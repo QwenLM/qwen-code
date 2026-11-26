@@ -22,7 +22,8 @@ import {
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
-  estimateContentTokens,
+  estimateContentChars,
+  TOKEN_TO_CHAR_RATIO,
 } from './content-token-estimate.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
 
@@ -425,19 +426,27 @@ function pruneCompression(
   );
   const previous =
     payload.resumePromptTokenCount ?? payload.info?.newTokenCount ?? 0;
-  // An old positive seed includes images at an unknown price. Only deduct
-  // their known text cost. An old zero seed can be sized from scratch.
-  const imageTokenEstimate =
-    payload.imageTokenEstimate ??
-    (previous > 0 ? 0 : currentImageTokenEstimate);
-  const visibleBefore = estimateContentTokens(
-    payload.compressedHistory,
-    imageTokenEstimate,
-  );
-  const visibleAfter = estimateContentTokens(
-    compressedHistory,
-    imageTokenEstimate,
-  );
+  // Older checkpoints recorded the configured image price even for provider
+  // counts. A positive seed does not prove those images were charged locally.
+  const saved = payload.pruneContentChars;
+  const chars =
+    Array.isArray(saved) &&
+    saved.length === payload.compressedHistory.length &&
+    saved.every((value) => Number.isFinite(value) && value >= 0)
+      ? saved
+      : payload.compressedHistory.map((entry) =>
+          estimateContentChars(
+            entry,
+            previous > 0 ? 0 : currentImageTokenEstimate,
+          ),
+        );
+  const pruneContentChars = retained.map((index) => chars[index]!);
+  const tokens = (values: number[]) =>
+    Math.ceil(
+      values.reduce((sum, value) => sum + value, 0) / TOKEN_TO_CHAR_RATIO,
+    );
+  const visibleBefore = tokens(chars);
+  const visibleAfter = tokens(pruneContentChars);
   // Keep system/tool overhead. A local estimate can exceed a provider count,
   // but deleting input cannot increase that count.
   const overhead = Math.max(0, previous - visibleBefore);
@@ -447,7 +456,7 @@ function pruneCompression(
     ...record,
     systemPayload: {
       ...payload,
-      imageTokenEstimate,
+      pruneContentChars,
       resumePromptTokenCount,
       compressedHistory,
       promptIds: retained.map((index) => payload.promptIds![index]!),

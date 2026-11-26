@@ -135,6 +135,7 @@ import {
   type ChatRecordingService,
   type ChatCompressionRecordPayload,
 } from '../services/chatRecordingService.js';
+import { contentChars } from '../utils/content-token-estimate.js';
 import { withoutCompactionTranscriptHint } from '../services/compaction-transcript-hint.js';
 import {
   ChatCompressionService,
@@ -2781,9 +2782,25 @@ export class LlmChat {
     const { imageTokenEstimate } = resolveSlimmingConfig(
       this.config.getChatCompression?.(),
     );
+    const catalogVisible = Boolean(this.config.getAutoMemoryContext?.());
+    const visibleChars = (entry: Content, imageCost: number) =>
+      contentChars(
+        catalogVisible ? [entry] : withoutAutoMemorySnapshots([entry]),
+        imageCost,
+      );
+    // A provider anchor does not establish a local price for retained media.
+    const pruneContentChars = persisted.map((entry) =>
+      visibleChars(entry, info.historyImageTokenEstimate ?? 0),
+    );
+    const pendingTokens = pending
+      ? Math.ceil(
+          visibleChars(pending, imageTokenEstimate) / TOKEN_TO_CHAR_RATIO,
+        )
+      : 0;
+    if (pending) pruneContentChars.push(pendingTokens * TOKEN_TO_CHAR_RATIO);
     const payload: ChatCompressionRecordPayload = {
       info,
-      imageTokenEstimate,
+      pruneContentChars,
       compressedHistory,
       summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
@@ -2798,7 +2815,7 @@ export class LlmChat {
             dispatched,
             imageTokenEstimate,
           ) +
-          (pending ? estimateContentTokens([pending], imageTokenEstimate) : 0),
+          pendingTokens,
       );
     }
     return payload;
@@ -3155,9 +3172,7 @@ export class LlmChat {
     history = this.history,
   ): Content[] {
     const curatedHistory = extractCuratedHistory(
-      this.config.getAutoMemoryContext?.()
-        ? history
-        : withoutAutoMemorySnapshots(history),
+      this.curatedBaseHistory(history),
     );
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
@@ -3512,7 +3527,7 @@ export class LlmChat {
       this.config.getChatCompression?.(),
     );
     const beforeEstimate = estimateModelContentTokens(
-      this.history,
+      this.curatedBaseHistory(),
       imageTokenEstimate,
     );
     const projectRoot = this.config.getProjectRoot();
@@ -3537,7 +3552,7 @@ export class LlmChat {
       .filter((c): c is Content => c !== null);
 
     const afterEstimate = estimateModelContentTokens(
-      newHistory,
+      this.curatedBaseHistory(newHistory),
       imageTokenEstimate,
     );
 
@@ -3566,6 +3581,9 @@ export class LlmChat {
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      ...(!this.lastPromptTokenCount && {
+        historyImageTokenEstimate: imageTokenEstimate,
+      }),
       originalTokenCountIsEstimated: baselineIsEstimated,
       newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
@@ -6753,10 +6771,10 @@ export class LlmChat {
    * keep a suppressed catalog; that omission is the defect this helper exists
    * to prevent.
    */
-  private curatedBaseHistory(): Content[] {
+  private curatedBaseHistory(history = this.history): Content[] {
     return this.config.getAutoMemoryContext?.()
-      ? this.history
-      : withoutAutoMemorySnapshots(this.history);
+      ? history
+      : withoutAutoMemorySnapshots(history);
   }
 
   /**

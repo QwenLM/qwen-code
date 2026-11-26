@@ -966,6 +966,7 @@ describe('ChatCompressionService', () => {
 
     expectCompressed(result);
     expect(result.info.originalTokenCount).toBe(5_000);
+    expect(result.info.historyImageTokenEstimate).toBe(1600);
     expect(result.info.newTokenCount).toBe(
       1_000 + estimateContentTokens(result.newHistory!),
     );

@@ -245,11 +245,12 @@ describe('message group deletion', () => {
 
   it.each([
     { savedImageCost: 25, override: 120, reported: 20, expected: 94 },
+    { savedImageCost: 25.1, override: 120, reported: 20, expected: 94 },
     { savedImageCost: 25, override: undefined, reported: 120, expected: 94 },
     { savedImageCost: 25, override: undefined, reported: 2, expected: 2 },
     { savedImageCost: undefined, override: 120, reported: 20, expected: 119 },
   ])(
-    'prunes at the saved image cost $savedImageCost (override $override, reported $reported)',
+    'prunes locally priced images with cost $savedImageCost (override $override, reported $reported)',
     ({ savedImageCost, override, reported, expected }) => {
       const summary: Content = {
         role: 'user',
@@ -271,9 +272,11 @@ describe('message group deletion', () => {
             newTokenCount: reported,
             compressionStatus: CompressionStatus.COMPRESSED,
           },
-          ...(savedImageCost === undefined
-            ? {}
-            : { imageTokenEstimate: savedImageCost }),
+          // Earlier writers saved the current price even for inherited counts.
+          imageTokenEstimate: 5000,
+          ...(savedImageCost !== undefined && {
+            pruneContentChars: [30, 12, 2 + savedImageCost * 4, 2, 2, 2],
+          }),
           ...(override === undefined
             ? {}
             : { resumePromptTokenCount: override }),
@@ -308,7 +311,7 @@ describe('message group deletion', () => {
       )!.systemPayload;
       expect(payload).toEqual({
         ...compression.systemPayload,
-        imageTokenEstimate: savedImageCost ?? 0,
+        pruneContentChars: [30, 12, 2, 2],
         resumePromptTokenCount: expected,
         compressedHistory: [summary, ack, u2.message, a2.message],
         promptIds: [null, null, 'api-u2', null],

@@ -1734,6 +1734,7 @@ export class ChatCompressionService {
     }
 
     let newTokenCount = originalHistoryTokenCount;
+    let historyImageTokenEstimate: number | undefined;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
     let restorationTokenCount = 0;
@@ -1986,6 +1987,7 @@ export class ChatCompressionService {
           // a much smaller visible-history-only estimate.
           newTokenCount =
             estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
+          historyImageTokenEstimate = slimmingConfig.imageTokenEstimate;
           canCalculateNewTokenCount = true;
           config
             .getDebugLogger()
@@ -2058,6 +2060,9 @@ export class ChatCompressionService {
           originalTokenCount: originalHistoryTokenCount,
           newTokenCount,
           newTokenCountIsEstimated: true,
+          ...(historyImageTokenEstimate !== undefined && {
+            historyImageTokenEstimate,
+          }),
           compressionStatus: CompressionStatus.COMPRESSED,
           summaryPrefixLength:
             retainedTail.length > 0 ? 3 : extraHistory.length,

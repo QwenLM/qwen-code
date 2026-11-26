@@ -307,6 +307,56 @@ describe('SchemaValidator', () => {
       },
     );
 
+    it.each([false, true])(
+      'checks the enclosing type before suggesting a child repair (array first: %s)',
+      (arrayFirst) => {
+        const alternatives = [
+          obj({ items: { type: 'array' } }, 'items'),
+          { type: 'array' },
+        ];
+        if (arrayFirst) alternatives.reverse();
+        const schema = obj({
+          reports: { allOf: [{ anyOf: alternatives }, { type: 'array' }] },
+        });
+        const items = '[1,]';
+        const { message, report } = validateWithNote(schema, {
+          reports: { items },
+        });
+        expect(report).toHaveBeenCalledExactlyOnceWith(
+          message,
+          expect.stringContaining('Check the type required for params/reports'),
+        );
+        expect(report.mock.calls[0][1]).not.toContain(
+          'send it as a JSON array',
+        );
+        invalid(schema, { reports: { items: [1] } });
+        valid(schema, { reports: [{ items }] });
+      },
+    );
+
+    it('preserves validation errors for schemas with non-UTF-8 URI fragments', () => {
+      const schema = {
+        $id: `https://example.test/${probe('fragment')}`,
+        definitions: { items: { $id: '#/caf%E9', type: 'array' } },
+        ...obj(
+          { items: { $ref: '#/caf%E9' }, count: { type: 'integer' } },
+          'count',
+        ),
+      };
+      valid(schema, { count: 1 });
+      const { message, report } = validateWithNote(schema, {});
+      expect(message).toBe("params must have required property 'count'");
+      expect(report).not.toHaveBeenCalled();
+      const direct = validateWithNote(schema, { count: 1, items: '[1,]' });
+      expect(direct.message).toBe('params/items must be array');
+      expect(direct.report).toHaveBeenCalledExactlyOnceWith(
+        direct.message,
+        expect.stringContaining(
+          'resend this field with the type required by its schema',
+        ),
+      );
+    });
+
     it.each(['anyOf', 'oneOf'])(
       'uses the selected tag to diagnose a malformed field under %s',
       (keyword) => {

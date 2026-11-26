@@ -16670,6 +16670,34 @@ describe('LlmChat', async () => {
       expect(chat.getLastPromptTokenCount()).toBe(200);
     });
 
+    it.each([true, false])(
+      'prices a replayed pending catalog according to its visibility (enabled: %s)',
+      async (enabled) => {
+        const catalog = 'old catalog'.repeat(100);
+        mockConfig.getAutoMemoryContext = () => (enabled ? catalog : '');
+        mockCompressionService('compressed');
+        const observer = vi.fn();
+        chat.setCompressionObserver(observer);
+        const pending = content(
+          'user',
+          { text: 'retry' },
+          getAutoMemorySnapshot([], catalog)!,
+        );
+        const info = await chat.tryCompress('retry', true, undefined, {
+          pendingUserMessage: pending,
+        });
+        const payload = observer.mock.calls[0][0];
+        const pendingTokens = estimateContentTokens([
+          enabled ? pending : userText('retry'),
+        ]);
+        expect(payload.compressedHistory.at(-1)).toEqual(pending);
+        expect(payload.resumePromptTokenCount).toBe(
+          info.newTokenCount + pendingTokens,
+        );
+        expect(payload.pruneContentChars.at(-1)).toBe(pendingTokens * 4);
+      },
+    );
+
     it('awaits the Managed checkpoint including pending input before applying compressed history', async () => {
       const compress = mockCompressionService('compressed');
       const before = [userText('old question'), modelText('old answer')];
@@ -16902,7 +16930,9 @@ describe('LlmChat', async () => {
 
         expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
         const payload = recordChatCompression.mock.calls[0][0];
-        expect(payload.imageTokenEstimate).toBe(imageTokenEstimate);
+        expect(payload.pruneContentChars[0]).toBe(
+          'question'.length + (priorCount ? 0 : imageTokenEstimate * 4),
+        );
         expect(JSON.stringify(payload.compressedHistory)).not.toContain(
           'r'.repeat(80),
         );
@@ -16918,6 +16948,31 @@ describe('LlmChat', async () => {
         }
       },
     );
+
+    it('sizes a fast checkpoint from visible history when no provider count exists', () => {
+      pinFastCompressionIdleClear();
+      mockConfig.getAutoMemoryContext = () => '';
+      const snapshot = getAutoMemorySnapshot([], 'old catalog'.repeat(100))!;
+      const recordChatCompression = vi.fn();
+      const target = newChat({
+        history: [
+          content('user', { text: 'ask' }, snapshot),
+          ...thoughtHistory(),
+        ],
+        recorder: { recordChatCompression },
+      });
+      const { info } = target.compressFast();
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      const payload = recordChatCompression.mock.calls[0][0];
+      expect(payload.compressedHistory[0].parts).toContainEqual(snapshot);
+      expect(payload.pruneContentChars[0]).toBe('ask'.length);
+      expect(info.newTokenCount).toBe(
+        estimateContentTokens([
+          userText('ask'),
+          ...payload.compressedHistory.slice(1),
+        ]),
+      );
+    });
 
     it('marks and records the locally adjusted fast-compression count as estimated', () => {
       const recordChatCompression = vi.fn();

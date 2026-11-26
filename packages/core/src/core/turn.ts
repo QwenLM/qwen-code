@@ -593,6 +593,8 @@ export interface ChatCompressionInfo {
    * estimate-derived, so UIs must not present the numbers as one chain.
    */
   originalTokenCountIsEstimated?: boolean;
+  /** Set when all retained images were sized locally at this price. */
+  historyImageTokenEstimate?: number;
   /** Whether newTokenCount ultimately came from a local estimate. */
   newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;

@@ -539,9 +539,8 @@ function describeBrokenJsonString(
   data: Record<string, unknown>,
   validate: ValidateFunction,
 ): string {
-  // Correcting a field cannot change the type of its enclosing container.
-  // Other failures may mean the string is valid for a different branch.
   let instancePath: string | undefined;
+  let enclosingPath: string | undefined;
   const types = new Set<string>();
   const schemaAt = diagnosticSchemaLookup(validate);
   const inactive = inactiveTaggedUnionErrors(errors, data, schemaAt);
@@ -557,11 +556,13 @@ function describeBrokenJsonString(
     if (error.keyword !== 'type') return '';
     const path = error.instancePath;
     if (instancePath === undefined || path.startsWith(`${instancePath}/`)) {
+      enclosingPath ??= instancePath;
       instancePath = path;
       types.clear();
     } else if (path !== instancePath) {
-      if (instancePath.startsWith(`${path}/`)) continue;
-      return '';
+      if (!instancePath.startsWith(`${path}/`)) return '';
+      enclosingPath = path;
+      continue;
     }
     const source = error.schemaPath.startsWith('#/')
       ? schemaAt(error.schemaPath.slice(1, -'/type'.length))
@@ -610,16 +611,18 @@ function describeBrokenJsonString(
       : '';
     // JavaScriptCore can quote an entire long identifier in the parser error.
     const summary = reason.length > 100 ? `${reason.slice(0, 100)}…` : reason;
+    const diagnosis = `; params${instancePath} arrived as a string whose text is not valid JSON (${summary}).${near}`;
+    // Changing the enclosing type can make this field's schema inapplicable.
+    if (enclosingPath !== undefined) {
+      return `${diagnosis} Check the type required for params${enclosingPath} before changing this field.`;
+    }
     const fix = hasPosition ? 'Fix the text there' : 'Fix the JSON syntax';
     // Errors from an early allOf member may list shapes a later member rejects.
     const retry =
       types.size === 1
         ? `send it as a JSON ${shapes[0]}, not as a string`
         : 'resend this field with the type required by its schema';
-    return (
-      `; params${instancePath} arrived as a string whose text is not valid JSON (${summary}).` +
-      `${near} ${fix} and ${retry}`
-    );
+    return `${diagnosis} ${fix} and ${retry}`;
   }
   return '';
 }
@@ -659,6 +662,15 @@ function diagnosticConjuncts(
   return undefined;
 }
 
+function decodeSchemaFragment(fragment: string): string | undefined {
+  // Ajv accepts URI fragments whose percent-encoded bytes are not UTF-8.
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return undefined;
+  }
+}
+
 function diagnosticSchemaLookup(
   validate: ValidateFunction,
 ): (pointer: string) => unknown {
@@ -678,7 +690,8 @@ function diagnosticSchemaLookup(
     if (compiled) compiledRoots.add(root);
     const fragment = id.split('#')[1];
     if (!fragment) continue;
-    const prefix = decodeURIComponent(fragment);
+    const prefix = decodeSchemaFragment(fragment);
+    if (prefix === undefined) continue;
     const roots = fragmentRoots.get(prefix);
     if (roots) roots.push(root);
     else fragmentRoots.set(prefix, [root]);
@@ -690,7 +703,8 @@ function diagnosticSchemaLookup(
     return locations.get(pointer);
   }
   function resolveLocation(pointer: string): unknown {
-    const path = decodeURIComponent(pointer);
+    const path = decodeSchemaFragment(pointer);
+    if (path === undefined) return undefined;
     const source = valueAtPointer(validate.schema, path);
     if (source === undefined) return undefined;
     for (const root of compiledRoots) {
