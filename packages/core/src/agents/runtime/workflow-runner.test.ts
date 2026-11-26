@@ -365,17 +365,9 @@ describe('WorkflowRunner', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await Promise.all(
-      storageRoots.splice(0).map((root) =>
-        fs.rm(root, {
-          recursive: true,
-          force: true,
-          // The launch record is appended fire-and-forget, so a run that
-          // settled just before this hook can still be flushing its journal.
-          // The recursive rm then races that write and fails with ENOTEMPTY.
-          maxRetries: 10,
-          retryDelay: 100,
-        }),
-      ),
+      storageRoots
+        .splice(0)
+        .map((root) => fs.rm(root, { recursive: true, force: true })),
     );
   });
 
@@ -1548,8 +1540,7 @@ describe('WorkflowRunner', () => {
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
     const telemetry = logWorkflowRunMock.mock.calls[0]?.[1] as
-      | { agents_completed: number }
-      | undefined;
+      { agents_completed: number } | undefined;
     expect(telemetry?.agents_completed).toBe(0);
     expect(snapshotAgentsCompleted).toBe(0);
     for (const resolve of journalWrites) resolve();
