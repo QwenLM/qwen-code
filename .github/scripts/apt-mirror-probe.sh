@@ -23,8 +23,12 @@ apt_mirror_probe_rate() {
   # shorter read cannot tell a warm CDN edge from a throttled one, while this
   # one still finishes in well under a second wherever the path is healthy,
   # so a slow candidate costs at most the 4-second cap.
+  # Bypass host proxy env vars (--noproxy '*'): `docker build` does not inherit
+  # the runner's HTTP_PROXY/ALL_PROXY into build containers, so probing through
+  # a host egress proxy measures the proxy's throughput to deb.debian.org while
+  # the container's apt-get still hits deb.debian.org directly (run 45832144977).
   local reply code rate
-  reply="$(curl -s -o /dev/null --max-time 4 --range 0-524287 \
+  reply="$(curl -s -o /dev/null --noproxy '*' --max-time 4 --range 0-524287 \
     -w '%{http_code} %{speed_download}' \
     "http://$1/debian/dists/bookworm/main/binary-arm64/Packages.gz" 2>/dev/null)" || true
   code="${reply%% *}"
