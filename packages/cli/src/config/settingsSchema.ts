@@ -36,6 +36,7 @@ import {
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import type { ModelPreferences } from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import type { Mem0Settings } from './mem0-settings.js';
@@ -1914,7 +1915,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+          'Default thinking effort for models without a saved effort. Each provider maps it to the tiers it supports. Leave unset to use the model/provider default.',
         showInDialog: true,
         options: [
           { value: 'low', label: 'Low' },
@@ -1927,6 +1928,31 @@ const SETTINGS_SCHEMA = {
         jsonSchemaOverride: {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
+      },
+      preferences: {
+        type: 'object',
+        label: 'Model Preferences',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as ModelPreferences | undefined,
+        description:
+          'Saved reasoning effort and context window per model route.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: {
+            type: 'object',
+            properties: {
+              reasoning: {
+                type: 'object',
+                properties: {
+                  effort: { type: 'string', enum: REASONING_EFFORT_TIERS },
+                },
+              },
+              contextWindow: { type: 'integer', minimum: 1 },
+            },
+          },
         },
       },
       catalogRefresh: {

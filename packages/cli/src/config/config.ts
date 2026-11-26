@@ -1742,6 +1742,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
+    modelPreferences?: ConfigParameters['modelPreferences'];
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1803,6 +1804,10 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const modelPreferences =
+    !bareMode && !sshWorkspace && !modelConfiguration
+      ? hostPolicy?.modelPreferences
+      : undefined;
   const executionSandboxSettings = agentHostReadOnly
     ? undefined
     : validateExecutionSandboxSelection(settings, argv);
@@ -2343,6 +2348,7 @@ export async function loadCliConfig(
           },
           settings,
           selectedAuthType,
+          deferReasoningEffort: modelPreferences !== undefined,
           env: process.env as Record<string, string | undefined>,
         });
 
@@ -2659,6 +2665,11 @@ export async function loadCliConfig(
 
   const configParams: ConfigParameters = {
     sessionId,
+    modelPreferences,
+    modelPreferenceDefaultEffort:
+      modelPreferences === undefined
+        ? undefined
+        : settings.model?.reasoningEffort,
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
