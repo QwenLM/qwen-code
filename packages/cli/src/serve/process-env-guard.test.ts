@@ -60,21 +60,43 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/hosted-harness-profile.ts',
+    'packages/cli/src/serve/hosted-loop-session.ts',
     {
       reason:
-        'Hosted profile validation refuses private CSI roots when the process-scoped pool instance identity is configured.',
-      accesses: { 'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1 },
+        'The loop arming gate is a process-scoped deployment contract fixed when the Harness starts; it gates arming only and defaults off until the acceptance evidence lands. The fire-time resolver also reads QWEN_HOME to locate the user-owned global loop.md, mirroring the interactive resolver’s QWEN_HOME-aware home candidate.',
+      accesses: {
+        'key:QWEN_MANAGED_AGENT_LOOP_ENABLED': 1,
+        'key:QWEN_HOME': 1,
+      },
     },
   ],
   [
-    'packages/cli/src/serve/hosted-harness-session.ts',
+    'packages/cli/src/serve/hosted-harness-session/session-open.ts',
     {
       reason:
-        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once.',
+        'The packaged load-reply-lost fault arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement Harness so the bridge loses exactly the first load attach reply for that Session. Test-only, read once per registration and fires once.',
+      accesses: {
+        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-session/session-suspension.ts',
+    {
+      reason:
+        'Packaged idle-suspension acceptance sets QWEN_E2E_IDLE_SUSPEND_MS to observe suspension without waiting out the production idle period. Read once per registration and only accepts a value below the production constant.',
+      accesses: {
+        'key:QWEN_E2E_IDLE_SUSPEND_MS': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-session/turn.ts',
+    {
+      reason:
+        'The packaged finished-before-commit fault arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the Harness generation that must crash, so the turn holds after its stream Finished marker is durable but before the assistant output commits. Test-only, read once and fires once.',
       accesses: {
         'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
-        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
       },
     },
   ],
@@ -336,8 +358,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
-      accesses: { whole: 1 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions. It also reads the QWEN_MANAGED_RUNTIME_OBSERVATION gate that decides whether the worker owns background observation.',
+      accesses: { 'key:QWEN_MANAGED_RUNTIME_OBSERVATION': 1, whole: 2 },
     },
   ],
   [
@@ -431,11 +453,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest is a process-scoped deployment contract fixed at daemon bootstrap. ' +
+        'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
+        'contracts, read once beside the settings they override rather than per tick. ' +
+        'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the serve entry reads the ' +
+        "launcher's previous value once, stamps '1' for the Hosted Harness profile under a refcount so co-resident " +
+        'embedded daemons restore the ambient value only at last close (delete when unset), and releases the same ' +
+        'refcount on startup failure — four accesses: read, stamp, restore-delete, restore-write. The inherit-drop ' +
+        'for other profiles applies to the per-daemon base env copy, not process.env.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
-        'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
+        'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 4,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -448,7 +477,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 6,
+        whole: 7,
       },
     },
   ],
@@ -477,13 +506,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The sandbox launcher assembles the sandboxed child environment: ' +
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
-        'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move.',
+        'variables. Every debugger decision funnels through one ' +
+        '`isDebugEnabled()` read of DEBUG. It entered the scanned serve/ ' +
+        'layer via the #9146 leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 5,
+        'key:DEBUG': 1,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
@@ -597,6 +627,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
         'process-scoped operator switch; embedded callers may omit the ' +
         'environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/pr-watch-deps.ts',
+    {
+      reason:
+        'The watch reads the daemon’s own gh configuration, whose directory ' +
+        'precedence (GH_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME) is ' +
+        'process-scoped: it describes the daemon’s gh login, not any one ' +
+        'workspace’s overlay.',
       accesses: { whole: 1 },
     },
   ],

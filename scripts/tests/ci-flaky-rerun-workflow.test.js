@@ -1662,7 +1662,7 @@ describe('ci failure patrol workflow', () => {
     }
   });
 
-  it('behaviorally proves a re-planted repository config cannot run during checkout', () => {
+  it('blocks repository hooks and trusts only the checkout workspace', () => {
     // The reset deletes .git and actions/checkout re-creates it, so the
     // REPOSITORY scope is reachable even with both file scopes neutralised.
     // GIT_CONFIG_* env entries outrank it. Positive control first: with only
@@ -1709,19 +1709,38 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(fired)).toBe(true); // positive control
 
       rmSync(fired);
-      // Now apply exactly what the checkout step pins.
+      // Use the checkout step's Git configuration.
       const pinned = {
-        GIT_CONFIG_GLOBAL: '/dev/null',
-        GIT_CONFIG_SYSTEM: '/dev/null',
-        GIT_CONFIG_PARAMETERS: '',
+        HOME: checkout.env.HOME,
+        GIT_CONFIG_GLOBAL: checkout.env.GIT_CONFIG_GLOBAL,
+        GIT_CONFIG_SYSTEM: checkout.env.GIT_CONFIG_SYSTEM,
+        GIT_CONFIG_PARAMETERS: checkout.env.GIT_CONFIG_PARAMETERS,
         GIT_CONFIG_COUNT: checkout.env.GIT_CONFIG_COUNT,
         GIT_CONFIG_KEY_0: checkout.env.GIT_CONFIG_KEY_0,
         GIT_CONFIG_VALUE_0: checkout.env.GIT_CONFIG_VALUE_0,
         GIT_CONFIG_KEY_1: checkout.env.GIT_CONFIG_KEY_1,
         GIT_CONFIG_VALUE_1: checkout.env.GIT_CONFIG_VALUE_1,
+        GIT_CONFIG_KEY_2: checkout.env.GIT_CONFIG_KEY_2,
+        GIT_CONFIG_VALUE_2: checkout.env.GIT_CONFIG_VALUE_2?.replace(
+          '${{ github.workspace }}',
+          ws,
+        ),
       };
       git(['checkout', '--force', '-q', 'HEAD'], pinned);
       expect(existsSync(fired)).toBe(false);
+
+      const differentOwner = {
+        ...pinned,
+        GIT_TEST_ASSUME_DIFFERENT_OWNER: '1',
+        LC_ALL: 'C',
+      };
+      expect(() =>
+        git(['status', '--short'], {
+          ...differentOwner,
+          GIT_CONFIG_VALUE_2: root,
+        }),
+      ).toThrow('dubious ownership');
+      expect(git(['status', '--short'], differentOwner)).toBe('');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1748,32 +1767,30 @@ describe('ci failure patrol workflow', () => {
       expect(rebuild.env.MKTEMP_BIN).toBeUndefined();
       expect(rebuild.run).not.toContain('patrol-empty-gitconfig');
       expect(rebuild.run).not.toContain('mktemp');
-      expect(rebuild.run).toContain('echo "gitconfig=/dev/null"');
+      const checkout = job.steps.find((step) => step.id === 'checkout');
+      // Avoid checkout's global write and keep Git away from the runner home.
+      expect(checkout.with['set-safe-directory']).toBe(false);
+      expect(checkout.env.HOME).toBe('/dev/null');
       for (const scope of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
         expect(rebuild.run).toContain(
           `echo "${scope}=/dev/null" >> "\${GITHUB_ENV}"`,
         );
+        // The step pin takes precedence over the job-wide export.
+        expect(checkout.env[scope]).toBe('/dev/null');
       }
-      const checkout = job.steps.find((step) => step.id === 'checkout');
-      // Step env too: it outranks the appendable $GITHUB_ENV copy, and this is
-      // the step whose own git invocation the planted config would reach.
-      expect(checkout.env.GIT_CONFIG_GLOBAL).toBe(
-        '${{ steps.gitmeta.outputs.gitconfig }}',
-      );
-      expect(checkout.env.GIT_CONFIG_SYSTEM).toBe(
-        '${{ steps.gitmeta.outputs.gitconfig }}',
-      );
       // git layers env-provided config ABOVE both file scopes, so neutralising
       // the files alone leaves core.hooksPath reachable through $GITHUB_ENV.
       // Step env, not $GITHUB_ENV: the runner takes the last duplicated key.
       // Env config outranks the repository scope, which the reset cannot
       // reach: it deletes .git and actions/checkout re-creates it, so a
       // re-planted .git/config would otherwise run fsmonitor / post-checkout.
-      expect(checkout.env.GIT_CONFIG_COUNT).toBe('2');
+      expect(checkout.env.GIT_CONFIG_COUNT).toBe('3');
       expect(checkout.env.GIT_CONFIG_KEY_0).toBe('core.hooksPath');
       expect(checkout.env.GIT_CONFIG_VALUE_0).toBe('/dev/null');
       expect(checkout.env.GIT_CONFIG_KEY_1).toBe('core.fsmonitor');
       expect(checkout.env.GIT_CONFIG_VALUE_1).toBe('false');
+      expect(checkout.env.GIT_CONFIG_KEY_2).toBe('safe.directory');
+      expect(checkout.env.GIT_CONFIG_VALUE_2).toBe('${{ github.workspace }}');
       expect(checkout.env.GIT_CONFIG_PARAMETERS).toBe('');
       expect(checkout.env.GIT_EXEC_PATH).toBe('');
       expect(checkout.env.GIT_TEMPLATE_DIR).toBe('/dev/null');
@@ -1808,28 +1825,66 @@ describe('ci failure patrol workflow', () => {
       join(home, '.gitconfig'),
       `[core]\n\thooksPath = ${hooks}\n[user]\n\tname = t\n\temail = t@e\n`,
     );
+    // The release runner appends GIT_CONFIG_GLOBAL=<empty file> to
+    // $GITHUB_ENV before `npm run test:scripts`, and that outranks
+    // $HOME/.gitconfig. Reproduce the ambient on every lane so the pin below
+    // is load-bearing here too, not only on a release run.
+    const releaseGitConfig = join(root, 'release-gitconfig');
+    writeFileSync(releaseGitConfig, '');
+    const releaseAmbient = {
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_PARAMETERS: '',
+      GIT_CONFIG_GLOBAL: releaseGitConfig,
+    };
+    // The positive control pins the global file back to the planted config,
+    // so it exercises the hooksPath the fixture wrote while the bare base env
+    // stays under the release ambient.
+    const fixtureGitConfig = {
+      GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
+    };
     const git = (args, env) =>
       execFileSync('git', args, {
         cwd: workspace,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: home, ...env },
+        env: {
+          ...process.env,
+          ...releaseAmbient,
+          HOME: home,
+          ...env,
+        },
       });
     const seed = () => {
       git(['init', '-q']);
       writeFileSync(join(workspace, 'driver.mjs'), 'trusted driver\n');
       git(['add', '.']);
-      git(['commit', '-qm', 'seed']);
+      // Identity via -c, not the planted config: removing the pin must fail
+      // the positive control below, not this commit.
+      git([
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@e',
+        'commit',
+        '-qm',
+        'seed',
+      ]);
     };
     try {
       seed();
       // Positive control: with the planted global config in force, an ordinary
       // force-checkout fires the hook. If this stops firing the fixture is
       // dead and the assertion below would pass vacuously.
-      git(['checkout', '--force', 'HEAD']);
+      git(['checkout', '--force', 'HEAD'], fixtureGitConfig);
       expect(existsSync(sentinel)).toBe(true);
 
       rmSync(sentinel);
+      // The bare base env keeps the ambient in force, so the planted config
+      // is outranked and the hook cannot fire.
+      git(['checkout', '--force', 'HEAD']);
+      expect(existsSync(sentinel)).toBe(false);
+
       const stepEnv = {
         ...process.env,
         HOME: home,
@@ -1859,7 +1914,13 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(join(workspace, '.git'))).toBe(false);
 
       seed();
-      git(['checkout', '--force', 'HEAD'], exported);
+      // Keep the plant as the fallback: without it the ambient's empty global
+      // file would outrank $HOME/.gitconfig, so a dropped GIT_CONFIG_GLOBAL
+      // export would leave this assertion green.
+      git(['checkout', '--force', 'HEAD'], {
+        ...fixtureGitConfig,
+        ...exported,
+      });
       expect(existsSync(sentinel)).toBe(false);
       expect(readFileSync(join(workspace, 'driver.mjs'), 'utf8')).toBe(
         'trusted driver\n',
@@ -2035,7 +2096,7 @@ describe('ci failure patrol workflow', () => {
     // through the same appendable $GITHUB_OUTPUT as the binaries. One forged
     // component would hand actions/checkout's bare `git` to a plant.
     const gitmeta = yml.jobs.classify.steps.find(
-      (step) => step.id === 'gitmeta',
+      (step) => step.name === 'Recreate runner Git metadata',
     );
     const root = mkdtempSync(join(tmpdir(), 'patrol-syspath-'));
     const plant = join(root, 'plant');

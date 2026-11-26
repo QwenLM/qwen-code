@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.extensions;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
@@ -16,9 +17,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,16 +53,19 @@ public class ManagedExtensionManagementService {
     public JsonNode query(String tenant, String actor, String sessionId, String operationId) {
         SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
         if (session.workspace() == null) {
+            if (operationId != null) {
+                throw missing();
+            }
             return empty(sessionId, false);
         }
-        boolean supported = packages.list(tenant, actor, session.workspace().getWorkspaceId()).supported()
+        boolean supported = packages.supported()
                 && harness.supportsSessionExtensions();
         JsonNode latest = records.currentMcpSettings(tenant, sessionId);
         if (!ManagedConfigInstall.isPackageConfig(latest)) {
             if (operationId != null) {
                 throw missing();
             }
-            return empty(sessionId, supported);
+            return withSelfService(empty(sessionId, supported), tenant, actor, session, supported);
         }
         JsonNode selected = latest;
         if (operationId != null) {
@@ -75,7 +82,25 @@ public class ManagedExtensionManagementService {
                 }
             }
         }
-        return snapshot(tenant, sessionId, selected, supported);
+        return withSelfService(snapshot(tenant, sessionId, selected, supported), tenant, actor, session, supported);
+    }
+
+    public JsonNode lookup(String tenant, String actor, String sessionId, String key) {
+        ManagedAgentService.validateIdempotencyKey(key);
+        return query(tenant, actor, sessionId, applyOperationId(tenant, actor, sessionId, key));
+    }
+
+    private JsonNode withSelfService(ObjectNode result, String tenant, String actor, SessionRecord session, boolean supported) {
+        boolean enabled = supported && packages.selfServiceSupported();
+        result.putObject("selfService").put("supported", enabled).put("canApply", enabled && store.canApplyExtensions(session)
+                && "ACTIVE".equals(session.status()) && packages.canPublish(tenant, actor, session.workspace().getWorkspaceId()))
+                .put("runtimeSkillImportSupported", packages.runtimeSkillImportEnabled() && harness.supportsRuntimeSkillImport());
+        return result;
+    }
+
+    private static String applyOperationId(String tenant, String actor, String sessionId, String key) {
+        return UUID.nameUUIDFromBytes(("managed-extension-apply\0" + tenant + "\0" + actor + "\0" + sessionId + "\0" + key)
+                .getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     public JsonNode submit(String tenant, String actor, String sessionId, String key, JsonNode command) {
@@ -92,23 +117,43 @@ public class ManagedExtensionManagementService {
         } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw invalid();
         }
-        String operationId = UUID.nameUUIDFromBytes(("managed-extension-apply\0" + tenant + "\0" + actor + "\0" + sessionId + "\0" + key)
-                .getBytes(StandardCharsets.UTF_8)).toString();
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        if (!harness.supportsSessionExtensions()) {
-            throw unsupported();
-        }
-        for (JsonNode pin : command.get("extensions")) {
-            packages.get(tenant, actor, session.workspace().getWorkspaceId(), pin.get("extensionId").asText(),
-                    pin.get("packageRevision").asLong(), pin.get("packageDigest").asText());
-        }
+        String operationId = applyOperationId(tenant, actor, sessionId, key);
+        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, false);
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operationId", operationId);
         request.put("actorKey", DigestUtils.sha256Hex(actor));
         request.put("expectedRevision", command.get("expectedConfigRevision").asLong());
         request.put("extensions", json.convertValue(command.get("extensions"), List.class));
+        JsonNode previous = records.currentMcpSettings(tenant, sessionId);
+        for (int step = 0; ManagedConfigInstall.isPackageConfig(previous); step++) {
+            if (operationId.equals(previous.path("operationId").asText())) {
+                if (!sameCommand(request, previous.get("command"))) {
+                    throw new ManagedAgentException(409, "idempotency_conflict", "The extension operation key was used for another request.");
+                }
+                return query(tenant, actor, sessionId, operationId);
+            }
+            if (step >= 4095 || previous.path("previousRecordRef").isNull()) {
+                break;
+            }
+            previous = read(tenant, sessionId, previous.get("previousRecordRef"));
+        }
+        session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
+        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
+        if (!harness.supportsSessionExtensions()) {
+            throw unsupported();
+        }
+        List<ManagedExtensionPackages.Pin> pins = json.convertValue(command.get("extensions"), json.getTypeFactory().constructCollectionType(
+                List.class, ManagedExtensionPackages.Pin.class));
+        packages.authorizeSelection(tenant, actor, session.workspace().getWorkspaceId(), pins);
         return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
+    }
+
+    private boolean sameCommand(Map<String, Object> request, JsonNode saved) {
+        try {
+            return json.readTree(json.writeValueAsBytes(request)).equals(saved);
+        } catch (IOException error) {
+            throw corrupt();
+        }
     }
 
     public JsonNode resume(String tenant, String actor, String sessionId, String operationId, boolean recoverPrevious) {
@@ -138,7 +183,12 @@ public class ManagedExtensionManagementService {
         JsonNode active = body;
         for (int step = 0; step < 4096; step++) {
             if ("active".equals(active.path("phase").asText())) {
-                result.set("extensions", bundlePins(tenant, sessionId, active.get("bundleRef")));
+                JsonNode bundle = bundlePackages(tenant, sessionId, active.get("bundleRef"));
+                result.set("extensions", pinsOf(bundle));
+                ObjectNode degraded = degradedComponents(bundle);
+                if (degraded.size() > 0) {
+                    result.set("degradedComponents", degraded);
+                }
                 break;
             }
             if (active.path("previousRecordRef").isNull()) {
@@ -158,10 +208,18 @@ public class ManagedExtensionManagementService {
     }
 
     private ArrayNode bundlePins(String tenant, String sessionId, JsonNode ref) {
+        return pinsOf(bundlePackages(tenant, sessionId, ref));
+    }
+
+    private JsonNode bundlePackages(String tenant, String sessionId, JsonNode ref) {
         JsonNode bundle = read(tenant, sessionId, ref);
         if (!"managed-extension-config-bundle".equals(bundle.path("kind").asText()) || !bundle.path("packages").isArray()) {
             throw corrupt();
         }
+        return bundle;
+    }
+
+    private ArrayNode pinsOf(JsonNode bundle) {
         ArrayNode pins = json.createArrayNode();
         for (JsonNode entry : bundle.get("packages")) {
             pins.add(entry.get("pin"));
@@ -174,9 +232,39 @@ public class ManagedExtensionManagementService {
         return pins;
     }
 
+    private ObjectNode degradedComponents(JsonNode bundle) {
+        ObjectNode degraded = json.createObjectNode();
+        for (JsonNode entry : bundle.get("packages")) {
+            JsonNode components = entry.get("degradedComponents");
+            if (components == null) {
+                continue;
+            }
+            if (!components.isArray() || components.size() > 2) {
+                throw corrupt();
+            }
+            if (components.isEmpty()) {
+                continue;
+            }
+            Set<String> seen = new HashSet<>();
+            for (JsonNode component : components) {
+                if (!component.isTextual() || !Set.of("mcp", "hooks").contains(component.asText())
+                        || !seen.add(component.asText())) {
+                    throw corrupt();
+                }
+            }
+            ArrayNode list = degraded.putArray(entry.path("pin").path("extensionId").asText());
+            for (String component : List.of("mcp", "hooks")) {
+                if (seen.contains(component)) {
+                    list.add(component);
+                }
+            }
+        }
+        return degraded;
+    }
+
     private JsonNode read(String tenant, String sessionId, JsonNode ref) {
         var resource = records.readCommittedResource(tenant, sessionId, ref);
-        JsonNode value = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+        JsonNode value = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
         if (value == null) {
             throw corrupt();
         }
@@ -198,7 +286,7 @@ public class ManagedExtensionManagementService {
             }
             return result;
         } catch (HarnessHttpFailure error) {
-            org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(error.getStatusCode());
+            HttpStatus status = HttpStatus.resolve(error.getStatusCode());
             if (status != null && status.is4xxClientError() && error.getErrorCode() != null
                     && error.getErrorCode().matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(status.value(), error.getErrorCode(), "Extension configuration was refused.");

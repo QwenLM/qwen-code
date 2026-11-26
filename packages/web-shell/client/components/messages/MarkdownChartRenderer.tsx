@@ -185,7 +185,7 @@ export function WebShellMarkdownChartProvider({
       theme={theme}
       loadingLabel={customization.loadingLabel ?? t('echartsChart.rendering')}
       labels={labels}
-      onError={customization.onError}
+      onError={customization.onError ?? reportMarkdownChartError}
     >
       {children}
     </MarkdownChartProvider>
@@ -205,6 +205,18 @@ function useWebShellMarkdownChartLabels(
       showChart: t('echartsChart.showChart'),
       showData: t('echartsChart.showData'),
       noData: t('echartsChart.noData'),
+      nodes: t('echartsChart.nodes'),
+      links: t('echartsChart.links'),
+      name: t('echartsChart.name'),
+      category: t('echartsChart.category'),
+      id: t('echartsChart.id'),
+      source: t('echartsChart.source'),
+      target: t('echartsChart.target'),
+      value: t('echartsChart.value'),
+      depth: t('echartsChart.depth'),
+      path: t('echartsChart.path'),
+      idPath: t('echartsChart.idPath'),
+      subtreeTotal: t('echartsChart.subtreeTotal'),
       tableNotice: ({ visibleRows, totalRows, visibleColumns, totalColumns }) =>
         t('echartsChart.tableNotice', {
           visibleRows,
@@ -387,7 +399,7 @@ function normalizeLegacyEchartsSource(source: string): {
   return { language: ECHARTS_FULLDATA_LANGUAGE, source };
 }
 
-function reportLegacyMarkdownChartError(error: unknown): void {
+function reportMarkdownChartError(error: unknown): void {
   console.error('[web-shell] markdown-chart render failed:', error);
 }
 
@@ -413,7 +425,7 @@ function MarkdownChartCodeBlock({
       streaming={streaming}
       loadingLabel={t('echartsChart.rendering')}
       labels={labels}
-      onError={reportLegacyMarkdownChartError}
+      onError={reportMarkdownChartError}
     >
       <MarkdownChartBlock
         language={language}

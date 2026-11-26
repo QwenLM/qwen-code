@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositoryContract;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import org.assertj.core.api.SoftAssertions;
@@ -33,7 +33,7 @@ class RuntimeBrokerFlywaySchemaTest {
     @Test
     void flywayCreatesTheBrokerSchema() throws SQLException {
         DataSource broker = dataSource();
-        JdbcRuntimeBrokerSchema.initialize(broker);
+        ManagedSchema.initialize(broker);
         Map<String, TableShape> expected = describe(broker);
         Map<String, TableShape> actual = describe(migrate(dataSource(), MigrationVersion.LATEST));
 
@@ -77,18 +77,18 @@ class RuntimeBrokerFlywaySchemaTest {
                 Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
         var settled = executions.settlePrepared(prepared, Map.of("executionStatus", "success"),
                 java.time.Instant.parse("2000-01-01T00:00:00Z"));
-        JdbcRuntimeBrokerSchema.initialize(source);
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
+        ManagedSchema.initialize(source);
         assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
         Map<String, TableShape> shape = describe(source);
         assertThat(shape).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
         assertThat(shape.get("ma_runtime_binding").indexes()).contains(
                 "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
         assertThat(shape.get("ma_storage_owner").indexes())
-                .contains("INDEX [binding_id, runtime_generation, storage_key]");
-        assertThat(shape.get("ma_output_capture").indexes()).contains("INDEX [execution_key]");
+                .contains("INDEX [binding_id, runtime_generation, physical_id]");
+        assertThat(shape.get("ma_output_capture").indexes()).contains("INDEX [execution_call_id]");
         assertThat(shape.get("ma_operation_work").indexes())
-                .contains("INDEX [work_kind, target_key, operation_key]");
+                .contains("INDEX [work_kind, target_id, operation_ref]");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -103,7 +103,7 @@ class RuntimeBrokerFlywaySchemaTest {
             sql.execute("INSERT INTO " + table + " VALUES ('legacy-witness')");
         }
         var before = describe(source);
-        assertThatThrownBy(() -> JdbcRuntimeBrokerSchema.initialize(source))
+        assertThatThrownBy(() -> ManagedSchema.initialize(source))
                 .isInstanceOf(IllegalStateException.class);
         assertThat(describe(source)).isEqualTo(before);
         try (var connection = source.getConnection();

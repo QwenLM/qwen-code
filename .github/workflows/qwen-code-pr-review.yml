@@ -103,7 +103,7 @@ jobs:
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot'))
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -229,11 +229,11 @@ jobs:
     # the requested reviewer can reach review-pr, so the human-requested
     # siblings must skip here instead of each spending a runner. KEEP IN
     # SYNC with the review_requested clauses in precheck-pr.if and
-    # authorize.if, and with the bot_login constant below.
+    # authorize.if, and with the bot_login expression below.
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested' &&
-      github.event.requested_reviewer.login == 'qwen-code-ci-bot'
+      github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
@@ -242,7 +242,7 @@ jobs:
       - name: 'Set review constants'
         id: 'values'
         run: |-
-          echo "bot_login=qwen-code-ci-bot" >> "$GITHUB_OUTPUT"
+          echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot' }}" >> "$GITHUB_OUTPUT"
 
   delay-automatic-review:
     needs: ['authorize']
@@ -339,7 +339,7 @@ jobs:
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'review_requested' ||
-       github.event.requested_reviewer.login == 'qwen-code-ci-bot') &&
+       github.event.requested_reviewer.login == (vars.REVIEW_BOT_LOGIN || 'qwen-code-review-bot')) &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -535,8 +535,12 @@ jobs:
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
     # The schedule switches the managed fleet to `ecs-review` at 17:00
     # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
-    # is closed.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # is closed. Fork pull_request_target payloads route to the disposable
+    # hosted runner: `off` containment on the shared pool hands PR-controlled
+    # install/build scripts CI_BOT_PAT + the model key and persists plants
+    # for the next run. Comment/dispatch triggers keep the pool; the sandbox
+    # preflight below is their fail-closed backstop.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request_target'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -611,7 +615,11 @@ jobs:
       # leftover draft comments (/tmp/stage-*.md, which survive `git clean`),
       # a stale `.qwen/tmp/review-pr-*` worktree / `qwen-review/*` branch from
       # an interrupted review, or stale per-run capture-tools dirs under
-      # RUNNER_TEMP. Reset all of them per run; never fail the job.
+      # RUNNER_TEMP. Reset all of them per run. The sweeps are best-effort
+      # EXCEPT the agent home: a foreign-owned qwen-home that survives the
+      # reclaim is renamed out of the way, and one that cannot even be
+      # renamed fails the job here, before checkout — proceeding would only
+      # die later at the first settings write (PR #16610 incident).
       - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
@@ -619,7 +627,88 @@ jobs:
           # below) + drop any leftover stage drafts.
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           rm -rf "$QWEN_HOME" 2>/dev/null || true
+          # A foreign-owned leftover defeats the rm above: triage's node
+          # container chowns this same path to uid 1000, and on the shared
+          # pool this host user cannot unlink it. `rm || true` plus mkdir -p
+          # on the still-existing dir both "succeed", so the job used to run
+          # on and die minutes later writing settings.json (PR #16610
+          # incident). Reclaim via sudo when available; otherwise quarantine
+          # it with a same-parent rename, and fail HERE only when even that
+          # is refused — before the checkout, with the cause named.
+          if [ -e "$QWEN_HOME" ]; then
+            sudo -n rm -rf "$QWEN_HOME" 2>/dev/null ||
+              sudo -n chown -R "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            rm -rf "$QWEN_HOME" 2>/dev/null || true
+          fi
+          # A quarantined copy left by an EARLIER run keeps the owner that
+          # made it unremovable. Triage's 'Restore workspace ownership after
+          # agent' hands these names back too (it runs as root in that
+          # container), and this unprivileged sweep deletes them once that has
+          # made them removable — chmod first, because a hand-back restores
+          # the owner without the write bit. It runs BEFORE the rung below, so
+          # it can never delete the copy this run is about to set aside. The
+          # -mmin gate measures the leftover's own mtime, which a same-parent
+          # rename preserves: a copy that was already stale when it was set
+          # aside drains on a later run, a fresh one waits. Name-scoped and
+          # never matching $QWEN_HOME itself. A runner that never runs triage
+          # hands nothing back, so the copies there stay until removed by hand.
+          # -type d is load-bearing: find matches a symlink by name and reports
+          # the link's own mtime, and chmod -R follows a symlink operand, so a
+          # planted `qwen-home.stale-*` link would make this pre-checkout step
+          # rewrite a tree outside RUNNER_TEMP. The rm below only unlinks the
+          # link, so it is no cover. The recursion itself must stay: a
+          # hand-back restores the owner without the write bit, so nested
+          # directories need u+w before rm can unlink them.
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec chmod -R u+rwX {} + 2>/dev/null || true
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
+          # The deletion above is best-effort, but silence is not: a copy it
+          # could not remove would otherwise look exactly like a clean run,
+          # and the cost of the miss is a full tree walk on every later run.
+          # The report is deliberately NOT age-gated (a partial rm bumps the
+          # directory's own mtime) and never fatal — only the two $QWEN_HOME
+          # checks above may fail this step.
+          survivors="$(find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'qwen-home.stale-*' 2>/dev/null | tr '\n' ' ' || true)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::qwen-home quarantine(s) survived the drain (no ownership hand-back has made them removable yet); retried every run, and they need manual cleanup: $survivors"
+          fi
+          # Pool members without passwordless sudo would otherwise lose the
+          # whole review to a directory this user cannot unlink. On Linux a
+          # same-parent rename needs write access to the PARENT, not to the
+          # directory — the one permission this job is known to have, and the
+          # review pool is Linux-only (BSD also rewrites the moved directory's
+          # `..`, so it needs write on the directory itself and the rename
+          # buys nothing there). The review proceeds on a fresh home while the
+          # leftover keeps its contents under a timestamped name. Same posture
+          # as 'Clean stale .qwen before checkout', which renames what it
+          # cannot delete; a read-only parent refuses the rename and still
+          # fails fast below.
+          if [ -e "$QWEN_HOME" ]; then
+            quarantine="${QWEN_HOME}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+            if mv -- "$QWEN_HOME" "$quarantine" 2>/dev/null; then
+              echo "::warning::could not delete a foreign-owned qwen-home; moved it to $quarantine so this review can proceed — that directory needs manual cleanup"
+            fi
+          fi
+          if [ -e "$QWEN_HOME" ]; then
+            echo "::error::stale qwen-home survives cleanup (foreign-owned leftover on this runner): $QWEN_HOME — remove it on the runner host"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           mkdir -p "$QWEN_HOME"
+          # mkdir just created this dir as the runner user, so under a normal
+          # umask it is already usable. This check covers the residual races
+          # and environments: another process re-creating the path between
+          # the sweep and mkdir, or a hostile umask stripping owner bits.
+          # settings.json needs write AND traverse, so test both — -w alone
+          # passes a mode-0600 home that cannot hold the file.
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            sudo -n chown "$(id -u):$(id -g)" "$QWEN_HOME" 2>/dev/null || true
+            chmod u+rwx "$QWEN_HOME" 2>/dev/null || true
+          fi
+          if [ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]; then
+            echo "::error::fresh qwen-home is not writable by the runner user: $QWEN_HOME"
+            ls -ld "$QWEN_HOME" || true
+            exit 1
+          fi
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a
@@ -853,7 +942,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
-        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"
+        # KEEP IN SYNC with review-pr.runs-on: every hosted shape needs this.
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository))"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -1073,6 +1163,78 @@ jobs:
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
 
+      # Decide the execution-sandbox policy from what this runner can actually
+      # do, and say so. `required` is the point — a review that cannot contain
+      # the PR's own install/build/test reports no evidence rather than running
+      # it with this step's GH_TOKEN and OPENAI_API_KEY — but `required` on a
+      # host that cannot satisfy it is not a security win, it is a review that
+      # fails its own install (a contained command that fails is a
+      # PR-attributed failure, and a refused prebuild leaves the tree bare for
+      # every agent, #10108). Measured on the `ecs-review` pool 2026-11-16: the
+      # daemon answers, and `ghcr.io/qwenlm/qwen-code:<version>` does not pull
+      # (TLS handshake timeout to the blob CDN). So: `required` when both halves
+      # hold, `off` — today's behaviour — with a warning and a summary line
+      # when they do not, and containment turns on by itself once the pool can
+      # pull the image. On the persistent pool that fail-open fallback is for
+      # SAME-REPO heads only: a fork head that still reaches the pool is
+      # refused when containment cannot be `required` (see the guard below).
+      # The image resolves through the repo's resolver first, so an
+      # unpublished tag cannot be charged to the PR under review.
+      - name: 'Resolve review sandbox'
+        id: 'review_sandbox'
+        if: "steps.context.outputs.should_run == 'true'"
+        # Absolute and step-scoped: the resolver's export is derived from this
+        # binary's stdout, and an appended $GITHUB_ENV value or a $GITHUB_PATH
+        # shadow in the runner-writable qwen-bin dir would otherwise steer it
+        # (#9527). The same pin the other sandboxed jobs use.
+        env:
+          SANDBOX_COMMAND: '/usr/bin/docker'
+          HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          GH_TOKEN: '${{ github.token }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
+        run: |-
+          # Payload-less triggers read the head repo via the read-only job
+          # token, before any PR code runs. Unreadable => treated as a fork.
+          if [ -z "${HEAD_REPO:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
+            HEAD_REPO="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name // ""' 2>/dev/null || true)"
+          fi
+          policy='off'
+          # A daemon round trip, not presence on PATH: a client with no
+          # reachable daemon is the shape that then refuses every reviewed
+          # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
+          if ! "${SANDBOX_COMMAND}" info > /dev/null 2>&1; then
+            echo "::warning::no container daemon answered '${SANDBOX_COMMAND} info' on this review runner; the PR's own install/build/test run unsandboxed for this review."
+          elif ! node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"; then
+            echo "::warning::the review sandbox image is not available on this runner; the PR's own install/build/test run unsandboxed for this review."
+          else
+            policy='required'
+          fi
+          # Fail closed for fork heads on the persistent pool (comment/
+          # dispatch shapes the runs-on routing cannot see): `off` there
+          # exposes this step's credentials AND the shared host — disabling
+          # only the prebuild would not contain the yolo agent's own shell
+          # probes. Hosted keeps fail-open: the disposable VM bounds it.
+          # Same-repo heads keep fail-open everywhere (authors hold write).
+          if [ "$policy" != 'required' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::fork PR review refused: the execution sandbox is '$policy' on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
+            {
+              echo "### Review sandbox"
+              echo "runtime: ${SANDBOX_COMMAND}"
+              echo "policy: $policy (fork head ${HEAD_REPO:-unknown}; review refused)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "sandbox_policy=$policy"
+          {
+            echo "### Review sandbox"
+            echo "runtime: ${SANDBOX_COMMAND}"
+            echo "policy: $policy"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1167,6 +1329,34 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          # The #9556 execution sandbox around the PR's own install/build/test.
+          # Without it those commands inherit this step's GH_TOKEN and
+          # OPENAI_API_KEY, and a `postinstall` reads both in one line.
+          # `required` only when the 'Resolve review sandbox' step above found a
+          # runtime AND an image; `off` (today's behaviour) with a warning and a
+          # summary line otherwise — and on the persistent pool that fallback
+          # only ever reaches a SAME-REPO head (fork payloads route hosted,
+          # see runs-on; the preflight refuses the rest). `required` on a host that cannot
+          # satisfy it would fail the PR's own install instead of containing
+          # it, and a silently refused prebuild leaves the tree bare for every
+          # agent (#10108) — so the policy follows what the runner can do,
+          # visibly, within that boundary.
+          # A contained command that fails for environmental reasons (no git in
+          # the mount, image toolchain gaps, egress) is a PR-attributed
+          # failure, not "unavailable". It does NOT contain the agent's own
+          # shell probes, so #9556 stays open. Mechanism: cli
+          # lib/sandboxed-exec.ts; the CI row of the design.
+          QWEN_REVIEW_SANDBOX: '${{ steps.review_sandbox.outputs.policy }}'
+          # The digest-bound image the resolver pulled, through its step
+          # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
+          # context is unsteerable (#9527). Empty when the resolver did not
+          # run; `policy` is `off` then, so it is not read.
+          QWEN_SANDBOX_IMAGE: '${{ steps.review_sandbox.outputs.image }}'
+          # Step env outranks an appended value, and the docker CLI skips an
+          # empty one; DOCKER_CONTEXT pins the pool-shared context so neither
+          # can steer the endpoint the sandbox runs against (#9527).
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail

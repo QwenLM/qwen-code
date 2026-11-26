@@ -11,6 +11,7 @@ import type {
   ModQueuedPrompt,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
+  ModBandInput,
   ModRenderElement,
   ModRenderInput,
   ModRenderSite,
@@ -20,6 +21,7 @@ import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { ModSession, type ModTurn } from './mod-session.js';
+import { modsWanted } from './display-translation-mod.js';
 import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
@@ -41,7 +43,7 @@ export function createInteractiveModSession(
   config: Config,
   settings: LoadedSettings,
 ): InteractiveModSession | undefined {
-  if (!settings.merged.experimental?.mods || !config.isInteractive()) return;
+  if (!modsWanted(settings) || !config.isInteractive()) return;
   let session = sessions.get(config);
   if (!session) {
     session = new InteractiveModSession(config, settings);
@@ -122,10 +124,7 @@ export class InteractiveModSession implements ICommandLoader {
           sessionId,
         ),
     })!;
-    this.unregisterCleanup = registerCleanup(() => {
-      this.unregisterCleanup = () => {};
-      return this.close();
-    });
+    this.unregisterCleanup = registerCleanup(() => this.close());
   }
 
   /**
@@ -203,8 +202,42 @@ export class InteractiveModSession implements ICommandLoader {
     this.presentation = { ...presentation };
   }
 
-  setRenderInput(input: ModRenderInput): void {
+  setRenderInput(input: ModBandInput): void {
     if (!this.closing) this.session.setRenderInput(input);
+  }
+
+  /**
+   * Shows a transcript row the Mods may draw; `listener` hears a change of
+   * what it draws. Returns the release, or undefined where nothing draws it.
+   */
+  watchRow(
+    sessionId: string,
+    input: ModRenderInput,
+    listener: () => void,
+  ): (() => void) | undefined {
+    return this.closing || !this.started || this.startupFailed
+      ? undefined
+      : this.session.watchRow(sessionId, input, listener);
+  }
+
+  /** The session whose transcript rows the Mods draw. */
+  get rowSession(): string {
+    return this.session.rowSession;
+  }
+
+  /**
+   * Hears the Mods adopt another session. A transcript can take the new
+   * session's id before they do, so its rows ask again then.
+   */
+  readonly subscribeSession = (listener: () => void): (() => void) =>
+    this.session.subscribeSession(listener);
+
+  /** The props a row draws with, when its hooks rewrote them. */
+  rowProps(
+    sessionId: string,
+    input: ModRenderInput,
+  ): ModRenderInput['props'] | undefined {
+    return this.closing ? undefined : this.session.rowProps(sessionId, input);
   }
 
   readonly subscribeBand = (listener: () => void): (() => void) => {

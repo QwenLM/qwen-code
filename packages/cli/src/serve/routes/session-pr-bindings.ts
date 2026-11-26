@@ -12,6 +12,7 @@ import {
   readSessionPrsDetailed,
   SESSION_PR_LIST_LIMIT,
 } from '@qwen-code/qwen-code-core/services/session-pr-service.js';
+import { collectActivePrWatches, prWatchKey } from './session-pr-watches.js';
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isHiddenCatalogSource } from '../../runtime/agent-session-source.js';
@@ -48,6 +49,12 @@ export interface SessionPrBindingEntry {
   url: string;
   state?: 'open' | 'merged' | 'closed';
   role?: 'review' | 'verify' | 'fix';
+  /**
+   * Whether the session holds an active watch on this PR, derived at scan
+   * time. Absent when watch detection failed for the workspace (fail-open:
+   * the channel treats unknown as eligible).
+   */
+  watching?: boolean;
 }
 
 export interface SessionPrBindingSummary {
@@ -161,8 +168,9 @@ async function resolveAttribution(
  * bindings the bridge holds in memory, and returns true when anything could
  * not be read (a sidecar, a transcript, or the live session list), so the
  * caller flags the answer partial; such bindings are UNKNOWN, not absent.
+ * Shared in-process by the bindings route and the daemon PR-watch refresh.
  */
-async function scanWorkspaceBindings(
+export async function scanWorkspaceBindings(
   runtime: WorkspaceRuntime,
   out: SessionPrBindingSummary[],
 ): Promise<boolean> {
@@ -332,6 +340,26 @@ async function scanWorkspaceBindings(
         sessionId,
         cause: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+  // Watch detection is a per-workspace scan of the artifacts the watch
+  // flows write (autofix-pr state files, verify-pr --watch cron tasks). A
+  // failure leaves `watching` absent — unknown, not false — so the channel
+  // keeps delivering as before the gate existed; it does not make the
+  // snapshot partial, whose retention semantics are about binding absence.
+  const watches = await collectActivePrWatches(runtime.workspaceCwd);
+  if (watches === undefined) {
+    process.stderr.write(
+      `[serve] PR bindings scan: watch detection unavailable in workspace ${runtime.workspaceCwd}, entries carry no watching flag (fail-open)\n`,
+    );
+  } else {
+    for (const row of rows.values()) {
+      const sessionWatches = watches.get(row.sessionId);
+      for (const pr of row.prs) {
+        const key = prWatchKey(pr.url, pr.number);
+        if (key === undefined) continue;
+        pr.watching = sessionWatches?.has(key) ?? false;
+      }
     }
   }
   out.push(...rows.values());

@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-Refresh and pagination fixes pass 16 focused component tests and the isolated HTTP verification. Full build, bundle and workspace typecheck remain blocked by missing or mismatched dependencies in the new worktree. Preview interaction below is a proposal only. No daemon API or settings changes.
+The refresh and pagination fixes are implemented. Preview interaction below is a proposal only. No daemon API or settings changes.
 
 ## Problem
 

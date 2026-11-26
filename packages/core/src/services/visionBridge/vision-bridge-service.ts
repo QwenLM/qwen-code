@@ -23,7 +23,7 @@ const debugLogger = createDebugLogger('VISION_BRIDGE');
 // the side query so concurrent tool results cannot each reset the turn cap.
 const turnImageCounts = new WeakMap<AbortSignal, number>();
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
-const VISION_BRIDGE_TIMEOUT_MS = 30_000;
+export const VISION_BRIDGE_TIMEOUT_MS = 30_000;
 // One retry on timeout, with a fresh timeout budget per attempt: a transient
 // latency spike on the vision endpoint shouldn't permanently drop the image.
 const VISION_BRIDGE_MAX_ATTEMPTS = 2;

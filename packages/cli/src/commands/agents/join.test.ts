@@ -104,6 +104,8 @@ it('warns, and still succeeds, when the daemon could not save the connection', a
   expect(code).toBe(0);
   expect(out.join('\n')).toContain('Joined https://hub.example:4170');
   expect(out.join('\n')).not.toContain('reconnects after restarts');
+  // No `recorded`, as from an older daemon: unknown, so no rerun advice —
+  // a released daemon would abort the live connection and refuse the rerun.
   expect(err).toEqual([
     'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
   ]);
@@ -123,6 +125,55 @@ it('says "no detail" when the daemon gives no reason for the failed save', async
 
   expect(err).toEqual([
     'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
+  ]);
+});
+
+it('does not advise a rerun when the credential did not record the join', async () => {
+  // A re-join whose record write failed: its rerun would be refused, so
+  // the warning must not send the operator into it.
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        recorded: false,
+        saveError: 'ENOSPC: no space left on device',
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(code).toBe(0);
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ENOSPC: no space left on device',
+  ]);
+});
+
+it('advises a rerun when the daemon says the credential recorded the join', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        recorded: true,
+        saveError: 'Lock file is already being held',
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  // The same command again keeps the connection and retries the save.
+  expect(code).toBe(0);
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held. Run the same command again to save it.',
   ]);
 });
 
@@ -244,6 +295,14 @@ it.each([
 
     expect(code).toBe(1);
     expect(err.join('\n')).toContain('the join may still complete');
+    // No usable answer arrived: whether the daemon recorded the token is
+    // unknowable, so the hint names the branches instead of promising the
+    // rerun goes on (on a released daemon it tears the connection down).
+    expect(err.join('\n')).toContain(
+      "if the daemon recorded this join's token",
+    );
+    expect(err.join('\n')).toContain('the same command again goes on with it');
+    expect(err.join('\n')).not.toContain('it picks up what the first run did');
     expect(err.join('\n')).not.toContain('No running qwen serve daemon');
     expect(err.join('\n')).not.toContain('Join failed');
     expect(err.join('\n')).not.toContain('qwen serve --join');

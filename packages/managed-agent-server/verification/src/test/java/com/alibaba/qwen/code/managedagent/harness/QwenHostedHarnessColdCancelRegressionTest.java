@@ -10,10 +10,10 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -70,7 +70,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")
@@ -79,7 +79,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Test
     @Transactional
     void coldCancellationRequiresPersistedIntentAndSurvivesMutableAuthorityChanges() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
@@ -123,9 +123,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         var expectedRecovery = new com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery(
                 null, "checkpoint-of-T1", "activation-of-T1", List.of(), false, false, false);
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         connector.createOrLoad(tenant, session, true);
@@ -186,7 +186,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     "DELETE FROM ma_workspace_access WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
-                    "UPDATE ma_workspace SET storage_id = X'7265706c6163656d656e742d73746f72616765' WHERE tenant_id = ?")) {
+                    "UPDATE ma_workspace SET storage_id = 'replacement-storage' WHERE tenant_id = ?")) {
                 jdbc.update(change, tenant);
                 clearInvocations(client);
                 ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
@@ -213,7 +213,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Test
     @Transactional
     void aMessageStopAttachesWithoutACancellingTurnOrACurrentGrant() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
@@ -249,9 +249,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(client.loadSession(any())).thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(boot);
         when(attached.getApprovalMode()).thenReturn("yolo");
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         try {
@@ -325,7 +325,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             String turn = fixture.turn();
             String owner = fixture.owner();
             if ("tenant".equals(missing)) {
-                tenant = "another-" + tenant;
+                tenant = UUID.randomUUID().toString();
             } else if ("session".equals(missing)) {
                 session = fixture.store().insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId(tenant)
@@ -408,7 +408,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     }
 
     private RecoveryFixture recoveryFixture(boolean admitted, boolean attempted, String epoch, Duration lease) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
@@ -445,9 +445,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(recovery.getCheckpointId()).thenReturn("failure-checkpoint");
         when(recovery.getActivationId()).thenReturn("failure-activation");
         when(attached.getRuntimeRecovery()).thenReturn(recovery);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("default");
-        WorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, transactionManager));
+        JdbcWorkspaceExecutionStore execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, transactionManager));
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, store, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         String owner = "owner-a";

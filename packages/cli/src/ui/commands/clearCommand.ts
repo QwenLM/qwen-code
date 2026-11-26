@@ -12,9 +12,9 @@ import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
-  persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -79,28 +79,13 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
-      const hasActivity = Object.values(metrics.models).some(
-        (m) => m.api.totalRequests > 0,
-      );
-      if (hasActivity) {
-        try {
-          persistSessionUsage({
-            sessionId: config.getSessionId(),
-            startTime: context.session.stats.sessionStartTime ?? new Date(),
-            endTime: new Date(),
-            project: config.getProjectRoot(),
-            metrics,
-          });
-        } catch {
-          // Best-effort — don't block /clear
-        }
-      }
+      flushRunUsageOnSessionSwap(config, config.getSessionId());
 
-      getInteractiveModSession(config)?.invalidateTools();
+      const interactiveMods = getInteractiveModSession(config);
+      interactiveMods?.invalidateTools();
       const newSessionId = config.startNewSession();
-      await getInteractiveModSession(config)?.syncSession('clear');
+      // In ACP, notify the session of the switch before yielding to old work.
+      if (interactiveMods) await interactiveMods.syncSession('clear');
 
       // Reset UI telemetry metrics for the new session
       uiTelemetryService.reset();
@@ -119,7 +104,7 @@ export const clearCommand: SlashCommand = {
       }
 
       // Clear UI first for immediate responsiveness
-      context.ui.clear();
+      context.ui.clear(newSessionId);
 
       const llmClient = config.getLlmClient();
       if (llmClient) {

@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -43,7 +42,7 @@ class WorkspaceCreationStoreTest {
     protected DataSource source;
     protected ManagedAgentProperties properties;
     protected WorkspaceStorageGuard guard;
-    protected ManagedWorkspaceRegistry registry;
+    protected JdbcManagedWorkspaceRegistry registry;
 
     protected DataSource dataSource() {
         return new DriverManagerDataSource("jdbc:h2:mem:create-" + UUID.randomUUID()
@@ -59,7 +58,7 @@ class WorkspaceCreationStoreTest {
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setStateDirectory(Files.createDirectory(temp.resolve("runtime")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, new DataSourceTransactionManager(source), properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "device",
                         Files.readAttributes(path, BasicFileAttributes.class).fileKey().toString(),
@@ -121,7 +120,7 @@ class WorkspaceCreationStoreTest {
     @Test
     void replayDoesNotRestoreRevokedAccessOrReRegisterHeldStorage() {
         var created = store(guard).create("tenant", "actor", "Held", "held");
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'already-held'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'already-held'");
         assertThat(store(guard).create("tenant", "actor", "Held", "held")).isEqualTo(created);
         assertThatThrownBy(() -> store(guard).create("tenant", "actor", "Different", "held"))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
@@ -227,16 +226,16 @@ class WorkspaceCreationStoreTest {
         Path project = Files.createDirectory(root.resolve("existing-project"));
         Files.writeString(project.resolve("README.md"), "existing project");
         var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'existing-runtime'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'existing-runtime'");
         var created = store(guard).create("tenant", "actor", "Project", "selected",
                 parent.workspaceId(), "./existing-project/");
         assertThat(created.defaultCwdRelative()).isEqualTo("existing-project");
         assertThat(storage(created.workspaceId())).isEqualTo(storage(parent.workspaceId()));
         assertThat(Files.readString(project.resolve("README.md"))).isEqualTo("existing project");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_key", "existing-runtime")
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_id", "existing-runtime")
                 .containsEntry("mount_registration_id", before.get("mount_registration_id"));
-        assertThat(new ManagedWorkspaceRegistry(jdbc).findReadable("tenant", "actor", created.workspaceId())
+        assertThat(new JdbcManagedWorkspaceRegistry(jdbc).findReadable("tenant", "actor", created.workspaceId())
                 .defaultCwdRelative()).isEqualTo("existing-project");
         assertThat(store(guard).create("tenant", "actor", "Project", "selected", parent.workspaceId(),
                 "existing-project")).isEqualTo(created);
@@ -318,8 +317,8 @@ class WorkspaceCreationStoreTest {
     void localDirectorySelectionRefusesRemoteStorageEvenIfGeneralVerificationSucceeds() {
         var parent = store(guard).create("tenant", "actor", "Projects", "remote-parent");
         assertThat(parent.canSelectDirectory()).isTrue();
-        jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL' WHERE alias_key = ?",
-                WorkspaceCsiRegistration.aliasKey("tenant", storage(parent.workspaceId())));
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL' WHERE tenant_id = ? AND storage_id = ?",
+                "tenant", storage(parent.workspaceId()));
         assertThat(registry.findReadable("tenant", "actor", parent.workspaceId()).canSelectDirectory()).isFalse();
         assertThat(registry.listReadable("tenant", "actor", null, 10))
                 .allSatisfy(item -> assertThat(item.canSelectDirectory()).isFalse());
@@ -365,7 +364,7 @@ class WorkspaceCreationStoreTest {
         Files.createDirectory(root.resolve("project"));
         var barrier = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            java.util.concurrent.Callable<ManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
+            java.util.concurrent.Callable<JdbcManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
                 barrier.await();
                 return store(guard).create("tenant", "actor", "Project", "concurrent-project",
                         parent.workspaceId(), "project");
@@ -388,7 +387,7 @@ class WorkspaceCreationStoreTest {
         return project.toRealPath();
     }
 
-    private ManagedWorkspaceRegistry.WorkspaceSummary importProject(Path project, String key) {
+    private JdbcManagedWorkspaceRegistry.WorkspaceSummary importProject(Path project, String key) {
         return store(guard).create("tenant", "actor", project.getFileName().toString(), key, null, null, project.toString());
     }
 
@@ -433,12 +432,12 @@ class WorkspaceCreationStoreTest {
         Path second = localProject("second");
         var original = importProject(first, "first");
         var before = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'running-runtime'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'running-runtime'");
         var next = importProject(second, "second");
         assertThat(next.defaultCwdRelative()).isEqualTo("second");
         assertThat(storage(next.workspaceId())).isEqualTo(storage(original.workspaceId()));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_key", "running-runtime")
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).containsEntry("holder_id", "running-runtime")
                 .containsEntry("mount_registration_id", before.get("mount_registration_id"));
     }
 
@@ -512,7 +511,7 @@ class WorkspaceCreationStoreTest {
         assertThatThrownBy(() -> store(interrupted).create("tenant", "actor", "first", "pending", null, null, first.toString()))
                 .isInstanceOf(IllegalStateException.class);
         var completed = importProject(second, "completed");
-        jdbc.update("UPDATE ma_storage_owner SET holder_key = 'running-runtime'");
+        jdbc.update("UPDATE ma_storage_owner SET holder_id = 'running-runtime'");
         var retried = importProject(first, "pending");
         assertThat(storage(retried.workspaceId())).isEqualTo(storage(completed.workspaceId()));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
@@ -524,7 +523,7 @@ class WorkspaceCreationStoreTest {
         Path project = localProject("project");
         var barrier = new CyclicBarrier(2);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            java.util.concurrent.Callable<ManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
+            java.util.concurrent.Callable<JdbcManagedWorkspaceRegistry.WorkspaceSummary> action = () -> {
                 barrier.await();
                 return importProject(project, "concurrent-import");
             };

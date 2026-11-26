@@ -1,9 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -22,26 +21,25 @@ class ManagedModelContextRetentionTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
-        String record = ManagedExtensionProjection.recordKey("session", "hosted_context_usage", "latest");
-        String resource = ManagedSchemaKeys.key(scope, "resource");
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified,"
                 + " retired_at) VALUES ('tenant', 'session', 'qwen-code', 1, 1, 1)");
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id,"
                 + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
-                + " inline_bytes, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', 'session',"
+                + " inline_bytes, state, gmt_create) VALUES ('tenant', 'workspace', 'session',"
                 + " 'resource', 'managed-hosted-model-usage', 1, 2, ?, 'MYSQL_INLINE', ?,"
-                + " 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resource, scope, "a".repeat(64), body);
-        jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key,"
+                + " 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", "a".repeat(64), body);
+        jdbc.update("INSERT INTO ma_session_record (record_kind,"
                 + " tenant_id, workspace_id, session_id, domain, record_id, revision,"
                 + " record_resource_id, gmt_create, settled_at, first_sequence) VALUES ('DOMAIN',"
-                + " ?, ?, 'tenant', 'workspace', 'session', 'hosted_context_usage', 'latest', 2,"
-                + " 'resource', 1, 2, 1)", scope, record);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
-                + " owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id,"
-                + " gmt_create) VALUES (?, 'SESSION_RECORD', ?, 2, ?, 'tenant', 'workspace',"
-                + " 'session', 'resource', " + ManagedSchemaTime.SQL_NOW + ")", scope, record, resource);
+                + " 'tenant', 'workspace', 'session', 'hosted_context_usage', 'latest', 2,"
+                + " 'resource', 1, 2, 1)");
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                + " owner_revision, tenant_id, workspace_id, session_id, resource_id,"
+                + " gmt_create) VALUES ('SESSION_RECORD', ?, 2, 'tenant', 'workspace',"
+                + " 'session', 'resource', " + ManagedSchemaTime.SQL_NOW + ")",
+                ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
+                        "session", "hosted_context_usage", "latest"));
 
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
         Boolean changed = transaction.execute(status -> ManagedSessionRetirementStore.deleteOwnerBatch(

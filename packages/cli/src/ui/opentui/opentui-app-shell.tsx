@@ -44,6 +44,7 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  runOutsideAgentContext,
   type Config,
   type Logger,
 } from '@qwen-code/qwen-code-core';
@@ -82,10 +83,11 @@ import {
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
-import type {
-  ForegroundShellOwner,
-  OpenTuiLiveTurn,
-  OpenTuiSubmitOptions,
+import {
+  goalOwnsSessionTurns,
+  type ForegroundShellOwner,
+  type OpenTuiLiveTurn,
+  type OpenTuiSubmitOptions,
 } from './live-turn.js';
 import {
   restoreInputSubmissions,
@@ -112,7 +114,11 @@ import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import type { KeyEvent, BoxRenderable } from '@opentui/core';
+import type {
+  KeyEvent,
+  BoxRenderable,
+  ScrollBoxRenderable,
+} from '@opentui/core';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { keyToAnsi } from '../hooks/keyToAnsi.js';
 import {
@@ -124,6 +130,7 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import { isExitInProgress } from './exit-lifecycle.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { injectCapturedInput } from './early-input.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
@@ -147,6 +154,10 @@ import { dialogAreaWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import {
+  ExtensionSettingInput,
+  ExtensionPluginChoice,
+} from './ExtensionAcquisition.js';
+import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
@@ -154,12 +165,15 @@ import {
 const debugLogger = createDebugLogger('OPEN_TUI_APP');
 
 export interface OpenTuiAppProps {
+  screenReader?: boolean;
   config: Config;
   settings: LoadedSettings;
   logger: Logger | null;
   startupHistory?: HistoryItem[];
   /** Preloaded slash registry; when omitted the shell loads it on mount. */
   commands?: readonly SlashCommand[];
+  /** Shared with the entry's keyboard exit guard. */
+  slashGateway?: OpenTuiSlashGateway;
   /** Owned by a Batch-6 stats provider; commands read it through the host. */
   getSessionStats: () => SessionStatsState;
   /** Reactive provider snapshot; the getter remains for imperative commands. */
@@ -205,10 +219,18 @@ export interface OpenTuiAppProps {
     args: Record<string, unknown>,
     restoreResponseBinding?: RestoreToolResponseBinding,
   ) => boolean;
+  /**
+   * Runs the next prompt a Mod submitted with `$.prompt.submit` as a turn of
+   * its own; false when none could start.
+   */
+  onRunModPrompt?: () => boolean;
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
-  onQuit?: (messages: readonly HistoryItem[]) => void;
+  onQuit?: (
+    messages: readonly HistoryItem[],
+    invocationItemId?: number,
+  ) => void;
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /**
@@ -297,7 +319,9 @@ interface ActionModal {
   resolve: (confirmed: boolean) => void;
 }
 
-type ConfirmationModal = ShellModal | ActionModal;
+type SettingModal = Parameters<typeof ExtensionSettingInput>[0]['permission'];
+type ChoiceModal = Parameters<typeof ExtensionPluginChoice>[0]['permission'];
+type ConfirmationModal = ShellModal | ActionModal | SettingModal | ChoiceModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
   const {
@@ -305,10 +329,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     settings,
     logger,
     commands,
+    slashGateway,
     getSessionStats,
     extensionRefreshState,
     renderMain,
     onSubmitPrompt,
+    onRunModPrompt,
     onQuit,
     onTranscriptReset,
     onTranscriptEvent,
@@ -584,6 +610,79 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
           ]);
         }),
+      presentChoice: (
+        marketplace: ChoiceModal['marketplace'],
+        signal: AbortSignal,
+      ) =>
+        new Promise<string>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error(t('Plugin selection cancelled.')));
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (value: string | null, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            if (value !== null && !signal.aborted) resolve(value);
+            else reject(new Error(t('Plugin selection cancelled.')));
+          };
+          const abort = () => finish(null);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(null, false),
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          ownedActionModals.current.add(lifetime);
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'choice',
+              id,
+              marketplace,
+              resolve: (value) => finish(value),
+              cancel: abort,
+            },
+          ]);
+        }),
+      presentSetting: (setting: SettingModal['setting'], signal: AbortSignal) =>
+        new Promise<string>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error(t('Setting input cancelled')));
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (value: string | null, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            if (value !== null && !signal.aborted) resolve(value);
+            else reject(new Error(t('Setting input cancelled')));
+          };
+          const abort = () => finish(null);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(null, false),
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          ownedActionModals.current.add(lifetime);
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'setting',
+              id,
+              setting,
+              resolve: (value) => finish(value),
+              cancel: abort,
+            },
+          ]);
+        }),
       presentAction: (
         prompt: ReactNode,
         options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
@@ -649,6 +748,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         options,
       );
     });
+    manager.setRequestSetting((setting) =>
+      confirmations.presentSetting(setting, controller.signal),
+    );
+    manager.setRequestChoicePlugin((marketplace) =>
+      confirmations.presentChoice(marketplace, controller.signal),
+    );
     return () => controller.abort();
   }, [config, confirmations]);
 
@@ -673,8 +778,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
-  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
-    addInfoItem({ type: MessageType.INFO, text }),
+  const hooksApproval = useProjectHooksApproval(config, settings, (notice) =>
+    onTranscriptEvent?.(notice),
   );
 
   const shellControl = props.foregroundShellControl;
@@ -701,6 +806,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   }, [shellFocused]);
 
   const controlsRef = useRef<BoxRenderable | null>(null);
+  const historyScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [controlsHeight, setControlsHeight] = useState(0);
   const shellColumns = Math.max(1, Math.floor(terminalWidth * 0.89));
   const shellRows = Math.max(1, terminalHeight - controlsHeight - 10);
@@ -781,6 +887,37 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // keeps only the Windows bare-Tab fallback — the one route that has to know
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
+    const historyScroll = historyScrollRef.current;
+    if (
+      props.screenReader &&
+      historyScroll &&
+      key.eventType !== 'release' &&
+      !shellFocused &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen
+    ) {
+      let consumed = true;
+      if (matchesCommand(Command.SCROLL_UP, key)) historyScroll.scrollBy(-1);
+      else if (matchesCommand(Command.SCROLL_DOWN, key))
+        historyScroll.scrollBy(1);
+      else if (matchesCommand(Command.PAGE_UP, key))
+        historyScroll.scrollBy(-Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.PAGE_DOWN, key))
+        historyScroll.scrollBy(Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.SCROLL_HOME, key))
+        historyScroll.scrollTo(0);
+      else if (matchesCommand(Command.SCROLL_END, key))
+        historyScroll.scrollTo(historyScroll.scrollHeight);
+      else consumed = false;
+      if (consumed) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
+    }
     if (shellFocused && handleShellKey(key)) {
       key.preventDefault();
       key.stopPropagation();
@@ -1040,7 +1177,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
   }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
 
-  const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
+  const gateway = useMemo(
+    () => slashGateway ?? new OpenTuiSlashGateway(),
+    [slashGateway],
+  );
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
   // Slash and shell submissions held back while a model turn streams (ink's
   // message queue; a queued shell entry carries its routing so the drain
@@ -1214,7 +1354,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // cleanup chain (recording flush, config.shutdown) against a turn
           // that is still writing. A no-op when nothing is in flight.
           onInterrupt?.();
-          onQuit?.(outcome.messages);
+          if (outcome.invocationItemId === undefined) {
+            onQuit?.(outcome.messages);
+          } else {
+            onQuit?.(outcome.messages, outcome.invocationItemId);
+          }
           return true;
         default: {
           const exhaustive: never = outcome;
@@ -1236,7 +1380,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     ],
   );
 
-  const onSubmit = useCallback(
+  // The person's own command or `!` command lets the Mods' prompts start
+  // turns again once it runs; a prompt does so when its turn starts (ink's
+  // submitQuery), so input the shell refuses or only queues resets nothing.
+  // A `?`-form counts once the dispatcher takes it, even when a Mod's hook
+  // then drops it, as in ink.
+  const notePersonPrompt = useCallback(
+    () => getInteractiveModSession(config)?.notePersonPrompt(),
+    [config],
+  );
+
+  const submitInput = useCallback(
     async (
       text: string,
       imagePaths?: readonly string[],
@@ -1319,10 +1473,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         return false;
       const settlement = hasImages
         ? { kind: 'settled' as const, outcome: false as const }
-        : await gateway.dispatch(submission, {
-            displayText: options?.displayText,
-            pasteExpansions: options?.pasteExpansions,
-          });
+        : await gateway.dispatch(
+            submission,
+            {
+              displayText: options?.displayText,
+              pasteExpansions: options?.pasteExpansions,
+            },
+            notePersonPrompt,
+          );
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return false;
@@ -1352,6 +1510,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
         }
         if (shellModeActive && query) {
+          notePersonPrompt();
           const started = runShellCommand(query);
           if (!started)
             notify('The shell command owner is not wired in this shell.');
@@ -1385,7 +1544,33 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       commandList,
       addInfoItem,
       props.onTranscriptEvent,
+      notePersonPrompt,
     ],
+  );
+
+  // Composer submissions still being routed: the gate awaits the command
+  // registry and the dispatch before any turn starts, so a Mod's prompt must
+  // not take the idle moment from under them.
+  const submittingRef = useRef(0);
+  // Re-runs the drain of the Mods' prompts below.
+  const [modPromptRevision, setModPromptRevision] = useState(0);
+  const onSubmit = useCallback(
+    async (
+      text: string,
+      imagePaths?: readonly string[],
+      options?: OpenTuiSubmitOptions,
+    ): Promise<boolean> => {
+      submittingRef.current += 1;
+      try {
+        return await submitInput(text, imagePaths, options);
+      } finally {
+        submittingRef.current -= 1;
+        // Only a Mod's prompt waiting on this submission needs the re-run.
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
+          setModPromptRevision((revision) => revision + 1);
+      }
+    },
+    [config, submitInput],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
@@ -1443,6 +1628,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             return;
           }
           if (entry.shell) {
+            notePersonPrompt();
             await runShellCommand(entry.text);
             continue;
           }
@@ -1477,10 +1663,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             }
             return;
           }
-          const settlement = await gateway.dispatch(entry.text, {
-            displayText: entry.options?.displayText,
-            pasteExpansions: entry.options?.pasteExpansions,
-          });
+          const settlement = await gateway.dispatch(
+            entry.text,
+            {
+              displayText: entry.options?.displayText,
+              pasteExpansions: entry.options?.pasteExpansions,
+            },
+            notePersonPrompt,
+          );
           if (settlement.kind === 'rejected') {
             notify(settlement.reason);
             continue;
@@ -1540,6 +1730,61 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     runShellCommand,
     config,
     props.composerHandle,
+    notePersonPrompt,
+  ]);
+
+  // A Mod's own prompts (`$.prompt.submit`) run each as a turn of its own
+  // once the session is idle: after the person's queued input, and not
+  // while a dialog owns the UI, a `!` command runs, a submission or command
+  // is still being routed, or a Goal owns the session's turns.
+  useEffect(
+    () =>
+      getInteractiveModSession(config)?.subscribePrompts(() =>
+        setModPromptRevision((revision) => revision + 1),
+      ),
+    [config],
+  );
+  // A Goal lets go of the session's turns on its own schedule, after the
+  // session is already idle, so the drain hears the Goal too.
+  const goalSessionId = config.getSessionId();
+  useEffect(() => {
+    try {
+      return config.getGoalRuntime().subscribe(() => {
+        if (getInteractiveModSession(config)?.hasSubmittedPrompts)
+          setModPromptRevision((revision) => revision + 1);
+      });
+    } catch {
+      // The Goal runtime is optional (early initialization, persistence off).
+      return undefined;
+    }
+  }, [config, goalSessionId]);
+  useEffect(() => {
+    if (
+      !onRunModPrompt ||
+      isExitInProgress() ||
+      streaming ||
+      dialog ||
+      shellControllersRef.current.size > 0 ||
+      deferredCommandsRef.current.length > 0 ||
+      drainingRef.current ||
+      submittingRef.current > 0 ||
+      gateway.isBusy() ||
+      !getInteractiveModSession(config)?.hasSubmittedPrompts ||
+      goalOwnsSessionTurns(config)
+    )
+      return;
+    // As ink's drain (#7156): this effect can run in a commit that batched a
+    // subagent's progress update made inside its agent frame, and the turn,
+    // with everything it starts, would then resolve the subagent's model.
+    runOutsideAgentContext(() => onRunModPrompt());
+  }, [
+    streaming,
+    dialog,
+    deferredRevision,
+    modPromptRevision,
+    gateway,
+    onRunModPrompt,
+    config,
   ]);
 
   const hostHistory = host.getHistory();
@@ -1592,6 +1837,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             of them can write the composer's focus — that is a React prop — so
             a click there changes nothing. */}
         <scrollbox
+          ref={(el) => {
+            historyScrollRef.current = el as ScrollBoxRenderable | null;
+          }}
           flexGrow={1}
           flexShrink={1}
           minHeight={0}
@@ -1621,6 +1869,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             column and squeezes the composer's three border rows into one row
             painted three times. */}
         <box
+          id={
+            dialog ||
+            activeModal ||
+            activeToolCall ||
+            (mcpApproval.isMcpApprovalDialogOpen &&
+              mcpApproval.currentMcpApproval) ||
+            (hooksApproval.isProjectHooksApprovalDialogOpen &&
+              hooksApproval.pendingProjectHooks)
+              ? 'screen-reader-dialog'
+              : 'screen-reader-composer'
+          }
           flexDirection="column"
           flexShrink={0}
           ref={(el) => {
@@ -1661,6 +1920,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 own bottom padding and the waiting row. */}
               <box marginTop={1}>
                 <OpenTuiLoadingIndicator
+                  screenReader={props.screenReader}
                   streaming={Boolean(streaming)}
                   waiting
                   showPhrase={showLoadingPhrases}
@@ -1668,7 +1928,21 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               </box>
             </box>
           ) : activeModal ? (
-            activeModal.kind === 'shell' ? (
+            activeModal.kind === 'choice' ? (
+              <ExtensionPluginChoice
+                key={`choice-${activeModal.id}`}
+                permission={activeModal}
+                width={Math.max(0, terminalWidth - 4)}
+                height={dialogRegionHeight}
+              />
+            ) : activeModal.kind === 'setting' ? (
+              <ExtensionSettingInput
+                key={`setting-${activeModal.id}`}
+                permission={activeModal}
+                width={Math.max(0, terminalWidth - 4)}
+                height={dialogRegionHeight}
+              />
+            ) : activeModal.kind === 'shell' ? (
               <OpenTuiShellConfirmation
                 key={`shell-${activeModal.id}`}
                 commands={activeModal.commands}
@@ -1741,6 +2015,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           ) : (
             <box key="composer" flexDirection="column" marginTop={1}>
               <OpenTuiLoadingIndicator
+                screenReader={props.screenReader}
                 streaming={Boolean(streaming) && !shellFocused}
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
@@ -1752,6 +2027,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 maxRows={modBandMaxRows(terminalHeight)}
               />
               <OpenTuiInputPrompt
+                screenReader={props.screenReader}
                 placeholder={
                   subscriptionActive
                     ? '  ' + t('Type your request, or /usage')
@@ -1825,6 +2101,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
+              screenReader={props.screenReader}
               config={config}
               settings={settings}
               statusLine={statusLine}

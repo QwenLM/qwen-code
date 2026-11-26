@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
@@ -14,12 +14,15 @@ import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -90,10 +93,10 @@ public class ChildResultRelay {
     private final Supplier<Long> clock;
     private final String owner = "child-relay-" + UUID.randomUUID();
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
-            org.springframework.beans.factory.ObjectProvider<RuntimeBrokerOperations> broker,
+            ObjectProvider<RuntimeBrokerOperations> broker,
             HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
             ChildWorkspaceService childWorkspaces) {
@@ -103,7 +106,7 @@ public class ChildResultRelay {
 
     ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
-            org.springframework.beans.factory.ObjectProvider<RuntimeBrokerOperations> broker,
+            ObjectProvider<RuntimeBrokerOperations> broker,
             HarnessConnector harness, ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
             ChildWorkspaceService childWorkspaces,
@@ -377,12 +380,17 @@ public class ChildResultRelay {
                 try {
                     harness.runMessageOperation(row.tenantId(), child, stop);
                 } catch (HarnessHttpFailure error) {
-                    // A child that waits on its recovery or is closing takes
-                    // no stop yet: the heartbeat asks again, spending no
-                    // attempt, and the bound above ends the wait.
+                    // A child that waits on its recovery, is closing, or is
+                    // out of cold-open slots takes no stop yet: the
+                    // heartbeat asks again, spending no attempt, and the
+                    // bound above ends the wait. A teardown that cannot
+                    // finish escalates to hosted_session_teardown_blocked,
+                    // which is a real fault and spends the attempt budget.
                     if (!"hosted_turn_recovery_required"
                             .equals(error.getErrorCode())
                             && !"hosted_session_closing"
+                                    .equals(error.getErrorCode())
+                            && !"hosted_session_open_busy"
                                     .equals(error.getErrorCode())) {
                         stopFailure = error;
                     }
@@ -485,15 +493,23 @@ public class ChildResultRelay {
             case "workflow" -> {
                 JsonNode definition = envelope.required("definition");
                 JsonNode args = envelope.get("args");
-                admission = sessions.createWorkflowChildSession(
-                        pending.tenantId(), pending.parentSessionId(),
-                        pending.childRunId(),
-                        definition.required("definitionId").asText(),
-                        definition.required("definitionRevision").asLong(),
-                        definition.required("definitionDigest").asText(),
-                        envelope.required("script").asText(),
-                        args == null || args.isNull() ? null
-                                : mapper.convertValue(args, Object.class));
+                try {
+                    admission = sessions.createWorkflowChildSession(
+                            pending.tenantId(), pending.parentSessionId(),
+                            pending.childRunId(),
+                            definition.required("definitionId").asText(),
+                            definition.required("definitionRevision").asLong(),
+                            definition.required("definitionDigest").asText(),
+                            envelope.required("script").asText(),
+                            args == null || args.isNull() ? null
+                                    : mapper.convertValue(args, Object.class));
+                } catch (ManagedAgentException refused) {
+                    if ("child_parent_unavailable".equals(refused.getCode())) {
+                        failCreation(row, refused.getCode(), now);
+                        return;
+                    }
+                    throw refused;
+                }
             }
             case "child_agent" -> {
                 String description = envelope.required("description").asText();
@@ -530,6 +546,10 @@ public class ChildResultRelay {
                     // check): the row moved off the parent's binding or was
                     // asked to finish since it read ready, and it never
                     // becomes ready again.
+                    if ("child_parent_unavailable".equals(refused.getCode())) {
+                        failCreation(row, refused.getCode(), now);
+                        return;
+                    }
                     if (!isolated || !"child_workspace_not_ready"
                             .equals(refused.getCode())) {
                         throw refused;
@@ -759,7 +779,7 @@ public class ChildResultRelay {
     private int jsonBytes(String text) {
         try {
             return mapper.writeValueAsBytes(text).length;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("A conflict path is not serializable", error);
         }
     }
@@ -850,8 +870,8 @@ public class ChildResultRelay {
         }
     }
 
-    private static final java.util.Set<String> SETTLED_FINISH_REFUSALS =
-            java.util.Set.of("child_workspace_conflict",
+    private static final Set<String> SETTLED_FINISH_REFUSALS =
+            Set.of("child_workspace_conflict",
                     "child_workspace_finishing", "child_workspace_not_found");
 
     private void bind(RelayRow row, long now) {
@@ -867,6 +887,29 @@ public class ChildResultRelay {
                 : broker.findLatestBindingByHarnessSession(row.tenantId(),
                         row.childSessionId());
         if (binding == null) {
+            // A binding that never appears is not always a wait: the child's
+            // Session load can fail before it acquires a Runtime at all (a
+            // refused profile, an unreadable inherited configuration), and
+            // the coordinator then settles that Turn FAILED with no dispatch
+            // ever sent. Such a child will never bind, and `watching` -- the
+            // only arm that reads the child's Turn -- is unreachable from
+            // here, so retrying the binding alone would hide a decided
+            // failure until the parent's Turn hits its deadline with no
+            // output at all (#17261). Read the Turn the same way `watch`
+            // does and let the proven pre-admission terminal shape settle
+            // through the ordinary give-up chain, which already pairs
+            // `creation_failed` with the child's own committed evidence.
+            // A live Turn (enqueued, or dispatched) is still a genuine wait:
+            // only preAdmissionTerminal() may decide anything here.
+            ChildResultRelayStore.TurnLine childTurn = relayStore.latestTurn(
+                    row.tenantId(), row.childSessionId());
+            if (childTurn != null && childTurn.preAdmissionTerminal()) {
+                settleThenClassifyGaveUp(row, new RelayRetry(
+                        "child Turn " + childTurn.status()
+                                + " before admission without a Runtime"
+                                + " binding: " + childTurn.errorCode()), now);
+                return;
+            }
             throw new RelayRetry("child runtime binding is not visible yet");
         }
         String generation = Long.toString(binding.getGeneration());
@@ -1301,7 +1344,7 @@ public class ChildResultRelay {
             }
         }
         if (!"merged".equals(outcome) && workspace.resultCommit() != null) {
-            receipt.put("resultRef", ChildWorktreeGit.PIN_PREFIX
+            receipt.put("resultRef", ChildWorktreeOperations.PIN_PREFIX
                     + workspace.childWorkspaceId() + "/result");
         }
         return receipt;

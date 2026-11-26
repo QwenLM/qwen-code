@@ -32,7 +32,7 @@ class ManagedAgentTurnDeferralTest {
         JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
         ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), events -> {},
-                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class),
+                org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         String tenant = "tenant-defer";

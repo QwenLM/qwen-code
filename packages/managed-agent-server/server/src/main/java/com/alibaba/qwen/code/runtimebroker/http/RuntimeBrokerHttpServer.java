@@ -1,10 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker.http;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
@@ -12,9 +11,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileFinalizeProtocol;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -27,7 +23,6 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -106,97 +101,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 new ThreadPoolExecutor.AbortPolicy());
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
-        if (nativeReadback != null) {
-            server.createContext(CsiNativeReadbackProtocol.PATH, exchange -> handleNative(exchange, nativeReadback));
-        }
     }
 
     public void start() {
         server.start();
-    }
-
-    public void registerCsiApplicationAuthority(String tenantId, String sessionId,
-            BiFunction<String, byte[], Map<String, Object>> readback) {
-        String tenant = BrokerValues.requireId(tenantId, "tenantId");
-        if (!java.util.UUID.fromString(sessionId).toString().equals(sessionId) || readback == null) {
-            throw new IllegalArgumentException("One original CSI Session authority is required");
-        }
-        String path = "/internal/managed-session-store/v1/sessions/" + sessionId + "/csi-retirement:worker-authority";
-        server.createContext(path, exchange -> {
-            exchange.getResponseHeaders().set("Cache-Control", "no-store");
-            try {
-                if (!"POST".equals(exchange.getRequestMethod()) || exchange.getRequestURI().getRawQuery() != null
-                        || !path.equals(exchange.getRequestURI().getRawPath())) {
-                    throw notFound();
-                }
-                var headers = exchange.getRequestHeaders();
-                List<String> authorization = headers.get("Authorization");
-                List<String> tenants = headers.get("X-Qwen-Tenant-Id");
-                if (authorization == null || authorization.size() != 1 || authorization.getFirst().length() > 519
-                        || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
-                    throw new RuntimeBrokerException(401, "csi_application_authority_unauthorized", "Original Runtime authentication failed.", false);
-                }
-                String contentType = headers.getFirst("Content-Type");
-                if (tenants == null || tenants.size() != 1 || !tenant.equals(tenants.getFirst())
-                        || contentType == null || !"application/json".equals(contentType.split(";", 2)[0].trim())
-                        || !"no-store".equals(headers.getFirst("Cache-Control"))) {
-                    throw new IllegalArgumentException("Invalid original CSI authority headers");
-                }
-                String length = headers.getFirst("Content-Length");
-                if (length != null && (!length.matches("0|[1-9][0-9]{0,9}") || Long.parseLong(length) > CsiFileFinalizeProtocol.REQUEST_LIMIT)) {
-                    throw tooLarge();
-                }
-                byte[] body;
-                try (var input = exchange.getRequestBody()) {
-                    body = input.readNBytes(CsiFileFinalizeProtocol.REQUEST_LIMIT + 1);
-                }
-                if (body.length > CsiFileFinalizeProtocol.REQUEST_LIMIT) {
-                    throw tooLarge();
-                }
-                sendJson(exchange, 200, readback.apply(authorization.getFirst().substring(7), body));
-            } catch (Throwable error) {
-                sendError(exchange, error);
-            }
-        });
-    }
-
-    private static void handleNative(HttpExchange exchange,
-            BiFunction<String, Map<String, Object>, Map<String, Object>> readback) {
-        exchange.getResponseHeaders().set("Cache-Control", "no-store");
-        try {
-            if (!"POST".equals(exchange.getRequestMethod()) || exchange.getRequestURI().getRawQuery() != null
-                    || !CsiNativeReadbackProtocol.PATH.equals(exchange.getRequestURI().getRawPath())) {
-                throw notFound();
-            }
-            List<String> authorization = exchange.getRequestHeaders().get("Authorization");
-            if (authorization == null || authorization.size() != 1
-                    || authorization.getFirst().length() > 519
-                    || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
-                throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original Runtime authentication failed.", false);
-            }
-            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
-            if (contentType == null || !"application/json".equals(contentType.split(";", 2)[0].trim())
-                    || !"no-store".equals(exchange.getRequestHeaders().getFirst("Cache-Control"))) {
-                throw new IllegalArgumentException("Invalid native readback headers");
-            }
-            String length = exchange.getRequestHeaders().getFirst("Content-Length");
-            if (length != null && (!length.matches("0|[1-9][0-9]{0,9}")
-                    || Long.parseLong(length) > CsiNativeReadbackProtocol.REQUEST_LIMIT)) {
-                throw tooLarge();
-            }
-            byte[] bytes;
-            try (var input = exchange.getRequestBody()) {
-                bytes = input.readNBytes(CsiNativeReadbackProtocol.REQUEST_LIMIT + 1);
-            }
-            if (bytes.length > CsiNativeReadbackProtocol.REQUEST_LIMIT) {
-                throw tooLarge();
-            }
-            var request = CsiNativeReadbackProtocol.request(bytes);
-            var response = readback.apply(authorization.getFirst().substring(7), request);
-            sendJson(exchange, 200, CsiNativeReadbackProtocol.response(response, request));
-        } catch (Throwable error) {
-            sendError(exchange, error);
-        }
     }
 
     public URI getBaseUri() {
@@ -247,6 +155,76 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/staged-deliveries/list")) {
+                String harnessSessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/staged-deliveries/list".length()));
+                Map<String, Object> body = requestBody(exchange, "staged deliveries list request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "staged deliveries list request");
+                String bodySessionId = JsonCodec.requiredString(
+                        body, "harnessSessionId", "staged deliveries list request");
+                if (!harnessSessionId.equals(bodySessionId)
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId",
+                                "writerId", "writerGeneration").containsAll(body.keySet())) {
+                    throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                            "staged deliveries list request is invalid", false);
+                }
+                String writerId = JsonCodec.requiredString(body, "writerId", "staged deliveries list request");
+                Object rawGeneration = body.get("writerGeneration");
+                if (!(rawGeneration instanceof Number genNumber) || genNumber.longValue() < 1) {
+                    throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                            "writerGeneration must be a positive integer", false);
+                }
+                complete(exchange, service.listStagedDeliveries(
+                        harnessSessionId, writerId, genNumber.longValue()), entries -> {
+                            Map<String, Object> response = new LinkedHashMap<>();
+                            response.put("protocolVersion", 1);
+                            response.put("harnessSessionId", harnessSessionId);
+                            response.put("entries", entries);
+                            return response;
+                        });
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/staged-deliveries/acknowledge")) {
+                String harnessSessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/staged-deliveries/acknowledge".length()));
+                Map<String, Object> body = requestBody(exchange, "staged deliveries acknowledge request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "staged deliveries acknowledge request");
+                String bodySessionId = JsonCodec.requiredString(
+                        body, "harnessSessionId", "staged deliveries acknowledge request");
+                if (!harnessSessionId.equals(bodySessionId)
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "writerId",
+                                "writerGeneration", "executionCallId", "throughSeq").containsAll(body.keySet())) {
+                    throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                            "staged deliveries acknowledge request is invalid", false);
+                }
+                String writerId = JsonCodec.requiredString(
+                        body, "writerId", "staged deliveries acknowledge request");
+                String executionCallId = JsonCodec.requiredString(
+                        body, "executionCallId", "staged deliveries acknowledge request");
+                Object rawGeneration = body.get("writerGeneration");
+                Object rawThrough = body.get("throughSeq");
+                if (!(rawGeneration instanceof Number genNumber) || genNumber.longValue() < 1
+                        || !(rawThrough instanceof Number seqNumber) || seqNumber.longValue() < 0) {
+                    throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                            "writerGeneration and throughSeq must be valid integers", false);
+                }
+                complete(exchange, service.acknowledgeStagedDeliveries(
+                        harnessSessionId, writerId, genNumber.longValue(), executionCallId, seqNumber.longValue()),
+                        ignored -> {
+                            Map<String, Object> response = new LinkedHashMap<>();
+                            response.put("protocolVersion", 1);
+                            response.put("harnessSessionId", harnessSessionId);
+                            response.put("acknowledged", true);
+                            return response;
+                        });
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
                     && relative.endsWith("/mcp-definitions")) {
                 String sessionId = pathId(relative.substring("/harness-sessions/".length(),
                         relative.length() - "/mcp-definitions".length()));
@@ -274,11 +252,18 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId"))) {
                     throw new IllegalArgumentException("Invalid capabilities request");
                 }
-                complete(exchange, service.capabilities(sessionId, lifecycleAuthority(exchange)), scope -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId,
-                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                                "workspaceGeneration", scope.getWorkspaceGeneration(),
-                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                complete(exchange, service.capabilitiesContext(sessionId, lifecycleAuthority(exchange)), value -> {
+                    var scope = value.scope();
+                    Map<String, Object> result = new LinkedHashMap<>(Map.of(
+                            "protocolVersion", 1, "harnessSessionId", sessionId,
+                            "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                    "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                    "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                    if (value.workspaceContext() != null) {
+                        result.put("workspaceContext", Map.of("cwdRelative", value.workspaceContext().cwdRelative(), "contextRevision", value.workspaceContext().contextRevision()));
+                    }
+                    return result;
+                });
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -398,13 +383,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
                     "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
-            if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
-                savedScope.put("canonicalCwd", scope.getCanonicalCwd());
-            }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
                     "generation", Long.toString(record.getRuntimeGeneration()),
                     "provisionerKind", service.runtimeProvisionerKind(record)));
+            if (service.mcpParkable(record)) {
+                response.put("mcpParkable", true);
+            }
             return response;
         });
     }
@@ -420,13 +405,73 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (!runtimeSessionId.equals(JsonCodec.requiredString(body, "runtimeSessionId", "publisher request"))) {
                 throw new RuntimeBrokerException(409, "runtime_session_conflict", "Runtime Session identity differs", false);
             }
+            Long writerGeneration = null;
+            Object rawGeneration = body.get("writerGeneration");
+            if (rawGeneration != null) {
+                if (!(rawGeneration instanceof Number generationNumber)
+                        || generationNumber.longValue() < 1) {
+                    throw new RuntimeBrokerException(400, "managed_runtime_attestation_invalid",
+                            "writerGeneration must be a positive integer", false);
+                }
+                writerGeneration = generationNumber.longValue();
+            }
             complete(exchange, service.installPublisher(harnessSessionId, runtimeSessionId,
-                    requiredObject(body, "publisher", "publisher request")), result -> {
+                    requiredObject(body, "publisher", "publisher request"), writerGeneration), result -> {
                         Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
                                 "installed", result.get("installed"));
                         response.put("bindingGeneration", result.get("bindingGeneration"));
+                        if (result.get("observation") != null) {
+                            response.put("observation", result.get("observation"));
+                        }
+                        if (result.get("observedRuns") != null) {
+                            response.put("observedRuns", result.get("observedRuns"));
+                        }
                         return response;
                     });
+            return;
+        }
+        if ("POST".equals(exchange.getRequestMethod())
+                && suffix.endsWith("/publisher/detach")) {
+            String runtimeSessionId = pathId(suffix.substring(0,
+                    suffix.length() - "/publisher/detach".length()));
+            Map<String, Object> body = requestBody(exchange, "publisher detach request");
+            requireProtocol(body);
+            JsonCodec.requiredString(body, "requestId", "publisher detach request");
+            if (lifecycleAuthority(exchange) != null
+                    || !Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId",
+                            "writerGeneration", "appliedThrough").containsAll(body.keySet())) {
+                throw new RuntimeBrokerException(400, "runtime_request_invalid",
+                        "publisher detach request is invalid", false);
+            }
+            String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "publisher detach request");
+            if (body.containsKey("runtimeSessionId")
+                    && !runtimeSessionId.equals(JsonCodec.requiredString(
+                            body, "runtimeSessionId", "publisher detach request"))) {
+                throw new RuntimeBrokerException(409, "runtime_session_conflict", "Runtime Session identity differs", false);
+            }
+            Long writerGeneration = null;
+            Object rawGeneration = body.get("writerGeneration");
+            if (rawGeneration != null) {
+                if (!(rawGeneration instanceof Number generationNumber)
+                        || generationNumber.longValue() < 1) {
+                    throw new RuntimeBrokerException(400, "managed_runtime_attestation_invalid",
+                            "writerGeneration must be a positive integer", false);
+                }
+                writerGeneration = generationNumber.longValue();
+            }
+            Map<String, Long> appliedThrough = new LinkedHashMap<>();
+            Object rawApplied = body.get("appliedThrough");
+            if (rawApplied instanceof Map<?, ?> appliedMap) {
+                for (Map.Entry<?, ?> item : appliedMap.entrySet()) {
+                    if (item.getKey() instanceof String callId && item.getValue() instanceof Number seq
+                            && seq.longValue() >= 0) {
+                        appliedThrough.put(callId, seq.longValue());
+                    }
+                }
+            }
+            complete(exchange, service.detachPublisher(
+                    harnessSessionId, runtimeSessionId, writerGeneration, appliedThrough),
+                    ignored -> envelope(harnessSessionId, runtimeSessionId, "detached", true));
             return;
         }
         if ("POST".equals(exchange.getRequestMethod())
@@ -441,9 +486,6 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "harnessSessionId", "control request");
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
-            if (CsiFileHistoryProtocol.isOperation(operation)) {
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
-            }
             complete(exchange, service.control(harnessSessionId,
                     runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",
@@ -520,11 +562,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 preparedFields.add("publicationId");
             }
             if (body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64")) {
-                if (body.containsKey("toolProtocol")) {
-                    throw new RuntimeBrokerException(400, "runtime_reference_invalid", "Private CSI allocation is not tool v3", false);
-                }
-                preparedFields.add("inputBytesBase64");
-                preparedFields.add("toolDefinitionBytesBase64");
+                throw new RuntimeBrokerException(400, "runtime_broker_csi_removed",
+                        "Private CSI allocation is no longer supported", false);
             }
             if (!body.keySet().equals(preparedFields)) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
@@ -539,10 +578,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             throw new RuntimeBrokerException(409, "runtime_reference_conflict",
                     "Execution envelope differs from its reference", false);
         }
-        complete(exchange, prepare && body.containsKey("inputBytesBase64")
-                        ? service.prepareCsiExecution(harnessSessionId, runtimeSessionId, idempotencyKey, reference,
-                                inlineBytes(body, "inputBytesBase64"), inlineBytes(body, "toolDefinitionBytesBase64"))
-                        : prepare
+        complete(exchange, prepare
                         ? service.prepareExecution(harnessSessionId, runtimeSessionId, idempotencyKey,
                         reference, "v3".equals(body.get("toolProtocol")) ? digest : null,
                         "v3".equals(body.get("toolProtocol"))
@@ -553,49 +589,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private void readBatch(HttpExchange exchange) throws IOException {
-        Map<String, Object> body = requestBody(exchange, "private batch read", true);
-        var fields = new java.util.HashSet<>(Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "promptId", "batchId"));
-        if (body.containsKey("recoveryOwner")) {
-            fields.add("recoveryOwner");
-            var owner = JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner");
-            if (!owner.keySet().equals(Set.of("writerId", "writerGeneration", "activationId", "activationEpoch"))
-                    || !(owner.get("writerGeneration") instanceof Number generation) || generation.longValue() <= 0
-                    || !(owner.get("activationEpoch") instanceof Number epoch) || epoch.longValue() <= 0
-                    || !generation.toString().matches("[1-9][0-9]{0,15}") || generation.longValue() > 9007199254740991L
-                    || !epoch.toString().matches("[1-9][0-9]{0,15}") || epoch.longValue() > 9007199254740991L) {
-                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private recovery owner fields are invalid", false);
-            }
-            JsonCodec.requiredString(owner, "writerId", "private recovery owner");
-            JsonCodec.requiredString(owner, "activationId", "private recovery owner");
-        }
-        if (!body.keySet().equals(fields)) {
-            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private batch read fields are invalid", false);
-        }
-        requireProtocol(body);
-        JsonCodec.requiredString(body, "requestId", "private batch read");
-        complete(exchange, service.readCsiBatch(JsonCodec.requiredString(body, "harnessSessionId", "private batch read"),
-                JsonCodec.requiredString(body, "runtimeSessionId", "private batch read"),
-                JsonCodec.requiredString(body, "promptId", "private batch read"),
-                JsonCodec.requiredString(body, "batchId", "private batch read"), body.containsKey("recoveryOwner")
-                        ? JsonCodec.parseObject(JsonCodec.encode(body.get("recoveryOwner")), "private recovery owner") : null), Function.identity());
-    }
-
-    private static byte[] inlineBytes(Map<String, Object> body, String field) {
-        if (!(body.get(field) instanceof String encoded)) {
-            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private CSI inline bytes are invalid", false);
-        }
-        try {
-            if (encoded.length() > 87384) {
-                throw tooLarge();
-            }
-            byte[] bytes = Base64.getDecoder().decode(encoded);
-            if (bytes.length == 0 || bytes.length > 64 * 1024 || !Base64.getEncoder().encodeToString(bytes).equals(encoded)) {
-                throw new IllegalArgumentException("Noncanonical inline bytes");
-            }
-            return bytes;
-        } catch (IllegalArgumentException error) {
-            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Private CSI inline bytes are invalid", false);
-        }
+        throw new RuntimeBrokerException(501, "runtime_broker_csi_removed",
+                "CSI batch read is no longer supported", false);
     }
 
     private void execution(HttpExchange exchange, String suffix)
@@ -835,7 +830,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         if (strict && (!"execution request".equals(context)
                 || body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64"))) {
             try {
-                CsiNativeActivationProof.readObject(bytes);
+                ManagedCheckpointHistory.readObject(bytes);
             } catch (RuntimeException invalid) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request", "Execution JSON is invalid", false);
             }

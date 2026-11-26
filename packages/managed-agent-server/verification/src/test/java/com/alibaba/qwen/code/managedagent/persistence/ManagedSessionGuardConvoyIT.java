@@ -21,7 +21,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -64,6 +63,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -175,7 +175,7 @@ class ManagedSessionGuardConvoyIT {
                 + " AND head_kind = 'MANAGED_SESSION'",
                 tenant, "blocked");
         var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String turnSession = transactions.execute(ignored -> agents.insertSessionCommand(tenant,
                 "CREATE_SESSION", "turn-session", "digest-create", "qwen-code", null, null,
                 List.of(), null)).sessionId();
@@ -185,7 +185,7 @@ class ManagedSessionGuardConvoyIT {
             // Hold both tenant-wide guards the way a fat lifecycle transaction
             // would, on a connection the test never commits.
             ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             var templates = ManagedHookRecordContractTest.fixtures().get("templates");
             var data = new CommitResource("hook-data", "hook-data", 1, 2, sha256("{}"), "e30=");
             ObjectNode registration = templates.get("hook_registration").deepCopy();
@@ -381,7 +381,7 @@ class ManagedSessionGuardConvoyIT {
             }
         }
         properties.getRuntimeBroker().setWorkspaceMounts(mounts);
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        var registry = new JdbcManagedWorkspaceRegistry(jdbc);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(),
                 ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var service = new com.alibaba.qwen.code.managedagent.session.ManagedAgentService(store,
@@ -501,6 +501,16 @@ class ManagedSessionGuardConvoyIT {
 
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String objectKey, byte[] bytes) {
                 throw new AssertionError("Inline fixture expected");
             }
@@ -529,7 +539,7 @@ class ManagedSessionGuardConvoyIT {
             assertThat(completesWhileHeld(() -> journal.store.verifyDispatch(execution, "pub-1",
                     PublicationJournalFixture.PUBLICATION_TOKEN)).path("publicationId").asText())
                     .isEqualTo("pub-1");
-            completesWhileHeld(() -> data.finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
+            completesWhileHeld(() -> verified(data).finish(key, "pub-1", PublicationJournalFixture.PUBLICATION_TOKEN,
                     "finish", envelope.toString().getBytes(StandardCharsets.UTF_8)));
         } finally {
             manager.rollback(hold);
@@ -593,7 +603,7 @@ class ManagedSessionGuardConvoyIT {
         try (var pool = Executors.newSingleThreadExecutor()) {
             var hold = manager.getTransaction(new DefaultTransactionDefinition());
             try {
-                WorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
                 ToolPublicationRetentionStore.lockTenant(jdbc, TENANT);
                 var published = pool.submit(() -> transactions.execute(status ->
                         store.publishToolResult(TENANT, "inline", TOKEN, inlineToolResult())))
@@ -608,7 +618,7 @@ class ManagedSessionGuardConvoyIT {
     @Test
     void toolResultPublishesToAnotherSessionWhileNewResourceIsProbed() throws Exception {
         var pausing = new PauseAfterDataSource(source, "SELECT " + ManagedSchemaProjection.RESOURCE.columns()
-                + " FROM ma_resource WHERE resource_key = ?");
+                + " FROM ma_resource WHERE tenant_id = ?");
         var jdbc = new ManagedSchemaJdbcTemplate(pausing);
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(pausing));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
@@ -674,17 +684,18 @@ class ManagedSessionGuardConvoyIT {
     void expiredReservationFenceHasABoundedNamedWait() throws Exception {
         var journal = PublicationJournalFixture.create(source);
         var jdbc = journal.jdbc;
-        String scope = ToolPublicationRetentionStore.hash("expired-session");
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
-                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+        String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "expired-session");
+        String digest = ToolPublicationRetentionStore.hash("expired-session");
+        jdbc.update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes)"
-                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'expired-session', 'expired', ?, 'expired', '{}', ?, ?,"
-                + " 'OPEN', 0, 1, 1, 1)", scope, ToolPublicationRetentionStore.hash("tenant-1"), scope, scope, scope);
+                + " VALUES (?, 'tenant-1', 'workspace-1', 'expired-session', 'expired', 'expired', 'expired', '{}', ?, ?,"
+                + " 'OPEN', 0, 1, 1, 1)", scope, digest, digest);
         var transactions = new TransactionTemplate(journal.manager);
         var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
         try {
             ToolPublicationRetentionStore.lockTenant(jdbc, "tenant-1");
-            jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_key = ? FOR UPDATE", scope);
+            jdbc.queryForList("SELECT publication_id FROM ma_output_capture WHERE scope_ref = ? FOR UPDATE", scope);
             assertFastGuardFailure(() -> transactions.execute(ignored -> {
                 jdbc.execute("SET SESSION innodb_lock_wait_timeout = 20");
                 return journal.reserve();
@@ -693,7 +704,7 @@ class ManagedSessionGuardConvoyIT {
             journal.manager.rollback(hold);
         }
         journal.reserve();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE scope_key = ?", String.class, scope))
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_output_capture WHERE scope_ref = ?", String.class, scope))
                 .isEqualTo("FENCED");
     }
 
@@ -703,16 +714,14 @@ class ManagedSessionGuardConvoyIT {
         journal.reserve();
         var jdbc = journal.jdbc;
         String scope = ToolPublicationDataStore.scope("tenant-1", "workspace-1", "session-1");
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
-                .sessionScopeKey("tenant-1", "session-1");
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_ref,"
                 + " publication_id, slot_key, capture_state, capture_object_key, object_key, operation_id, gmt_create)"
-                + " VALUES (?, ?, 'tenant-1', 'workspace-1', 'session-1', 'corrupt-resource',"
+                + " VALUES ('tenant-1', 'workspace-1', 'session-1', 'corrupt-resource',"
                 + " 'managed-tool-result-content', 1, 1, ?, 'TOOL_PUBLICATION', 'PUBLISHED', ?, 'pub-1',"
                 + " 'segment:stdout:0', 'VERIFIED', 'corrupt-object', 'corrupt-object', 'op', "
-                + ManagedSchemaTime.SQL_NOW + ")", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                        .key(resourceScope, "corrupt-resource"), resourceScope, scope, scope);
+                + ManagedSchemaTime.SQL_NOW + ")",
+                ToolPublicationRetentionStore.hash("corrupt-resource"), scope);
         var retention = new ToolPublicationRetentionStore(jdbc, journal.manager);
         var transactions = new TransactionTemplate(journal.manager);
         var hold = journal.manager.getTransaction(new DefaultTransactionDefinition());
@@ -788,7 +797,7 @@ class ManagedSessionGuardConvoyIT {
         // before inserting a drain row.
         var lifecycle = manager.getTransaction(new DefaultTransactionDefinition());
         try {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
             long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(jdbc);
             try (var pool = Executors.newSingleThreadExecutor()) {
                 var writer = pool.submit(() -> transactions.executeWithoutResult(ignored ->
@@ -798,13 +807,11 @@ class ManagedSessionGuardConvoyIT {
                 // The begin path's drain insert must complete inside the same
                 // transaction window: a drain-first writer order would have the
                 // writer holding this gap and deadlock the pair.
-                jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                                 + " harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified)"
-                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
+                                + " VALUES (?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
                                 + ManagedSchemaTime.SQL_NOW + ")"
-                                + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                        JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim");
+                                + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL", tenant, "victim", "victim");
                 manager.rollback(lifecycle);
                 // Collected only after the rollback: until then the writer is
                 // parked on the placement row the hold owns. A deadlock victim
@@ -822,13 +829,11 @@ class ManagedSessionGuardConvoyIT {
         // A real lifecycle would commit the drain instead of rolling it
         // back; replay that final state explicitly.
         transactions.executeWithoutResult(ignored ->
-                jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id,"
+                jdbc.update("INSERT INTO ma_session_head (tenant_id,"
                                 + " harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified)"
-                                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
+                                + " VALUES (?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", "
                                 + ManagedSchemaTime.SQL_NOW + ")"
-                                + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL",
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                        JdbcRuntimeBindingRepository.harnessDrainKey("victim"), tenant, "victim", "victim"));
+                                + " ON DUPLICATE KEY UPDATE phase = 'DRAINING', claim_lease_until = NULL", tenant, "victim", "victim"));
         assertThatThrownBy(() -> transactions.executeWithoutResult(ignored ->
                 store.acquireWriter(tenant, "victim", token,
                         new AcquireWriterRequest(workspace, "writer-victim", 60_000L))))
@@ -877,7 +882,7 @@ class ManagedSessionGuardConvoyIT {
         var fixture = new WorkspaceLifecycleStoreTest.Fixture(source);
         String operationId = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
                 "tenant", fixture.session, StoreModels.OperationKind.CLOSE, "owner", "a".repeat(64),
-                "close", "digest", true, 1).operation().operationId());
+                "close", "digest", true, 2).operation().operationId());
         var operation = fixture.transactions.execute(ignored -> fixture.store.claimOperation(
                 "tenant", fixture.session, operationId, "worker", Duration.ofMinutes(5)).orElseThrow());
         var effects = fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
@@ -912,7 +917,7 @@ class ManagedSessionGuardConvoyIT {
     private static final String TOKEN = "w".repeat(32);
 
     private interface PausedCall {
-        Object run(ManagedSessionStore store, ManagedSessionStoreModels.WriterGrant grant);
+        Object run(JdbcManagedSessionStore store, ManagedSessionStoreModels.WriterGrant grant);
     }
 
     private void assertNoDeadlockAgainstOrdinaryWriter(String trigger, PausedCall paused) throws Exception {
@@ -1019,7 +1024,7 @@ class ManagedSessionGuardConvoyIT {
     private static org.springframework.transaction.TransactionStatus holdBothTenantGuards(JdbcTemplate jdbc,
             DataSourceTransactionManager manager, String tenant) {
         var hold = manager.getTransaction(new DefaultTransactionDefinition());
-        WorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
+        JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenant);
         ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         return hold;
     }

@@ -15,15 +15,21 @@ export const BUNDLED_APP_URI = 'ui://qwen-code-generated-ui/view-v1.html';
 export const META_KEY = 'qwen/generated-ui';
 export const MAX_RESULT_CHARS = 24_000;
 export const MAX_RESULT_BYTES = 24_000;
+/** Names one card for its saved view state; not part of the document hash. */
+export const CARD_ID = /^gc_[A-Za-z0-9_-]{16,64}$/;
 const NON_BLANK_TEXT = /[^\s\u200c\u200d]/u;
+const textSchema = z.string({
+  error: (issue) =>
+    issue.code === 'invalid_type' ? 'Expected text.' : undefined,
+});
 
 export const showInputSchema = z
   .object({
-    title: z.string().min(1).max(120),
-    summary: z.string().min(1).max(2000),
-    html: z.string().min(1).max(12_000),
-    css: z.string().max(6000),
-    javascript: z.string().max(12_000),
+    title: textSchema.min(1).max(120),
+    summary: textSchema.min(1).max(2000),
+    html: textSchema.min(1).max(12_000),
+    css: textSchema.max(6000),
+    javascript: textSchema.max(12_000),
   })
   .strict();
 
@@ -32,6 +38,8 @@ export type ShowInput = z.infer<typeof showInputSchema>;
 export const documentSchema = showInputSchema.extend({
   schemaVersion: z.literal(1),
   documentId: z.string().regex(/^g1_[0-9a-f]{64}$/),
+  // Results recorded before card ids existed have none and do not persist.
+  cardId: z.string().regex(CARD_ID).optional(),
 });
 
 export type GeneratedDocument = z.infer<typeof documentSchema>;
@@ -67,6 +75,12 @@ export function serializeDocument(input: ShowInput): string {
 
 export function hashDocument(input: ShowInput): string {
   return `g1_${bytesToHex(sha256(utf8ToBytes(serializeDocument(input))))}`;
+}
+
+function mintCardId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const base64 = btoa(String.fromCharCode(...bytes));
+  return `gc_${base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
 }
 
 function checkResultBudget(value: unknown): void {
@@ -113,6 +127,7 @@ export function createShowResult(input: unknown): CallToolResult {
   const document: GeneratedDocument = {
     schemaVersion: 1,
     documentId: hashDocument(data),
+    cardId: mintCardId(),
     ...data,
   };
   const result: CallToolResult = {

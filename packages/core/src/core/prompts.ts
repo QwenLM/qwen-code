@@ -517,6 +517,7 @@ function buildDefaultBasePrompt(
   todoWriteEnabled = false,
   codeModeOnly = false,
   surface?: PromptToolSurface,
+  identityOverride: string | null = null,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -542,7 +543,7 @@ When you create a todo list:
   // variant applies only to the default identity sentence — the override is
   // distributor-owned wording we must not rewrite.
   const coreIdentity =
-    resolveCoreIdentityOverride() ??
+    identityOverride ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
 
   const toolGuidance = getToolGuidanceSection(
@@ -718,6 +719,31 @@ export function resolveMainSessionOutputStyle(config: {
   return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
+export interface CoreSystemPromptSource {
+  systemMdPath: string;
+  systemPrompt?: string;
+  identity: string | null;
+}
+
+export function loadCoreSystemPromptSource(): CoreSystemPromptSource {
+  const systemMdEnabled = isSystemMdActive();
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  const systemMdPath =
+    systemMdEnabled && !resolution.isSwitch && resolution.value
+      ? resolution.value
+      : path.resolve(path.join(QWEN_DIR, 'system.md'));
+  if (systemMdEnabled && !fs.existsSync(systemMdPath)) {
+    throw new Error(`missing system prompt file '${systemMdPath}'`);
+  }
+  return {
+    systemMdPath,
+    ...(systemMdEnabled
+      ? { systemPrompt: fs.readFileSync(systemMdPath, 'utf8') }
+      : {}),
+    identity: systemMdEnabled ? null : resolveCoreIdentityOverride(),
+  };
+}
+
 /**
  * Builds the stable base system prompt (identity, mandates, tool guidance).
  *
@@ -747,33 +773,18 @@ export function getCoreSystemPrompt(
   // Trailing options object rather than an eighth positional parameter: this
   // function is re-exported from the package root and its arity is asserted by
   // callers' tests (#12032).
-  options?: PromptToolSurface,
+  options?: PromptToolSurface & { source?: CoreSystemPromptSource },
 ): string {
+  const source = options?.source;
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
     interactionMode,
   );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  const systemMdEnabled = isSystemMdActive();
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-
-  if (systemMdEnabled) {
-    // Resolve the environment variable to get either a path or a switch value.
-    const systemMdResolution = resolvePathFromEnv(
-      process.env['QWEN_SYSTEM_MD'],
-    );
-
-    // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
-      systemMdPath = systemMdResolution.value;
-    }
-
-    // require file to exist when override is enabled
-    if (!fs.existsSync(systemMdPath)) {
-      throw new Error(`missing system prompt file '${systemMdPath}'`);
-    }
-  }
+  const promptSource = source ?? loadCoreSystemPromptSource();
+  const systemMdEnabled = promptSource.systemPrompt !== undefined;
+  const systemMdPath = promptSource.systemMdPath;
 
   const interaction = getInteractionModePrompt(interactionMode);
   // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
@@ -787,7 +798,7 @@ export function getCoreSystemPrompt(
   // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
+    ? promptSource.systemPrompt!
     : buildDefaultBasePrompt(
         interaction,
         model,
@@ -795,6 +806,7 @@ export function getCoreSystemPrompt(
         todoWriteEnabled,
         codeModeOnly,
         options,
+        promptSource.identity,
       );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -804,7 +816,11 @@ export function getCoreSystemPrompt(
 
   // Check if the feature is enabled. This proceeds only if the environment
   // variable is set and is not explicitly '0' or 'false'.
-  if (writeSystemMdResolution.value && !writeSystemMdResolution.isDisabled) {
+  if (
+    !source &&
+    writeSystemMdResolution.value &&
+    !writeSystemMdResolution.isDisabled
+  ) {
     const writePath = writeSystemMdResolution.isSwitch
       ? systemMdPath
       : writeSystemMdResolution.value;
@@ -824,6 +840,7 @@ export function getCoreSystemPrompt(
             todoWriteEnabled,
             codeModeOnly,
             options,
+            promptSource.identity,
           ),
     );
   }
@@ -885,25 +902,16 @@ export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   );
 }
 
-/**
- * Returns the "Executing actions with care" system prompt section.
- * Provides layered guidance for risky operations: general principle,
- * 4 categories of dangerous operations, behavioral rules, and approval scoping.
- * Placed between Sandbox and Git Repository sections in the prompt.
- */
+/** Guidance for scope, authorization, and protecting existing user work. */
 function getActionsSection(): string {
   return `
 # Executing actions with care
 
-Carefully consider the reversibility and blast radius of actions. Generally you can freely take local, reversible actions like editing files or running tests. But for actions that are hard to reverse, affect shared systems beyond your local environment, or could otherwise be risky or destructive, obtain confirmation when the current interaction mode can receive it; otherwise stop and report the blocker. The cost of pausing to confirm is low, while the cost of an unwanted action (lost work, unintended messages sent, deleted branches) can be very high. For actions like these, consider the context, the action, and user instructions, and by default transparently communicate the action and follow the active interaction mode's question guidance before proceeding. This default can be changed by user instructions - if explicitly asked to operate more autonomously, then you may proceed without confirmation, but still attend to the risks and consequences when taking actions. A user approving an action (like a git push) once does NOT mean that they approve it in all contexts, so unless actions are authorized in advance in durable instructions like QWEN.md files, obtain confirmation only when the current interaction mode can receive it; otherwise report the blocker. Authorization stands for the scope specified, not beyond. Match the scope of your actions to what was actually requested.
+Take local reversible actions within the requested scope. Before risky, destructive, hard-to-reverse, or externally visible actions, explain the impact and confirm unless the user has authorized the specific action, including through durable workspace instructions. If confirmation is needed and the current interaction mode cannot receive it, stop and report the blocker. Prior approval applies only within its original scope.
 
-Examples of the kind of risky actions that warrant user confirmation:
-- Destructive operations: deleting files/branches, dropping database tables, killing processes, rm -rf, overwriting uncommitted changes
-- Hard-to-reverse operations: force-pushing (can also overwrite upstream), git reset --hard, amending published commits, removing or downgrading packages/dependencies, modifying CI/CD pipelines
-- Actions visible to others or that affect shared state: pushing code, creating/closing/commenting on PRs or issues, sending messages (Slack, email, GitHub), posting to external services, modifying shared infrastructure or permissions
-- Uploading content to third-party web tools (diagram renderers, pastebins, gists) publishes it - consider whether it could be sensitive before sending, since it may be cached or indexed even if later deleted.
+Examples include deleting or overwriting work, rewriting published history, changing shared systems or permissions, sending messages, and uploading data. Treat third-party uploads as publication because services may retain or index the data.
 
-When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In short: only take risky actions carefully, and when in doubt, follow the active interaction mode's question guidance before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.`;
+Inspect unexpected files, branches, or configuration before modifying them. Protect existing user work and investigate failures without bypassing safeguards or taking destructive shortcuts.`;
 }
 
 /**
@@ -1399,7 +1407,7 @@ function getToolCallExamples(model?: string): string {
     }
   }
 
-  return generalToolCallExamples;
+  return '';
 }
 
 /**

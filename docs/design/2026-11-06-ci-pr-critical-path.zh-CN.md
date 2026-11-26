@@ -38,9 +38,9 @@
 flowchart LR
     C[Classify PR] --> B[test_build<br/>恢复 base 构建，只构建一次<br/>+ bundle closure / core subpath 检查]
     C --> L[Lint & Static]
-    B --> U[单测分片 1..8]
-    B --> I[no-AK 集成分片 1..3]
-    B --> W[web-shell smoke 分片 1..4]
+    B --> U[单测分片 1..2]
+    B --> I[no-AK 集成分片 1..2]
+    B --> W[web-shell smoke 分片 1..2]
     U --> T{{Test ubuntu}}
     I --> R{{Integration Tests no-AK, No Sandbox}}
     W --> WR{{web-shell E2E Smoke}}
@@ -62,7 +62,7 @@ flowchart LR
 
 ### 所有 lane 共用一棵树
 
-- **集成测试**：`integration_no_ak` 依赖 `test_build`，用 `QWEN_SKIP_PREPARE=1` 安装依赖，然后像单测分片一样下载并解包 `unit-test-tree`。测试分 3 片跑（`--shard=N/3`），`typecheck:integration` 只在 shard 1 执行。新增的 `integration_no_ak_result` job 沿用 required 名称 `Integration Tests (no-AK, No Sandbox)`，只有构建和每个分片都通过时才通过。
+- **集成测试**：`integration_no_ak` 依赖 `test_build`，用 `QWEN_SKIP_PREPARE=1` 安装依赖，然后像单测分片一样下载并解包 `unit-test-tree`。测试分 2 片跑（`--shard=N/2`），`typecheck:integration` 只在 shard 1 执行。新增的 `integration_no_ak_result` job 沿用 required 名称 `Integration Tests (no-AK, No Sandbox)`，只有构建和每个分片都通过时才通过。
 - **web-shell**：`web_shell_e2e_smoke` 去掉了 hash / restore / build / pack / save 这几步，改为依赖 `test_build` 并解包同一棵树。
 - **test_build**：构建时设 `DEV=true`，它唯一的作用是写出 `dist/esbuild.json`。构建后直接在产物上运行 `Check serve fast-path bundle closure` 和 `Check core subpath exports resolve`，两项加起来不到 2 秒；settings schema 是否最新的检查也一起移过来，因为它的生成脚本要 import core 的 `dist`。这三项都从 `Lint & Static` 移出（`Lint & Static` 之所以有 `dist`，只是因为 bundle 检查顺带构建了一次），通过 `Test (ubuntu-latest, Node 22.x)` 保持 required。
 
@@ -83,7 +83,7 @@ flowchart LR
 | bundle 检查放进 `test_build`，不新开 job  | 新 job 要复制约 150 行 checkout 前的 prelude；这段在 checkout 之前执行，没法写成本地 composite action                              |
 | 缓存 key 去掉架构，而不是给主机重新打标签 | 混合 pool 是有意的；唯一的 native 产物重新拷一次成本很低                                                                           |
 | 按 base 提交恢复，而不是 merge-base       | `pull_request.base.sha` 就在事件 payload 里，而且 `main` push 正是用这个 key 保存的；merge-base 要么需要拉历史，要么需要额外调 API |
-| 集成测试分 3 片                           | 约 17 分钟的串行执行变成每片约 6 分钟，和单测 lane 持平                                                                            |
+| 集成测试分 2 片                           | 约 17 分钟的串行执行变成每片约 8–9 分钟；单测 lane 后来已 8→2 重新分片，不再与之持平                                               |
 
 ## 风险
 
@@ -104,4 +104,4 @@ flowchart LR
 - 每个非草稿 pull request 上，4 个 required check 名称都会上报结果。
 - no-AK 集成测试和 web-shell smoke 不再执行构建。
 - `Lint & Static` 不再构建或打包。
-- `main` 保存了 `v2` 缓存条目之后，取 20 次 run，required 路径中位数低于 15 分钟。
+- `main` 保存了 `v2` 缓存条目之后，取 20 次 run，required 路径中位数低于 15 分钟。此目标已被后续出于车道可靠性的分片缩减（单测 8→2、smoke 4→2、集成 3→2）取代：两分片的 smoke lane 是最长杆，实测约 26 分钟，关键路径目标让位于可靠性。

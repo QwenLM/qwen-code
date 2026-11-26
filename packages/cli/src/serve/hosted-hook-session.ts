@@ -29,6 +29,7 @@ import type {
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type {
   ManagedSessionDurableRef,
+  ManagedSessionKey,
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -96,6 +97,93 @@ interface HookPlan {
   readonly messagesRef?: ManagedSessionDurableRef;
   readonly refusedInputDigest?: string;
   readonly toolInputOrder?: HostedToolInputOrder;
+}
+
+function isSynchronousCommand(hook: ManagedHookDescriptor): boolean {
+  return !hook.async && hook.config.type === HookType.Command;
+}
+
+function synchronousCommandOrdinals(plan: HookPlan): number[] {
+  return plan.hooks.flatMap((hook, index) =>
+    isSynchronousCommand(hook) ? [index + 1] : [],
+  );
+}
+
+function isLegacyCommandStopBlock(receipt: ManagedHookResult): boolean {
+  // Older Stop consumers used the continue flag to recognize this block.
+  return (
+    !receipt.success &&
+    receipt.outcome === 'blocking' &&
+    receipt.output?.continue === false
+  );
+}
+
+function asyncAdmission(): ManagedHookResult {
+  return { success: true, outcome: 'success', duration: 0 };
+}
+
+function isCommandCompletion(result: ManagedHookResult): boolean {
+  // The runner also synthesizes a deny decision for a silent exit 2.
+  return (
+    !result.notStarted &&
+    (result.success ||
+      result.stdout !== undefined ||
+      result.stderr !== undefined ||
+      (result.outcome === 'blocking' && result.output?.decision === 'deny'))
+  );
+}
+
+function hookExecutionResult(
+  result: ManagedHookResult,
+  hook: ManagedHookDescriptor,
+  event: HookEventName,
+): HookExecutionResult {
+  // A saved async receipt may settle after the occurrence was admitted.
+  const { error, ...receipt } =
+    event === HookEventName.Stop && hook.async && isCommandCompletion(result)
+      ? asyncAdmission()
+      : result;
+  const output = receipt.output;
+  if (
+    event === HookEventName.Stop &&
+    isSynchronousCommand(hook) &&
+    isLegacyCommandStopBlock(result) &&
+    output?.decision !== 'block' &&
+    output?.decision !== 'deny'
+  ) {
+    receipt.output = { ...output, decision: 'deny' };
+  }
+  return {
+    ...receipt,
+    hookConfig: hook.config as HookConfig,
+    eventName: event,
+    ...(error ? { error: new Error(error) } : {}),
+  };
+}
+
+const CONFIG_SCOPED_OWNER_PREFIX = 'extensions-components-';
+
+/**
+ * The config-scoped owner an active extension bundle names. The same id is
+ * recomputed on every load of that configRevision, so a terminal release
+ * tombstones the id a later load must re-acquire (R13-1). One builder for every
+ * producer, so the predicate below cannot silently stop recognising an owner
+ * the Harness still constructs.
+ */
+export function hostedConfigScopedOwnerId(
+  sessionKey: ManagedSessionKey,
+  configRevision: number,
+): string {
+  return `${CONFIG_SCOPED_OWNER_PREFIX}${digest([sessionKey, configRevision])}`;
+}
+
+/**
+ * Recognises an id built by `hostedConfigScopedOwnerId`. Only trustworthy
+ * for ids the Harness constructed: a channel `inputId` is client-chosen and
+ * carries no prefix rule, so shape alone never proves ownership.
+ */
+export function isHostedConfigScopedOwner(runtimeSessionId: string): boolean {
+  return runtimeSessionId.startsWith(CONFIG_SCOPED_OWNER_PREFIX);
 }
 
 function exceedsHookResourceLimit(value: unknown): boolean {
@@ -378,7 +466,10 @@ export class HostedHookSession {
   >();
   private writes: Promise<void> = Promise.resolve();
   private occurrenceQueue: Promise<void> = Promise.resolve();
-  private readonly stopPlanPrompts = new Map<string, unknown>();
+  private readonly stopPlans = new Map<
+    string,
+    { promptId: unknown; commandOrdinals: number[] }
+  >();
   private children?: {
     readonly sequence: number;
     readonly byOccurrence: Map<string, HookExecution[]>;
@@ -648,7 +739,7 @@ export class HostedHookSession {
    * the id a later load must re-acquire (R13-1).
    */
   private get deterministicOwner(): boolean {
-    return this.broker.runtimeSessionId.startsWith('extensions-components-');
+    return isHostedConfigScopedOwner(this.broker.runtimeSessionId);
   }
 
   delegateBrokerToMcp(): void {
@@ -821,16 +912,22 @@ export class HostedHookSession {
       // A plan never changes, so each one is read once rather than on
       // every turn of a long Session.
       const planId = record.planRef.resourceId;
-      if (!this.stopPlanPrompts.has(planId))
-        this.stopPlanPrompts.set(
-          planId,
-          (await this.read<HookPlan>(record.planRef)).input.prompt_id,
-        );
-      if (this.stopPlanPrompts.get(planId) !== promptId) continue;
-      const result = await this.read<{ output?: HookOutput }>(record.resultRef);
-      const output =
-        result.output && createHookOutput(HookEventName.Stop, result.output);
-      if (output?.isBlockingDecision() || output?.shouldStopExecution())
+      let cached = this.stopPlans.get(planId);
+      if (!cached) {
+        const plan = await this.read<HookPlan>(record.planRef);
+        cached = {
+          promptId: plan.input.prompt_id,
+          commandOrdinals: synchronousCommandOrdinals(plan),
+        };
+        this.stopPlans.set(planId, cached);
+      }
+      if (cached.promptId !== promptId) continue;
+      const output = await this.readOccurrenceOutput(
+        record.occurrenceId,
+        record.resultRef,
+        cached.commandOrdinals,
+      );
+      if (output?.decision === 'block' || output?.decision === 'deny')
         return true;
     }
     return false;
@@ -1045,8 +1142,11 @@ export class HostedHookSession {
       if (marker.run.execution === 'not_started_proven')
         return cancelledResult().output;
       if (marker.resultRef)
-        return (await this.read<{ output?: HookOutput }>(marker.resultRef))
-          .output;
+        return this.readOccurrenceOutput(
+          occurrenceId,
+          marker.resultRef,
+          event === HookEventName.Stop ? synchronousCommandOrdinals(plan) : [],
+        );
     } else {
       if (this.hasPendingOperations) {
         // A recovery fence is not terminal: once an abandoned module
@@ -1221,12 +1321,7 @@ export class HostedHookSession {
         signal,
         prompt,
       );
-      return {
-        ...result,
-        hookConfig: hook.config as HookConfig,
-        eventName: event,
-        ...(result.error ? { error: new Error(result.error) } : {}),
-      } as HookExecutionResult;
+      return hookExecutionResult(result, hook, event);
     };
     if (plan.sequential) {
       for (const [index, hook] of plan.hooks.entries()) {
@@ -1325,7 +1420,7 @@ export class HostedHookSession {
         pending.admitted.then(() => null),
         pending.result,
       ]);
-      return completed ?? this.asyncAdmission();
+      return completed ?? asyncAdmission();
     }
     const abort = new AbortController();
     const executionSignal = hook.async
@@ -1531,7 +1626,7 @@ export class HostedHookSession {
     void result.catch(() => undefined).finally(() => this.pending.delete(id));
     if (!hook.async) return result;
     const completed = await Promise.race([admitted.then(() => null), result]);
-    return completed ?? this.asyncAdmission();
+    return completed ?? asyncAdmission();
   }
 
   private cancelRequested(id: string): boolean {
@@ -1652,10 +1747,6 @@ export class HostedHookSession {
       )!.record,
     );
     return this.read<ManagedHookResult>(committed.resultRef!);
-  }
-
-  private asyncAdmission(): ManagedHookResult {
-    return { success: true, outcome: 'success', duration: 0 };
   }
 
   private async lookup(
@@ -1902,14 +1993,10 @@ export class HostedHookSession {
       const result = child.resultRef
         ? await this.read<ManagedHookResult>(child.resultRef)
         : cancelledResult();
-      results.push({
-        ...result,
-        hookConfig: hook.config as HookConfig,
-        eventName: record.eventName as HookEventName,
-        ...(result.error ? { error: new Error(result.error) } : {}),
-      } as HookExecutionResult);
+      const execution = hookExecutionResult(result, hook, event);
+      results.push(execution);
       if (plan.sequential) {
-        effectiveInput = sequentialInput(effectiveInput, result, event);
+        effectiveInput = sequentialInput(effectiveInput, execution, event);
         if (malformedShellInput(effectiveInput, event)) break;
       }
     }
@@ -1969,6 +2056,32 @@ export class HostedHookSession {
       : output;
   }
 
+  private async readOccurrenceOutput(
+    occurrenceId: string,
+    resultRef: ManagedSessionDurableRef,
+    commandOrdinals: readonly number[],
+  ): Promise<HookOutput | undefined> {
+    const { output } = await this.read<{ output?: HookOutput }>(resultRef);
+    if (
+      commandOrdinals.length === 0 ||
+      output?.continue !== false ||
+      output?.decision === 'block' ||
+      output?.decision === 'deny'
+    )
+      return output;
+
+    // Older aggregate results lack the decision for a command's exit 2.
+    // A detached command can settle after the Stop decision was committed.
+    for (const child of this.childrenOf(occurrenceId)) {
+      if (!child.resultRef || !commandOrdinals.includes(child.ordinal))
+        continue;
+      const receipt = await this.read<ManagedHookResult>(child.resultRef);
+      if (isLegacyCommandStopBlock(receipt))
+        return { ...output, decision: 'deny' };
+    }
+    return output;
+  }
+
   async drain(
     excludedOccurrences: ReadonlySet<string> = new Set(),
   ): Promise<void> {
@@ -1995,12 +2108,9 @@ export class HostedHookSession {
   }
 
   async close(opts: { terminal?: boolean } = {}): Promise<void> {
-    // A detach keeps the Session reloadable; only a delete is terminal. The
-    // deterministic config-scoped owner must survive a detach re-acquirable
-    // (R13-1): a terminal release would persist a RELEASED tombstone under the
-    // very id the next load recomputes, wedging every later acquire. The rule
-    // lives on the owner, not the call site (R14-1): every non-delete close
-    // defaults to non-terminal, and only DELETE opts into the terminal release.
+    // A detach keeps the deterministic owner re-acquirable (R13-1).
+    // Public close/delete opt into terminal release after lifecycle effects;
+    // applying it to a detach would fence every later same-revision load.
     const terminal = opts.terminal ?? false;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this

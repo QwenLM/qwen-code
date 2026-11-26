@@ -26,3 +26,11 @@ export function getTipHistory(): TipHistory {
   }
   return _tipHistory;
 }
+
+/**
+ * Counts a /btw use toward the spinner tip. Only counts when tips already
+ * loaded the history, so opting out of tips never touches the file.
+ */
+export function recordBtwUse(): void {
+  _tipHistory?.recordBtwUse();
+}

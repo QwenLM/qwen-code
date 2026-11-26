@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
@@ -13,6 +14,7 @@ import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
 import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from '../ReportedArtifactRegistration';
 import { useI18n } from '../../i18n';
 import {
   SubagentDetailsProvider,
@@ -82,11 +84,7 @@ function getSubagentMetrics(
 }
 
 function createDetailClientId(): string {
-  const suffix =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `subagent-detail:${suffix}`;
+  return `subagent-detail:${randomUUID()}`;
 }
 
 export function findSubagentRootTool(
@@ -145,7 +143,7 @@ function SubagentDetailContent({
   const connection = useConnection();
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
@@ -254,6 +252,14 @@ function SubagentDetailContent({
 
   return (
     <div className={styles.detail}>
+      {/* The detail view runs under its own DaemonSessionProvider for the
+          subagent session; App's registration mount only covers the main
+          session, so register this session's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       <div className={styles.overview}>
         <div className={styles.descriptionRow}>
           {description && (

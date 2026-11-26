@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,10 +69,8 @@ class StorageRowLockOrderMySqlIT {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
         threads = Executors.newFixedThreadPool(2);
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                + " VALUES (?, ?, ?, ?, ?)", JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE),
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), TENANT, STORAGE);
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id)"
+                + " VALUES (?, ?)", TENANT, STORAGE);
     }
 
     @AfterEach
@@ -93,7 +91,7 @@ class StorageRowLockOrderMySqlIT {
         // The alias locker starts once admission has read the row for its
         // fence, and admission goes on only after the locker is waiting.
         var admissionJdbc = new PausingJdbc(database.source(), " FROM ma_storage ",
-                () -> transactions.executeWithoutResult(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
+                () -> transactions.executeWithoutResult(status -> JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, STORAGE)));
         Future<?> admission = threads.submit(() -> transactions.executeWithoutResult(status -> admit(admissionJdbc, shared)));
 
         admission.get(30, TimeUnit.SECONDS);
@@ -131,11 +129,11 @@ class StorageRowLockOrderMySqlIT {
         // tenant's guard orders them. The second starts once the first holds
         // the aliases it locks before its scan. Recoveries that locked only
         // their own alias would close a cycle: their scans cross, one holding
-        // a physical_key record the other needs while it waits for a primary
+        // a physical_id record the other needs while it waits for a primary
         // record the other holds.
         String first = other;
         String second = TENANT;
-        var recoveryJdbc = new PausingJdbc(database.source(), "alias_key IN (",
+        var recoveryJdbc = new PausingJdbc(database.source(), "(tenant_id, storage_id) IN (",
                 () -> transactions.executeWithoutResult(status ->
                         assertThat(LocalStorageOwners.lockCovered(jdbc, second, STORAGE)).isEqualTo(PHYSICAL)));
         Future<?> recovery = threads.submit(() -> transactions.executeWithoutResult(status ->
@@ -159,12 +157,12 @@ class StorageRowLockOrderMySqlIT {
         var scan = new CapturingJdbc(database.source(), "LIMIT 129 FOR UPDATE");
         transactions.executeWithoutResult(status ->
                 assertThat(LocalStorageOwners.lockCovered(scan, TENANT, STORAGE)).isEqualTo(PHYSICAL));
-        var aliases = new CapturingJdbc(database.source(), "alias_key IN (");
+        var aliases = new CapturingJdbc(database.source(), "(tenant_id, storage_id) IN (");
         transactions.executeWithoutResult(status ->
                 assertThat(LocalStorageOwners.lockCovered(aliases, TENANT, STORAGE)).isEqualTo(PHYSICAL));
 
         // A table scan would lock the other storages' rows, in id order; the
-        // alias locks must come from the alias index, in alias_key order.
+        // alias locks must come from the alias index, in (tenant_id, storage_id) order.
         assertThat(scan.sql).as("recovery scanned the physical storage").isNotNull();
         var plan = ExecutedQueryPlan.explain(jdbc, scan.sql, scan.arguments);
         assertThat(plan.tableScan()).as(plan.text()).isFalse();
@@ -184,7 +182,7 @@ class StorageRowLockOrderMySqlIT {
             insertLocal("lock-order-tenant-" + index, PHYSICAL);
         }
         jdbc.execute("ANALYZE TABLE ma_storage");
-        var aliases = new CapturingJdbc(database.source(), "alias_key IN (");
+        var aliases = new CapturingJdbc(database.source(), "(tenant_id, storage_id) IN (");
         transactions.executeWithoutResult(status ->
                 assertThat(LocalStorageOwners.lockCovered(aliases, TENANT, STORAGE)).isEqualTo(PHYSICAL));
 
@@ -211,7 +209,7 @@ class StorageRowLockOrderMySqlIT {
             assertThat(committed.queryForObject("SELECT COUNT(*) FROM performance_schema.data_locks"
                     + " WHERE OBJECT_SCHEMA = ? AND INDEX_NAME = 'uk_ma_storage_business_key' AND LOCK_STATUS = 'GRANTED'"
                     + " AND LOCK_DATA LIKE ?", Integer.class, schema,
-                    "'" + JdbcRuntimeBindingRepository.storageAliasKey(later, STORAGE) + "'%"))
+                    "%" + later + "%"))
                     .as("recovery holds the later alias's record").isPositive();
         });
     }
@@ -219,14 +217,13 @@ class StorageRowLockOrderMySqlIT {
     @Test
     void physicalRecoveryOnASingleConnectionKeepsItsCallersTransaction() {
         registerLocal();
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE);
         // The offline recovery entry runs on one connection, as here.
         var single = new SingleConnectionDataSource(database.url(), System.getProperty("mysql.user"),
                 System.getProperty("mysql.password", ""), true);
         try {
             var singleJdbc = new ManagedSchemaJdbcTemplate(single);
             new TransactionTemplate(new DataSourceTransactionManager(single)).executeWithoutResult(status -> {
-                assertThat(singleJdbc.update("UPDATE ma_storage SET gmt_modified = 42 WHERE alias_key = ?", alias))
+                assertThat(singleJdbc.update("UPDATE ma_storage SET gmt_modified = 42 WHERE tenant_id = ? AND storage_id = ?", TENANT, STORAGE))
                         .as("the caller's write").isEqualTo(1);
                 assertThat(LocalStorageOwners.lockCovered(singleJdbc, TENANT, STORAGE)).isEqualTo(PHYSICAL);
                 status.setRollbackOnly();
@@ -234,14 +231,14 @@ class StorageRowLockOrderMySqlIT {
         } finally {
             single.destroy();
         }
-        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE alias_key = ?", Long.class, alias))
+        assertThat(jdbc.queryForObject("SELECT gmt_modified FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", Long.class, TENANT, STORAGE))
                 .as("the rollback discarded the caller's write").isNotEqualTo(42L);
     }
 
     @Test
     void migrationAbortClearsTheFenceThroughTheAliasIndex(@TempDir Path temp) throws Exception {
         // owner() locked the row through uk_ma_storage_business_key; clearing
-        // the fence through uk_ma_storage_alias would lock the row through a
+        // the fence through any other index would lock the row through a
         // second index inside the same transaction.
         String tenant = "lock-order-migration-tenant";
         String storage = "lock-order-migration-storage";
@@ -267,7 +264,8 @@ class StorageRowLockOrderMySqlIT {
                 .put("stateDirectory", temp.resolve("runtime").toString()).put("nodeExecutable", "/test/node")
                 .put("cliEntry", "/test/cli.js");
         var cleared = new CapturingJdbc(database.source(), "fence_operation_id = NULL WHERE");
-        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new InMemoryRuntimeBindingRepository(),
+        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new JdbcRuntimeBindingRepository(database.source(),
+                new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), true,
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         operation.retire(mock(RuntimeBrokerService.class));
@@ -285,19 +283,18 @@ class StorageRowLockOrderMySqlIT {
     }
 
     private static void insertLocal(ManagedSchemaJdbcTemplate jdbc, String tenant, String physical) {
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                 + " registration_state, storage_kind, registration_revision, registration_json)"
-                + " VALUES (?, ?, ?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), tenant, STORAGE, physical);
+                + " VALUES (?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
+                tenant, STORAGE, physical);
     }
 
     private void registerLocal() {
-        jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
-                + " registration_revision = 1, registration_json = '{}' WHERE alias_key = ?", PHYSICAL,
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE));
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", PHYSICAL, PHYSICAL);
+        jdbc.update("UPDATE ma_storage SET physical_id = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
+                + " registration_revision = 1, registration_json = '{}' WHERE tenant_id = ? AND storage_id = ?", PHYSICAL,
+                TENANT, STORAGE);
+        jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", PHYSICAL);
     }
 
     private static void admit(ManagedSchemaJdbcTemplate jdbc, boolean shared) {

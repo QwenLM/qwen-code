@@ -11,8 +11,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -62,7 +63,7 @@ class TaskCancelCoordinatorTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private AgentStateStore store;
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
     private HarnessConnector harness;
     private RuntimeBrokerService broker;
     private TaskCancelCoordinator coordinator;
@@ -87,7 +88,7 @@ class TaskCancelCoordinatorTest {
         logged.start();
         coordinatorLog.addAppender(logged);
         store = mock(AgentStateStore.class);
-        records = mock(ManagedExtensionRecordStore.class);
+        records = mock(JdbcManagedExtensionRecordStore.class);
         harness = mock(HarnessConnector.class);
         broker = mock(RuntimeBrokerService.class);
         doAnswer(args -> {
@@ -753,7 +754,7 @@ class TaskCancelCoordinatorTest {
     @Test
     void aDeliveryCancelTheRouteRefusesParksAndSettlesFromTheRecord() {
         when(harness.runChannelOperation(eq(TENANT), eq(SESSION), any()))
-                .thenThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+                .thenThrow(WorkspaceExecutionStore.unavailable());
         target.set(delivery("pending", false));
         coordinator.dispatch(TENANT, SESSION, OPERATION);
         verify(store).retryOperation(eq(TENANT), eq(SESSION), eq(OPERATION),

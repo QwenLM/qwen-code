@@ -12,9 +12,13 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailu
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -86,7 +90,7 @@ class OperationRetryTerminalStateTest {
     void lifecycleOperationKeepsWaitingPastTheBudgetWhileAWriterIsLive(
             int attemptCount, int lifecycleProtocol, int budgetExemptAttempt) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-close", OperationKind.CLOSE, "digest", "RUNNING",
@@ -115,7 +119,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -127,7 +131,7 @@ class OperationRetryTerminalStateTest {
             when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
             when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
             coordinator.setWorkspaceLifecycleStore(mock(
-                    com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class));
+                    JdbcWorkspaceLifecycleStore.class));
         }
         try {
             coordinator.dispatch("tenant", "session", "op-close");
@@ -154,7 +158,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aCloseThatWaitedOutALiveWriterKeepsItsFullBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(11, 11);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -176,7 +180,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -212,7 +216,7 @@ class OperationRetryTerminalStateTest {
     void aStaleHarnessViewPublishesItsWaitPastTheBudget(
             int budgetExemptAttempt) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(10, budgetExemptAttempt);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -233,7 +237,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -269,7 +273,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aStaleHarnessViewBesideALiveWriterPublishesTheGenerationMismatch() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(10);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -291,7 +295,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -322,7 +326,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aStaleHarnessViewReschedulesExemptlyBelowTheBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(9);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -343,7 +347,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -375,7 +379,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void anActiveSessionDeletePublishesTheWriterWaitPastTheBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
                 "op-delete", OperationKind.DELETE, "digest", "RUNNING",
@@ -397,7 +401,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -432,7 +436,7 @@ class OperationRetryTerminalStateTest {
     void lifecycleOperationTerminatesWithAFailureCodeAfterTheBudgetIsSpent(
             int attemptCount) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount);
@@ -458,7 +462,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -494,7 +498,7 @@ class OperationRetryTerminalStateTest {
     void blockedLifecycleOperationPublishesItsCodeWhileAWriterIsLive(
             int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -523,7 +527,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -562,7 +566,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aPermanentSettleRefusalPublishesTheWaitWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -589,7 +593,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -627,7 +631,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aCapabilityMismatchPublishesTheWaitWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -656,7 +660,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -691,7 +695,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aProtocolErrorPublishesTheWaitWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -717,7 +721,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -748,7 +752,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aCapabilityMismatchConsumesTheBudgetBelowTheLimit() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(9);
@@ -774,7 +778,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -806,7 +810,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void boundSessionExhaustionRoutesThroughTheWorkspaceClose() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -832,7 +836,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -865,7 +869,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aSettleThatReachedTheHarnessIsNotTerminallyRecorded() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10, 0, 1);
@@ -879,9 +883,9 @@ class OperationRetryTerminalStateTest {
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         // The settle's effects are already durable — saved by a previous
         // attempt — so the Harness did settle the lifecycle.
         when(lifecycle.recoverEffects(any(OperationRecord.class)))
@@ -900,7 +904,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -930,7 +934,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aSettleThatAnsweredTheHarnessReschedulesInsteadOfTerminating() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -959,7 +963,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -993,7 +997,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aSettleWhoseReceiptWriteFailsAfterTheHarnessAnsweredIsNotTerminallyRecorded() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10, 0, 1);
@@ -1007,9 +1011,9 @@ class OperationRetryTerminalStateTest {
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         when(harness.supportsLifecycle(TOOL_PROFILE)).thenReturn(true);
         // No durable receipt yet: the Harness is asked, and answers — then
         // the receipt write refuses.
@@ -1018,7 +1022,7 @@ class OperationRetryTerminalStateTest {
         when(harness.settleLifecycle(any(OperationRecord.class)))
                 .thenReturn(new ObjectMapper().createObjectNode()
                         .put("settled", true));
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled"))
+        doThrow(WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled"))
                 .when(lifecycle).saveEffects(any(OperationRecord.class),
                         any(JsonNode.class));
 
@@ -1028,7 +1032,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1059,7 +1063,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aSettledCompletionTerminatesUnsettledPastTheSettledBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(40);
@@ -1088,7 +1092,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1120,7 +1124,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aFailedCompletionWritePastTheSettledBudgetTerminatesUnsettled() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(40);
@@ -1150,7 +1154,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1184,7 +1188,7 @@ class OperationRetryTerminalStateTest {
     @ValueSource(ints = {10, 40})
     void aSettleAnsweredButUndecodableKeepsTheSettledBudget(int attemptCount) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
@@ -1200,9 +1204,9 @@ class OperationRetryTerminalStateTest {
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         // No durable receipt, so the settle calls the Harness; the Harness
         // answered 200 but the receipt failed to decode — the client marks
         // it as answered.
@@ -1216,7 +1220,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1259,7 +1263,7 @@ class OperationRetryTerminalStateTest {
     void aNeverInitializedReceiptDoesNotReachTheSettledBudget(
             int attemptCount) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
@@ -1274,9 +1278,9 @@ class OperationRetryTerminalStateTest {
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         // The store synthesized and persisted the receipt with zero Harness
         // contact — the Session was never booted there.
         when(lifecycle.recoverEffects(any())).thenReturn(
@@ -1293,7 +1297,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1330,7 +1334,7 @@ class OperationRetryTerminalStateTest {
     void aStoreSynthesizedReceiptDoesNotReachTheSettledBudget(
             int attemptCount) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
@@ -1345,9 +1349,9 @@ class OperationRetryTerminalStateTest {
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         // The store synthesized and persisted the receipt from the journal
         // alone — no Harness contact — and it carries the store's own marker.
         when(lifecycle.recoverEffects(any())).thenReturn(
@@ -1362,7 +1366,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1398,6 +1402,14 @@ class OperationRetryTerminalStateTest {
     // scan.
     @ParameterizedTest(name = "code = {0}, attemptCount = {1}, wrapped = {2}")
     @CsvSource({
+        "hosted_session_closing, 0, false",
+        "hosted_session_closing, 10, false",
+        "hosted_session_closing, 0, true",
+        "hosted_session_closing, 10, true",
+        "hosted_session_open_busy, 0, false",
+        "hosted_session_open_busy, 10, false",
+        "hosted_session_open_busy, 0, true",
+        "hosted_session_open_busy, 10, true",
         "hosted_lifecycle_recovery_required, 0, false",
         "hosted_lifecycle_recovery_required, 10, false",
         "hosted_lifecycle_recovery_required, 0, true",
@@ -1409,7 +1421,7 @@ class OperationRetryTerminalStateTest {
     void aDaemonBusyRefusalWaitsWithoutSpendingTheBudget(
             String refusalCode, int attemptCount, boolean wrapped) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount, 0, 1);
@@ -1424,14 +1436,15 @@ class OperationRetryTerminalStateTest {
         when(runtimeWarmer.supportsWorkspaceClose(BOUND_WORKSPACE)).thenReturn(true);
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
-        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore
+        JdbcWorkspaceLifecycleStore
                 lifecycle = mock(
-                        com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class);
+                        JdbcWorkspaceLifecycleStore.class);
         when(lifecycle.recoverEffects(any())).thenReturn(
                 new ObjectMapper().createObjectNode()
                         .put("storeSynthesized", true));
         HarnessHttpFailure refusal = mock(HarnessHttpFailure.class);
         when(refusal.getErrorCode()).thenReturn(refusalCode);
+        when(refusal.getStatusCode()).thenReturn(409);
         // The SDK wraps the daemon's refusal in HarnessMutationUnknownFailure
         // once the non-idempotent detach may have been delivered, so the wire
         // code lives on the cause chain — the reason daemonRefusalCode walks it.
@@ -1450,7 +1463,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1492,7 +1505,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aPermanentRefusalPublishesTheWaitWhenTheWriterCheckFails() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -1518,7 +1531,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1550,7 +1563,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aV1RefusalSkipsTheWorkspaceCloseWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10, 0, 1);
@@ -1575,7 +1588,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1584,7 +1597,7 @@ class OperationRetryTerminalStateTest {
                         Clock.systemUTC(),
                         new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(mock(
-                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class));
+                JdbcWorkspaceLifecycleStore.class));
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1613,7 +1626,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void boundV1SessionExhaustionSkipsTheV0DrainRequest() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -1641,7 +1654,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1650,7 +1663,7 @@ class OperationRetryTerminalStateTest {
                         Clock.systemUTC(),
                         new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(mock(
-                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class));
+                JdbcWorkspaceLifecycleStore.class));
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1676,7 +1689,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void boundV2SessionExhaustionSkipsTheV0DrainRequest() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10, 0, 2);
@@ -1699,7 +1712,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1708,7 +1721,7 @@ class OperationRetryTerminalStateTest {
                         Clock.systemUTC(),
                         new ManagedAgentProperties());
         coordinator.setWorkspaceLifecycleStore(mock(
-                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.class));
+                JdbcWorkspaceLifecycleStore.class));
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
@@ -1733,7 +1746,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aClosedSessionDeleteWaitsOnTheRetirementWriterCode() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -1762,7 +1775,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1794,7 +1807,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void lifecycleOperationTerminatesWhenTheTerminalDrainFails() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -1818,7 +1831,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1845,7 +1858,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void lifecycleOperationReschedulesWhenTheTerminalRecordFails() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -1872,7 +1885,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1898,7 +1911,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void deleteOfAClosedSessionKeepsWaitingWhileAWriterIsLive() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -1927,7 +1940,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -1963,7 +1976,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void closedSessionDeleteRetriesACompletionWriteFailureWithoutTouchingTheRuntime() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -1994,7 +2007,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2028,7 +2041,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void closedSessionDeleteTerminatesWithTheDeliveryCodePastTheBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = new OperationRecord("tenant", "session",
@@ -2055,7 +2068,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2086,7 +2099,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void lifecycleOperationKeepsWaitingWhenTheWriterCheckFails() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(10);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -2107,7 +2120,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2138,7 +2151,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aFailedCompletionWriteAfterASuccessfulSettleRetries() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(10);
@@ -2169,7 +2182,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2199,7 +2212,7 @@ class OperationRetryTerminalStateTest {
     void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails(
             int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
@@ -2227,7 +2240,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2260,7 +2273,7 @@ class OperationRetryTerminalStateTest {
     @ValueSource(ints = {1, 9})
     void lifecycleOperationStillRetriesWhileTheBudgetLasts(int attemptCount) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = lifecycleOperation(attemptCount);
         when(store.claimOperation(eq("tenant"), eq("session"),
@@ -2280,7 +2293,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         mock(RuntimeWarmer.class),
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2311,7 +2324,7 @@ class OperationRetryTerminalStateTest {
     void actionResponseCompletesWithAFailureCodeAfterTheBudgetIsSpent(
             int attemptCount) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = actionOperation(attemptCount);
         mockUnresolvedAction(sessions, actions, harness, claimed);
@@ -2340,7 +2353,7 @@ class OperationRetryTerminalStateTest {
     void anAnsweredButUnprojectedDecisionNeverTerminatesAsDeliveryFailed(
             int attemptCount) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(attemptCount);
@@ -2349,10 +2362,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         // harness.resolveAction returns normally: the Harness answered 200.
 
@@ -2382,7 +2395,7 @@ class OperationRetryTerminalStateTest {
     void aPostAnswerProjectionFailureNeverTerminatesAsDeliveryFailed(
             int attemptCount) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(attemptCount);
@@ -2391,16 +2404,16 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         // The pre-answer projection read shows "requested"; the post-answer
         // read throws once (a store fault after the 200); the catch's
         // re-inspection still reads "requested".
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)))
                 .thenThrow(new IllegalStateException("lock wait timeout"))
-                .thenReturn(Optional.of(new ManagedActionStore.Action(
+                .thenReturn(Optional.of(new JdbcManagedActionStore.Action(
                         "action-1", "requested", body, null, null)));
         // harness.resolveAction returns normally: the Harness answered 200.
 
@@ -2427,7 +2440,7 @@ class OperationRetryTerminalStateTest {
     void anAnsweredAttemptPersistsTheWatermarkBeforeTheCatchBlocksReads()
             throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(10);
@@ -2439,10 +2452,10 @@ class OperationRetryTerminalStateTest {
         // recovery re-read throws (a store fault after the Harness answered
         // 200).
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null, null))
+                new JdbcManagedActionStore.Response("action-1", body, null, null))
                 .thenThrow(new IllegalStateException("store blip"));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         // harness.resolveAction returns normally: the Harness answered 200.
 
@@ -2475,7 +2488,7 @@ class OperationRetryTerminalStateTest {
     void aLaterFailureAfterAnAnsweredAttemptStaysBudgetExempt()
             throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         // attemptCount == budgetExemptAttempt == 10: every attempt so far
@@ -2489,10 +2502,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         HarnessHttpFailure unavailable = mock(HarnessHttpFailure.class);
         when(unavailable.getStatusCode()).thenReturn(503);
@@ -2524,7 +2537,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void anAnsweredResponseTerminatesOnceItsActionExpired() throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         // attemptCount == budgetExemptAttempt == 10: the Harness answered an
@@ -2538,10 +2551,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", new ObjectMapper().readTree(
                                 "{\"expiresAt\":1}"),
                         null, null)));
@@ -2580,7 +2593,7 @@ class OperationRetryTerminalStateTest {
     void aCapabilityMismatchCompletesTerminallyWithoutHarnessConfirmation()
             throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(1);
@@ -2589,10 +2602,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         HarnessCapabilityFailure mismatch =
                 mock(HarnessCapabilityFailure.class);
@@ -2630,7 +2643,7 @@ class OperationRetryTerminalStateTest {
     void aWorkspaceUnavailableCompletesTerminallyWithoutHarnessConfirmation(
             int attemptCount) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(attemptCount);
@@ -2639,12 +2652,12 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(harness)
+        doThrow(WorkspaceExecutionStore.unavailable()).when(harness)
                 .resolveAction("tenant", "session", "action-1", body);
 
         ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
@@ -2669,7 +2682,7 @@ class OperationRetryTerminalStateTest {
     void actionResponseStillRetriesWhileTheBudgetLasts(int attemptCount)
             throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = actionOperation(attemptCount);
         mockUnresolvedAction(sessions, actions, harness, claimed);
@@ -2692,7 +2705,7 @@ class OperationRetryTerminalStateTest {
     void lifecycleOperationHonoursTheConfiguredBudget(int attemptCount,
             boolean expectTermination) {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         OperationRecord claimed = lifecycleOperation(attemptCount);
@@ -2718,7 +2731,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2751,7 +2764,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void exemptWaitsRefundNoAlreadyChargedAttempt() {
         AgentStateStore store = mock(AgentStateStore.class);
-        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        JdbcManagedSessionStore sessionStore = mock(JdbcManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         // Ten charged failures and ten exempt waits: the charged count alone
@@ -2777,7 +2790,7 @@ class OperationRetryTerminalStateTest {
                         sessionStore,
                         harness,
                         runtimeWarmer,
-                        mock(ChildResultRelayStore.class),
+                        mock(JdbcChildResultRelayStore.class),
                         new ObjectMapper(),
                         mock(ChildLifecycleAdmissions.class),
                         mock(ManagedAgentService.class),
@@ -2806,7 +2819,7 @@ class OperationRetryTerminalStateTest {
     void actionResponseHonoursTheConfiguredBudget(int attemptCount,
             boolean expectCompletion) throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         OperationRecord claimed = actionOperation(attemptCount);
         mockUnresolvedAction(sessions, actions, harness, claimed);
@@ -2836,7 +2849,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aHarnessRefusalCompletesHarnessConfirmed() throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(0);
@@ -2845,10 +2858,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         HarnessHttpFailure rejected = mock(HarnessHttpFailure.class);
         when(rejected.getStatusCode()).thenReturn(400);
@@ -2868,7 +2881,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aProjectedDecisionCompletesHarnessConfirmed() throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(0);
@@ -2877,12 +2890,12 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "decided", body, "rcpt-9",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(body))));
+                        ManagedActionStore.decisionDigest(body))));
 
         ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
                 sessions, actions, harness,
@@ -2902,7 +2915,7 @@ class OperationRetryTerminalStateTest {
     @Test
     void aCommittedDecisionWinsOverTheExhaustedBudget() throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(40);
@@ -2911,7 +2924,7 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         // The delivery attempt throws after the Harness committed the
         // decision — the answer was only lost. The projection is still
@@ -2921,11 +2934,11 @@ class OperationRetryTerminalStateTest {
                 .when(harness).resolveAction("tenant", "session", "action-1",
                         body);
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)),
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "decided", body, "rcpt-9",
-                        com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(body))));
+                        ManagedActionStore.decisionDigest(body))));
 
         ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
                 sessions, actions, harness,
@@ -2949,7 +2962,7 @@ class OperationRetryTerminalStateTest {
     void theOperationLeaseIsRenewedAcrossASlowResolveAction()
             throws Exception {
         AgentStateStore sessions = mock(AgentStateStore.class);
-        ManagedActionStore actions = mock(ManagedActionStore.class);
+        JdbcManagedActionStore actions = mock(JdbcManagedActionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         OperationRecord claimed = actionOperation(1);
@@ -2960,10 +2973,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         // Every renewal succeeds, so the renewals counted below are real
         // renewals of a held lease, not ticks of one already lost (review
@@ -3045,7 +3058,7 @@ class OperationRetryTerminalStateTest {
     }
 
     private static void mockUnresolvedAction(AgentStateStore sessions,
-            ManagedActionStore actions, HarnessConnector harness,
+            JdbcManagedActionStore actions, HarnessConnector harness,
             OperationRecord claimed) throws Exception {
         when(harness.isAvailable()).thenReturn(true);
         JsonNode body = new ObjectMapper().readTree("{\"optionId\":\"allow\","
@@ -3054,10 +3067,10 @@ class OperationRetryTerminalStateTest {
                 eq("op-action"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(actions.response("tenant", "session", "op-action")).thenReturn(
-                new ManagedActionStore.Response("action-1", body, null,
+                new JdbcManagedActionStore.Response("action-1", body, null,
                         null));
         when(actions.find("tenant", "session", "action-1")).thenReturn(
-                Optional.of(new ManagedActionStore.Action("action-1",
+                Optional.of(new JdbcManagedActionStore.Action("action-1",
                         "requested", body, null, null)));
         // The Hosted Harness resolution endpoint stays down.
         doThrow(new IllegalStateException("connection refused"))

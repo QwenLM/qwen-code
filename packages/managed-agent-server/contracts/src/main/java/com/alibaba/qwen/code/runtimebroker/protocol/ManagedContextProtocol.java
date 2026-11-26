@@ -9,7 +9,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -27,6 +35,8 @@ public final class ManagedContextProtocol {
     public static final String PROTOCOL = "managed-context/1";
     public static final String ATTEST_PATH = "/internal/managed-runtime/v3/attest";
     public static final String CONTEXT_PATH = "/internal/managed-runtime/v3/context";
+    public static final String PUBLISHER_DETACH_PATH = "/internal/managed-runtime/v3/publisher/detach";
+    public static final String OBSERVATION_PULL_PATH = "/internal/managed-runtime/v3/observations/pull";
     private static final long MAX_EPOCH = 9_007_199_254_740_991L;
     private static final Pattern IDENTIFIER = Pattern.compile(
             "[A-Za-z0-9._:-]{1,128}");
@@ -40,6 +50,51 @@ public final class ManagedContextProtocol {
     private static final Set<String> READY_KEYS = Set.of("type", "version",
             "managedContext", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "url");
+
+    public record Boot(String runtimeInstanceId, String runtimeIncarnation,
+            String leaseId, String provisionRequestId, String token, long epoch,
+            String tenantId, String workspaceId, String workspaceGeneration,
+            String storageId, String mountRoot, String capabilityDigest,
+            String isolationClass, Map<String, Object> managedExtensions) {
+        public Boot {
+            managedExtensions = managedExtensions == null ? null
+                    : BrokerValues.immutableMap(managedExtensions);
+        }
+
+        public Map<String, Object> toWire() {
+            Map<String, Object> wire = new LinkedHashMap<>();
+            wire.put("type", "boot");
+            wire.put("version", 2);
+            wire.put("managedContext", PROTOCOL);
+            wire.put("runtimeInstanceId", runtimeInstanceId);
+            wire.put("runtimeIncarnation", runtimeIncarnation);
+            wire.put("leaseId", leaseId);
+            wire.put("provisionRequestId", provisionRequestId);
+            wire.put("epoch", epoch);
+            wire.put("token", token);
+            wire.put("tenantId", tenantId);
+            wire.put("workspaceId", workspaceId);
+            wire.put("workspaceGeneration", workspaceGeneration);
+            wire.put("storageId", storageId);
+            wire.put("mountRoot", mountRoot);
+            wire.put("capabilityDigest", capabilityDigest);
+            wire.put("isolationClass", isolationClass);
+            if (managedExtensions != null) {
+                wire.put("managedExtensions", managedExtensions);
+            }
+            return Map.copyOf(wire);
+        }
+
+        @Override
+        public String toString() {
+            return "Boot[runtimeInstanceId=" + runtimeInstanceId
+                    + ", leaseId=" + leaseId + ", epoch=" + epoch + "]";
+        }
+    }
+
+    public record Ready(String runtimeInstanceId, String runtimeIncarnation,
+            String leaseId, long epoch, URI url) {
+    }
 
     private ManagedContextProtocol() {
     }
@@ -58,12 +113,12 @@ public final class ManagedContextProtocol {
         require(scope.getCapabilityDigest().matches("sha256:[0-9a-f]{64}"));
     }
 
-    public static Map<String, Object> boot(RuntimeProvisionRequest request,
+    public static Boot boot(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed) {
         return boot(request, seed, null);
     }
 
-    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> extensions) {
+    public static Boot boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> extensions) {
         require(request != null && request.isManagedContext() && seed != null);
         RuntimeScope scope = request.getScope();
         Map<String, Object> boot = new LinkedHashMap<>();
@@ -86,8 +141,21 @@ public final class ManagedContextProtocol {
         if (extensions != null) {
             boot.put("managedExtensions", extensions);
         }
-        validateBoot(boot);
-        return Map.copyOf(boot);
+        return parseBoot(boot);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static Boot parseBoot(Map<String, Object> boot) {
+        Map<String, Object> snapshot = BrokerValues.immutableMap(boot);
+        validateBoot(snapshot);
+        return new Boot(string(snapshot, "runtimeInstanceId"),
+                string(snapshot, "runtimeIncarnation"), string(snapshot, "leaseId"),
+                string(snapshot, "provisionRequestId"), string(snapshot, "token"),
+                integer(snapshot.get("epoch")), string(snapshot, "tenantId"),
+                string(snapshot, "workspaceId"), string(snapshot, "workspaceGeneration"),
+                string(snapshot, "storageId"), string(snapshot, "mountRoot"),
+                string(snapshot, "capabilityDigest"), string(snapshot, "isolationClass"),
+                (Map<String, Object>) snapshot.get("managedExtensions"));
     }
 
     public static void validateBoot(Map<String, Object> boot) {
@@ -129,20 +197,20 @@ public final class ManagedContextProtocol {
         }
     }
 
-    public static URI ready(Map<String, Object> ready, Map<String, Object> boot) {
+    public static Ready ready(Map<String, Object> ready, Boot boot) {
         require(ready.keySet().equals(READY_KEYS)
                 && "ready".equals(ready.get("type"))
                 && exactNumber(ready.get("version"), 2)
                 && PROTOCOL.equals(ready.get("managedContext")));
-        for (String key : Set.of("runtimeInstanceId", "runtimeIncarnation",
-                "leaseId")) {
-            require(boot.get(key).equals(ready.get(key)));
-        }
-        require(exactNumber(ready.get("epoch"), integer(boot.get("epoch"))));
+        require(boot.runtimeInstanceId().equals(ready.get("runtimeInstanceId"))
+                && boot.runtimeIncarnation().equals(ready.get("runtimeIncarnation"))
+                && boot.leaseId().equals(ready.get("leaseId")));
+        require(exactNumber(ready.get("epoch"), boot.epoch()));
         String url = string(ready, "url");
         Matcher origin = ORIGIN.matcher(url);
         require(origin.matches() && Integer.parseInt(origin.group(1)) <= 65535);
-        return URI.create(url);
+        return new Ready(boot.runtimeInstanceId(), boot.runtimeIncarnation(),
+                boot.leaseId(), boot.epoch(), URI.create(url));
     }
 
     public static Map<String, Object> attestationRequest(Map<String, Object> boot) {
@@ -205,6 +273,40 @@ public final class ManagedContextProtocol {
                     JSONReader.Feature.UseBigDecimalForDoubles,
                     JSONReader.Feature.UseBigDecimalForFloats));
         } catch (CharacterCodingException | RuntimeException failure) {
+            throw invalidResponse();
+        }
+    }
+
+    private static final ObjectMapper CANONICAL_JSON = new ObjectMapper(JsonFactory.builder()
+            .streamReadConstraints(StreamReadConstraints.builder()
+                    .maxNestingDepth(64).maxStringLength(32 * 1024 * 1024).build()).build())
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    /**
+     * Strict reader for external drain proofs: every JSON number must be a
+     * canonical safe integer, and duplicate keys or trailing content are
+     * rejected. {@link #parse(byte[])} is intentionally lenient about number
+     * representation; drain proofs are not.
+     */
+    public static Map<String, Object> parseCanonical(byte[] bytes, int limit) {
+        try {
+            if (bytes == null || bytes.length > limit) {
+                throw invalidResponse();
+            }
+            String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
+            try (JsonParser parser = CANONICAL_JSON.createParser(text)) {
+                for (JsonToken token = parser.nextToken(); token != null; token = parser.nextToken()) {
+                    if (token.isNumeric() && (token != JsonToken.VALUE_NUMBER_INT
+                            || !parser.getText().matches("0|[1-9][0-9]*")
+                            || parser.getBigIntegerValue().bitLength() > 53)) {
+                        throw invalidResponse();
+                    }
+                }
+            }
+            return BrokerValues.immutableMap(CANONICAL_JSON.readValue(text,
+                    new TypeReference<Map<String, Object>>() { }));
+        } catch (IOException | RuntimeException failure) {
             throw invalidResponse();
         }
     }

@@ -5,17 +5,24 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcRuntimeStageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRecoveryCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
@@ -27,15 +34,23 @@ import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.routing.RoutingRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
+import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -43,8 +58,9 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Arrays;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
@@ -56,12 +72,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeRecoveryCoordinator recovery;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
-    private final boolean resident;
-    private final com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator coordinator;
+    private final ManagedRuntimeCoordinator coordinator;
     private final RuntimeProvisioner primaryProvisioner;
     private final RuntimeBindingRepository extensionBindings;
     private final HttpRuntimeTransport extensionTransport;
+    private final ManagedAgentProperties.RuntimeBroker brokerSettings;
+    private final ExternalStorageRegistrationStore externalRegistrations;
+    private final JdbcTemplate jdbc;
 
     public EmbeddedRuntimeBroker(SessionQueryStore store,
             ManagedAgentProperties properties,
@@ -76,7 +93,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore) {
+            JdbcWorkspaceExecutionStore workspaceExecutionStore) {
         this(store, properties, bindingRepository, sessionRepository,
                 executionRepository, workspaceExecutionStore, null, null);
     }
@@ -86,11 +103,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, null, null, null, null);
+                workspaceExecutionStore, publications, publicationData, null, null, null);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store,
@@ -98,56 +115,32 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications,
             ToolPublicationDataStore publicationData,
             SshWorkspaceService ssh) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, null, null, null, ssh);
+                workspaceExecutionStore, publications, publicationData, null, null, ssh);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
-            org.springframework.jdbc.core.JdbcTemplate jdbc,
-            org.springframework.transaction.PlatformTransactionManager manager) {
+            JdbcTemplate jdbc,
+            PlatformTransactionManager manager) {
         this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, jdbc, manager, null, null);
+                workspaceExecutionStore, publications, publicationData, jdbc, manager, null);
     }
 
     public EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
             RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
+            ToolExecutionRepository executionRepository, JdbcWorkspaceExecutionStore workspaceExecutionStore,
             ToolPublicationStore publications, ToolPublicationDataStore publicationData,
-            org.springframework.jdbc.core.JdbcTemplate jdbc,
-            org.springframework.transaction.PlatformTransactionManager manager, SshWorkspaceService ssh) {
-        this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, jdbc, manager, null, ssh);
-    }
-
-    EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
-            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
-            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
-            org.springframework.jdbc.core.JdbcTemplate jdbc,
-            org.springframework.transaction.PlatformTransactionManager manager,
-            RuntimeProvisioner residentProvisioner) {
-        this(store, properties, bindingRepository, sessionRepository, executionRepository,
-                workspaceExecutionStore, publications, publicationData, jdbc, manager, residentProvisioner, null);
-    }
-
-    private EmbeddedRuntimeBroker(SessionQueryStore store, ManagedAgentProperties properties,
-            RuntimeBindingRepository bindingRepository, RuntimeSessionRepository sessionRepository,
-            ToolExecutionRepository executionRepository, WorkspaceExecutionStore workspaceExecutionStore,
-            ToolPublicationStore publications, ToolPublicationDataStore publicationData,
-            org.springframework.jdbc.core.JdbcTemplate jdbc,
-            org.springframework.transaction.PlatformTransactionManager manager,
-            RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
+            JdbcTemplate jdbc,
+            PlatformTransactionManager manager, SshWorkspaceService ssh) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
-        this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
-        this.resident = "kubernetes-workspace".equals(broker.getProvisioner());
         require(broker.getToken(), "Runtime Broker token");
         require(broker.getWorkspaceGeneration(),
                 "Runtime Broker workspace generation");
@@ -169,36 +162,36 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 "Hosted Harness capability digest");
         var selection = RuntimeBackendSelection.from(properties);
         var registry = new RuntimeProviderRegistry();
-        if (residentProvisioner == null) {
-            registry.validateSelected(properties);
-        }
+        registry.validateSelected(properties);
         boolean remote = selection.includes(RuntimeProviderKinds.SSH_PROCESS);
         if (remote && (ssh == null || !ssh.configured() || workspaceExecutionStore == null)) {
             throw new IllegalStateException("SSH Runtime requires configured Workspace services");
         }
-        if (resident && remote) {
-            throw new IllegalStateException("Resident Workspace and SSH nodes require separate Broker configurations");
-        }
         HttpRuntimeTransport http = remote ? new HttpRuntimeTransport(ssh.connections()::resolveEndpoint) : new HttpRuntimeTransport();
         this.extensionBindings = bindingRepository;
         this.extensionTransport = http;
+        this.jdbc = jdbc;
+        this.brokerSettings = broker;
+        this.externalRegistrations = jdbc == null || manager == null ? null
+                : new ExternalStorageRegistrationStore(jdbc, manager);
         this.workspaces = workspaceExecutionStore == null ? null
-                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh, externalRegistrations);
+        if (this.workspaces != null) {
+            // Let the capability hint require the same recorded terminal digest
+            // the relay's admission checks, so it never advertises a refused terminal.
+            this.workspaces.setBindingRepository(bindingRepository);
+        }
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
-        RuntimeTransport transport = workspaces == null ? http
-                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
-                        bindingRepository, sessionRepository);
         RuntimeProviderDependencies dependencies = new RuntimeProviderDependencies() {
-            private com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry external;
-            private com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations csi;
+            private ExternalStorageRegistry external;
 
             @Override
             public RuntimeBindingRepository bindings() { return bindingRepository; }
 
             @Override
-            public com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalStorage() {
+            public ExternalStorageRegistry externalStorage() {
                 if (jdbc == null || manager == null) {
                     return RuntimeProviderDependencies.super.externalStorage();
                 }
@@ -209,53 +202,24 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
 
             @Override
-            public com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations csiReservations() {
-                if (!(bindingRepository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository original)
-                        || jdbc == null || manager == null || workspaceExecutionStore == null
-                        || !original.usesDataSource(jdbc.getDataSource())) {
-                    throw new IllegalStateException("Resident Workspace requires original JDBC authority");
-                }
-                if (csi == null) {
-                    csi = new com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
-                }
-                return csi;
-            }
-
-            @Override
-            public com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess ssh() {
+            public SshRuntimeAccess ssh() {
                 if (ssh == null || !ssh.configured()) {
                     return RuntimeProviderDependencies.super.ssh();
                 }
                 return ssh;
             }
         };
-        RuntimeProvisioner baseProvisioner;
-        if (resident) {
-            dependencies.csiReservations();
-            if (residentProvisioner != null && !"kubernetes-workspace".equals(residentProvisioner.kind())) {
-                throw new IllegalArgumentException("Resident provisioner kind differs");
-            }
-            baseProvisioner = residentProvisioner == null
-                    ? registry.create(properties, http, dependencies) : residentProvisioner;
-        } else {
-            if (residentProvisioner != null) {
-                throw new IllegalArgumentException("Resident provisioner requires resident configuration");
-            }
-            if (!broker.getResidentWorkspaces().isEmpty()) {
-                throw new IllegalStateException("Resident mappings require kubernetes-workspace provisioner");
-            }
-            baseProvisioner = provisioner(properties,
-                    remote && !RuntimeProviderKinds.SSH_PROCESS.equals(broker.getProvisioner())
-                            ? new HttpRuntimeTransport() : http, dependencies);
-        }
+        RuntimeProvisioner baseProvisioner = provisioner(properties,
+                remote && !RuntimeProviderKinds.SSH_PROCESS.equals(broker.getProvisioner())
+                        ? new HttpRuntimeTransport() : http, dependencies);
         this.primaryProvisioner = baseProvisioner;
         if (remote && !RuntimeProviderKinds.SSH_PROCESS.equals(broker.getProvisioner())) {
             RuntimeProvisioner local = baseProvisioner;
             RuntimeProvisioner remoteProvisioner = null;
             try {
                 remoteProvisioner = registry.create(RuntimeProviderKinds.SSH_PROCESS, properties, http, dependencies);
-                baseProvisioner = new com.alibaba.qwen.code.runtimebroker.routing.RoutingRuntimeProvisioner(
-                        java.util.Map.of(local.kind(), local, RuntimeProviderKinds.SSH_PROCESS, remoteProvisioner),
+                baseProvisioner = new RoutingRuntimeProvisioner(
+                        Map.of(local.kind(), local, RuntimeProviderKinds.SSH_PROCESS, remoteProvisioner),
                         scope -> ssh.runtimeStorage(scope) == null ? local.kind() : RuntimeProviderKinds.SSH_PROCESS,
                         (kind, lease) -> {
                             if (!RuntimeProviderKinds.SSH_PROCESS.equals(kind)) {
@@ -270,10 +234,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 throw failure;
             }
         }
-        RuntimeProvisioner provisioner = workspaces == null || resident ? baseProvisioner
-                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
-        HarnessSessionResolver resolver = com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator.resolver(
-                store, workspaces, properties, workspaceId, workspaceCwd);
+        ExternalWorkspaceAcquisitionVerifier workspaceVerifier =
+                primaryProvisioner instanceof ExternalWorkspaceAcquisitionVerifier verifier ? verifier
+                        : ignored -> CompletableFuture.failedFuture(
+                                WorkspaceExecutionStore.unavailable());
+        RuntimeTransport transport = workspaces == null ? http
+                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
+                        bindingRepository, sessionRepository, workspaceVerifier::verifyAcquisition);
+        RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
+                : new WorkspaceRuntimeProvisioner(
+                        baseProvisioner, workspaces, workspaceExecutionStore, bindingRepository);
+        HarnessSessionResolver resolver = ManagedRuntimeCoordinator.resolver(
+                store, workspaces, properties, workspaceId, workspaceCwd, workspaceExecutionStore);
         ObjectMapper mapper = new ObjectMapper();
         RuntimePublicationVerifier verifier = publications == null || publicationData == null
                 ? null : new RuntimePublicationVerifier() {
@@ -282,7 +254,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                             String id, String token) {
                         var binding = publications.verifyDispatch(execution, id, token);
                         var fields = mapper.convertValue(binding,
-                                new TypeReference<java.util.Map<String, Object>>() { });
+                                new TypeReference<Map<String, Object>>() { });
                         var runtime = bindingRepository.findById(execution.getBindingId());
                         var storage = remote && runtime != null ? ssh.runtimeStorage(runtime.getRequest().getScope()) : null;
                         String publicationUrl = storage == null ? properties.getToolPublication().getServiceBaseUrl()
@@ -291,17 +263,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     }
 
                     @Override
-                    public java.util.Map<String, Object> finished(ToolExecutionRecord execution) {
+                    public Map<String, Object> finished(ToolExecutionRecord execution) {
                         var saved = publicationData.finishedForBroker(execution);
                         return saved == null ? null : mapper.convertValue(saved.path("result"),
-                                new TypeReference<java.util.Map<String, Object>>() { });
+                                new TypeReference<Map<String, Object>>() { });
                     }
 
                     @Override
-                    public java.util.Map<String, Object> receipt(ToolExecutionRecord execution) {
+                    public Map<String, Object> receipt(ToolExecutionRecord execution) {
                         var saved = publicationData.receiptForBroker(execution);
                         return saved == null ? null : mapper.convertValue(saved,
-                                new TypeReference<java.util.Map<String, Object>>() { });
+                                new TypeReference<Map<String, Object>>() { });
                     }
                 };
         try {
@@ -309,6 +281,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     transport, bindingRepository, sessionRepository,
                     executionRepository, UUID.randomUUID().toString(), LEASE,
                     LEASE, verifier, v3ResultWindow);
+            if (jdbc != null) {
+                this.service.configureStageStore(
+                        new JdbcRuntimeStageStore(jdbc));
+            }
         } catch (RuntimeException | Error failure) {
             provisioner.close();
             throw failure;
@@ -329,8 +305,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         this.recovery = broker.isTrustedLocalRebootRecovery()
                 ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
-        this.coordinator = new com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator(
-                service, store, workspaces, childWorkspaces, residents, resident, ssh, primaryProvisioner, extensionBindings, extensionTransport);
+        this.coordinator = new ManagedRuntimeCoordinator(
+                service, store, workspaces, childWorkspaces, ssh, primaryProvisioner, extensionBindings, extensionTransport);
         // Log the resolved window: a suffix-less config value binds as
         // seconds, so a stale milliseconds-style "1800000" meant as 30
         // minutes shows up here as PT500H.
@@ -343,7 +319,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return coordinator.isEnabled();
     }
 
-    public void configureExtensions(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService packages) {
+    public void configureExtensions(ManagedExtensionPackageService packages) {
         coordinator.configureExtensions(packages);
     }
 
@@ -368,12 +344,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
+    public boolean supportsWorkspaceClose(String profile) {
+        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(brokerSettings.getProvisioner())
+                        && externalRegistrations != null
+                        && service.supportsDrainedStopKind(RuntimeProviderKinds.EXTERNAL_WORKSPACE)
+                : supportsWorkspaceClose();
+    }
+
+    @Override
     public boolean supportsWorkspaceContextChange(ContextBinding binding) {
         return coordinator.supportsWorkspaceContextChange(binding);
     }
 
     @Override
-    public boolean supportsWorkspaceClose(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+    public boolean supportsWorkspaceClose(ContextBinding binding) {
+        if (RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(brokerSettings.getProvisioner())) {
+            if (binding == null || externalRegistrations == null || jdbc == null
+                    || !service.supportsDrainedStopKind(RuntimeProviderKinds.EXTERNAL_WORKSPACE)) {
+                return false;
+            }
+            try {
+                var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
+                return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
+                        && brokerSettings.getExternalProviderId().equals(registered.providerId())
+                        && !jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
+                                + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT'",
+                                Integer.class, binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId()).isEmpty();
+            } catch (RuntimeBrokerException | DataAccessException unavailable) {
+                return false;
+            }
+        }
         return coordinator.supportsWorkspaceClose(binding);
     }
 
@@ -389,19 +390,19 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     @Override
     public CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         return coordinator.drainWorkspaceResources(tenantId, sessionId, authority);
     }
 
     @Override
     public CompletionStage<Void> prepareWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         return coordinator.prepareWorkspaceResources(tenantId, sessionId, authority);
     }
 
     @Override
     public CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         return coordinator.recoverStoppedWorkspaceResources(tenantId, sessionId, authority);
     }
 
@@ -425,7 +426,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         return new ChildWorkspaceProvider() {
             @Override
-            public java.nio.file.Path storageRoot(ContextBinding binding) {
+            public Path storageRoot(ContextBinding binding) {
                 return workspaces.storageRoot(binding);
             }
 
@@ -446,7 +447,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return server.getBaseUri();
     }
 
-    @org.springframework.scheduling.annotation.Scheduled(scheduler = "runtimeRecoveryScheduler",
+    @Scheduled(scheduler = "runtimeRecoveryScheduler",
             fixedDelay = 5000)
     public void recoverSavedRuntimes() {
         if (recovery != null) {
@@ -462,6 +463,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
      */
     public RuntimeBrokerService service() {
         return service;
+    }
+
+    /** The resolver this Broker already built, or null when there is no
+     * workspace execution store. Exposed so the capability hint can share the
+     * very same placement authority instead of a provider lookup that finds no
+     * bean. */
+    public WorkspaceRuntimeResolver workspaceRuntimeResolver() {
+        return workspaces;
     }
 
     @Override
@@ -481,7 +490,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeProviderDependencies dependencies) {
         var broker = properties.getRuntimeBroker();
         if (broker.isTrustedLocalRebootRecovery()
-                && (!broker.isDurableLocalProcess() || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner()))) {
+                && (!broker.isDurableLocalProcess() || !RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner()))) {
             if (!broker.isDurableLocalProcess()) {
                 throw new IllegalStateException("Trusted reboot recovery requires durable local-process"
                         + " provisioning; enable durable local-process"
@@ -505,18 +514,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
 
     private static String resolveWorkspaceCwd(
             ManagedAgentProperties.RuntimeBroker broker) {
-        if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
-            // This is a Pod path, independent of the server host filesystem.
-            String configured = broker.getWorkspaceCwd();
-            if (configured == null || !configured.startsWith("/") || configured.indexOf('\0') >= 0
-                    || !configured.equals("/") && Arrays.stream(configured.substring(1).split("/", -1))
-                            .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
-                throw new IllegalStateException("Kubernetes Runtime Broker"
-                        + " workspace cwd must be an absolute normalized path");
-            }
-            return configured;
-        }
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())) {
+        if (!RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())) {
             return broker.getWorkspaceCwd();
         }
         try {
@@ -532,8 +530,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             String workspaceCwd) {
         String configured = broker.getWorkspaceId();
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())
-                && !"kubernetes".equals(broker.getProvisioner())) {
+        if (!RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())) {
             require(configured, "Runtime Broker workspace ID");
             return configured;
         }

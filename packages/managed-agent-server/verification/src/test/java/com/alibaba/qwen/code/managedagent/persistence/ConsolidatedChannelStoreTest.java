@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryR
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,7 +18,7 @@ class ConsolidatedChannelStoreTest {
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
     private JdbcChannelDeliveryRepository deliveries;
-    private ChannelInstanceStore instances;
+    private JdbcChannelInstanceStore instances;
 
     @BeforeEach
     void initialize() {
@@ -28,7 +27,7 @@ class ConsolidatedChannelStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         deliveries = new JdbcChannelDeliveryRepository(jdbc);
-        instances = new ChannelInstanceStore(jdbc);
+        instances = new JdbcChannelInstanceStore(jdbc);
     }
 
     @AfterEach
@@ -53,10 +52,10 @@ class ConsolidatedChannelStoreTest {
         assertThat(deliveries.transition("tenant", "channel", "delivery", "planned", "sending", null).state())
                 .isEqualTo("sending");
         jdbc.update("UPDATE ma_delivery SET claimed_at = 1 WHERE delivery_kind = 'CHANNEL'");
-        jdbc.update("INSERT INTO ma_delivery (delivery_key,delivery_kind,tenant_id,delivery_id,source_session_id,"
-                + "source_scope_key,payload_json,transport_state,reception_state,consumption_state,claimed_at,"
-                + "gmt_create,gmt_modified) VALUES ('other','SESSION_MESSAGE','tenant','delivery','session',"
-                + "'another','{}','sending','PENDING','PENDING',1,0,0)");
+        jdbc.update("INSERT INTO ma_delivery (delivery_kind,tenant_id,delivery_id,source_session_id,"
+                + "source_scope_id,payload_json,transport_state,reception_state,consumption_state,claimed_at,"
+                + "gmt_create,gmt_modified) VALUES ('SESSION_MESSAGE','tenant','delivery','session',"
+                + "'session','{}','sending','PENDING','PENDING',1,0,0)");
         assertThat(instances.findExpiredClaims(2, 100)).hasSize(1);
         assertThat(deliveries.listByChannel("tenant", "channel", null, 100).deliveries()).hasSize(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_delivery WHERE delivery_kind = 'CHANNEL'", Long.class))
@@ -94,13 +93,12 @@ class ConsolidatedChannelStoreTest {
 
     private void resource(String session, String body) {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session);
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES (?,?,'tenant',?,'resource','domain',1,?,?, 'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(scope, "resource"), scope, session, bytes.length,
+        jdbc.update("INSERT INTO ma_resource (tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create) VALUES ('tenant',?,'resource','domain',1,?,?, 'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ")",
+                session, bytes.length,
                 ChannelStoreSupport.sha256(body), bytes);
     }
 
     private static ChannelDelivery planned(String channel) {
-        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0);
+        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0, 1);
     }
 }

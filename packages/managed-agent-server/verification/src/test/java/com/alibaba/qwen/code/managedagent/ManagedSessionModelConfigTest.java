@@ -15,16 +15,18 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -62,7 +64,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ManagedSessionModelConfigTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
-    @Autowired private ManagedWorkspaceRegistry registry;
+    @Autowired private JdbcManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
     private final String token = "synthetic-writer-token-0123456789012345";
     private String tenant;
@@ -75,7 +77,7 @@ class ManagedSessionModelConfigTest {
 
     @BeforeEach
     void setup() {
-        tenant = "model-config-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -97,8 +99,8 @@ class ManagedSessionModelConfigTest {
         store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
                 registry, properties, new SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills(jdbc, json, new RequestDigests(), null),
-                null, null, null, null, null, null, configs);
+                new JdbcManagedSessionSkills(jdbc, json, new RequestDigests(), null),
+                null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
         when(harness.supportsModelSelection()).thenReturn(true);
@@ -136,6 +138,60 @@ class ManagedSessionModelConfigTest {
         assertCode(() -> new TransactionTemplate(manager).execute(status ->
                 store.changeSessionModel(tenant, "actor", session, "switch", "digest", "catalog", 0, true)),
                 "model_config_immutable");
+    }
+
+    @Test
+    void preservesHistoricalWireJsonAndDigest() throws Exception {
+        var config = config("synthetic-key-a");
+        assertThat(json.writeValueAsString(config.wireValue())).isEqualTo(
+                "{\"protocol\":\"openai\",\"model\":\"session-model\","
+                        + "\"base_url\":\"https://models.example/v1\",\"api_key\":\"synthetic-key-a\","
+                        + "\"generation_config\":{\"temperature\":0.4}}");
+        assertThat(config.digest()).isEqualTo(
+                "sha256:3d201abd9923bc43dea7629963073a1c64ff4f4bf60460da13de82cc93df6023");
+    }
+
+    @Test
+    void preservesAbsentAndEmptyGenerationAndRejectsNulls() {
+        assertThat(SessionModelConfig.parse(null)).isNull();
+        ObjectNode value = (ObjectNode) json.valueToTree(config("key").wireValue());
+        value.remove("generation_config");
+        SessionModelConfig absent = SessionModelConfig.parse(value);
+        assertThat(absent.wireValue()).doesNotContainKey("generation_config");
+        assertThatThrownBy(() -> absent.wireValue().put("model", "changed"))
+                .isInstanceOf(UnsupportedOperationException.class);
+
+        value.set("generation_config", json.createObjectNode());
+        SessionModelConfig empty = SessionModelConfig.parse(value);
+        assertThat(empty.wireValue()).containsEntry("generation_config", Map.of());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> generation = (Map<String, Object>) empty.wireValue()
+                .get("generation_config");
+        assertThatThrownBy(() -> generation.put("temperature", 1))
+                .isInstanceOf(UnsupportedOperationException.class);
+
+        value.putNull("generation_config");
+        assertCode(() -> SessionModelConfig.parse(value), "invalid_model_config");
+        value.set("generation_config", json.createObjectNode().putNull("temperature"));
+        assertCode(() -> SessionModelConfig.parse(value), "invalid_model_config");
+    }
+
+    @Test
+    void normalizesSamplingNumberTypesBeforeDigesting() throws Exception {
+        SessionModelConfig config = SessionModelConfig.parse(json.readTree(
+                "{\"protocol\":\"openai\",\"model\":\"session-model\","
+                        + "\"base_url\":\"https://models.example/v1\",\"api_key\":\"key\","
+                        + "\"generation_config\":{\"top_k\":1e0,\"max_tokens\":1.0,"
+                        + "\"seed\":1,\"temperature\":1}}"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> generation = (Map<String, Object>) config.wireValue()
+                .get("generation_config");
+        for (String field : List.of("top_k", "max_tokens", "seed")) {
+            assertThat(generation.get(field)).isInstanceOf(Integer.class).isEqualTo(1);
+        }
+        assertThat(generation.get("temperature")).isInstanceOf(Double.class).isEqualTo(1.0);
+        assertThat(config.digest()).isEqualTo(SessionModelConfig.parse(
+                json.valueToTree(config.wireValue())).digest());
     }
 
     @Test
@@ -212,11 +268,11 @@ class ManagedSessionModelConfigTest {
 
     @Test
     void privateReadValidatesWriterBeforeAuthorization() throws Exception {
-        var authority = mock(ManagedSessionStore.class);
+        var authority = mock(JdbcManagedSessionStore.class);
         var modelConfigs = mock(ManagedSessionModelConfigs.class);
         var config = config("key");
         when(modelConfigs.read(tenant, "session", config.digest())).thenReturn(config);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", modelConfigs);
         var mvc = MockMvcBuilders.standaloneSetup(controller)
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver()).build();
@@ -243,7 +299,7 @@ class ManagedSessionModelConfigTest {
         var sessionStore = VerificationFixtures.managedSessionStore(jdbc);
         new TransactionTemplate(manager).execute(status -> sessionStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
-        var controller = new ManagedSessionStoreController(sessionStore, null, null);
+        var controller = new ManagedSessionStoreController(sessionStore, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         var request = new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), null);
         var result = new TransactionTemplate(manager).execute(status -> controller.modelConfig(new TenantContext(tenant, null), session,
@@ -269,8 +325,8 @@ class ManagedSessionModelConfigTest {
     void secretReadsPreserveLegacyCloseAndLifecycleAuthority() {
         var config = config("hook-key");
         String session = create("hooks", config);
-        var authority = mock(ManagedSessionStore.class);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var authority = mock(JdbcManagedSessionStore.class);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         controller.modelConfig(new TenantContext(tenant, null), session, token,
                 new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), "legacy-close"), new HttpHeaders());
