@@ -28,6 +28,7 @@ defaults:
     shell: 'bash'
 
 permissions:
+  actions: 'read'
   contents: 'read'
   issues: 'write'
 
@@ -51,11 +52,14 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     concurrency:
-      group: 'main-ci-failure-resolve-${{ github.event.workflow.id }}'
+      group: 'main-ci-failure-issue-${{ github.event.workflow.id }}'
       cancel-in-progress: false
+      queue: 'max'
     steps:
       - name: 'Close the issues this green run covers'
         env:
+          GH_TOKEN: '${{ github.token }}'
+          CONFIGURED_BOT_LOGIN: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           REPO: '${{ github.repository }}'
           WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           RUN_ID: '${{ github.event.workflow_run.id }}'
@@ -87,7 +91,7 @@ jobs:
           lookup_ok=false
           for attempt in 1 2 3; do
             if gh issue list --repo "${REPO}" --state open --limit 3000 \
-              --json number,title,body,updatedAt > "${open_issues}"; then
+              --json number,title,author,updatedAt > "${open_issues}"; then
               lookup_ok=true
               break
             fi
@@ -98,53 +102,94 @@ jobs:
             exit 1
           fi
 
-          # Title families mirror the reporter's own matching: exact, the
-          # legacy " on <sha>" suffix, and the per-signature " — <test>"
-          # suffix. An issue touched after this run started belongs to a
-          # newer occurrence and must stay open.
-          candidates="${work}/candidates.tsv"
+          # Title families mirror the reporter's own matching. The author gate
+          # accepts both identities the reporter can write with; a same-titled
+          # human tracking issue must never enter the close path.
+          candidates="${work}/candidates.txt"
           if ! jq -r --arg family "Main CI failed: ${WORKFLOW_NAME}" \
+            --arg bot "${CONFIGURED_BOT_LOGIN}" \
             --arg run_started "${RUN_STARTED_AT}" '
               .[]
+              | select(.author.login == $bot or .author.login == "app/github-actions")
               | select(
                   (.title == $family)
                   or (.title | startswith($family + " — "))
                   or (.title | startswith($family + " on "))
                 )
               | select(.updatedAt < $run_started)
-              | [ (.number | tostring), ((.body // "") | @base64) ] | @tsv
+              | .number
             ' "${open_issues}" > "${candidates}"; then
             echo '::error::Could not filter the open issues; closing nothing.'
             exit 1
           fi
 
           closed=0
-          while IFS=$'\t' read -r number encoded_body; do
+          while IFS= read -r number; do
             [[ -n "${number}" ]] || continue
-            body_text="$(printf '%s' "${encoded_body}" | base64 --decode)"
-            # Every issue body lists the failing jobs as markdown links in the
-            # form "- [`job name`](run url)". A report closes only when all of
-            # them ran successfully in this green run: a lane that was skipped
-            # or absent here is not evidence that its failure went away.
-            job_names="$(printf '%s\n' "${body_text}" \
-              | grep -o '^- \[`[^`]*`\]' \
-              | sed -e 's/^- \[`//' -e 's/`\]$//' || true)"
-            covered=true
-            if [[ -n "${job_names}" ]]; then
-              while IFS= read -r job_name; do
-                [[ -n "${job_name}" ]] || continue
-                if ! grep -Fxq -- "${job_name}" "${green_jobs}"; then
-                  covered=false
-                  break
-                fi
-              done <<< "${job_names}"
+            issue_json="${work}/issue-${number}.json"
+            if ! gh issue view "${number}" --repo "${REPO}" \
+              --json number,title,state,author,createdAt,updatedAt,body,comments \
+              > "${issue_json}"; then
+              echo "::warning::Could not re-read issue #${number}; leaving it open."
+              continue
             fi
+            if ! jq -e --arg bot "${CONFIGURED_BOT_LOGIN}" \
+              --arg run_started "${RUN_STARTED_AT}" '
+                .state == "OPEN"
+                and (.author.login == $bot or .author.login == "app/github-actions")
+                and .updatedAt < $run_started
+              ' "${issue_json}" >/dev/null; then
+              continue
+            fi
+
+            # Only marker-stamped reporter records count; the latest one wins
+            # even when it lists no jobs, so a jobless recurrence pins it open.
+            latest_record="$(jq -r --arg bot "${CONFIGURED_BOT_LOGIN}" '
+              def reporter: . == $bot or . == "app/github-actions" or . == "github-actions[bot]";
+              def failureRecord:
+                (.body // "")
+                | contains("qwen-managed-agent-ci-failure:")
+                  or contains("qwen-main-ci-failure:")
+                  or contains("qwen-main-ci-failure-sig:");
+              ([{createdAt, body: (.body // "")}]
+                + [(.comments // [])[] | select(.author.login | reporter) | {createdAt, body: (.body // "")}])
+              | map(select(failureRecord))
+              | sort_by(.createdAt) | last | .body // ""
+            ' "${issue_json}")"
+            job_names="$(printf '%s\n' "${latest_record}" | awk '
+              /^- \[`[^`]+`\]/ {
+                line = $0
+                sub(/^- \[`/, "", line)
+                sub(/`\].*$/, "", line)
+                print line
+                next
+              }
+              /^  - `[^`]+`/ {
+                line = $0
+                sub(/^  - `/, "", line)
+                sub(/`.*$/, "", line)
+                print line
+              }
+            ')"
+            if [[ -z "${job_names}" ]]; then
+              echo "::warning::Could not identify the latest failure jobs in #${number}; leaving it open."
+              continue
+            fi
+
+            covered=true
+            while IFS= read -r job_name; do
+              [[ -n "${job_name}" ]] || continue
+              if ! grep -Fxq -- "${job_name}" "${green_jobs}"; then
+                covered=false
+                break
+              fi
+            done <<< "${job_names}"
             if [[ "${covered}" != true ]]; then
               continue
             fi
             if gh issue close "${number}" --repo "${REPO}" \
               --reason completed \
-              --comment "Main \`${WORKFLOW_NAME}\` run ${RUN_URL} completed green and covered every job this report named. Closing; the reporter reopens this issue if the signature recurs."; then
+              --comment "Main \`${WORKFLOW_NAME}\` run ${RUN_URL} completed green and covered every job this report's latest failure record named. Closing; the reporter reopens this issue if the signature recurs."; then
               closed=$((closed + 1))
             else
               echo "::warning::Could not close #${number}."
