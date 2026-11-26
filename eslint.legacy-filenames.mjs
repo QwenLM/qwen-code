@@ -192,7 +192,6 @@ export const legacyFilenames = [
   'layoutUtils',
   'loadedSettingsAdapter',
   'loggingContentGenerator',
-  'loopDetectionService',
   'lowlightLoader',
   'lspCommand',
   'LspConfigLoader',

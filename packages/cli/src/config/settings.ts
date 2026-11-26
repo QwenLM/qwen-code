@@ -259,6 +259,8 @@ export interface SettingsFile {
   rawJson?: string;
 }
 
+const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
+
 function getSettingsFileKeyWarnings(
   settings: Record<string, unknown>,
   settingsFilePath: string,
@@ -295,8 +297,19 @@ function getSettingsFileKeyWarnings(
 
     ignoredLegacyKeys.add(oldKey);
     warnings.push(
-      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+      REMOVED_MODEL_SETTINGS.some((key) => newPath === `model.${key}`)
+        ? `Warning: Legacy setting '${oldKey}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`
+        : `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
     );
+  }
+
+  const model = settings['model'];
+  for (const key of REMOVED_MODEL_SETTINGS) {
+    if (isPlainObject(model) && model[key] !== undefined) {
+      warnings.push(
+        `Warning: Setting 'model.${key}' was removed (loop detection no longer exists) and will be ignored in ${settingsFilePath}.`,
+      );
+    }
   }
 
   // Unknown top-level keys — log silently to debug output.

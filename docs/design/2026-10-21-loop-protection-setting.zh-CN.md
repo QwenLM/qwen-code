@@ -3,6 +3,7 @@
 [English](2026-10-21-loop-protection-setting.md) | [简体中文](2026-10-21-loop-protection-setting.zh-CN.md)
 
 - **状态**：已在 PR 分支实现
+- **已被取代**：[移除循环检测](2026-11-25-remove-loop-detection.zh-CN.md)
 - **日期**：2026-10-21
 - **相关**：issue #14828（两个 PR 中的第二个）、
   [循环停止原因](2026-10-20-loop-stop-reason.zh-CN.md)（PR 1，#14858）、
