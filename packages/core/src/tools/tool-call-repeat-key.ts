@@ -40,9 +40,8 @@ function canonicalizeForHash(value: unknown): unknown {
  * keys, preserved array order), so identical calls that differ only in
  * field order — or in a legacy alias such as `task` vs `agent` — hash to
  * the same key, and large payloads (e.g. write_file content) are retained
- * as a fixed-size digest rather than the raw JSON. Shared by the loop
- * detection service, the daemon's turn-loop guard (ACP Session), and the
- * duplicate provider tool-call replay detection so every runtime keys
+ * as a fixed-size digest rather than the raw JSON. Shared by the duplicate
+ * provider tool-call replay detection and auto mode, so every caller keys
  * repeats the same way.
  */
 export function getToolCallRepeatKey(toolName: string, args: unknown): string {

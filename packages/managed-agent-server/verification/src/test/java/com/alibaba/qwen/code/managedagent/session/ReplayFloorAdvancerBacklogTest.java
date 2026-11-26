@@ -40,7 +40,7 @@ class ReplayFloorAdvancerBacklogTest {
 
     @Test
     void theAppendingSessionAdvancesInOnePassOverAFullBacklog() {
-        String tenant = "tenant-replay-backlog-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<String> quiet = new ArrayList<>();
         for (int index = 0; index < BATCH_LIMIT; index++) {
             String sessionId = store.insertSessionCommand(tenant,

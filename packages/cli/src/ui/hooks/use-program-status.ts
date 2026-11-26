@@ -29,7 +29,6 @@ export interface ProgramStatusInputs {
   authPending: boolean;
   /** A slash command's shell confirmation is on screen. */
   shellConfirmationPending: boolean;
-  loopDetectionPending: boolean;
   /** Folder trust, MCP server or project hook approval at startup. */
   startupApprovalPending: boolean;
 }
@@ -52,13 +51,6 @@ export function deriveProgramStatus(input: ProgramStatusInputs): ProgramStatus {
       state: 'blocked',
       kind: 'permission',
       msg: 'Permission needed: Shell',
-    };
-  }
-  if (input.loopDetectionPending) {
-    return {
-      state: 'blocked',
-      kind: 'question',
-      msg: 'Loop detected: continue?',
     };
   }
   if (input.startupApprovalPending) {

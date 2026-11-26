@@ -93,7 +93,7 @@ import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call
 import { Kind, ToolConfirmationOutcome } from '../../tools/tools.js';
 import { runAgentLoop } from '../../core/agent-loop.js';
 import * as agentLoopRollout from '../../config/agent-loop-rollout.js';
-import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import { TurnToolCallCap } from '../../services/turn-tool-call-cap.js';
 import { streamOf } from '../../test-utils/model-fixtures.js';
 import {
   AgentEventType,
@@ -102,6 +102,7 @@ import {
   type AgentToolResultEvent,
   type AgentToolOutputUpdateEvent,
 } from './agent-events.js';
+import { AgentTerminateMode } from './agent-types.js';
 
 vi.mock('../../core/agent-loop.js', async (importOriginal) => {
   const actual =
@@ -150,7 +151,7 @@ async function runToolStep(
   abortController: AbortController,
   promptId: string,
   toolsList: FunctionDeclaration[],
-): Promise<{ messages: Content[]; results: unknown[] }> {
+): Promise<{ messages: Content[] }> {
   if (!shared) {
     return core.processFunctionCalls(
       calls,
@@ -161,7 +162,7 @@ async function runToolStep(
     );
   }
   const rounds = vi.mocked(runAgentLoop).mock.calls.length;
-  let step: { messages: Content[]; results: unknown[] } | undefined;
+  let step: { messages: Content[] } | undefined;
   core
     .getEventEmitter()
     .on(AgentEventType.TOOL_RESPONSES_FINALIZED, ({ responses }) => {
@@ -174,7 +175,6 @@ async function runToolStep(
             ),
           },
         ],
-        results: responses,
       };
     });
   let sent = 0;
@@ -205,17 +205,9 @@ async function runToolStep(
       }),
     getHistoryToolCallFingerprints: () => [],
   } as unknown as LlmChat;
-  // The loop detector is not under test here.
+  // The tool-call cap is not under test here.
   const detector = [
-    vi
-      .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
-      .mockReturnValue(false),
-    vi
-      .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-      .mockReturnValue(false),
-    vi
-      .spyOn(LoopDetectionService.prototype, 'recordToolResult')
-      .mockReturnValue(false),
+    vi.spyOn(TurnToolCallCap.prototype, 'check').mockReturnValue(false),
   ];
   const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
   try {
@@ -232,7 +224,7 @@ async function runToolStep(
   // The agent-core loop entry marker must be logged for this surface.
   expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'agent-core');
   entrySpy.mockRestore();
-  return step ?? { messages: [{ role: 'user', parts: [] }], results: [] };
+  return step ?? { messages: [{ role: 'user', parts: [] }] };
 }
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -875,7 +867,7 @@ describe.each(LOOPS)(
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
         getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
         isUnifiedAgentLoopEnabled: vi.fn(() => shared),
-        getSkipLoopDetection: () => false,
+        getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         ...overrides,
       } as unknown as Config;
@@ -1164,7 +1156,7 @@ describe.each(LOOPS)(
           'prompt-rejected',
           reason === 'undeclared' ? [] : [{ name: 'read_file' }],
         );
-        expect(result.results).toHaveLength(1);
+        expect(result.messages[0].parts).toHaveLength(1);
         expect(events.results).toHaveLength(1);
         expect(events.results[0].success).toBe(false);
         expect(events.results[0].error).toContain(
@@ -1200,9 +1192,7 @@ describe.each(LOOPS)(
                 ? { serverName: 'catalog', serverToolName: 'lookup' }
                 : undefined,
           }),
-          getSkipLoopDetection: () => true,
-          getMaxToolCallsPerTurn: () => 100,
-          isMaxToolCallsPerTurnExplicit: () => false,
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         },
       );
       const chat = {
@@ -1233,6 +1223,80 @@ describe.each(LOOPS)(
         expect(schedule.mock.calls[0]?.[0]).toEqual([
           expect.objectContaining({ callId: 'lookup', name }),
         ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
+    it.runIf(shared)('ends the run on a tool hook stop', async () => {
+      const { core } = buildCore(
+        'hook-stop',
+        { tools: ['*'] },
+        {
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
+        },
+      );
+      const addHistory = vi.fn();
+      const sendMessageStream = vi.fn(async () =>
+        (async function* () {
+          yield {
+            type: 'chunk',
+            value: {
+              functionCalls: [{ id: 'stop-call', name: 'read_file', args: {} }],
+            },
+          };
+        })(),
+      );
+      const chat = {
+        sendMessageStream,
+        getHistoryToolCallFingerprints: () => new Map(),
+        addHistory,
+      } as unknown as LlmChat;
+      const part = {
+        functionResponse: {
+          id: 'stop-call',
+          name: 'read_file',
+          response: { output: 'read' },
+        },
+      };
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler, requests) {
+          const [request] = Array.isArray(requests) ? requests : [requests];
+          await (this as unknown as Scheduler).onAllToolCallsComplete?.([
+            {
+              status: 'success',
+              request,
+              response: {
+                callId: request.callId,
+                responseParts: [part],
+                resultDisplay: 'read',
+                error: undefined,
+                errorType: undefined,
+                hookStopReason: 'halt',
+              },
+            } as unknown as ToolCall,
+          ]);
+        });
+      try {
+        const result = await core.runReasoningLoop(
+          chat,
+          [],
+          [{ name: 'read_file' }],
+          new AbortController(),
+          { maxTurns: 5 },
+        );
+        expect(result.terminateMode).toBe(AgentTerminateMode.HOOK_STOPPED);
+        expect(result.text).toBe('A hook stopped the agent: halt');
+        expect(sendMessageStream).toHaveBeenCalledOnce();
+        expect(addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'stop-call' }),
+            }),
+          ],
+        });
       } finally {
         schedule.mockRestore();
       }
@@ -1790,7 +1854,7 @@ describe.each(LOOPS)(
           getMaxSubagentDepth: vi.fn().mockReturnValue(5),
           getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
           isUnifiedAgentLoopEnabled: () => shared,
-          getSkipLoopDetection: () => false,
+          getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
           isEventBusAgentLoopEnabled: () => kernel,
         } as unknown as Config;
         const core = new AgentCore(
@@ -2106,7 +2170,7 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
       const checkToolSteps = trackToolSteps(shared, kernel);
       const config = {
         isUnifiedAgentLoopEnabled: () => shared,
-        getSkipLoopDetection: () => false,
+        getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
         isEventBusAgentLoopEnabled: () => kernel,
         getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
         getDebugLogger: vi
@@ -2513,7 +2577,7 @@ describe('AgentCore.prepareTools', () => {
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
       getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
       isUnifiedAgentLoopEnabled: () => shared,
-      getSkipLoopDetection: () => false,
+      getMaxToolCallsPerTurn: () => Number.POSITIVE_INFINITY,
       isEventBusAgentLoopEnabled: () => kernel,
     } as unknown as Config;
 

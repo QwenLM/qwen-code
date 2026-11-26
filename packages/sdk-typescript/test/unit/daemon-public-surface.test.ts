@@ -1091,3 +1091,17 @@ describe('task executionMode guard public surface', () => {
     expect(isTaskExecutionMode({})).toBe(false);
   });
 });
+
+it('mirrors runtime.loadAdmission as an additive optional member', () => {
+  expectTypeOf<DaemonStatusReport['runtime']['loadAdmission']>().toEqualTypeOf<
+    | {
+        enabled: boolean;
+        overloaded: boolean;
+        reason: string | null;
+        loadRatio: number;
+        eventLoopLagP99Ms: number;
+        sampledAtMs: number;
+      }
+    | undefined
+  >();
+});

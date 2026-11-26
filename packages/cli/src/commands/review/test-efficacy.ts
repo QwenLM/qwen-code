@@ -48,6 +48,7 @@
 // `killed`.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -69,18 +70,27 @@ import { inertPath, probeWorktreePath } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   boxedRunLeftContainer,
+  closeGuestSessionSync,
   containerCommand,
   containerName,
   containerPathFor,
-  killContainer,
+  describeExecutionBoundary,
+  executeViaGuestBridgeSync,
+  guestCommandEnv,
   mountRootFor,
+  reapContainer,
+  reapVmWorker,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeIsRootless,
   runtimeClientEnv,
   sandboxVerdict,
+  trustInputFromPlan,
   type ContainerRuntime,
+  type ReviewTeardownStatus,
+  type ReviewTrustInput,
 } from './lib/sandboxed-exec.js';
+import { lockfileInstaller } from './lib/npm-toolchain.js';
 import {
   checkoutFilterCommands,
   describeFilterScreen,
@@ -1574,13 +1584,14 @@ export function probeCleanupFailureDetail(
 function probeContainer(
   command: string,
   probeTree: string,
+  trustContext?: ReviewTrustInput,
 ): {
   file: string;
   args: string[];
   name: string;
   runtime: ContainerRuntime;
 } | null {
-  const verdict = sandboxVerdict();
+  const verdict = sandboxVerdict(undefined, undefined, undefined, trustContext);
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(probeTree);
   if (tmpDir === null) return null;
@@ -1768,12 +1779,25 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
  */
+interface MicrovmProbeSession {
+  sessionId: string;
+  socketPath: string;
+  /** The guest session exists/needs an explicit close, even after an install failure. */
+  sessionAllocated: boolean;
+  /** One install attempt per phase, never repeated after a failed install. */
+  installAttempted: boolean;
+  installError?: string;
+}
+
 function runProbeSuite(
   probeTree: string,
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): {
   perFile: ProbeResult[];
   ms: number;
@@ -1798,12 +1822,149 @@ function runProbeSuite(
   // statement about the PR's own suite. Canonicalise what crosses the
   // boundary, and only there — the direct path keeps the caller's spelling.
   let farmRoot = dependencyRoot;
-  if (sandboxVerdict().kind === 'container') {
+  if (
+    sandboxVerdict(undefined, undefined, undefined, trustContext).kind ===
+    'container'
+  ) {
     try {
       farmRoot = realpathSync(dependencyRoot);
     } catch {
       // Unresolvable: the farm below reports what it could not link.
     }
+  }
+  const probeVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  if (probeVerdict.kind === 'microvm') {
+    const handleBridgeFault = (
+      res: {
+        timedOut: boolean;
+        protocolError?: string;
+        signal: NodeJS.Signals | null;
+      },
+      phaseLabel: string,
+    ): void => {
+      if (res.timedOut || res.protocolError) {
+        if (probeVerdict.workerPidFile) {
+          const reap = reapVmWorker({
+            pidFile: probeVerdict.workerPidFile,
+            expectedExeTokens: [probeVerdict.backend],
+          });
+          onTeardown?.(reap.status);
+        } else {
+          onTeardown?.('partial');
+        }
+      }
+      if (res.timedOut) {
+        throw new ProbeRunFailure(
+          `microVM ${phaseLabel} timed out after ${Math.round(timeout / 1000)}s`,
+          'runner-died',
+        );
+      }
+      if (res.protocolError) {
+        throw new ProbeRunFailure(
+          `microVM bridge (${probeVerdict.backend}) ${phaseLabel} error: ${res.protocolError}`,
+          'not-run',
+        );
+      }
+      if (res.signal) {
+        throw new ProbeRunFailure(
+          `microVM ${phaseLabel} killed by ${res.signal}`,
+          'runner-died',
+        );
+      }
+    };
+
+    // Content-only sync into the microVM — never expose host node_modules
+    // symlinks across a host mount boundary. Allocate dependencies once per
+    // session, and never mistake a failed install for a usable one on a later probe.
+    if (vmSession?.installError) {
+      throw new ProbeRunFailure(vmSession.installError, 'not-run');
+    }
+    if (vmSession && !vmSession.installAttempted) {
+      const installer = lockfileInstaller(probeTree);
+      if (installer) {
+        vmSession.installAttempted = true;
+        const installCmd =
+          installer === 'pnpm'
+            ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
+            : 'npm ci --no-audit --no-fund';
+        const installRes = executeViaGuestBridgeSync(probeVerdict.socketPath, {
+          command: installCmd,
+          kind: 'install',
+          timeoutMs: timeout,
+          env: guestCommandEnv('install'),
+          workspaceDir: probeTree,
+          workspaceSessionId: vmSession.sessionId,
+          workspaceMode: 'replace',
+        });
+        vmSession.sessionAllocated = true;
+        if (installRes.timedOut || installRes.protocolError) {
+          vmSession.installError = `microVM dependency install failed: ${installRes.protocolError ?? 'timed out'}`;
+        } else if (installRes.exitCode !== 0) {
+          vmSession.installError = `microVM dependency install exited ${String(installRes.exitCode)}`;
+        }
+        handleBridgeFault(installRes, 'dependency install');
+        // A zero exit is not proof of a usable tree: `build-test` and
+        // `test-delta` both probe the installer's completeness marker inside
+        // the guest, and an efficacy probe must not spend N runs discovering
+        // the same empty install as `no-output`.
+        if (installRes.exitCode === 0) {
+          const marker =
+            installer === 'pnpm' ? '.modules.yaml' : '.package-lock.json';
+          const markerCheck = executeViaGuestBridgeSync(
+            probeVerdict.socketPath,
+            {
+              command: `test -f node_modules/${marker}`,
+              kind: 'test',
+              timeoutMs: Math.min(5_000, timeout),
+              env: guestCommandEnv('test'),
+              workspaceSessionId: vmSession.sessionId,
+              workspaceMode: 'reuse',
+            },
+          );
+          if (!markerCheck.ok || markerCheck.exitCode !== 0) {
+            vmSession.installError =
+              'microVM dependency install exited 0 without the lockfile completeness marker';
+          }
+        }
+        if (vmSession.installError) {
+          throw new ProbeRunFailure(vmSession.installError, 'not-run');
+        }
+      }
+    }
+
+    const guestSuite = `npx --no-install vitest run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+    const bridgeResult = executeViaGuestBridgeSync(probeVerdict.socketPath, {
+      command: guestSuite,
+      kind: 'test',
+      timeoutMs: timeout,
+      env: guestCommandEnv('test'),
+      workspaceDir: probeTree,
+      ...(vmSession
+        ? {
+            workspaceSessionId: vmSession.sessionId,
+            // `sync` removes stale non-node_modules files (e.g. PR-added files
+            // deleted during the revert probe) while keeping guest node_modules.
+            workspaceMode: vmSession.sessionAllocated ? 'sync' : 'replace',
+          }
+        : {}),
+    });
+    handleBridgeFault(bridgeResult, 'probe');
+    if (vmSession) vmSession.sessionAllocated = true;
+    return {
+      perFile: classifyProbeRun(
+        bridgeResult.exitCode ?? 1,
+        bridgeResult.stdout,
+        probes,
+        bridgeResult.stderr,
+      ),
+      ms: now() - started,
+      exposed: { linked: 0, failed: 0 },
+    };
   }
   const exposed = exposeDependencies(probeTree, farmRoot, {
     rebuild: true,
@@ -1823,7 +1984,7 @@ function runProbeSuite(
   const suite = `node ${shellQuotePath(
     findVitestBin(dependencyRoot),
   )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
-  const boxed = probeContainer(suite, probeTree);
+  const boxed = probeContainer(suite, probeTree, trustContext);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd: probeTree,
@@ -1871,9 +2032,9 @@ function runProbeSuite(
   // which message wins.
   if (boxed && boxedRunLeftContainer(r.status)) {
     // The deadline killed the CLIENT; the container outlives it — `--rm` fires
-    // only on a self-exit. Reach the daemon before reporting, or a
-    // TERM-ignoring suite keeps this mount writable past the end of the review.
-    killContainer(boxed.runtime, boxed.name);
+    // only on a self-exit. Reach the daemon and verify teardown before reporting.
+    const reap = reapContainer(boxed.runtime, boxed.name);
+    onTeardown?.(reap.status);
   }
   if (r.error)
     throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
@@ -2145,6 +2306,9 @@ export function runOneHunkProbe(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
@@ -2231,6 +2395,9 @@ export function runOneHunkProbe(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
+        vmSession,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2299,6 +2466,9 @@ export function runControlMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
   // A probe file reached through a symlink — at the leaf or an ancestor —
@@ -2334,6 +2504,9 @@ export function runControlMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
+        vmSession,
       );
       // `gated` is the runner's "went red" verdict; anything else — still
       // green, collected nothing, crashed — means the control did NOT
@@ -2366,6 +2539,9 @@ export function runOneMutant(
   deadlineAt?: number,
   now: () => number = Date.now,
   dependencyRoot: string = probeTree,
+  trustContext?: ReviewTrustInput,
+  onTeardown?: (status: ReviewTeardownStatus) => void,
+  vmSession?: MicrovmProbeSession,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
   if (probeTargetEscapes(probeTree, mutant.file)) {
@@ -2435,6 +2611,9 @@ export function runOneMutant(
         deadlineAt,
         now,
         dependencyRoot,
+        trustContext,
+        onTeardown,
+        vmSession,
       );
       const verdict = classifyMutantRun(perFile);
       const detail =
@@ -2618,7 +2797,45 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // The probe tree this phase WOULD build, named before it exists — the gate
   // has to answer before anything is created, and `probeWorktreePath` is a
   // pure path function.
-  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  const trustContext = trustInputFromPlan(report);
+  let closeReason: string | undefined;
+  const teardownState: { status: ReviewTeardownStatus } = {
+    status: 'not-applicable',
+  };
+  const recordTeardown = (status: ReviewTeardownStatus): void => {
+    if (status === 'failed') {
+      teardownState.status = 'failed';
+    } else if (status === 'partial' && teardownState.status !== 'failed') {
+      teardownState.status = 'partial';
+    } else if (
+      status === 'clean' &&
+      teardownState.status === 'not-applicable'
+    ) {
+      teardownState.status = 'clean';
+    }
+  };
+  const initialVerdict = sandboxVerdict(
+    undefined,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  const vmSession: MicrovmProbeSession | undefined =
+    initialVerdict.kind === 'microvm'
+      ? {
+          sessionId: `eff-${randomBytes(6).toString('hex')}`,
+          socketPath: initialVerdict.socketPath,
+          sessionAllocated: false,
+          installAttempted: false,
+        }
+      : undefined;
+  const sandboxRefusal = refuseUnsandboxedPhase(
+    probeWorktreePath(worktree),
+    initialVerdict,
+    undefined,
+    undefined,
+    trustContext,
+  );
   if (sandboxRefusal) {
     noteMutants(
       `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
@@ -2882,6 +3099,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           mutantDeadline,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
+          vmSession,
         );
         noteDependencyFarm(baseline.exposed);
         // A mutant is only evidence against a probe file that is green WITHOUT
@@ -2936,6 +3156,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               // two are the same) — and the control is the run that decides
               // whether ANY mutant verdict is trusted.
               worktree,
+              trustContext,
+              recordTeardown,
+              vmSession,
             );
             if (harnessValidated === null) {
               // THREE causes share this `null` and the note must not name one:
@@ -3011,6 +3234,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
+                vmSession,
               ),
             );
           }
@@ -3062,6 +3288,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
                 mutantDeadline,
                 now,
                 worktree,
+                trustContext,
+                recordTeardown,
+                vmSession,
               ),
             );
           }
@@ -3214,6 +3443,9 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,
+          trustContext,
+          recordTeardown,
+          vmSession,
         );
         noteDependencyFarm(revertRun.exposed);
         results.push(...revertRun.perFile);
@@ -3234,6 +3466,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           })),
         );
       } finally {
+        if (vmSession?.sessionAllocated) {
+          const closed = closeGuestSessionSync(
+            vmSession.socketPath,
+            vmSession.sessionId,
+          );
+          recordTeardown(closed.ok ? 'clean' : 'partial');
+          if (closed.reason) closeReason = closed.reason;
+        }
         // Discard the whole probe tree. There is no in-place restore to fail —
         // the shared worktree was never mutated — and a path that survives the
         // discard corrupts nothing: the next run's pre-sweep and cleanup.ts both
@@ -3382,6 +3622,36 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     },
     findings,
     cleanupFailure,
+    executionBoundary: (() => {
+      const verdict = sandboxRefusal
+        ? ({ kind: 'refused', reason: sandboxRefusal } as const)
+        : sandboxVerdict(undefined, undefined, undefined, trustContext);
+      const mountable = mountRootFor(probeWorktreePath(worktree)) !== null;
+      const effectiveBackend =
+        verdict.kind === 'refused'
+          ? 'refused'
+          : verdict.kind === 'microvm'
+            ? verdict.backend
+            : verdict.kind === 'container' && mountable
+              ? 'container'
+              : 'direct';
+      const boundaryNote =
+        teardownState.status === 'failed'
+          ? verdict.kind === 'microvm'
+            ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+            : 'container teardown verification failed — a timed-out probe container may still be running'
+          : teardownState.status === 'partial' && verdict.kind === 'microvm'
+            ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified${closeReason ? `: ${closeReason}` : ''}`
+            : verdict.kind === 'container' && !mountable
+              ? 'probe tree is not under a review temp dir, so probes ran directly rather than in a container'
+              : undefined;
+      return describeExecutionBoundary({
+        backend: effectiveBackend,
+        trustContext,
+        teardownStatus: teardownState.status,
+        ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
+      });
+    })(),
   };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify(result, null, 2), 'utf8');

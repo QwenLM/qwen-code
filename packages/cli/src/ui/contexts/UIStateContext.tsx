@@ -11,7 +11,6 @@ import type {
   ThoughtSummary,
   ShellConfirmationRequest,
   ConfirmationRequest,
-  LoopDetectionConfirmationRequest,
   HistoryItemWithoutId,
   StreamingState,
   SettingInputRequest,
@@ -101,7 +100,6 @@ export interface UIState {
   providerUpdateRequest: ProviderUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
-  loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   memoryFileCount: number;
   streamingState: StreamingState;
   commandCancellationBlocked: boolean;

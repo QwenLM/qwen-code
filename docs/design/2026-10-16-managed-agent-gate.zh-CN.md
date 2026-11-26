@@ -2,6 +2,9 @@
 
 [English](2026-10-16-managed-agent-gate.md) | [简体中文](2026-10-16-managed-agent-gate.zh-CN.md)
 
+下文记录最初的上线设计。当前快检范围、独立的审批检查结果和上线条件见
+[按变更路径选择 Managed Agent 检查](2026-11-25-managed-agent-path-checks.zh-CN.md)。
+
 状态：已在 `.github/workflows/managed-agent-gate.yml` 中实现；必需检查启用由 #17039
 跟踪。历史跟踪 issue：#14392、#14381。
 

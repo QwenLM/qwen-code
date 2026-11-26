@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/utils/envVarResolver.js';
+import { hasUnsupportedCommandHookArgs } from '@qwen-code/qwen-code-core/hooks/hookRegistry.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
@@ -283,7 +284,11 @@ const REQUIRED_FIELD: Record<string, string> = {
 function isRunnableHook(hook: unknown): hook is Record<string, unknown> {
   if (!isRecord(hook) || typeof hook['type'] !== 'string') return false;
   const field = REQUIRED_FIELD[hook['type']];
-  return field !== undefined && Boolean(hook[field]);
+  return (
+    field !== undefined &&
+    Boolean(hook[field]) &&
+    !hasUnsupportedCommandHookArgs(hook)
+  );
 }
 
 function entry(value: unknown, key: string | number): unknown {

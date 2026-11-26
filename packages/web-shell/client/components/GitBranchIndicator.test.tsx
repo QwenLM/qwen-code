@@ -1,12 +1,32 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
+import postcss from 'postcss';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { getTranslator, I18nProvider } from '../i18n';
+import chatStyles from './ChatEditor.module.css';
 import { GitBranchIndicator } from './GitBranchIndicator';
+
+function compileChatEditorStyles(): string {
+  const root = postcss.parse(
+    readFileSync(resolve(__dirname, './ChatEditor.module.css'), 'utf8'),
+  );
+  root.walkAtRules((atRule) => {
+    atRule.remove();
+  });
+  root.walkRules((rule) => {
+    rule.selector = rule.selector.replace(
+      /\.([A-Za-z_][A-Za-z0-9_-]*)/g,
+      (_, name: string) => `.${chatStyles[name] ?? name}`,
+    );
+  });
+  return root.toString();
+}
 
 let container: HTMLDivElement | undefined;
 let root: Root | undefined;
@@ -183,6 +203,87 @@ describe('GitBranchIndicator', () => {
   it('omits the badge dot for a clean compact chip', () => {
     render({ branch: 'main', compact: true, status: undefined });
     expect(chip().querySelector('[data-tone]')).toBeNull();
+  });
+
+  it('computes visible badge dot and hidden label when compact', () => {
+    const style = document.createElement('style');
+    style.textContent = compileChatEditorStyles();
+    document.head.appendChild(style);
+    try {
+      render({
+        branch: 'main',
+        compact: true,
+        status: {
+          v: 2,
+          workspaceCwd: '/repo',
+          branch: 'main',
+          conflicted: 2,
+        },
+      });
+      const el = chip();
+      const dot = el.querySelector('[data-tone]');
+      const label = el.querySelector(`.${chatStyles.gitBranchText}`);
+      expect(dot).not.toBeNull();
+      expect(label).not.toBeNull();
+      expect(getComputedStyle(dot!).display).toBe('block');
+      expect(getComputedStyle(label!).display).toBe('none');
+    } finally {
+      style.remove();
+    }
+  });
+
+  it('computes hidden badge dot when expanded', () => {
+    const style = document.createElement('style');
+    style.textContent = compileChatEditorStyles();
+    document.head.appendChild(style);
+    try {
+      render({
+        branch: 'main',
+        compact: false,
+        status: {
+          v: 2,
+          workspaceCwd: '/repo',
+          branch: 'main',
+          conflicted: 2,
+        },
+      });
+      const dot = chip().querySelector('[data-tone]');
+      expect(dot).not.toBeNull();
+      expect(getComputedStyle(dot!).display).toBe('none');
+    } finally {
+      style.remove();
+    }
+  });
+
+  it('keeps branch label visible and computes visible badge dot when details collapse', () => {
+    const style = document.createElement('style');
+    style.textContent = compileChatEditorStyles();
+    document.head.appendChild(style);
+    try {
+      render({
+        branch: 'main',
+        compact: false,
+        showDetails: false,
+        status: {
+          v: 2,
+          workspaceCwd: '/repo',
+          branch: 'main',
+          operation: 'rebase',
+          conflicted: 2,
+        },
+      });
+      const el = chip();
+      const dot = el.querySelector('[data-tone]');
+      const label = el.querySelector(`.${chatStyles.gitBranchText}`);
+      const indicators = el.querySelector(`.${chatStyles.gitBranchIndicators}`);
+      expect(dot).not.toBeNull();
+      expect(label).not.toBeNull();
+      expect(indicators).toBeNull();
+      expect(getComputedStyle(dot!).display).toBe('block');
+      expect(getComputedStyle(label!).display).not.toBe('none');
+    } finally {
+      style.remove();
+    }
   });
 
   it('labels a known-clean working tree in the accessible label', () => {

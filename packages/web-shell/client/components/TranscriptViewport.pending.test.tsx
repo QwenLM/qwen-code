@@ -24,6 +24,7 @@ const observed = vi.hoisted(() => ({
 }));
 vi.mock('../daemon/session/DaemonSessionProvider', () => ({
   useDaemonHistoryNavigationStore: () => observed.store,
+  useOptionalDaemonHistoryNavigationStore: () => observed.store,
 }));
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');

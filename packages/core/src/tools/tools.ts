@@ -648,6 +648,13 @@ export interface ToolResult {
   interruptedBeforeCompletion?: boolean;
 
   /**
+   * Set when the result names work that keeps running after the call, such
+   * as a shell moved to the background for a user message. A call cancelled
+   * after this result keeps it, so the model still learns the task.
+   */
+  keptWhenCancelled?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -700,6 +707,12 @@ export interface ToolResult {
    * honored when the tool batch carries a Goal context; ignored otherwise.
    */
   terminateTurn?: boolean;
+
+  /**
+   * A tool hook of a call this tool ran (a Code Mode `exec` call) returned
+   * `continue: false`: the turn ends after this batch, with this reason.
+   */
+  hookStopReason?: string;
 }
 
 /**

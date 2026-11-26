@@ -161,7 +161,7 @@ Issue #13753 对 I3 提出两点：
   - `write_file`、`edit`、`run_shell_command`、`monitor`、`agent` 与 `send_message` 都在获取 Broker 之前被拒绝；
   - 两个读工具在 `default` 与 `auto-edit` 下都预先批准，且 `glob` 只在 `/2` 与只读 profile 上预先批准。
 - **消息**（`hosted-session-message-session.test.ts`）：snapshot child 运行期间（attach 前后）都会被拒绝，且不提交任何东西，而运行中的 worktree child 仍能收到消息；快照完成后，只有在提供快照的主机上才续跑，续跑为 `snapshot` run；正在关闭的 Session 的拒绝不承诺续跑。
-- **主机标志与恢复**（`hosted-harness-session.test.ts`，新增 3 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；agent definition 发布了 Skills 时也不获取 skill 目录；恢复接受只读 profile，带捕获容量时仍会拒绝。
+- **主机标志与恢复**（`hosted-harness-session.tool-profiles.test.ts`, `hosted-harness-session.stored-definitions.test.ts`，新增 3 个用例；`workspace-recovery-session.test.ts`）：只有创建或加载重申了两个标志时才宣告 `snapshot`（只有 snapshot 标志或文本 `"true"` 都不算）；只读 profile 的 Session 可以创建，并声明它的两个工具；agent definition 发布了 Skills 时也不获取 skill 目录；恢复接受只读 profile，带捕获容量时仍会拒绝。
 - **Runtime 被替换**（`hosted-recovery.test.ts`，新增 2 个用例）：只读 profile 的 child 在 `read_file` 结果提交后 Runtime 被替换，恢复已保存的模型请求而不重跑工具，释放原 owner，并拒绝该 Turn 中的新工具调用。
 - **Relay**（`ChildResultRelayTest`，新增 6 个用例）：
   - snapshot run 以自己的模式准备副本，并以隔离方式创建 child；

@@ -16,14 +16,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRepositorySupportTest {
     @Test
-    void preservesLegacyHashesAndSeparatesManagedStorageIdentity() {
+    void separatesManagedStorageIdentityWithCanonicalReferences() {
         RuntimeProvisionRequest managed = ManagedContextProtocolTest.request();
         RuntimeProvisionRequest legacy = new RuntimeProvisionRequest(
                 managed.getScope(), null, managed.getProvisionerKind());
-        assertEquals("9483cdc5e70f3594cb9abf3416c592c710e23494cb1d52c2ae2d4b4520cc715f",
-                JdbcRepositorySupport.scopeKey(managed.getScope()));
-        assertEquals("a6a254c7261ee5da2dd213d5a3f399f740e5c77ced4069b188f74dcb54973d54",
-                JdbcRepositorySupport.requestKey(legacy));
+        // The de-hash replaces the legacy SHA-256 scope/request keys with
+        // canonical references; identity separation must still hold.
+        String scopeRef = JdbcRepositorySupport.scopeKey(managed.getScope());
+        assertTrue(scopeRef.startsWith("v1|"));
+        assertEquals(scopeRef, JdbcRepositorySupport.scopeKey(managed.getScope()));
+        assertTrue(JdbcRepositorySupport.requestKey(legacy).startsWith("v1|"));
         org.junit.jupiter.api.Assertions.assertNotEquals(JdbcRepositorySupport.requestKey(legacy),
                 JdbcRepositorySupport.requestKey(managed));
         RuntimeProvisionRequest other = new RuntimeProvisionRequest(managed.getScope(), null,

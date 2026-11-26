@@ -16,6 +16,9 @@ public interface ParkedMcpOwners {
     /** The owners holding a mount on this storage. */
     public List<Owner> onStorage(String storageKey, int limit);
 
-    /** How long the owner's Session journal has been sealed; empty while it is not sealed. */
+    /**
+     * How long the owner's Session journal has been sealed; empty while it is not sealed, and while its
+     * seal parks a Turn waiting for an Action, which resumes on this owner.
+     */
     public Optional<Duration> sealedFor(Owner owner);
 }

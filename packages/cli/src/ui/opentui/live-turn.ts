@@ -167,6 +167,7 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  promptHook?: OpenTuiSteeringSubmission['promptHook'];
   humanInput?: HumanPromptInput;
   hasUnknownInput?: boolean;
   displayText?: string;
@@ -716,7 +717,7 @@ export function useOpenTuiLiveTurn(
               text: modelText,
               restoredDraft: undefined,
             };
-            turnOptions = { ...turnOptions, ...rewrite };
+            turnOptions = { ...turnOptions, ...rewrite, promptHook: undefined };
             editablePrompt = typed;
             active.prompt = typed;
           }
@@ -768,6 +769,7 @@ export function useOpenTuiLiveTurn(
             if (seq === turnSeqRef.current) prepared = request;
           },
           submittedPrompt: turnOptions?.submittedPrompt,
+          promptHook: turnOptions?.promptHook,
           humanInput: turnOptions?.humanInput,
           promptContext,
           modPrompt: turnOptions?.modPrompt,
@@ -1056,6 +1058,7 @@ export function useOpenTuiLiveTurn(
                       hasUnknownInput: entry.hasUnknownInput,
                       pasteExpansions: entry.pasteExpansions,
                       submittedPrompt: entry.submittedPrompt ?? entry.text,
+                      promptHook: entry.promptHook,
                     },
                 entry.generated ? undefined : entry,
                 undefined,
