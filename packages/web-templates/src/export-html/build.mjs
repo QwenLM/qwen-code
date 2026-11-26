@@ -82,12 +82,11 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // warning = measurement + 713, hard ceiling = measurement + 1,713.
 // The Goal budget stop-reason localization (#17271) lands in the
 // transcript entry's i18n table (en/zh-CN inlined; ru is a
-// transcript stub): the branch measured +2,854 bytes on Node 22.23.1
-// against main b9da38c7bd, and main carries no goal.reason keys, so the
-// merged tree estimates at 2,155,573 + 2,854 = 2,158,427 bytes. The
-// warning is provisionally 2,158,427 + 713; re-measure the host build
-// and re-track if the actual measurement differs.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_159_140;
+// transcript stub): main carries no goal.reason keys, and the merged
+// tree measures 2,159,362 renderer JS bytes on the 2026-11-26 host
+// build (Node 22.23.1), 3,789 above the shared-tree baseline.
+// Re-tracked from that measurement: warning = measurement + 713.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_160_075;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
