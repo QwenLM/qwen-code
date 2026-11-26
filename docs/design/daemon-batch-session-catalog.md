@@ -117,8 +117,9 @@ verified by the safe open helper, including symlinks.
 Once the page is selected, the daemon reads worktree, PR binding, artifact
 summary and Goal sidecars for its persisted rows and PR binding sidecars for its
 live-only rows. It also reads the prompt ledger for active persisted rows to
-detect interrupted prompts. Live work in progress takes precedence over the
-continuation hint. These fields do not affect page membership or the cursor.
+detect interrupted prompts. Before returning rows with a continuation hint, the
+daemon checks their current live state so work started during page enrichment
+can suppress the hint. These fields do not affect page membership or the cursor.
 Persisted rows reuse completed sidecar reads and share in-progress reads for the
 lifetime of the same cached summary. Cancelling one request releases its wait
 without cancelling a read another request still needs. Sidecars for a row first

@@ -21,6 +21,7 @@ import {
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -122,9 +123,17 @@ describe('merged session catalog pagination', () => {
 
   function bridgeFor(sessions: BridgeSessionSummary[]) {
     const list = vi.fn(() => sessions);
+    const getSessionSummary = vi.fn((sessionId: string) => {
+      const session = sessions.find((row) => row.sessionId === sessionId);
+      if (!session) throw new SessionNotFoundError(sessionId);
+      return session;
+    });
     return {
       list,
-      bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
+      bridge: {
+        listWorkspaceSessions: list,
+        getSessionSummary,
+      } as unknown as AcpSessionBridge,
     };
   }
 
@@ -1744,26 +1753,62 @@ describe('merged session catalog pagination', () => {
       expect(result.sessions[0]?.needsContinuation).toBe(true);
     });
 
-    it.each([
+    describe.each([
       ['organized', { view: 'organized' as const }],
       ['metadata-filtered', { sourceType: 'default' }],
-    ] as const)(
-      'enriches the %s list path and respects live state',
-      async (_label, options) => {
-        const session = summary(0);
-        await persist(session);
-        await writeLedger(session, [inFlight]);
-        const result = await listSessions([], options);
-        expect(result.sessions[0]?.needsContinuation).toBe(true);
+    ] as const)('%s list', (_label, options) => {
+      it('returns the continuation hint on the second page', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        await writeLedger(second, [inFlight, terminal('interrupted')]);
 
-        const running = await listSessions(
-          [{ ...session, hasActivePrompt: true }],
-          options,
-        );
-        expect(running.sessions[0]?.sessionId).toBe(session.sessionId);
-        expect(running.sessions[0]?.needsContinuation).toBeUndefined();
-      },
-    );
+        const firstPage = await listSessions([second], { ...options, size: 1 });
+        expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+        ]);
+        expect(firstPage.sessions[0]?.needsContinuation).toBeUndefined();
+        expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+        const secondPage = await listSessions([second], {
+          ...options,
+          size: 1,
+          cursor: firstPage.nextCursor,
+        });
+        expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+          second.sessionId,
+        ]);
+        expect(secondPage.sessions[0]?.needsContinuation).toBe(true);
+        expect(secondPage.nextCursor).toBeUndefined();
+      });
+
+      it('clears the hint when a prompt starts during page enrichment', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        const completed = [inFlight, terminal('completed')];
+        await writeLedger(second, completed);
+        const live = [second];
+        abortHarness.beforeRead = async () => {
+          abortHarness.beforeRead = undefined;
+          live[0] = { ...second, hasActivePrompt: true };
+          await writeLedger(second, [
+            ...completed,
+            { ...inFlight, promptId: 'p2', at: 3 },
+          ]);
+        };
+
+        const result = await listSessions(live, { ...options, size: 2 });
+        expect(result.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+          second.sessionId,
+        ]);
+        expect(live[0]?.hasActivePrompt).toBe(true);
+        expect(result.sessions[1]?.needsContinuation).toBeUndefined();
+      });
+    });
   });
 });
 
