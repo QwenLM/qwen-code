@@ -2,6 +2,10 @@
 
 [中文版本](./web-shell-shared-input-history.zh-CN.md)
 
+- **Status:** merged — PR #18120, squash `65616b314b` (2026-11-26), released in `v0.28.6`. Deferred `[P3]` follow-up tracked in #18423.
+- **Scope:** `packages/core`, `packages/cli` (shell-history file lock, serve routes, TUI `useShellHistory`), `packages/sdk-typescript`, `packages/web-shell`, `integration-tests`
+- **Verification at merge:** 35/35 executable CI checks green on final PR head `4cfaddc70e` (including `web-shell E2E Smoke` shard 1 416 passed with `web-shell.shared-input-history.spec.ts`, Linux unit shards, no-AK integration shards, TUI parity, Serve A/B, and Java E2E); `verify-pr` 28/28 `merge-ready`; local CLI suites 138 passed, Web Shell suites 84 passed, real daemon HTTP/FS integration 4/4, and real desktop + Pixel 7 Chromium E2E 3/3 (plus mutation kills on the 100-entry bound, conditional-read queue wait, and prompt/mid-turn write ordering). Post-merge main push workflows (`Qwen Code CI`, `Managed Agent gate`, `Managed Agent loop verification`, `Web Shell Managed Host Build`, `Verify Landlock helper`, `pnpm Worktree Smoke`) green. Coverage boundary: mobile E2E ran in Linux Chromium Pixel 7 context with a mock ACP model child rather than physical phones, mobile Safari/WebKit, or live models.
+
 ## Background
 
 Web Shell stores composer input history (prompt history and shell-mode command history) solely in browser `localStorage` (`qwen-web-shell-history:<workspaceCwd>` and `qwen-web-shell-command-history`). When a user opens the same Web Shell session or workspace on both desktop and mobile, inputs submitted on desktop are invisible from mobile's **Input history** panel (and vice versa). Shell command history in Web Shell is also not scoped per workspace and does not share history with the CLI's project-level `shell_history` file.

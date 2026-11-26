@@ -2,6 +2,10 @@
 
 [English Version](./web-shell-shared-input-history.md)
 
+- **状态：** 已合入 — PR #18120，squash `65616b314b`（2026-11-26），随 `v0.28.6` 发布。延后 `[P3]` 后续项跟踪于 #18423。
+- **范围：** `packages/core`、`packages/cli`（Shell 历史文件锁、serve 路由、TUI `useShellHistory`）、`packages/sdk-typescript`、`packages/web-shell`、`integration-tests`
+- **合入时验证：** 最终 PR head `4cfaddc70e` 上 35/35 可执行 CI 检查全绿（含 `web-shell E2E Smoke` shard 1 共 416 passed 且执行 `web-shell.shared-input-history.spec.ts`、Linux unit 两片、no-AK 集成两片、TUI parity、Serve A/B 与 Java E2E）；`verify-pr` 28/28 `merge-ready`；本地 CLI 套件 138 passed、Web Shell 套件 84 passed、真实 daemon HTTP/FS 集成 4/4、真实桌面与 Pixel 7 Chromium 双客户端 E2E 3/3（并完成 100 条上限、条件读等待及 prompt/mid-turn 落盘排序的变异击杀）。合入后 main push 车道（`Qwen Code CI`、`Managed Agent gate`、`Managed Agent loop verification`、`Web Shell Managed Host Build`、`Verify Landlock helper`、`pnpm Worktree Smoke`）全绿。覆盖边界：移动端 E2E 在 Linux Chromium Pixel 7 context 与 mock ACP model child 下运行，不替代实体手机、mobile Safari/WebKit 或 live-model 验证。
+
 ## 背景
 
 当前 Web Shell 的输入框历史（Prompt 历史与 Shell 模式命令历史）完全保存在浏览器本地 `localStorage` 中（`qwen-web-shell-history:<workspaceCwd>` 与 `qwen-web-shell-command-history`）。当用户在手机和电脑上同时使用同一个 Web Shell 会话或工作区时，电脑上提交的历史输入在手机端的 **Input history** 面板中不可见（反之亦然）。此外，Web Shell 的 Shell 命令历史目前未按工作区隔离，也没有与 CLI 的项目级 `shell_history` 互通。
