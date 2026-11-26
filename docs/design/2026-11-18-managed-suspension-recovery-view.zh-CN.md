@@ -34,7 +34,7 @@
 
 `inspect()` 保留既有分支（Session 非 active；已绑定 Session 缺 head；recovery 状态非 READY；原始初始 Session；无恢复意图的活跃 Turn）。在落到 Harness 活证据之前，它先评估持久挂起状态：
 
-1. **干净挂起 → `ready`。** Session `ACTIVE`、head recovery `READY`、`state = SEALED`、`activation_phase = released`、投影齐平、无活跃 Turn、具备上述 wake 证明、且无未结算工作。视图为 `ready` 且 `nextTurnAllowed = true`：下一次 load 获取 writer generation + 1，被已 seal 的写者围栏保护，并重新安装 owner。不查 Harness 证据，缓存有无无关。
+1. **干净挂起 → `ready`。** Session `ACTIVE`、head recovery `READY`、`state = SEALED`、`activation_phase = released`、投影齐平、无活跃 Turn、具备上述 wake 证明、且无未结算工作。视图为 `ready` 且 `nextTurnAllowed = true`：下一次 load 获取 writer generation + 1，被已 seal 的写者围栏保护，并复用 parked owner 的连接或重新安装 owner。不查 Harness 证据，缓存有无无关。
 2. **已 seal 但投影滞后 → `awaiting_evidence`。** `activation_head_revision < journal_revision`：释放可能尚未投影。视图选择等待而非猜测，这不是运维失败。
 3. **其余情况一律下落**到既有的写者丢失与活证据分支。无法证明自己什么都不欠的已 seal head，保持这些分支本来就给出的保守答案；既不会被改写成健康挂起，也不会被赋予新的异常码——裸 `writers:seal` 与被拒绝的 load 都能合法地留下这些形态。
 

@@ -2,16 +2,14 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -54,7 +52,6 @@ class ManagedActionStoreTest {
     private JdbcManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
-    private String scope;
 
     @BeforeEach
     void initialize() throws Exception {
@@ -65,7 +62,6 @@ class ManagedActionStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,'agent','ACTIVE','manual',0,0)", TENANT, SESSION);
         agents = mock(AgentStateStore.class);
@@ -86,6 +82,106 @@ class ManagedActionStoreTest {
         if (fixture != null) {
             fixture.close();
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "decided, allow, false, COMPLETED,",
+        "decided, allow, true, COMPLETED,",
+        "decided, deny, false, FAILED, action_already_resolved",
+        "expired, allow, true, FAILED, action_expired",
+        "cancelled, allow, false, FAILED, action_cancelled"
+    })
+    void settlesEndedResponsesWithOneRead(String state, String decision, boolean leased,
+            String expectedState, String expectedFailure) {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        if (leased) {
+            lease(operationId);
+        }
+        project(state, "decided".equals(state) ? response(decision) : null, 2, 1000);
+        String decisionReceipt = actions.find(TENANT, SESSION, ACTION).orElseThrow().decisionReceiptId();
+        trace.clear();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(trace.events()).filteredOn(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("select ")).hasSize(1);
+        assertThat(stringColumn("state", operationId)).isEqualTo(expectedState);
+        assertThat(stringColumn("failure_code", operationId)).isEqualTo(expectedFailure);
+        assertThat(stringColumn("decision_receipt_id", operationId))
+                .isEqualTo("COMPLETED".equals(expectedState) ? decisionReceipt : null);
+        assertThat(stringColumn("admission_stage", operationId)).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("CONFIRMED");
+        assertThat(stringColumn("claim_owner", operationId)).isNull();
+        String receipt = stringColumn("receipt_id", operationId);
+        assertThat(receipt).isNotBlank();
+        trace.clear();
+
+        actions.settleEndedResponses(30);
+
+        assertThat(trace.events()).noneMatch(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("update "));
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo(receipt);
+    }
+
+    @Test
+    void doesNotSettleARequestedAction() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(stringColumn("state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("receipt_id", operationId)).isNull();
+    }
+
+    @Test
+    void admittingADecisionUnparksTheSessionsActionTurns() {
+        project("requested", null, 1, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,1234,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
+
+        admit("decision", "digest", response("allow"), 10);
+
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
+    }
+
+    // The Action park guard finds a Turn's requested Action by this column.
+    @Test
+    void projectsTheActionPromptIdentity() {
+        project("requested", null, 1, 1000);
+
+        assertThat(jdbc.queryForMap("SELECT prompt_id FROM ma_session_record WHERE tenant_id=?"
+                + " AND session_id=? AND record_kind='ACTION' AND action_id=?", TENANT, SESSION, ACTION)
+                .get("prompt_id")).isEqualTo("turn");
+    }
+
+    @Test
+    void doesNotOverwriteAResponseConfirmedAfterCandidateSelection() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        project("decided", response("allow"), 2, 1000);
+        var racing = new ManagedSchemaJdbcTemplate(fixture.source()) {
+            @Override
+            public <T> java.util.List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper) {
+                var rows = super.query(sql, mapper);
+                jdbc.update("UPDATE ma_operation SET state = 'COMPLETED', delivery_state = 'CONFIRMED',"
+                                + " receipt_id = 'concurrent-receipt' WHERE tenant_id = ? AND session_id = ?"
+                                + " AND operation_id = ?", TENANT, SESSION, operationId);
+                return rows;
+            }
+        };
+
+        new JdbcManagedActionStore(racing, agents).settleEndedResponses(20);
+
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("concurrent-receipt");
     }
 
     @Test
@@ -144,6 +240,10 @@ class ManagedActionStoreTest {
         // The first delivery of the answer failed past its retry budget,
         // with the budget-exempt watermark left over from answered attempts.
         markFailed(operationId, "action_response_delivery_failed", 10, 7);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,1234,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 20);
 
@@ -158,6 +258,10 @@ class ManagedActionStoreTest {
         assertThat(intColumn("budget_exempt_attempt", operationId)).isZero();
         assertThat(stringColumn("receipt_id", operationId)).isNull();
         assertThat(stringColumn("failure_code", operationId)).isNull();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
         // The re-admitted row is deliverable again — no recovery path could
         // see the FAILED/CONFIRMED row.
         assertThat(actions.deliverable(Long.MAX_VALUE))
@@ -177,11 +281,7 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"),
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?)",
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);
@@ -245,6 +345,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 20);
 
@@ -258,6 +362,10 @@ class ManagedActionStoreTest {
         // The settled row stays out of the outbox: it is terminal, not
         // re-deliverable.
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The decision-expired terminal is the same durable lie the digest heal
@@ -274,6 +382,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_decision_expired", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 2000);
 
@@ -283,6 +395,10 @@ class ManagedActionStoreTest {
         assertThat(stringColumn("failure_code", operationId)).isNull();
         assertThat(stringColumn("receipt_id", operationId)).isNotNull().isNotEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The re-admission gate keeps the Session check: on a Session that no
@@ -460,6 +576,23 @@ class ManagedActionStoreTest {
                 Long.class, TENANT, SESSION)).isEqualTo(1);
     }
 
+    @Test
+    void uncapturedPlanExitApprovalDecidesWithoutReleasingPlan() {
+        jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','turn','[]','digest','RUNNING','default',1,TRUE,0,0)",
+                TENANT, SESSION);
+        ObjectNode options = planExitOptions();
+        options.remove("continuationRef");
+        project("requested", null, 1, options);
+        project("decided", response("allow"), 2, options);
+        assertThat(actions.find(TENANT, SESSION, ACTION).orElseThrow().state()).isEqualTo("decided");
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Boolean.class, TENANT, SESSION)).isTrue();
+    }
+
     private ObjectNode planExitOptions() {
         ObjectNode input = JSON.createObjectNode().put("harnessSessionId", SESSION)
                 .put("runtimeSessionId", "turn").put("payloadJson", "{\"toolName\":\"exit_plan_mode\",\"input\":{\"plan\":\"Read then edit\"}}");
@@ -493,7 +626,7 @@ class ManagedActionStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    @CsvSource({"3,true", "3,false"})
     void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
         ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
         if (version < 3) {
@@ -519,8 +652,8 @@ class ManagedActionStoreTest {
                 JSON.createObjectNode().put("command", "printf rewritten").put("timeout", 120000));
         options.set("inputRef", inputRef);
         ObjectNode continuation = (ObjectNode) JSON.readTree(jdbc.queryForObject(
-                "SELECT inline_bytes FROM ma_resource WHERE resource_key=?",
-                byte[].class, ManagedSchemaKeys.key(scope, "continuation")));
+                "SELECT inline_bytes FROM ma_resource WHERE tenant_id=? AND session_id=? AND resource_id=?",
+                byte[].class, TENANT, SESSION, "continuation"));
         continuation.put("actionId", id);
         ObjectNode call = (ObjectNode) continuation.withArray("calls").get(0);
         call.put("actionId", id);
@@ -577,7 +710,7 @@ class ManagedActionStoreTest {
                         + " context_revision = 1, workspace_config_ref = 'config',"
                         + " workspace_policy_ref = 'policy', owner_actor_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                ManagedWorkspaceRegistry.actorKey(TENANT, "owner"), TENANT, SESSION);
+                "owner", TENANT, SESSION);
     }
 
     private void grantRole(String actor, String role) {
@@ -599,7 +732,7 @@ class ManagedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence, long expiresAt) {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
@@ -630,19 +763,19 @@ class ManagedActionStoreTest {
         ObjectNode record = JSON.createObjectNode().put("subtype", "managed_session_event_v1");
         record.set("managedSession", envelope);
         transactions.executeWithoutResult(status -> actions.apply(TENANT, "workspace", SESSION, sequence, 1,
-                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT * FROM ma_resource WHERE resource_key=?",
+                record.toString().getBytes(StandardCharsets.UTF_8), id -> jdbc.queryForObject("SELECT * FROM ma_resource WHERE tenant_id=? AND session_id=? AND resource_id=?",
                         (row, n) -> new StoredResource(id, row.getString("kind"), row.getInt("schema_version"), row.getLong("byte_length"),
-                                row.getString("sha256"), row.getBytes("inline_bytes")), ManagedSchemaKeys.key(scope, id))));
+                                row.getString("sha256"), row.getBytes("inline_bytes")), TENANT, SESSION, id)));
     }
 
     private ObjectNode storeBody(String id, String kind, JsonNode body) {
         try {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (tenant_id,workspace_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+                            + " VALUES (?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_id=resource_id",
+                    TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
             return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         } catch (java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);

@@ -124,8 +124,10 @@ is a backoff policy, not an estimate of when cleanup will complete.
 Prompt, cancellation, approvals, model changes and session close use the entry's
 bound connection. Inbound session lookups, restore replay, background admission,
 and generation events must also match the sending channel/connection. Live
-transcript reads, turn-index reads and flushes use that owner as well; only
-persisted reads without a live entry use the Legacy workspace fallback.
+transcript flushes use that owner; the transcript and turn-index reads themselves
+are now served daemon-local by the serve routes (see
+`untrusted-persisted-transcript.md`) and only cross the bridge for the live-flush
+barrier, so they no longer route through the owner process for the read itself.
 
 Workspace MCP, configuration/status control and preheat use Legacy. Aggregate
 liveness and activity inspect both engines; idle reclamation locates the actual

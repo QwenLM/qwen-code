@@ -215,7 +215,17 @@ describe('prebuild collector hygiene', () => {
     // The shared preflight wipes with path containment; the subtree rm it
     // replaced followed a leftover symlinked parent out of the workspace.
     const steps = audioYaml.jobs.collect.steps;
-    expect(steps[0].uses).toBe('$/.github/actions/prepare-release-runner');
+    expect(steps[0].name).toBe('Prepare isolated release runner');
+    expect(steps[0].uses).toBeUndefined();
+    expect(steps[0].if).toContain("runner.environment == 'self-hosted'");
+    expect(steps[0]['working-directory']).toBe('${{ runner.temp }}');
+    expect(steps[0].env).toEqual({
+      GH_TOKEN: '${{ github.token }}',
+      WORKFLOW_SHA: '${{ github.workflow_sha }}',
+    });
+    expect(steps[0].run).toContain(
+      'bash "$bootstrap/prepare-release-runner.sh"',
+    );
     expect(steps[1].name).toBe('Merge per-platform prebuilds');
     for (const entry of steps)
       expect(entry.run ?? '').not.toContain('rm -rf -- "${GITHUB_WORKSPACE}');

@@ -45,6 +45,8 @@ test.describe('session source switch sliding indicator', () => {
     const channelsTab = page.getByRole('tab', { name: 'Channels' });
     const indicator = page.locator('[data-slot="tabs-list-indicator"]');
     await expect(indicator).toBeVisible();
+    // Let the first measurement finish arming transitions before the first switch.
+    await page.evaluate(() => new Promise(requestAnimationFrame));
 
     const expectOverlay = async (tab: Locator) => {
       const [tabBox, pillBox] = await Promise.all([

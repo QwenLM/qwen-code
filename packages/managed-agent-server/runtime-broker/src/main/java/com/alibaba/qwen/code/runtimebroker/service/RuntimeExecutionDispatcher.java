@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -122,6 +123,7 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
@@ -455,7 +457,7 @@ final class RuntimeExecutionDispatcher {
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
-                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                || !HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }

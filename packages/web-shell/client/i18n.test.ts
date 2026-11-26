@@ -3,6 +3,8 @@ import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/
 import {
   WEB_SHELL_LANGUAGES,
   LOCAL_FILES_MESSAGE_KEYS,
+  RESTART_RECOVERY_MESSAGE_KEYS,
+  CHAT_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -486,6 +488,24 @@ describe('web-shell i18n catalog', () => {
     expect(zhPort).not.toBe(enPort);
   });
 
+  it('keeps the chat.* composer error strings localized in every catalog', () => {
+    const en = getTranslator('en');
+    // Derived from the EN catalog, not a hardcoded subset, so a new chat.* key
+    // enters the parity check automatically; pin one known key so the derivation
+    // cannot quietly be replaced by a subset.
+    expect(CHAT_MESSAGE_KEYS).toContain('chat.failedToSend');
+    // Compare against the EN value, not the raw key: the translator falls back
+    // to EN per key, so a deleted entry (or one pasted with the EN text) would
+    // otherwise silently degrade to English.
+    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      const translator = getTranslator(language);
+      for (const key of CHAT_MESSAGE_KEYS) {
+        expect(translator(key)).not.toBe(key);
+        expect(translator(key)).not.toBe(en(key));
+      }
+    }
+  });
+
   it.each([
     [
       'en',
@@ -877,6 +897,10 @@ describe('web-shell ru locale', () => {
     expect(t('welcome.prompt')).toBe('Что вы хотите сделать?');
     expect(t('session.new')).toBe('Новая сессия');
     expect(t('sidebar.project')).toBe('Рабочие области');
+    expect(t('settings.category.General')).toBe('Общие');
+    expect(t('settings.label.ui.theme')).toBe('Тема');
+    expect(t('hooks.status.success')).toBe('Успешно');
+    expect(t('hooks.status.running')).not.toBe(en('hooks.status.running'));
     expect(t('sidebar.recentSessions')).toBe('Недавние');
     expect(t('activity.title')).toBe('Активность');
     expect(
@@ -943,6 +967,18 @@ describe('web-shell zh-TW locale', () => {
     expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
   });
 
+  it('covers every restart-recovery message key without relying on fallbacks', () => {
+    expect(
+      Object.keys(ZH_TW)
+        .filter((key) => key.startsWith('restartRecovery.'))
+        .sort(),
+    ).toEqual([...RESTART_RECOVERY_MESSAGE_KEYS].sort());
+    for (const key of RESTART_RECOVERY_MESSAGE_KEYS) {
+      expect(getTranslator('en')(key)).not.toBe(key);
+      expect(getTranslator('zh-TW')(key)).not.toBe(key);
+    }
+  });
+
   it('carries no Simplified-only vocabulary in any entry', () => {
     for (const [key, value] of Object.entries(ZH_TW)) {
       const text = typeof value === 'function' ? value({}) : value;
@@ -952,6 +988,7 @@ describe('web-shell zh-TW locale', () => {
 
   it('translates the surfaces that would otherwise stay English', () => {
     const tw = getTranslator('zh-TW');
+    const ru = getTranslator('ru');
     const en = getTranslator('en');
     for (const key of [
       'sidebar.gitCloneJobGone',
@@ -960,9 +997,48 @@ describe('web-shell zh-TW locale', () => {
       'sidebar.liveVoicePending',
       'memory.lastDream',
       'memory.savedIn',
+      'managed.artifactLibrary.title',
+      'managed.artifactLibrary.description',
+      'managed.artifactLibrary.empty',
+      'managed.artifactLibrary.unavailable',
+      'managed.artifactLibrary.workspaceGone',
+      'managed.artifactLibrary.loadFailed',
+      'managed.artifactLibrary.unavailableBadge',
+      'managed.artifactLibrary.sessionFallback',
+      'managed.artifactLibrary.refresh',
+      'managed.artifactLibrary.close',
+      'userMessage.automatic.title',
+      'workspaceArtifactLibrary.title',
+      'workspaceArtifactLibrary.description',
+      'workspaceArtifactLibrary.filterPlaceholder',
+      'workspaceArtifactLibrary.scanning',
+      'workspaceArtifactLibrary.enumerationComplete',
+      'workspaceArtifactLibrary.finishedWithErrors',
+      'workspaceArtifactLibrary.partialBanner',
+      'workspaceArtifactLibrary.empty',
+      'workspaceArtifactLibrary.filterEmpty',
+      'workspaceArtifactLibrary.persistenceUnavailable',
+      'workspaceArtifactLibrary.runtimeUnavailable',
+      'workspaceArtifactLibrary.loadFailed',
+      'workspaceArtifactLibrary.sessionErrorsTitle',
+      'workspaceArtifactLibrary.sessionFallback',
+      'workspaceArtifactLibrary.archivedBadge',
+      'workspaceArtifactLibrary.activeBadge',
+      'workspaceArtifactLibrary.openSession',
+      'workspaceArtifactLibrary.jumpToPreview',
+      'workspaceArtifactLibrary.loadMore',
+      'workspaceArtifactLibrary.refresh',
+      'workspaceArtifactLibrary.retry',
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
+    expect(getTranslator('zh-CN')('userMessage.automatic.title')).toBe(
+      '自动触发',
+    );
+    expect(ru('userMessage.automatic.title')).toBe(
+      'Автоматическое срабатывание',
+    );
+    expect(tw('userMessage.automatic.title')).toBe('自動觸發');
     expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
     expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
   });
@@ -1005,5 +1081,31 @@ describe('web-shell zh-TW locale', () => {
         omittedColumns: 2,
       }),
     ).toBe('顯示 5/10 行，3/3 欄');
+  });
+});
+
+// The catalog checks above pin named key lists, so newly added keys are not
+// swept automatically. The touch follow-up keys are pinned here across every
+// shipped catalog: a missing entry would silently fall back to EN in the UI.
+const TOUCH_FOLLOWUP_KEYS = [
+  'composerMobile.acceptFollowup',
+  'composerMobile.dismissFollowup',
+  'composerMobile.caretUp',
+  'composerMobile.caretDown',
+  'composerMobile.caretRight',
+  'composerMobile.insertSlash',
+] as const;
+
+describe('touch follow-up catalog parity', () => {
+  it('carries the six touch follow-up keys in every shipped catalog', () => {
+    for (const key of TOUCH_FOLLOWUP_KEYS) {
+      const en = getTranslator('en')(key);
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key);
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+      }
+    }
   });
 });

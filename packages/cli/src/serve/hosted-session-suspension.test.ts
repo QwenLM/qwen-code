@@ -205,6 +205,52 @@ describe('suspension attempt driver', () => {
     expect(suspension.teardownStarted).toBe(false);
   });
 
+  it('runs the reversible hook before the irreversible teardown', async () => {
+    const { suspension, deps, calls } = harness({
+      beforeTeardown: () => {
+        calls.push('beforeTeardown');
+        return true;
+      },
+    });
+    const outcome = await runSuspensionAttempt(suspension, deps);
+    expect(outcome).toBe('suspended');
+    expect(calls).toEqual([
+      'markClosing:0',
+      'beforeTeardown',
+      'teardown',
+      'removeResident',
+    ]);
+  });
+
+  it('reverts when the reversible hook refuses the freeze', async () => {
+    const { suspension, deps, calls } = harness({
+      beforeTeardown: () => {
+        calls.push('beforeTeardown');
+        return false;
+      },
+    });
+    const outcome = await runSuspensionAttempt(suspension, deps);
+    expect(outcome).toBe('reverted');
+    expect(suspension.gate).toBe('open');
+    expect(suspension.teardownStarted).toBe(false);
+    expect(calls).toEqual(['markClosing:0', 'beforeTeardown', 'rearm']);
+  });
+
+  it('reverts and rethrows when the reversible hook fails', async () => {
+    const { suspension, deps, calls } = harness({
+      beforeTeardown: () => {
+        calls.push('beforeTeardown');
+        throw new Error('hook failed');
+      },
+    });
+    await expect(runSuspensionAttempt(suspension, deps)).rejects.toThrow(
+      'hook failed',
+    );
+    expect(suspension.gate).toBe('open');
+    expect(suspension.teardownStarted).toBe(false);
+    expect(calls).toEqual(['markClosing:0', 'beforeTeardown', 'rearm']);
+  });
+
   it('keeps serving when pending inputs exist, without gating', async () => {
     const { suspension, deps, calls } = harness({
       pendingInputs: async () => true,

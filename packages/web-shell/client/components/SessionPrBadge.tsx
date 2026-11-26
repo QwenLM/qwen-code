@@ -19,6 +19,8 @@ interface SessionPrBadgeProps {
    * owns roving-tabindex keyboard navigation (e.g. picker dialogs).
    */
   tabIndex?: number;
+  /** Uses less spacing and no pill background in sidebar session rows. */
+  compact?: boolean;
 }
 
 /**
@@ -40,7 +42,11 @@ export function openableSessionPrs(
  * PR with an overflow count and opens it through the desktop-aware
  * external-link opener.
  */
-export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
+export function SessionPrBadge({
+  prs,
+  tabIndex,
+  compact = false,
+}: SessionPrBadgeProps) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const openable = openableSessionPrs(prs);
@@ -56,7 +62,11 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
   const stateSuffix = sessionPrStateLabel(t, latest.state);
   return (
     <a
-      className={styles.sessionPrBadge}
+      className={
+        compact
+          ? `${styles.sessionPrBadge} ${styles.sessionPrBadgeCompact}`
+          : styles.sessionPrBadge
+      }
       href={latest.url}
       target="_blank"
       rel="noreferrer"

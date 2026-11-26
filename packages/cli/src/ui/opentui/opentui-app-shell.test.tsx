@@ -74,9 +74,8 @@ import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
-import { StreamingState } from '../types.js';
+import { MessageType, StreamingState, type HistoryItem } from '../types.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
-import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import {
   markApiHistoryPrompt,
@@ -89,6 +88,7 @@ import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
 import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import { livePromptEvents } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import {
   applyCollapsePolicyAndSummary,
@@ -133,7 +133,7 @@ const mocks = vi.hoisted(() => {
     /** Hook lines the project hooks approval hook reports as pending. */
     pendingHookLines: null as string[] | null,
     handleProjectHooksApprovalSelect: vi.fn(),
-    hooksAddInfo: null as ((text: string) => void) | null,
+    hooksAddNotice: undefined as Parameters<typeof useProjectHooksApproval>[2],
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     statusLineState: null as StatusLineState | null,
@@ -412,9 +412,9 @@ vi.mock('../hooks/use-project-hooks-approval.js', () => ({
   useProjectHooksApproval: (
     _config: unknown,
     _settings: unknown,
-    addInfo?: (text: string) => void,
+    addNotice?: Parameters<typeof useProjectHooksApproval>[2],
   ) => {
-    mocks.state.hooksAddInfo = addInfo ?? null;
+    mocks.state.hooksAddNotice = addNotice;
     return {
       isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
       pendingProjectHooks: mocks.state.pendingHookLines
@@ -546,7 +546,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
@@ -2381,6 +2381,84 @@ describe('OpenTuiApp shell wiring', () => {
     });
   });
 
+  it.each([true, false])(
+    'routes history keys only for screen-reader=%s without moving composer focus',
+    async (screenReader) => {
+      const view = renderApp({ screenReader });
+      await settle();
+      const scroll = view.container.querySelector('scrollbox')!;
+      const scrollBy = vi.fn();
+      const scrollTo = vi.fn();
+      Object.defineProperties(scroll, {
+        viewport: { value: { height: 18 }, configurable: true },
+        scrollHeight: { value: 900, configurable: true },
+        scrollBy: { value: scrollBy, configurable: true },
+        scrollTo: { value: scrollTo, configurable: true },
+      });
+      for (const [name, shift, ctrl] of [
+        ['up', true, false],
+        ['down', true, false],
+        ['pageup', false, false],
+        ['pagedown', false, false],
+        ['home', false, true],
+        ['end', false, true],
+      ] as const) {
+        const key = {
+          name,
+          shift,
+          ctrl,
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+        };
+        act(() => mocks.state.keyboardHandlers.at(-1)!(key));
+        expect(key.preventDefault).toHaveBeenCalledTimes(screenReader ? 1 : 0);
+      }
+      expect(scrollBy.mock.calls).toEqual(
+        screenReader ? [[-1], [1], [-18], [18]] : [],
+      );
+      expect(scrollTo.mock.calls).toEqual(screenReader ? [[0], [900]] : []);
+      expect(mocks.state.inputProps?.['focus']).toBe(true);
+    },
+  );
+
+  it('keeps modal keys out of screen-reader history scrolling', async () => {
+    const view = renderApp({ screenReader: true });
+    await settle();
+    const scroll = view.container.querySelector('scrollbox')!;
+    const scrollBy = vi.fn();
+    Object.defineProperties(scroll, {
+      viewport: { value: { height: 18 }, configurable: true },
+      scrollBy: { value: scrollBy, configurable: true },
+    });
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    };
+    await submit('/help');
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!({
+        name: 'pageup',
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      }),
+    );
+    expect(scrollBy).not.toHaveBeenCalled();
+  });
+
+  it('passes the builtin quit invocation identity to the entry', async () => {
+    const onQuit = vi.fn();
+    renderApp({ onQuit });
+    await settle();
+    const messages = [{ type: 'user', text: '/quit', id: 1 }] as never;
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages,
+      invocationItemId: 42,
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/quit');
+    expect(onQuit).toHaveBeenCalledExactlyOnceWith(messages, 42);
+  });
+
   it('reaches the entry seam on a quit outcome', async () => {
     const onQuit = vi.fn();
     renderApp({ onQuit });
@@ -3688,16 +3766,27 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
-  it('writes the hooks approval note to the transcript', async () => {
+  it('writes hooks approval notices to the transcript', async () => {
     const onTranscriptEvent = vi.fn();
     renderApp({ onTranscriptEvent });
     await settle();
     await act(async () => {
-      mocks.state.hooksAddInfo?.('Project hooks were not loaded.');
+      mocks.state.hooksAddNotice?.({
+        type: MessageType.INFO,
+        text: 'Project hooks were not loaded.',
+      });
+      mocks.state.hooksAddNotice?.({
+        type: MessageType.WARNING,
+        text: 'A project hook was skipped.',
+      });
     });
     expect(onTranscriptEvent).toHaveBeenCalledWith({
       type: 'info',
       text: 'Project hooks were not loaded.',
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'warning',
+      text: 'A project hook was skipped.',
     });
   });
 
@@ -5056,7 +5145,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
@@ -5322,7 +5411,7 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 

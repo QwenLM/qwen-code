@@ -319,6 +319,21 @@ export function selectActiveSideArtifactRecordUuids(
   activeRecordUuids: readonly string[],
 ): string[] {
   const activeUuids = new Set(activeRecordUuids);
+  // A transcript that never held a conversation turn (every record is
+  // system metadata) has no conversation tail to segment against and no
+  // abandoned branch to exclude: every side artifact record belongs to
+  // the session's only branch. Include them all so the projection
+  // delivers the same set the whole-transcript rebuild counts and the
+  // recorder stamps — otherwise the derived sidecar oscillates between
+  // the two definitions depending on which surface opened last. A file
+  // that holds conversation records anywhere (even off the active chain,
+  // e.g. rewound away) keeps the active-segment rule below, which
+  // excludes the abandoned branch's artifacts.
+  if (!records.some((record) => record.type !== 'system')) {
+    return records
+      .filter((record) => isTranscriptArtifactRecord(record))
+      .map((record) => record.uuid);
+  }
   const firstActiveUuid = activeRecordUuids[0];
   const firstActiveIndex =
     firstActiveUuid === undefined
@@ -791,4 +806,20 @@ export function prepareTranscriptRecords(
     gaps: chain.gaps,
     diagnostics,
   };
+}
+
+export function isLifecycleUiTelemetryEvent(uiEvent: unknown): boolean {
+  if (
+    typeof uiEvent !== 'object' ||
+    uiEvent === null ||
+    Array.isArray(uiEvent)
+  ) {
+    return false;
+  }
+  const eventName = (uiEvent as Record<string, unknown>)['event.name'];
+  return (
+    eventName === 'request_lifecycle' ||
+    eventName === 'tool_lifecycle' ||
+    eventName === 'hook_lifecycle'
+  );
 }

@@ -11,15 +11,10 @@ import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from '../core/environmentContext.js';
 import { isClearedMediaPlaceholder } from './microcompaction/microcompact.js';
-
-// Envelope the background registries wrap a notification's `modelText` in
-// (agents, monitors, shells, workflows, the dropped-notification tally).
-// Same shape `turn-interruption.ts` keys on; see that file for the envelope's
-// trust model (role-gated, emitter escaping not uniform).
-const TASK_NOTIFICATION_OPEN = '<task-notification>';
-const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 
 function isWrappedText(text: string, open: string, close: string): boolean {
   return text.startsWith(open) && text.trimEnd().endsWith(close);
