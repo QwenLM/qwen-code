@@ -303,6 +303,8 @@ export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
  */
 export const TYPED_TEXT_MAX_CHARS = 32_000;
 
+const OMITTED_THOUGHT_PLACEHOLDER = '[thought omitted]';
+
 export interface SlimOptions {
   /**
    * When set, text payloads larger than this (top-level `text` parts,
@@ -321,12 +323,21 @@ export interface SlimOptions {
    * `maxTextChars` like other text. Unmarked parts are cut as before.
    */
   keepTypedText?: boolean;
+  /**
+   * When true, strip historical `thought: true` parts that do not carry a
+   * `thoughtSignature`. Cold compression side-queries do not share prompt
+   * cache and do not need prior unsigned reasoning transcripts, which can
+   * otherwise crowd out the compaction output budget. Signed thought parts
+   * stay intact for providers that validate replayed signatures.
+   */
+  stripUnsignedThoughts?: boolean;
 }
 
 interface SlimStats {
   imagesStripped: number;
   documentsStripped: number;
   textPartsTruncated: number;
+  thoughtsStripped: number;
 }
 
 /**
@@ -343,6 +354,7 @@ export function slimCompactionInput(
     imagesStripped: 0,
     documentsStripped: 0,
     textPartsTruncated: 0,
+    thoughtsStripped: 0,
   };
   let anyChange = false;
 
@@ -354,21 +366,43 @@ export function slimCompactionInput(
       options?.keepTypedText === true && content.role === 'user'
         ? options.maxTextChars
         : undefined;
-    const newParts: Part[] = content.parts.map((part) => {
+    const newParts: Part[] = [];
+    for (const part of content.parts) {
+      if (
+        options?.stripUnsignedThoughts &&
+        part.thought === true &&
+        // Only a pure thought part is dropped: one that also carries a tool
+        // call or result must stay so tool_call/tool_response pairing survives.
+        !part.functionCall &&
+        !part.functionResponse &&
+        !(
+          typeof part.thoughtSignature === 'string' &&
+          part.thoughtSignature.length > 0
+        )
+      ) {
+        stats.thoughtsStripped++;
+        touched = true;
+        continue;
+      }
       const replacement =
         typedTextCap !== undefined && isTypedPrompt(part)
           ? keepTypedPart(part, typedTextCap, stats)
           : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
         touched = true;
-        return replacement;
       }
-      return part;
-    });
+      newParts.push(replacement);
+    }
 
     if (!touched) return content;
     anyChange = true;
-    return { ...content, parts: newParts };
+    return {
+      ...content,
+      parts:
+        newParts.length > 0
+          ? newParts
+          : [{ text: OMITTED_THOUGHT_PLACEHOLDER }],
+    };
   });
 
   return {
@@ -514,6 +548,14 @@ function transformPart(
   }
   if (
     maxTextChars !== undefined &&
+    // A signed thought is a replay unit: providers validate the signature
+    // against the exact text, so truncating the text while keeping the
+    // signature would silently relabel a mutated unit as intact. Keep signed
+    // units byte-exact; the unsigned cap still applies to everything else.
+    !(
+      typeof nextPart.thoughtSignature === 'string' &&
+      nextPart.thoughtSignature.length > 0
+    ) &&
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {

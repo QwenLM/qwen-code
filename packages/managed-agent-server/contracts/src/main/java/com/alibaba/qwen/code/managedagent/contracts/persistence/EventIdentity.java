@@ -29,6 +29,8 @@ public final class EventIdentity {
      */
     public static Identity of(String type, String turnId, long sequence,
             Map<String, Object> data, Identity previous) {
+        requireHarnessId(data.get("itemId"), "data.itemId");
+        requireHarnessId(data.get("contentPartId"), "data.contentPartId");
         return switch (type) {
             case "turn.accepted", "item.input.added" -> new Identity(type,
                     itemId(data, StoreModels.inputItemId(turnId)), null);
@@ -111,6 +113,23 @@ public final class EventIdentity {
 
     private static String string(Object value) {
         return value instanceof String ? (String) value : null;
+    }
+
+    // A harness-supplied Item/Part identity lands in a VARCHAR(128) column.
+    // PAD SPACE collations fold trailing spaces, so two distinct ids would
+    // compare equal; the boundary refuses them rather than relying on the
+    // column to preserve exactness. Absent (non-string) values name nothing.
+    private static void requireHarnessId(Object value, String label) {
+        if (!(value instanceof String id)) {
+            return;
+        }
+        if (id.isEmpty() || id.length() > 128 || id.endsWith(" ")
+                || id.codePoints().anyMatch(point ->
+                        point >= Character.MIN_SURROGATE
+                                && point <= Character.MAX_SURROGATE)) {
+            throw new IllegalArgumentException(label
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
     }
 
     public record Identity(String type, String itemId, String contentPartId) {

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
@@ -55,9 +56,10 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
                 + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
-                + " wake_seal_revision BIGINT, wake_seal_background INT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0);
+                + " wake_seal_revision BIGINT, wake_seal_background INT, wake_seal_parked_owner VARCHAR)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0,
+                null);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR,"
@@ -66,9 +68,10 @@ class SessionRecoveryServiceTest {
         // prefix every index on those tables leads with.
         jdbc.execute("CREATE TABLE ma_session_record (tenant_id VARCHAR, session_id VARCHAR,"
                 + " record_kind VARCHAR, runtime_state VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR,"
+        jdbc.execute("CREATE TABLE ma_resource_ref (resource_id VARCHAR,"
                 + " tenant_id VARCHAR, session_id VARCHAR, owner_kind VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource (tenant_id VARCHAR, session_id VARCHAR,"
+                + " resource_id VARCHAR, state VARCHAR)");
         jdbc.execute("CREATE TABLE ma_public_event (tenant_id VARCHAR, session_id VARCHAR,"
                 + " turn_id VARCHAR, stream_kind VARCHAR, is_terminal INT, source_key VARCHAR)");
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
@@ -124,6 +127,24 @@ class SessionRecoveryServiceTest {
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    // A parked Turn reads as running whether its seal certificate is current
+    // or a later writer acquisition has already cleared it.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anActionParkedTurnReportsItsActiveTurnWithoutHarnessEvidence(boolean certified) {
+        sealCleanly();
+        jdbc.update(certified ? "UPDATE ma_session_head SET wake_seal_revision = 5"
+                : "UPDATE ma_session_head SET state = 'ACTIVE', activation_phase = 'active'");
+        turn("RUNNING", TurnExecutionStore.HARNESS_ACTION_PARKED);
+
+        var recovery = service.query("tenant", "actor", "session");
+
+        assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_active");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
         verifyNoInteractions(harness, coordinator);
     }
 
@@ -183,7 +204,7 @@ class SessionRecoveryServiceTest {
             case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }
@@ -198,7 +219,7 @@ class SessionRecoveryServiceTest {
     // still unsettled. Without the certificate the same rows still block.
     private void oweBackgroundWork() {
         jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', 'ready')");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
     }
 
@@ -211,6 +232,22 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
         verifyNoInteractions(harness, coordinator);
+    }
+
+    // S4 (#18149): a parked wake-started Turn has no Turn row, and the wake
+    // scan resumes it at its due time; its own owed cleanup is certified work.
+    @Test
+    void aWakeParkedSealIsReadyWhileItsTurnOwesCleanup() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1, wake_seal_revision = 5,"
+                + " wake_seal_parked_owner = 'wake'");
+        oweBackgroundWork();
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        verifyNoInteractions(harness, coordinator);
+
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 4");
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isFalse();
     }
 
     @Test
@@ -248,7 +285,7 @@ class SessionRecoveryServiceTest {
         // A terminal run projects a null runtime_state, and a confirmed debt
         // drops its REFERENCED ref: neither is owed work any more.
         jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', NULL)");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'RELEASED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'RELEASED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
@@ -336,7 +373,7 @@ class SessionRecoveryServiceTest {
             case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }

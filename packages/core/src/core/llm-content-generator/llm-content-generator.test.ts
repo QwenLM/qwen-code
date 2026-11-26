@@ -765,24 +765,29 @@ describe('LlmContentGenerator', () => {
   });
 
   // Sends one user turn holding a Read functionResponse with these nested
-  // parts; returns the nested parts the SDK received.
-  async function sentFunctionResponseParts(parts: Part[]) {
+  // parts; returns the functionResponse object the SDK received.
+  async function sentFunctionResponse(
+    parts: Part[],
+    response: Record<string, unknown> = { output: 'content' },
+  ) {
     await generator.generateContent(
       userReq({
         functionResponse: {
           id: 'call-1',
           name: 'Read',
-          response: { output: 'content' },
-          parts,
+          response,
+          parts: parts as NonNullable<
+            NonNullable<Part['functionResponse']>['parts']
+          >,
         },
       }),
       'prompt-id',
     );
-    return sent().contents[0].parts[0].functionResponse.parts;
+    return sent().contents[0].parts[0].functionResponse;
   }
 
   it('should strip displayName from functionResponse parts', async () => {
-    const functionResponseParts = await sentFunctionResponseParts([
+    const functionResponse = await sentFunctionResponse([
       {
         inlineData: {
           mimeType: 'image/png',
@@ -793,15 +798,19 @@ describe('LlmContentGenerator', () => {
     ]);
 
     // displayName is stripped from nested inlineData
-    expect(functionResponseParts[0].inlineData).toEqual({
-      mimeType: 'image/png',
-      data: 'base64data',
-    });
-    expect(functionResponseParts[0].inlineData.displayName).toBeUndefined();
+    expect(functionResponse.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'base64data',
+        },
+      },
+    ]);
+    expect(functionResponse.parts[0].inlineData.displayName).toBeUndefined();
   });
 
-  it('should convert audio and video to text in functionResponse parts', async () => {
-    const functionResponseParts = await sentFunctionResponseParts([
+  it('moves unsupported audio and video notes out of functionResponse.parts into response.output', async () => {
+    const functionResponse = await sentFunctionResponse([
       { inlineData: { mimeType: 'image/png', data: 'imagedata' } },
       {
         inlineData: {
@@ -813,15 +822,158 @@ describe('LlmContentGenerator', () => {
       { inlineData: { mimeType: 'video/mp4', data: 'videodata' } },
     ]);
 
-    // All parts remain, but audio/video are converted to text
-    expect(functionResponseParts).toHaveLength(3);
-    expect(functionResponseParts[0].inlineData.mimeType).toBe('image/png');
-    expect(functionResponseParts[1].text).toBe(
-      'Unsupported media type for Gemini: audio/wav (recording.wav).',
+    // Gemini's FunctionResponsePart schema rejects `text`; only supported
+    // inlineData/fileData entries remain in functionResponse.parts.
+    expect(functionResponse.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'imagedata' } },
+    ]);
+    expect(functionResponse.response).toEqual({
+      output:
+        'content\nUnsupported media type for Gemini: audio/wav (recording.wav).\nUnsupported media type for Gemini: video/mp4.',
+    });
+  });
+
+  it('drops functionResponse.parts when all nested parts are unsupported video and preserves caller input', async () => {
+    const originalResponse = { output: '' };
+    const originalParts: Part[] = [
+      {
+        inlineData: {
+          mimeType: 'video/webm',
+          data: 'webmdata',
+          displayName: 'video.webm',
+        },
+      },
+    ];
+    const request = userReq({
+      functionResponse: {
+        id: 'call-video',
+        name: 'read_file',
+        response: originalResponse,
+        parts: originalParts as NonNullable<
+          NonNullable<Part['functionResponse']>['parts']
+        >,
+      },
+    });
+
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(
+      streamOf({ responseId: '1' }),
     );
-    expect(functionResponseParts[2].text).toBe(
-      'Unsupported media type for Gemini: video/mp4.',
+    await generator.generateContentStream(request, 'prompt-id');
+
+    const sentFnResponse =
+      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0].contents[0]
+        .parts[0].functionResponse;
+    expect(sentFnResponse.parts).toBeUndefined();
+    expect(sentFnResponse.response).toEqual({
+      output: 'Unsupported media type for Gemini: video/webm (video.webm).',
+    });
+    // Caller history must remain untouched for subsequent switches back to a
+    // provider that supports video.
+    expect(originalResponse).toEqual({ output: '' });
+    expect(originalParts).toHaveLength(1);
+    expect(originalParts[0].inlineData?.mimeType).toBe('video/webm');
+  });
+
+  it('moves upstream text entries and unsupported fileData out of functionResponse.parts', async () => {
+    const functionResponse = await sentFunctionResponse(
+      [
+        { text: '[Image omitted during compaction]' },
+        {
+          fileData: {
+            mimeType: 'video/mp4',
+            fileUri: 'gs://bucket/clip.mp4',
+            displayName: 'clip.mp4',
+          },
+        },
+        {
+          fileData: {
+            mimeType: 'application/pdf',
+            fileUri: 'gs://bucket/doc.pdf',
+            displayName: 'doc.pdf',
+          },
+        },
+      ],
+      { error: 'partial failure' },
     );
+
+    expect(functionResponse.parts).toEqual([
+      {
+        fileData: {
+          mimeType: 'application/pdf',
+          fileUri: 'gs://bucket/doc.pdf',
+        },
+      },
+    ]);
+    expect(functionResponse.response).toEqual({
+      error: 'partial failure',
+      output:
+        '[Image omitted during compaction]\nUnsupported media type for Gemini: video/mp4 (clip.mp4).',
+    });
+  });
+
+  it('preserves non-string response.output by recording extracted notes under response.notes', async () => {
+    const functionResponse = await sentFunctionResponse(
+      [{ text: '[Image omitted during compaction]' }],
+      { output: { ok: true } },
+    );
+
+    expect(functionResponse.parts).toBeUndefined();
+    expect(functionResponse.response).toEqual({
+      output: { ok: true },
+      notes: '[Image omitted during compaction]',
+    });
+  });
+
+  it('handles case-insensitive audio/video MIME types, raw string entries, unknown nested fields, and non-string response.notes', async () => {
+    const functionResponse = await sentFunctionResponse(
+      [
+        {
+          inlineData: {
+            mimeType: ' VIDEO/WEBM ',
+            data: 'webmdata',
+            displayName: 'clip.webm',
+          },
+        },
+        {
+          fileData: {
+            mimeType: 'Audio/MP3',
+            fileUri: 'gs://bucket/a.mp3',
+          },
+        },
+        'legacy string note' as unknown as Part,
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'pngdata',
+            displayName: 'shot.png',
+            extraKey: 'must-not-leak',
+          } as Part['inlineData'],
+          fileData: {
+            mimeType: 'application/pdf',
+            fileUri: 'gs://bucket/doc.pdf',
+            displayName: 'doc.pdf',
+            extraKey: 'must-not-leak',
+          } as Part['fileData'],
+        },
+      ],
+      { output: { ok: true }, notes: ['existing-note'] },
+    );
+
+    expect(functionResponse.parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'pngdata' } },
+      {
+        fileData: {
+          fileUri: 'gs://bucket/doc.pdf',
+          mimeType: 'application/pdf',
+        },
+      },
+    ]);
+    expect(functionResponse.response).toEqual({
+      output: { ok: true },
+      notes: ['existing-note'],
+      _notes:
+        'Unsupported media type for Gemini: VIDEO/WEBM (clip.webm).\nUnsupported media type for Gemini: Audio/MP3.\nlegacy string note',
+    });
   });
 
   // https://github.com/QwenLM/qwen-code/issues/9453

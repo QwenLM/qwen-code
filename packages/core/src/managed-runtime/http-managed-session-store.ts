@@ -194,6 +194,11 @@ export interface HttpManagedSessionStores {
   supportsWakeDispatch(): boolean;
   /** Whether this control plane lets a background Session suspend behind the pull. */
   supportsRuntimeObservation(): boolean;
+  supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -439,6 +444,10 @@ export function createHttpManagedSessionStores(
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
     supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
+    supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -991,6 +1000,9 @@ interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly wakeDispatch: boolean;
   readonly runtimeObservation: boolean;
+  readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1063,6 +1075,18 @@ class ManagedSessionStoreHttpClient {
 
   supportsRuntimeObservation(): boolean {
     return this.grant?.runtimeObservation === true;
+  }
+
+  supportsActionParking(): boolean {
+    return this.grant?.actionParking === true;
+  }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3139,6 +3163,9 @@ class ManagedSessionStoreHttpClient {
         leaseUntil: renewed.leaseUntil,
         wakeDispatch: renewed.wakeDispatch,
         runtimeObservation: renewed.runtimeObservation,
+        actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
       };
       this.scheduleRenewal();
     })();
@@ -3783,6 +3810,9 @@ function parseWriterGrant(value: unknown): WriterGrant {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     wakeDispatch: record['wakeDispatch'] === true,
     runtimeObservation: record['runtimeObservation'] === true,
+    actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

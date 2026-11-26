@@ -385,6 +385,7 @@ describe('compactionInputSlimming', () => {
         imagesStripped: 1,
         documentsStripped: 0,
         textPartsTruncated: 0,
+        thoughtsStripped: 0,
       });
     });
 
@@ -1366,6 +1367,140 @@ describe('compactionInputSlimming', () => {
         expect(output.charCodeAt(499)).not.toBeGreaterThanOrEqual(0xd800);
         expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
       }
+    });
+  });
+
+  describe('stripUnsignedThoughts', () => {
+    it('keeps unsigned thought parts by default', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: 'scratchpad', thought: true }, { text: 'reply' }],
+        },
+      ];
+
+      const result = slimCompactionInput(history);
+
+      expect(result.slimmedHistory).toBe(history);
+      expect(result.stats.thoughtsStripped).toBe(0);
+    });
+
+    it('strips unsigned thoughts, preserves signed thoughts, and keeps turn count stable', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            { text: 'unsigned reasoning', thought: true },
+            { text: 'visible answer' },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'only unsigned reasoning', thought: true }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: 'signed reasoning',
+              thought: true,
+              thoughtSignature: 'sig-123',
+            },
+            { text: 'signed reply' },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory).toHaveLength(3);
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { text: 'visible answer' },
+      ]);
+      expect(result.slimmedHistory[1]!.parts).toEqual([
+        { text: '[thought omitted]' },
+      ]);
+      expect(result.slimmedHistory[2]).toBe(history[2]);
+      expect(result.stats.thoughtsStripped).toBe(2);
+    });
+
+    it('treats empty-string thoughtSignature as unsigned and preserves sibling functionCall without adding a placeholder', () => {
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            { text: 'empty sig thought', thought: true, thoughtSignature: '' },
+            { functionCall: { id: 'c1', name: 'read_file', args: { p: 'a' } } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { functionCall: { id: 'c1', name: 'read_file', args: { p: 'a' } } },
+      ]);
+      expect(result.stats.thoughtsStripped).toBe(1);
+    });
+
+    it('keeps a thought-flagged part that also carries a functionCall so tool pairing survives', () => {
+      const functionCall = { id: 'c2', name: 'read_file', args: { p: 'b' } };
+      const history: Content[] = [
+        {
+          role: 'model',
+          parts: [{ text: 'plan', thought: true, functionCall }],
+        },
+      ];
+
+      const result = slimCompactionInput(history, undefined, {
+        stripUnsignedThoughts: true,
+      });
+
+      expect(result.slimmedHistory).toBe(history);
+      expect(result.stats.thoughtsStripped).toBe(0);
+    });
+
+    it('keeps a signed thought byte-exact under the text cap (combined strip + cap path)', () => {
+      const signed = {
+        text: 'r'.repeat(4001),
+        thought: true,
+        thoughtSignature: 'fixture-signature',
+      };
+      const result = slimCompactionInput(
+        [{ role: 'model', parts: [signed] }],
+        undefined,
+        { stripUnsignedThoughts: true, maxTextChars: 4000 },
+      );
+      expect(result.slimmedHistory[0]!.parts).toEqual([signed]);
+      expect(result.stats.textPartsTruncated).toBe(0);
+    });
+
+    it('still caps an unsigned thought and an ordinary text part under the text cap', () => {
+      const unsigned = { text: 'u'.repeat(4001), thought: true };
+      const plain = { text: 'p'.repeat(4001) };
+      const result = slimCompactionInput(
+        [
+          { role: 'model', parts: [unsigned] },
+          { role: 'user', parts: [plain] },
+        ],
+        undefined,
+        { maxTextChars: 4000 },
+      );
+      expect(result.stats.textPartsTruncated).toBe(2);
+      const unsignedText = (
+        result.slimmedHistory[0]!.parts![0] as { text: string }
+      ).text;
+      const plainText = (
+        result.slimmedHistory[1]!.parts![0] as { text: string }
+      ).text;
+      expect(unsignedText.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      expect(unsignedText).not.toContain('u'.repeat(4001));
+      expect(plainText.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
+      expect(plainText).not.toContain('p'.repeat(4001));
     });
   });
 });

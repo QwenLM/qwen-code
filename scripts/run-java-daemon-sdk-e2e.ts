@@ -103,6 +103,8 @@ const daemon = spawn(
     '0',
     '--hostname',
     '127.0.0.1',
+    // Keep the runner's host load out of the session contract assertions.
+    '--no-load-admission',
     '--require-auth',
     '--prompt-deadline-ms',
     '60000',

@@ -534,6 +534,7 @@ export default {
   'Debug Keystroke Logging': 'Registre de tecles per a depuració',
   'Language: UI': 'Idioma: Interfície',
   'Language: Model': 'Idioma: Model',
+  'Language: Display Translation': 'Idioma: Traducció de la visualització',
   'Output Format': 'Format de sortida',
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
@@ -841,6 +842,8 @@ export default {
   'Manage Qwen Code hooks': 'Gestiona els hooks de Qwen Code',
   'List all configured hooks': 'Llista tots els hooks configurats',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook ha aturat el torn: {{reason}}',
   'Loading hooks...': 'Carregant hooks...',
   'Error loading hooks:': 'Error en carregar els hooks:',
   'Press Escape to close': 'Premeu Escape per tancar',

@@ -24,7 +24,7 @@ ACP 已经为其中一种用法做了临时方案 `MessageRewriteMiddleware`（�
 - 渲染站点（`ui.render`）。ACP 客户端目前都不绘制 Mod 改写。Web Shell 的投影和它的客户端能力检查是下一步。
 - 工具和命令中间件（`tool.call`、`tool.check`、Mod 命令）以及 prompt（`prompt.submit`、`$.prompt.submit`），留给后续的 ACP 步骤。
 - 在 Web Shell 里显示 Mod 日志，随投影一起做。
-- 移除 `MessageRewriteMiddleware`。Web Shell 能绘制 Mod 改写之后再移除。
+- 移除 `MessageRewriteMiddleware`。Web Shell 能绘制 Mod 改写之后已将其移除：[移除 MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.zh-CN.md)。
 
 ## 契约
 

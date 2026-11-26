@@ -215,6 +215,15 @@ export type {
   ShellToolInvocation,
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
+export {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+  type TurnSkillSnapshotLease,
+} from './skills/turn-skill-snapshot.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
@@ -490,11 +499,15 @@ export {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
   getTokenUsageFilePath,
+  loadTokenUsageDailyByModel,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
 } from './services/tokenUsageService.js';
 export type {
+  TokenUsageCompletedMonthCache,
+  TokenUsageDailyByModel,
+  TokenUsageDayModelTotals,
   TokenUsageExportFormat,
   TokenUsageExportOptions,
   TokenUsageGroupSummary,

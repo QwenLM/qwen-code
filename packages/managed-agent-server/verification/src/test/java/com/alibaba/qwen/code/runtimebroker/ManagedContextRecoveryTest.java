@@ -259,7 +259,7 @@ class ManagedContextRecoveryTest {
             worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
                 exchange.getRequestBody().readAllBytes();
                 byte[] proof = JsonCodec.encode(ManagedContextProtocol.attestationResponse(
-                        ManagedContextProtocol.boot(REQUEST, seed)));
+                        ManagedContextProtocol.boot(REQUEST, seed).toWire()));
                 exchange.getResponseHeaders().set("Cache-Control", "no-store");
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, proof.length);
