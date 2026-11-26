@@ -128,9 +128,7 @@ describe('qwen pr review runner routing', () => {
     // Every fork event, including comment and dispatch, resolves trust in a
     // checkout-free job and uses a disposable hosted VM. Same-host Docker
     // does not isolate a privileged CI process or same-UID filesystem reads.
-    expect(runsOn).toContain(
-      "needs.review-trust.outputs.untrusted != 'true'",
-    );
+    expect(runsOn).toContain("needs.review-trust.outputs.untrusted != 'true'");
     expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
     expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
     // The hosted toolchain setup must fire on every shape the routing sends
@@ -148,10 +146,12 @@ describe('qwen pr review runner routing', () => {
     const review = parse(workflow).jobs['review-pr'].steps.find(
       (step) => step.id === 'review',
     );
-    expect(review.env.SECURITY_GITHUB_TOKEN).toContain("'' || secrets.CI_BOT_PAT");
+    expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
+      "'' || secrets.CI_BOT_PAT",
+    );
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
-      "needs.review-trust.outputs.untrusted",
+      'needs.review-trust.outputs.untrusted',
     );
     expect(review.run).toContain(
       '"${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt',
@@ -166,7 +166,7 @@ describe('qwen pr review runner routing', () => {
     expect(invocation).not.toContain('UPSTREAM_API_KEY');
     expect(invocation).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
     expect(review.run).toContain('/usr/bin/docker run --detach');
-    expect(review.run).toContain("if [ \"$FORK_LIFECYCLE_REVIEW\" = 'true' ]");
+    expect(review.run).toContain('if [ "$FORK_LIFECYCLE_REVIEW" = \'true\' ]');
     expect(review.run).toContain('review-untrusted-no-token');
 
     const publisher = parse(workflow).jobs['publish-review'];
@@ -184,8 +184,12 @@ describe('qwen pr review runner routing', () => {
       'pull-requests': 'write',
       issues: 'write',
     });
-    const publish = publisher.steps.find((s) => s.name === 'Validate and publish COMMENT only');
-    expect(publish.env.ALLOW_STALE).toContain('needs.review-pr.outputs.salvage_post');
+    const publish = publisher.steps.find(
+      (s) => s.name === 'Validate and publish COMMENT only',
+    );
+    expect(publish.env.ALLOW_STALE).toContain(
+      'needs.review-pr.outputs.salvage_post',
+    );
     expect(publish.env.MOVED_TO).toContain('salvage_moved_to');
     expect(publish.env.DOCS_ONLY_FAILED).toBe(
       '${{ needs.review-pr.outputs.docs_only_failed }}',
@@ -193,8 +197,16 @@ describe('qwen pr review runner routing', () => {
     expect(publish.env.GH_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
     expect(publish.run).toContain('review-publish-comment.mjs');
     for (const step of parse(workflow).jobs['review-pr'].steps) {
-      if (['Report docs-only medium outcome', 'Supersede stale docs-only badge', 'Post fallback comment on failure'].includes(step.name)) {
-        expect(step.if).toContain("needs.review-trust.outputs.untrusted != 'true'");
+      if (
+        [
+          'Report docs-only medium outcome',
+          'Supersede stale docs-only badge',
+          'Post fallback comment on failure',
+        ].includes(step.name)
+      ) {
+        expect(step.if).toContain(
+          "needs.review-trust.outputs.untrusted != 'true'",
+        );
       }
     }
   });
@@ -7893,7 +7905,9 @@ describe('review model canary routing', () => {
     // canary endpoint swap) the slice executes for real.
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const hostCapture = run.indexOf('REVIEW_ENDPOINT_HOST="$(openai_base_host)"');
+    const hostCapture = run.indexOf(
+      'REVIEW_ENDPOINT_HOST="$(openai_base_host)"',
+    );
     expect(hostCapture).toBeGreaterThan(-1);
     expect(hostCapture).toBeLessThan(notice);
     const end =
@@ -8005,7 +8019,9 @@ describe('review model canary routing', () => {
   it('moves the endpoint only for the canary cohort, and only with its own key', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const hostCapture = run.indexOf('REVIEW_ENDPOINT_HOST="$(openai_base_host)"');
+    const hostCapture = run.indexOf(
+      'REVIEW_ENDPOINT_HOST="$(openai_base_host)"',
+    );
     expect(hostCapture).toBeGreaterThan(-1);
     expect(hostCapture).toBeLessThan(notice);
     const end =

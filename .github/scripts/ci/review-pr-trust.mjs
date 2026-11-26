@@ -18,8 +18,13 @@ if (!repository || !Number.isInteger(prNumber) || prNumber <= 0) {
 }
 const pr =
   event.pull_request ||
-  JSON.parse(execFileSync('gh', ['api', `repos/${repository}/pulls/${prNumber}`], { encoding: 'utf8' }));
-const untrusted = pr.head?.repo?.full_name?.toLowerCase() !== repository.toLowerCase();
+  JSON.parse(
+    execFileSync('gh', ['api', `repos/${repository}/pulls/${prNumber}`], {
+      encoding: 'utf8',
+    }),
+  );
+const untrusted =
+  pr.head?.repo?.full_name?.toLowerCase() !== repository.toLowerCase();
 if (pr.state !== 'OPEN' || !/^[a-f0-9]{40}$/.test(pr.head?.sha || '')) {
   throw new Error('review-pr-trust: PR is closed or has an invalid head');
 }

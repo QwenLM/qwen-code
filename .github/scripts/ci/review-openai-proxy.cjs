@@ -49,11 +49,26 @@ const server = http.createServer(async (req, res) => {
   let timer = setTimeout(() => controller.abort(), 600_000);
   try {
     const upstream = await fetch(target, {
-      method: 'POST', headers, body: req, duplex: 'half', signal: controller.signal,
+      method: 'POST',
+      headers,
+      body: req,
+      duplex: 'half',
+      signal: controller.signal,
     });
-    res.writeHead(upstream.status, Object.fromEntries(
-      [...upstream.headers].filter(([key]) => !['content-encoding', 'content-length', 'connection', 'transfer-encoding'].includes(key)),
-    ));
+    res.writeHead(
+      upstream.status,
+      Object.fromEntries(
+        [...upstream.headers].filter(
+          ([key]) =>
+            ![
+              'content-encoding',
+              'content-length',
+              'connection',
+              'transfer-encoding',
+            ].includes(key),
+        ),
+      ),
+    );
     if (!upstream.body) {
       clearTimeout(timer);
       res.end();
@@ -67,7 +82,10 @@ const server = http.createServer(async (req, res) => {
     });
     body.on('end', () => clearTimeout(timer));
     body.on('error', () => res.destroy());
-    res.on('close', () => { clearTimeout(timer); controller.abort(); });
+    res.on('close', () => {
+      clearTimeout(timer);
+      controller.abort();
+    });
     body.pipe(res);
   } catch {
     clearTimeout(timer);

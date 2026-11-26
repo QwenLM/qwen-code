@@ -511,7 +511,8 @@ jobs:
           esac
 
   review-pr:
-    needs: ['review-config', 'delay-automatic-review', 'authorize', 'review-trust']
+    needs:
+      ['review-config', 'delay-automatic-review', 'authorize', 'review-trust']
     # pull_request_target routing (all paths additionally pass through
     # `authorize`; automatic PR events are precheck-gated, while explicit
     # review_requested events check the requester and skip delay):
@@ -568,8 +569,8 @@ jobs:
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && needs.review-trust.outputs.untrusted != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
-      pull-requests: '${{ needs.review-trust.outputs.untrusted == ''true'' && ''read'' || ''write'' }}'
-      issues: '${{ needs.review-trust.outputs.untrusted == ''true'' && ''read'' || ''write'' }}'
+      pull-requests: "${{ needs.review-trust.outputs.untrusted != 'true' || 'read' }}"
+      issues: "${{ needs.review-trust.outputs.untrusted != 'true' || 'read' }}"
     outputs:
       pr_number: '${{ steps.context.outputs.pr_number }}'
       expected_head_sha: '${{ steps.review.outputs.expected_head_sha }}'
@@ -582,7 +583,7 @@ jobs:
       failure_reason: '${{ steps.review.outputs.failure_reason }}'
       failure_kind: '${{ steps.review.outputs.failure_kind }}'
       effective_timeout_minutes: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
-      salvage_post: '${{ env.QWEN_REVIEW_SALVAGE_POST == ''true'' && steps.review.outputs.salvaged == ''true'' }}'
+      salvage_post: "${{ env.QWEN_REVIEW_SALVAGE_POST == 'true' && steps.review.outputs.salvaged == 'true' }}"
       salvage_moved_to: '${{ steps.review.outputs.salvage_moved_to }}'
       completion_line: '${{ steps.review.outputs.completion_line }}'
     steps:
@@ -3707,10 +3708,10 @@ jobs:
           REVIEW_MODE: '${{ needs.review-pr.outputs.review_mode }}'
           COMPLETION_LINE: '${{ needs.review-pr.outputs.completion_line }}'
           ALLOW_STALE: '${{ needs.review-pr.outputs.salvage_post }}'
-          DOCS_ONLY: '${{ needs.review-pr.outputs.docs_only_medium == ''true'' }}'
+          DOCS_ONLY: "${{ needs.review-pr.outputs.docs_only_medium == 'true' }}"
           MOVED_TO: '${{ needs.review-pr.outputs.salvage_moved_to }}'
           DOCS_ONLY_FAILED: '${{ needs.review-pr.outputs.docs_only_failed }}'
-          SUPERSEDE_DOCS_ONLY: '${{ needs.review-pr.outputs.docs_only_medium == ''false'' }}'
+          SUPERSEDE_DOCS_ONLY: "${{ needs.review-pr.outputs.docs_only_medium == 'false' }}"
           REVIEW_FAILED: '${{ needs.review-pr.outputs.review_failed }}'
           FAILURE_REASON: '${{ needs.review-pr.outputs.failure_reason }}'
           FAILURE_KIND: '${{ needs.review-pr.outputs.failure_kind }}'
