@@ -2,7 +2,7 @@
 
 [English](2026-11-24-review-tiered-sandbox.md) | [简体中文](2026-11-24-review-tiered-sandbox.zh-CN.md)
 
-**状态：** Phase 1、Phase 2-B 与 Phase 2-A 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、`guest-exec-v1` UDS/vsock 本地微虚机实时执行桥接含纯内容打包与身份核验 VMM 回收、旁路子命令门禁、结构化边界披露，以及 CI workflow 切换至 `QWEN_REVIEW_SANDBOX=tiered` 并联动 fail-closed 的 `QWEN_REVIEW_FORCE_HARDWARE`）；云端 `provider-vm` HTTP/SDK 数据面与可选的微虚机化 `drive` 执行作为后续阶段。
+**状态：** Phase 1、Phase 2-B 与 Phase 2-A 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、`guest-exec-v1` UDS/vsock 本地微虚机实时执行桥接含纯内容打包与身份核验 VMM 回收、旁路子命令门禁、结构化边界披露，以及 CI workflow 切换至 `QWEN_REVIEW_SANDBOX=tiered` 并联动 fail-closed 的 `QWEN_REVIEW_FORCE_HARDWARE` 与按行为探测的生产 CLI 能力门禁）；云端 `provider-vm` HTTP/SDK 数据面与可选的微虚机化 `drive` 执行作为后续阶段。
 **日期：** 2026-11-24
 **关联文档：** [`/verify-pr` 分信任等级 microVM 隔离设计](2026-11-23-verify-pr-tiered-microvm.zh-CN.md)、[Review CPU for Tokens](review-cpu-for-tokens.md)
 
@@ -125,6 +125,7 @@
 - **容器不可用路径（`container_ready=false`、`force_hardware=1`）：**
   - 在持久 `self-hosted` 池上，fork head（或无 payload 触发器中无法读出 `HEAD_REPO` 的 PR）在输出任何 step output 与启动 yolo agent 前直接 `exit 1` 拒绝，同时保护 CI 凭据与共享宿主机。
   - 其余所有运行（hosted 上的 fork PR 以及同仓 PR）均保持 `QWEN_REVIEW_SANDBOX=tiered` 并附带 `QWEN_REVIEW_FORCE_HARDWARE=1`。设置 `force_hardware=1` 可阻断「`docker info` 成功但镜像拉取失败」时 CLI 回退到未 digest-pin 的默认标签，也避免把镜像拉取故障误归因给待审 PR——每个执行阶段均要求硬件隔离或以结构化 `executionBoundary` 干净拒绝。
+- **生产 CLI 能力门禁（`Ensure tiered-capable review CLI`）：** 评审 runner 上已发布的 CLI 可能早于本设计（其策略解析器只认识 `off | auto | required`，会把未知的 `tiered` 静默映射为 `off`，重新打开宿主机执行路径）。版本号无法证明能力，因此门禁探测**行为**：在 `QWEN_REVIEW_SANDBOX=tiered` + `QWEN_REVIEW_FORCE_HARDWARE=1` 下，用候选 CLI 自身的 `review build-test` 跑一个由工作流编写的受信夹具（含受影响文件的根包，其 `preinstall` 写入 canary 标记）。有能力的 CLI 会在执行任何内容前拒绝——报告带 `executionBoundary.policy=tiered`、`executionClass=hardware-isolated`、`backend=refused` 且不存在 canary；静默降级的 CLI 会执行 canary 和/或缺少 boundary。探针中只会运行工作流自己的夹具代码，绝不运行 PR 代码。探针失败时门禁先尝试最新已发布版本，再从受信 base 检出构建 CLI（`corepack pnpm install --frozen-lockfile` + `npm run build` + `npm run bundle`，与 triage verify 车道同形），把 bundle 的 wrapper 置于 `GITHUB_PATH` 首位（在任何 PR 代码运行前追加；评审 agent 自身的 `GITHUB_PATH` 已被 decoy），复探，仍不支持则以明确的 `review CLI capability gate` 错误 `exit 1`——绝不放行不支持的 CLI。wrapper 是检出内的固定名目录，每次构建覆盖重写，除非本次运行将其追加到 `GITHUB_PATH` 否则不起作用，并由下一次运行的 checkout clean（`actions/checkout` `clean=true` 执行 `git clean -ffdx`）回收。
 
 ## 4. 风险与缓解
 
@@ -143,7 +144,7 @@
    - `sandboxed-exec.test.ts`：覆盖 `tiered` 策略严格度优先级、仓库 `.env` 对新增变量的拦截、容器硬化参数（`--cap-drop=ALL`、`--security-opt=no-new-privileges:true`、`--pids-limit=512`）、`reapContainer()` 干净/失败校验以及 `refuseHostExecutionPhase()`。
    - `build-test` / `test-efficacy` / `test-delta` / `drive` / `ab-drive` / `capture-tui` 单测：验证 `executionBoundary` 字段、基于 plan 的信任分档执行与旁路子命令的 fail-closed 拒绝。
    - `guest-exec-bridge.test.ts`：覆盖 `guest-exec-v1` 帧编解码、UDS 路径上限与 symlink socket 拒绝、纯内容工作区打包（拒绝 symlink、非普通文件与超预算）、截断/伪造摘要拦截、按身份核验的 `reapVmWorker()`（拒绝不匹配 PID、强杀抗 `SIGTERM` 存活目标并保留无辜 canary 进程），以及真实 Unix Domain Socket 独立子进程 guest-agent 在 `tiered` + 外部 fork PR 下驱动 `runBuildTest` 与 `runTestDelta` 的端到端闭环。
-   - `scripts/tests/qwen-pr-review-workflow.test.js`：验证 Phase 2-A 的 CI workflow 切换（`QWEN_REVIEW_SANDBOX`、`QWEN_REVIEW_FORCE_HARDWARE` 与 `QWEN_SANDBOX_IMAGE` 的 step-output 绑定、移除 `policy='off'` 降级，以及通过真实 `/bin/bash` 回放 `Resolve review sandbox` 在容器就绪、daemon 不可达、镜像拉取失败、self-hosted fork 拒绝与无 payload `gh api` 解析等全场景的行为）。
+   - `scripts/tests/qwen-pr-review-workflow.test.js`：验证 Phase 2-A 的 CI workflow 切换（`QWEN_REVIEW_SANDBOX`、`QWEN_REVIEW_FORCE_HARDWARE` 与 `QWEN_SANDBOX_IMAGE` 的 step-output 绑定、移除 `policy='off'` 降级，以及通过真实 `/bin/bash` 回放 `Resolve review sandbox` 在容器就绪、daemon 不可达、镜像拉取失败、self-hosted fork 拒绝与无 payload `gh api` 解析等全场景的行为），并以桩 CLI 真实回放 CLI 能力门禁：有能力的 CLI 无需升级/构建即通过；静默降级的旧 CLI、报新版本号但仍执行 canary 的 CLI、发出拒绝报告但仍执行 canary 的 CLI、以及返回无 `executionBoundary` 且无 canary 的干净报告的 CLI，在无可用升级/构建时均被拒绝；base 检出构建成功但行为仍似旧 CLI 时由最终复探拒绝；有能力的已发布版本无需构建即被接受；无能力的已发布 CLI 仅经由 base 检出构建路径被接受。
 2. **构建与静态检查**：`npm run build && npm run typecheck`、workflow lint/格式检查，以及 `packages/cli` 和 `scripts/tests` 中受影响单测全部通过。
 
 ## 6. 后续工作

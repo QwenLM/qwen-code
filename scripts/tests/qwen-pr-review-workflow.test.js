@@ -3259,7 +3259,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.outputs.policy).toBe('tiered');
-    expect(r.outputs.container_ready).toBe('true');
+    expect(r.outputs.container_ready).toBeUndefined();
     expect(r.outputs.force_hardware).toBe('');
     expect(r.outputs.image).toMatch(
       /^ghcr\.io\/qwenlm\/qwen-code@sha256:[0-9a-f]{64}$/,
@@ -3280,7 +3280,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.outputs.policy).toBe('tiered');
-    expect(r.outputs.container_ready).toBe('false');
+    expect(r.outputs.container_ready).toBeUndefined();
     expect(r.outputs.force_hardware).toBe('1');
     expect(r.outputs.image).toBeUndefined();
     expect(r.stdout).toContain('::warning::');
@@ -3297,7 +3297,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
       });
       expect(r.status).toBe(0);
       expect(r.outputs.policy).toBe('tiered');
-      expect(r.outputs.container_ready).toBe('false');
+      expect(r.outputs.container_ready).toBeUndefined();
       expect(r.outputs.force_hardware).toBe('1');
       expect(r.outputs.image).toBeUndefined();
       expect(r.stdout).toContain('::warning::');
@@ -3347,8 +3347,240 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.outputs.policy).toBe('tiered');
-    expect(r.outputs.container_ready).toBe('false');
+    expect(r.outputs.container_ready).toBeUndefined();
     expect(r.outputs.force_hardware).toBe('1');
+  });
+});
+
+describe('review CLI capability gate (production cutover blocker)', () => {
+  // The published CLI on a review runner may predate the tiered sandbox and
+  // silently map `tiered` to `off`. The gate must probe BEHAVIOUR (a trusted
+  // fixture whose preinstall writes a canary, plus the refused-report shape),
+  // never a version string, and refuse explicitly when no candidate CLI
+  // implements the boundary. Replayed with stub CLIs against the real step.
+  const doc = parse(workflow);
+  const gate = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Ensure tiered-capable review CLI',
+  );
+
+  const cliStub = (behavior, version) => {
+    const body =
+      behavior === 'new'
+        ? `printf '%s\\n' '{"ok":false,"executionBoundary":{"policy":"tiered","executionClass":"hardware-isolated","backend":"refused"}}' > "$out"\nexit 0\n`
+        : behavior === 'liar-boundary'
+          ? `printf '%s\\n' '{"ok":false,"executionBoundary":{"policy":"tiered","executionClass":"hardware-isolated","backend":"refused"}}' > "$out"\nprintf executed > "$wt/canary-marker"\nexit 0\n`
+          : behavior === 'silent-no-boundary'
+            ? `printf '%s\\n' '{"ok":true}' > "$out"\nexit 0\n`
+            : `printf '%s\\n' '{"ok":true}' > "$out"\nprintf executed > "$wt/canary-marker"\nexit 0\n`;
+    return (
+      `#!/bin/sh\n` +
+      `if [ "$1" = "--version" ]; then echo '${version}'; exit 0; fi\n` +
+      `out=''; wt=''; prev=''\n` +
+      `for a in "$@"; do\n` +
+      `  case "$prev" in --out) out="$a" ;; --worktree) wt="$a" ;; esac\n` +
+      `  prev="$a"\n` +
+      `done\n` +
+      body
+    );
+  };
+
+  const runGate = ({
+    cliBehavior = 'old',
+    version = '0.28.3',
+    upgradeBehavior = null,
+    buildOk = true,
+    builtBehavior = 'new',
+  } = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-review-cli-gate-'));
+    try {
+      const binDir = join(dir, 'bin');
+      const runnerTemp = join(dir, 'runner-temp');
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(runnerTemp, { recursive: true });
+      const callLog = join(dir, 'calls.log');
+      writeFileSync(callLog, '');
+      writeFileSync(join(binDir, 'qwen'), cliStub(cliBehavior, version));
+      chmodSync(join(binDir, 'qwen'), 0o755);
+      if (upgradeBehavior) {
+        writeFileSync(
+          join(dir, 'qwen-upgraded'),
+          cliStub(upgradeBehavior, '99.0.0'),
+        );
+      }
+      writeFileSync(
+        join(binDir, 'npm'),
+        `#!/bin/sh\necho "npm $*" >> ${JSON.stringify(callLog)}\n` +
+          `if [ "$1" = "install" ]; then\n` +
+          `  if [ -f ${JSON.stringify(join(dir, 'qwen-upgraded'))} ]; then cp ${JSON.stringify(join(dir, 'qwen-upgraded'))} ${JSON.stringify(join(binDir, 'qwen'))}; fi\n` +
+          `  exit 0\nfi\n` +
+          `if [ "$1" = "run" ]; then exit ${buildOk ? 0 : 1}; fi\nexit 0\n`,
+      );
+      chmodSync(join(binDir, 'npm'), 0o755);
+      writeFileSync(
+        join(binDir, 'corepack'),
+        `#!/bin/sh\necho "corepack $*" >> ${JSON.stringify(callLog)}\nexit ${buildOk ? 0 : 1}\n`,
+      );
+      chmodSync(join(binDir, 'corepack'), 0o755);
+      // macOS hosts lack GNU timeout; the step only needs its exec semantics.
+      writeFileSync(join(binDir, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+      chmodSync(join(binDir, 'timeout'), 0o755);
+      // The base-checkout build's bundle, executed by the wrapper via node.
+      mkdirSync(join(dir, 'dist'), { recursive: true });
+      writeFileSync(
+        join(dir, 'dist', 'cli.js'),
+        builtBehavior === 'new'
+          ? `const fs = require('node:fs');\n` +
+              `const argv = process.argv.slice(2);\n` +
+              `const out = argv[argv.indexOf('--out') + 1];\n` +
+              `fs.writeFileSync(out, JSON.stringify({ ok: false, executionBoundary: { policy: 'tiered', executionClass: 'hardware-isolated', backend: 'refused' } }));\n`
+          : `const fs = require('node:fs');\n` +
+              `const argv = process.argv.slice(2);\n` +
+              `const out = argv[argv.indexOf('--out') + 1];\n` +
+              `const wt = argv[argv.indexOf('--worktree') + 1];\n` +
+              `fs.writeFileSync(out, JSON.stringify({ ok: true }));\n` +
+              `fs.writeFileSync(wt + '/canary-marker', 'executed');\n`,
+      );
+      const githubPath = join(dir, 'github-path');
+      const githubSummary = join(dir, 'github-summary');
+      writeFileSync(githubPath, '');
+      writeFileSync(githubSummary, '');
+      const res = spawnSync(
+        '/bin/bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', gate.run],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: dir,
+            GITHUB_PATH: githubPath,
+            GITHUB_STEP_SUMMARY: githubSummary,
+          },
+        },
+      );
+      return {
+        status: res.status,
+        stdout: res.stdout ?? '',
+        stderr: res.stderr ?? '',
+        calls: readFileSync(callLog, 'utf8'),
+        githubPath: readFileSync(githubPath, 'utf8'),
+        summary: readFileSync(githubSummary, 'utf8'),
+        workspace: dir,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('sits between the CLI install and the sandbox preflight, before any reviewed command', () => {
+    const steps = doc.jobs['review-pr'].steps;
+    const installIndex = steps.findIndex(
+      (s) => s.name === 'Install Qwen CLI if missing',
+    );
+    const gateIndex = steps.findIndex(
+      (s) => s.name === 'Ensure tiered-capable review CLI',
+    );
+    const preflightIndex = steps.findIndex(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
+    expect(installIndex).toBeGreaterThan(-1);
+    expect(gateIndex).toBeGreaterThan(installIndex);
+    expect(gateIndex).toBeLessThan(preflightIndex);
+    expect(preflightIndex).toBeLessThan(reviewIndex);
+    expect(gate['continue-on-error']).toBeUndefined();
+    // Behaviour, not version: the probe asserts the refused-report shape and
+    // the absence of the fixture canary, and never reads `qwen --version`.
+    expect(gate.run).toContain('QWEN_REVIEW_SANDBOX=tiered');
+    expect(gate.run).toContain('QWEN_REVIEW_FORCE_HARDWARE=1');
+    expect(gate.run).toContain('canary-marker');
+    expect(gate.run).toContain('executionBoundary');
+    expect(gate.run).not.toMatch(/qwen --version/);
+  });
+
+  it('accepts a CLI that refuses the tiered probe without executing the canary', () => {
+    const r = runGate({ cliBehavior: 'new' });
+    expect(r.status).toBe(0);
+    expect(r.calls).toBe('');
+    expect(r.githubPath).toBe('');
+    expect(r.summary).toContain('behaviour probe passed');
+  });
+
+  it('refuses an older CLI that silently downgrades tiered to off when no upgrade or build can fix it', () => {
+    const r = runGate({ cliBehavior: 'old', buildOk: false });
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain(
+      '::error::review CLI capability gate',
+    );
+    expect(r.githubPath).toBe('');
+    expect(r.summary).not.toContain('implements the tiered sandbox boundary');
+  });
+
+  it('refuses a CLI that reports a new version but still executes the canary (version is not capability)', () => {
+    const r = runGate({
+      cliBehavior: 'old',
+      version: '99.9.9',
+      buildOk: false,
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain(
+      '::error::review CLI capability gate',
+    );
+  });
+
+  it('refuses a CLI that emits the tiered refusal report but still executes the canary', () => {
+    const r = runGate({ cliBehavior: 'liar-boundary', buildOk: false });
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain(
+      '::error::review CLI capability gate',
+    );
+  });
+
+  it('refuses a CLI that returns a clean report without any executionBoundary and without the canary', () => {
+    // The real 0.28.4 shape when it scopes the fixture as an unsupported
+    // toolchain: ok:true, no boundary, nothing executed. The boundary
+    // assertion, not the canary, must catch this one.
+    const r = runGate({ cliBehavior: 'silent-no-boundary', buildOk: false });
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain(
+      '::error::review CLI capability gate',
+    );
+  });
+
+  it('refuses when the base-checkout build itself still lacks the boundary', () => {
+    // Build succeeds but the produced bundle behaves like the old CLI: the
+    // final re-probe refusal (not the install refusal) must fire.
+    const r = runGate({
+      cliBehavior: 'old',
+      buildOk: true,
+      builtBehavior: 'old',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).toContain(
+      '::error::review CLI capability gate: the base-checkout build still does not implement',
+    );
+    expect(r.githubPath).toContain('.qwen-review-cli-bin');
+  });
+
+  it('upgrades to a capable published release without building when one exists', () => {
+    const r = runGate({ cliBehavior: 'old', upgradeBehavior: 'new' });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('npm install -g');
+    expect(r.calls).not.toContain('corepack');
+    expect(r.githubPath).toBe('');
+    expect(r.summary).toContain('after published-release upgrade');
+  });
+
+  it('builds the CLI from the base checkout and re-probes when no published release is capable', () => {
+    const r = runGate({ cliBehavior: 'old', buildOk: true });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('corepack pnpm install --frozen-lockfile');
+    expect(r.calls).toContain('npm run build');
+    expect(r.calls).toContain('npm run bundle');
+    expect(r.githubPath.trim()).toBe(join(r.workspace, '.qwen-review-cli-bin'));
+    expect(r.summary).toContain('base-checkout build');
   });
 });
 
