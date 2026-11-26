@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -190,6 +191,31 @@ class ManagedHostedRecoveryRecordsTest {
         assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
         call.remove("publicationId");
         assertThatThrownBy(() -> validateNativeContinuation(body, definition)).hasMessageContaining("publication identity");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"approval", "final"})
+    void validatesConfinedNativeShellWithoutPublicationIdentity(String stage) {
+        ObjectNode body = nativeContinuation("run_shell_command").put("stage", stage);
+        ObjectNode definition = json.createObjectNode()
+                .put("toolProfile", WorkspaceToolProfiles.CONFINED_SHELL)
+                .put("foregroundOnly", true);
+        ObjectNode call = (ObjectNode) body.path("calls").get(0);
+        assertThatCode(() -> validateNativeContinuation(body, definition)).doesNotThrowAnyException();
+
+        call.putNull("publicationId");
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition))
+                .hasMessageContaining("publication identity");
+        call.remove("publicationId");
+
+        definition.put("captureBytes", 1024);
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition))
+                .hasMessageContaining("confined Shell definition");
+        definition.remove("captureBytes");
+
+        definition.put("foregroundOnly", false);
+        assertThatThrownBy(() -> validateNativeContinuation(body, definition))
+                .hasMessageContaining("confined Shell definition");
     }
 
     @Test
