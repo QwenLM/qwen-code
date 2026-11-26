@@ -52,6 +52,68 @@ class TakeoverReconciliationTest {
     }
 
     @Test
+    void statusSettlesExecutionThatWasStillRunningDuringAdoption() throws Exception {
+        Fixture fixture = new Fixture();
+        ToolExecutionRecord original = fixture.execution("running", ToolExecutionRecord.State.EXECUTING);
+        try (RuntimeBrokerService broker = fixture.broker(reference -> fixture.lookups.size() == 1
+                ? CompletableFuture.completedFuture(Map.of("state", "executing")) : settled())) {
+            fixture.acquire(broker);
+            assertEquals(ToolExecutionRecord.State.EXECUTING, fixture.executions
+                    .findByExecutionCallId(original.getExecutionCallId()).getState());
+            ToolExecutionRecord result = broker.getExecution(original.getHarnessSessionId(),
+                    original.getRuntimeSessionId(), original.getExecutionCallId()).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertEquals(2, fixture.lookups.size());
+            assertEquals(ToolExecutionRecord.State.SETTLED, result.getState());
+            assertEquals(Map.of("executionStatus", "success", "output", "original result"), result.getResult());
+            assertEquals(original.getVersion() + 1, result.getVersion());
+            assertEquals(original.getDispatchOwner(), result.getDispatchOwner());
+            assertEquals(original.getDispatchGeneration(), result.getDispatchGeneration());
+            assertTrue(fixture.unexpectedTransportCalls.isEmpty(), fixture.unexpectedTransportCalls.toString());
+            assertTrue(fixture.unexpectedRepositoryCalls.isEmpty(), fixture.unexpectedRepositoryCalls.toString());
+        }
+    }
+
+    @Test
+    void statusKeepsItsOwnDispatchOnTheLedgerPath() throws Exception {
+        Fixture fixture = new Fixture();
+        String owner = "replacement-" + UUID.randomUUID();
+        try (RuntimeBrokerService broker = fixture.broker(owner, reference -> settled())) {
+            fixture.acquire(broker);
+            ToolExecutionRecord original = fixture.execution("local", ToolExecutionRecord.State.EXECUTING,
+                    Duration.ofMinutes(5), owner);
+            ToolExecutionRecord result = broker.getExecution(original.getHarnessSessionId(),
+                    original.getRuntimeSessionId(), original.getExecutionCallId()).toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+            assertTrue(fixture.lookups.isEmpty());
+            assertEquals(ToolExecutionRecord.State.EXECUTING, result.getState());
+            assertEquals(original.getVersion(), result.getVersion());
+        }
+    }
+
+    @Test
+    void aSlowWorkerDoesNotHoldStatusUntilTheOperationLeaseExpires() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.operationLease = Duration.ofSeconds(30);
+        ToolExecutionRecord original = fixture.execution("slow", ToolExecutionRecord.State.EXECUTING);
+        CompletableFuture<Map<String, Object>> pending = new CompletableFuture<>();
+        try (RuntimeBrokerService broker = fixture.broker(reference -> fixture.lookups.size() == 1
+                ? CompletableFuture.completedFuture(Map.of("state", "executing")) : pending)) {
+            fixture.acquire(broker);
+            var first = broker.getExecution(original.getHarnessSessionId(), original.getRuntimeSessionId(),
+                    original.getExecutionCallId());
+            var concurrent = broker.getExecution(original.getHarnessSessionId(), original.getRuntimeSessionId(),
+                    original.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.EXECUTING, first.toCompletableFuture().get(8, TimeUnit.SECONDS).getState());
+            assertEquals(ToolExecutionRecord.State.EXECUTING, concurrent.toCompletableFuture().get(8, TimeUnit.SECONDS).getState());
+            assertEquals(2, fixture.lookups.size());
+            pending.complete(settled().toCompletableFuture().join());
+            assertEquals(ToolExecutionRecord.State.SETTLED, fixture.executions
+                    .findByExecutionCallId(original.getExecutionCallId()).getState());
+        }
+    }
+
+    @Test
     void expiredDispatchesSettleDirectlyFromOriginalRuntimeEvidence() throws Exception {
         Fixture fixture = new Fixture();
         ToolExecutionRecord original = fixture.execution("expired", ToolExecutionRecord.State.EXECUTING,
@@ -258,6 +320,7 @@ class TakeoverReconciliationTest {
         final List<String> lookups = new CopyOnWriteArrayList<>();
         final List<String> unexpectedTransportCalls = new CopyOnWriteArrayList<>();
         final List<String> unexpectedRepositoryCalls = new CopyOnWriteArrayList<>();
+        Duration operationLease = Duration.ofSeconds(1);
         boolean takeoverOnly = true;
         int settlements;
         int failSettlementNumber;
@@ -280,11 +343,15 @@ class TakeoverReconciliationTest {
         }
 
         ToolExecutionRecord execution(String id, ToolExecutionRecord.State state, Duration duration) {
+            return execution(id, state, duration, "dead-broker");
+        }
+
+        ToolExecutionRecord execution(String id, ToolExecutionRecord.State state, Duration duration, String owner) {
             ToolExecutionRecord prepared = saved.prepare(id);
             if (state == ToolExecutionRecord.State.PREPARED) {
                 return prepared;
             }
-            ToolExecutionRecord claimed = executions.claimDispatch(prepared.getExecutionCallId(), "dead-broker",
+            ToolExecutionRecord claimed = executions.claimDispatch(prepared.getExecutionCallId(), owner,
                     duration);
             if (state == ToolExecutionRecord.State.DISPATCHING) {
                 return claimed;
@@ -302,6 +369,11 @@ class TakeoverReconciliationTest {
         }
 
         RuntimeBrokerService broker(Function<Map<String, Object>, CompletionStage<Map<String, Object>>> status) {
+            return broker("replacement-" + UUID.randomUUID(), status);
+        }
+
+        RuntimeBrokerService broker(String owner,
+                Function<Map<String, Object>, CompletionStage<Map<String, Object>>> status) {
             RuntimeProvisioner provisioner = new RuntimeProvisioner() {
                 @Override
                 public String kind() { return "test-supervisor"; }
@@ -370,8 +442,7 @@ class TakeoverReconciliationTest {
                     });
             return new RuntimeBrokerService(id -> CompletableFuture.completedFuture(saved.session.getSession().getScope()),
                     provisioner, transport, bindings, sessions, takeoverOnly ? observed : executions,
-                    "replacement-" + UUID.randomUUID(),
-                    Duration.ofSeconds(1), Duration.ofSeconds(1));
+                    owner, operationLease, Duration.ofSeconds(1));
         }
     }
 }
