@@ -144,6 +144,7 @@ import {
 import {
   catalogSnapshotChars,
   estimateContentChars,
+  estimatedMedia,
 } from '../utils/content-token-estimate.js';
 import type {
   PricedCatalogEntry,
@@ -195,6 +196,7 @@ import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
   createUserPromptSubmitContextPart,
   hasUserPromptSubmitContext,
+  isUserPromptSubmitContextPartText,
 } from '../hooks/user-prompt-submit-context.js';
 import {
   type ChatCompressionInfo,
@@ -871,22 +873,102 @@ export const userContentPushSnapshotKey = Symbol(
 interface LocalHistoryEstimate {
   imageTokenEstimate: number;
   tokenOffset: number;
-  historyLength: number;
-  historyRevision: number;
+  mediaCounts: Map<string, number>;
 }
 
-function hasEstimatedMedia(part: Part): boolean {
-  return !!(
-    part.inlineData ||
-    part.fileData ||
-    getFunctionResponseParts(part)?.some(hasEstimatedMedia)
-  );
+// Payloads are shared by shallow history copies. Keep only digests in route
+// counts so a replaced history cannot keep the original image bytes alive.
+const mediaDigests = new WeakMap<object, string>();
+
+function countMedia(history: Content[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const content of history) {
+    for (const media of estimatedMedia(content)) {
+      let digest = mediaDigests.get(media);
+      if (digest === undefined) {
+        const data =
+          'data' in media
+            ? media.data
+            : 'fileUri' in media
+              ? media.fileUri
+              : '';
+        digest = createHash('sha256')
+          .update(media.mimeType ?? '')
+          .update('\0')
+          .update(data ?? '')
+          .digest('hex');
+        mediaDigests.set(media, digest);
+      }
+      counts.set(digest, (counts.get(digest) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 interface PromptTokenCountSource {
   kind: 'provider' | 'adjusted-provider' | 'estimate';
   localHistory?: LocalHistoryEstimate;
   catalogChanges?: WeakMap<Part, number>;
+  mediaCosts?: WeakMap<object, number>;
+}
+
+function copyHistoryMediaCosts(
+  previous: Content[],
+  next: Content[],
+  costs: WeakMap<object, number>,
+): void {
+  const byPrompt = new Map<string, Content | undefined>();
+  for (const entry of previous) {
+    const id = getApiHistoryPromptId(entry);
+    if (id) byPrompt.set(id, byPrompt.has(id) ? undefined : entry);
+  }
+  for (const [index, entry] of next.entries()) {
+    const id = getApiHistoryPromptId(entry);
+    const old = (id && byPrompt.get(id)) || previous[index];
+    if (
+      !old ||
+      old === entry ||
+      old.role !== entry.role ||
+      getApiHistoryPromptId(old) !== id
+    )
+      continue;
+    const original = estimatedMedia(old);
+    if (!original.some((item) => costs.has(item))) continue;
+    const copies = estimatedMedia(entry);
+    if (
+      original.length !== copies.length ||
+      original.every((item, i) => item === copies[i])
+    )
+      continue;
+    // Unidentified or repeated turns can only be paired in an equivalent slot.
+    // A byte-identical image in another message can have a different charge.
+    if (
+      (previous.length !== next.length && !(id && byPrompt.get(id))) ||
+      !isDeepStrictEqual(old.parts, entry.parts)
+    )
+      continue;
+    for (const [i, item] of original.entries()) {
+      const cost = costs.get(item);
+      if (cost !== undefined) costs.set(copies[i], cost);
+    }
+  }
+}
+
+function estimateWithMediaCosts(
+  history: Content[],
+  fallback: number,
+  costs?: WeakMap<object, number>,
+): number {
+  if (!costs) return estimateModelContentTokens(history, fallback);
+  let chars = 0;
+  for (const entry of withModelToolErrorNotes(history)) {
+    chars += estimateContentChars(entry, fallback);
+    for (const item of estimatedMedia(entry)) {
+      const cost = costs.get(item);
+      if (cost !== undefined) chars += (cost - fallback) * TOKEN_TO_CHAR_RATIO;
+    }
+  }
+  return Math.ceil(chars / TOKEN_TO_CHAR_RATIO);
 }
 
 interface TryCompressOptions {
@@ -2808,7 +2890,8 @@ export class LlmChat {
     history: Content[],
     summaryPrefixLength: number | undefined,
     pending?: Content,
-    knownCatalogChanges?: WeakMap<Part, number>,
+    source?: PromptTokenCountSource,
+    reattachmentTokens = 0,
   ): ChatCompressionRecordPayload {
     const persisted = withoutCompactionTranscriptHint(history);
     const dispatched = withModelToolErrorNotes(history);
@@ -2823,12 +2906,28 @@ export class LlmChat {
     let hasCatalog = false;
     let pendingTokens = 0;
     const pruneContentChars: number[] = [];
+    const historyImageTokenEstimate = info.historyImageTokenEstimate;
+    const uniformImagePrice =
+      historyImageTokenEstimate !== undefined &&
+      (historyImageTokenEstimate === imageTokenEstimate ||
+        !pending ||
+        estimatedMedia(pending).length === 0);
+    const mediaTokenCosts: number[][] = [];
     for (const [index, entry] of compressedHistory.entries()) {
       const isPending = index === persisted.length;
       const imageCost = isPending
         ? imageTokenEstimate
         : (info.historyImageTokenEstimate ?? 0);
       let visible = estimateContentChars(entry, imageCost);
+      if (!uniformImagePrice && (pending || source?.mediaCosts)) {
+        const costs = estimatedMedia(entry).map(
+          (item) => imageCost || source?.mediaCosts?.get(item) || 0,
+        );
+        mediaTokenCosts.push(costs);
+        if (!imageCost) {
+          for (const cost of costs) visible += cost * TOKEN_TO_CHAR_RATIO;
+        }
+      }
       let hidden = visible - catalogSnapshotChars(entry);
       if (visible !== hidden) hasCatalog = true;
       if (isPending) {
@@ -2844,11 +2943,11 @@ export class LlmChat {
       const locallyPriced =
         isPending || info.historyImageTokenEstimate !== undefined;
       let difference = locallyPriced ? visible - hidden : 0;
-      if (!locallyPriced && knownCatalogChanges && visible !== hidden) {
+      if (!locallyPriced && source?.catalogChanges && visible !== hidden) {
         // A previous checkpoint can price just its pending catalog. Preserve
         // its separately rounded adjustment while its Part remains in history.
         for (const part of entry.parts ?? []) {
-          const known = knownCatalogChanges.get(part) ?? 0;
+          const known = source.catalogChanges.get(part) ?? 0;
           if (catalogVisible ? known < 0 : known > 0) {
             difference += Math.abs(known);
           }
@@ -2858,28 +2957,24 @@ export class LlmChat {
       catalogSwitchChars.push(catalogVisible ? -difference : difference);
       pruneContentChars.push(catalogVisible ? visible : hidden);
     }
-    // A pending image is charged at the current setting, independently of
-    // the price used for already-committed history.
-    const historyImageTokenEstimate = info.historyImageTokenEstimate;
-    const uniformImagePrice =
-      historyImageTokenEstimate !== undefined &&
-      (historyImageTokenEstimate === imageTokenEstimate ||
-        !pending ||
-        !pending.parts?.some(hasEstimatedMedia));
     const payload: ChatCompressionRecordPayload = {
       info,
       ...(uniformImagePrice && { historyImageTokenEstimate }),
+      ...(mediaTokenCosts.some((entry) => entry.some((cost) => cost > 0)) && {
+        mediaTokenCosts,
+      }),
       pruneContentChars,
       ...(hasCatalog && { catalogSwitchChars }),
       compressedHistory,
       summaryPrefixLength,
       completedToolCallIds: this.completedToolCallIds,
     };
-    if (pending || persisted !== dispatched) {
+    if (pending || persisted !== dispatched || reattachmentTokens) {
       // Preserve the live system/tool overhead while sizing the history resume loads.
       payload.resumePromptTokenCount = Math.max(
         0,
-        info.newTokenCount +
+        info.newTokenCount -
+          reattachmentTokens +
           this.persistedPromptTokenDelta(
             persisted,
             dispatched,
@@ -3363,6 +3458,18 @@ export class LlmChat {
     this.lastPromptTokenCountSource = isEstimated
       ? this.estimatedCountSource(count, historyImageTokenEstimate)
       : { kind: 'provider' };
+    const local = this.lastPromptTokenCountSource.localHistory;
+    if (local && this.imagePayloadStore.size) {
+      const history = this.curatedBaseHistory();
+      const projected = this.withReattachedImages(history);
+      if (projected !== history) {
+        this.lastPromptTokenCount = Math.max(
+          0,
+          local.tokenOffset +
+            estimateModelContentTokens(projected, local.imageTokenEstimate),
+        );
+      }
+    }
     this.lastOutputTokenCount = 0;
     this.lastCachedContentTokenCount = 0;
     this.telemetryService?.setLastCachedContentTokenCount(0);
@@ -3417,8 +3524,7 @@ export class LlmChat {
       localHistory: {
         imageTokenEstimate,
         tokenOffset,
-        historyLength: this.history.length,
-        historyRevision: this.historyReplacementRevision,
+        mediaCounts: countMedia(this.history),
       },
     };
   }
@@ -3433,22 +3539,51 @@ export class LlmChat {
     if (!source || configured === source.imageTokenEstimate) return configured;
     // Old media retain their checkpoint price until new media enter. At that
     // point reprice all visible history once, preserving the fixed overhead.
-    // Replacing history invalidates its former append boundary.
-    const suffix =
-      added ??
-      (source.historyRevision === this.historyReplacementRevision
-        ? this.history.slice(source.historyLength)
-        : this.history);
-    return suffix.some((content) => content.parts?.some(hasEstimatedMedia))
-      ? configured
-      : source.imageTokenEstimate;
+    if (added?.some((content) => estimatedMedia(content).length > 0))
+      return configured;
+    for (const [key, count] of countMedia(this.history)) {
+      if (count > (source.mediaCounts.get(key) ?? 0)) return configured;
+    }
+    return source.imageTokenEstimate;
+  }
+
+  // These parts are rebuilt from this process's image store on each request.
+  // Restoring the JSONL in another process restores only the text references.
+  private withReattachedImages(
+    history: Content[],
+    modalities?: InputModalities,
+  ): Content[] {
+    if (!this.imagePayloadStore.size) return history;
+    const { maxRecentImages } = resolveCompactionTuning(
+      this.config.getChatCompression(),
+    );
+    const parts = buildReattachParts(
+      [],
+      maxRecentImages,
+      history,
+      this.imagePayloadStore,
+    );
+    if (!parts.length) return history;
+    const { slimmedHistory } = slimCompactionInput(
+      [{ role: 'user', parts }],
+      modalities ?? this.config.getEffectiveInputModalities(),
+    );
+    return [...history, ...slimmedHistory];
   }
 
   private updateLocalCount(
     price: number,
     tokenOffset: number,
-    visible = estimateModelContentTokens(this.curatedBaseHistory(), price),
+    visible?: number,
+    modalities?: InputModalities,
   ): void {
+    if (visible === undefined) {
+      const history = this.curatedBaseHistory();
+      visible = estimateModelContentTokens(
+        this.withReattachedImages(history, modalities),
+        price,
+      );
+    }
     this.lastPromptTokenCount = Math.max(0, tokenOffset + visible);
     this.lastPromptTokenCountSource = this.localCountSource(price, tokenOffset);
     this.lastOutputTokenCount = 0; // The visible history includes the output.
@@ -3554,11 +3689,27 @@ export class LlmChat {
         coveredHistory = this.history.slice(0, end);
         added = this.history.slice(end);
         if (last?.parts && count < last.parts.length) {
-          coveredHistory[index] = {
-            ...last,
-            parts: last.parts.slice(0, count),
-          };
-          added.unshift({ ...last, parts: last.parts.slice(count) });
+          const coveredParts = last.parts.slice(0, count);
+          let addedParts = last.parts.slice(count);
+          if (
+            resumeBoundary.endsWithHookContext &&
+            coveredParts.at(-1)?.partMetadata?.[PERMISSION_CONTEXT_METADATA]
+          ) {
+            // Replay inserts permissions before the saved trailing hook. Its
+            // first occurrence after the insertion is still checkpoint input.
+            const hook = addedParts.findIndex((part) =>
+              isUserPromptSubmitContextPartText(part.text ?? ''),
+            );
+            if (hook >= 0) {
+              coveredParts[count - 1] = addedParts[hook];
+              addedParts = [
+                ...last.parts.slice(count - 1, count + hook),
+                ...addedParts.slice(hook + 1),
+              ];
+            }
+          }
+          coveredHistory[index] = { ...last, parts: coveredParts };
+          added.unshift({ ...last, parts: addedParts });
         }
       }
     }
@@ -3578,6 +3729,28 @@ export class LlmChat {
       pricedCatalogEntries?.length
     ) {
       this.restoreCatalogChanges(pricedCatalogEntries);
+    }
+    if (
+      hasCheckpointCount &&
+      isEstimated &&
+      !hasProviderBaseline &&
+      resumeBoundary?.mediaTokenCosts
+    ) {
+      const prices = resumeBoundary.mediaTokenCosts;
+      const start =
+        this.history.length - resumeBoundary.trailingEntries - prices.length;
+      if (start >= 0) {
+        const costs = new WeakMap<object, number>();
+        for (const [index, entry] of prices.entries()) {
+          if (!Array.isArray(entry) || !entry.length) continue;
+          const media = estimatedMedia(this.history[start + index]);
+          for (const [i, cost] of entry.entries()) {
+            if (media[i] && Number.isFinite(cost) && cost > 0)
+              costs.set(media[i], cost);
+          }
+        }
+        this.lastPromptTokenCountSource.mediaCosts = costs;
+      }
     }
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
@@ -3780,10 +3953,14 @@ export class LlmChat {
     // then adjusted by the estimated delta — never replaced wholesale.
     const localSource = this.lastPromptTokenCountSource.localHistory;
     const imageTokenEstimate = this.localImagePrice(localSource);
+    const mediaCosts = this.lastPromptTokenCountSource.mediaCosts;
     const beforeHistory = this.curatedBaseHistory();
-    const beforeEstimate = estimateModelContentTokens(
-      beforeHistory,
+    const locallyPriced =
+      !this.lastPromptTokenCount || localSource !== undefined;
+    const beforeEstimate = estimateWithMediaCosts(
+      locallyPriced ? this.withReattachedImages(beforeHistory) : beforeHistory,
       imageTokenEstimate,
+      mediaCosts,
     );
     const projectRoot = this.config.getProjectRoot();
     const targetDir = this.config.getTargetDir?.() ?? projectRoot;
@@ -3807,9 +3984,13 @@ export class LlmChat {
       .filter((c): c is Content => c !== null);
 
     const afterHistory = this.curatedBaseHistory(newHistory);
-    const afterEstimate = estimateModelContentTokens(
-      afterHistory,
+    const projectedAfter = locallyPriced
+      ? this.withReattachedImages(afterHistory)
+      : afterHistory;
+    const afterEstimate = estimateWithMediaCosts(
+      projectedAfter,
       imageTokenEstimate,
+      mediaCosts,
     );
 
     const apiBaseline = localSource
@@ -3838,13 +4019,11 @@ export class LlmChat {
     // unknown. Only deduct text savings from an unpriced usage anchor.
     // Usage-less turns may add visible content (including catalogs that were
     // separately charged). Reusing the original offset counts it only once.
-    const locallyPriced =
-      !this.lastPromptTokenCount || localSource !== undefined;
     const reduction = !locallyPriced
       ? Math.max(
           0,
-          estimateModelContentTokens(beforeHistory, 0) -
-            estimateModelContentTokens(afterHistory, 0),
+          estimateWithMediaCosts(beforeHistory, 0, mediaCosts) -
+            estimateWithMediaCosts(afterHistory, 0, mediaCosts),
         )
       : beforeEstimate - afterEstimate;
     const baselineIsEstimated = this.promptCountIsEstimateDerived();
@@ -3872,7 +4051,11 @@ export class LlmChat {
         getStartupContextLength(newHistory, { includeCompressed: true }) ||
           undefined,
         undefined,
-        this.lastPromptTokenCountSource.catalogChanges,
+        this.lastPromptTokenCountSource,
+        projectedAfter === afterHistory
+          ? 0
+          : afterEstimate -
+              estimateModelContentTokens(afterHistory, imageTokenEstimate),
       ),
     );
     logChatCompression(
@@ -3892,6 +4075,7 @@ export class LlmChat {
       : {
           kind: 'estimate',
           catalogChanges: this.lastPromptTokenCountSource.catalogChanges,
+          mediaCosts,
         };
     this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
@@ -7015,7 +7199,11 @@ export class LlmChat {
       acceptQuietToolResultCompletion,
       params.config?.abortSignal,
       { authType, extraRetryErrorCodes },
-      resumePromptTokenDelta,
+      {
+        resumePromptTokenDelta,
+        modalities: actualConfig?.modalities,
+        message: params.message,
+      },
     );
   }
 
@@ -7638,6 +7826,12 @@ export class LlmChat {
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
     markCompressedHistory(history);
+    const activeCosts = this.lastPromptTokenCountSource.mediaCosts;
+    if (activeCosts) copyHistoryMediaCosts(this.history, history, activeCosts);
+    for (const retained of this.tokenCountsByRouteKey.values()) {
+      const costs = retained.promptTokenCountSource.mediaCosts;
+      if (costs) copyHistoryMediaCosts(this.history, history, costs);
+    }
     this.history = history;
     this.permissionContextEnabled ||= !!findLatestPermissionContext(history);
     this.markToolResultsInjected(this.history);
@@ -7884,8 +8078,13 @@ export class LlmChat {
     acceptQuietToolResultCompletion = false,
     abortSignal?: AbortSignal,
     retryClassificationContext?: RetryErrorClassificationContext,
-    resumePromptTokenDelta = 0,
+    counting?: {
+      resumePromptTokenDelta: number;
+      modalities?: InputModalities;
+      message: SendMessageParameters['message'];
+    },
   ): AsyncGenerator<GenerateContentResponse> {
+    const resumePromptTokenDelta = counting?.resumePromptTokenDelta ?? 0;
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
@@ -8770,6 +8969,7 @@ export class LlmChat {
           changes.set(part, (after - before) * TOKEN_TO_CHAR_RATIO);
         }
         this.lastPromptTokenCountSource = {
+          ...source,
           catalogChanges: changes,
           kind: source.kind === 'provider' ? 'adjusted-provider' : source.kind,
         };
@@ -8786,7 +8986,15 @@ export class LlmChat {
     });
     const local = source.localHistory;
     if (local) {
-      this.updateLocalCount(this.localImagePrice(local), local.tokenOffset);
+      // The sender may have replaced an older copy of this very image with a
+      // reference. A fresh submission still switches to the current price.
+      const submitted = counting && createUserContent(counting.message);
+      this.updateLocalCount(
+        this.localImagePrice(local, submitted ? [submitted] : undefined),
+        local.tokenOffset,
+        undefined,
+        counting?.modalities,
+      );
     }
     this.toolBudgetUsageAnchor =
       fixedInputVersion === this.toolBudgetFixedInputVersion &&

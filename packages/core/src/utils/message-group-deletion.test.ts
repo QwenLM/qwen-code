@@ -327,6 +327,61 @@ describe('message group deletion', () => {
     },
   );
 
+  it.each([false, true])(
+    'preserves the media charges of a mixed checkpoint during deletion (legacy: %s)',
+    (legacy) => {
+      const first = user('u1', null);
+      const last = user('u2', 'u1');
+      for (const item of [first, last]) {
+        item.message!.parts!.push({
+          inlineData: { mimeType: 'image/png', data: 'AA==' },
+        });
+      }
+      const checkpoint = record('checkpoint', 'u2', 'system', {
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            originalTokenCount: 40000,
+            newTokenCount: 30000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [first.message!, last.message!],
+          promptIds: ['api-u1', 'api-u2'],
+          pruneContentChars: [2, 16804],
+          resumePromptTokenCount: 34201,
+          ...(!legacy && { mediaTokenCosts: [[0], [4200]] }),
+        },
+      });
+      const records = [first, last, checkpoint];
+      const counts = getResumeTokenCounts({ messages: records });
+      expect(counts?.historyCheckpoint?.mediaTokenCosts?.at(-1)).toEqual([
+        4200,
+      ]);
+      const retained = deleteTranscriptMessageGroups(
+        records,
+        ['u1'],
+        anchor,
+      ).records;
+      expect(
+        getResumeTokenCounts({ messages: retained })?.historyCheckpoint
+          ?.mediaTokenCosts,
+      ).toEqual([[4200]]);
+      const removed = deleteTranscriptMessageGroups(
+        records,
+        ['u2'],
+        anchor,
+      ).records;
+      expect(
+        getResumeTokenCounts({ messages: removed })?.promptTokenCount,
+      ).toBe(30000);
+      expect(
+        getResumeTokenCounts({
+          messages: removed,
+        })?.historyCheckpoint?.mediaTokenCosts?.flat() ?? [],
+      ).not.toContain(4200);
+    },
+  );
+
   it('keeps only retained entries when repricing a catalog after deletion', () => {
     const u1 = user('u1', null);
     const u2 = user('u2', 'u1');

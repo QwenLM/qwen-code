@@ -4217,6 +4217,108 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('reprices a pasted image even when its older copy becomes a reference', async () => {
+      const history = [
+        png('old'),
+        modelText('one'),
+        png('keep'),
+        modelText('two'),
+      ];
+      const target = newChat({ history });
+      target.seedResumeTokenCounts(
+        estimateContentTokens(history, 100),
+        0,
+        true,
+        false,
+        100,
+      );
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        imageTokenEstimate: 3200,
+        imagePayloadThreshold: 1,
+        maxRecentImagesToRetain: 1,
+      });
+      mockStream(textStream('done'));
+      await sendDrain(png('old').parts!, 'paste-again', target);
+      const sent = requestAt(0).contents as Content[];
+      expect(
+        sent
+          .flatMap(({ parts }) => parts ?? [])
+          .filter((part) => part.inlineData),
+      ).toHaveLength(2);
+      expect(target.getLastPromptTokenCount()).toBe(
+        estimateContentTokens([...sent, modelText('done')], 3200),
+      );
+      expect(target.compressFast().info.newTokenCount).toBe(
+        target.getLastPromptTokenCount(),
+      );
+    });
+
+    it('charges only live reattachments across sends and compression', async () => {
+      retainOneImage();
+      const history = [
+        png('old-shot'),
+        modelText('seen'),
+        png('new-shot'),
+        content(
+          'model',
+          { text: 'thinking'.repeat(100), thought: true },
+          { text: 'ready' },
+        ),
+      ];
+      const price = 1600;
+      const overhead = 300;
+      const recorder = {
+        recordChatCompression: vi.fn(),
+        recordAssistantTurn: vi.fn(),
+      };
+      const target = newChat({ history, recorder });
+      target.seedResumeTokenCounts(
+        estimateContentTokens(history, price) + overhead,
+        0,
+        true,
+        false,
+        price,
+      );
+      streamEach(() => textStream('answer'));
+      await sendDrain('continue', 'evict', target);
+      const nextRequest = target.getLastPromptTokenCount();
+      await sendDrain('more', 'replay', target);
+      const sent = requestAt(1).contents as Content[];
+      expect(JSON.stringify(sent)).toContain('"data":"new-shot"');
+      expect(JSON.stringify(sent)).not.toContain('"data":"old-shot"');
+      // The second request adds exactly four characters to the first reply.
+      expect(nextRequest).toBe(
+        estimateContentTokens(sent, price) + overhead - 1,
+      );
+
+      const { info } = target.compressFast();
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      const [saved] = recorder.recordChatCompression.mock.lastCall!;
+      const durable =
+        estimateContentTokens(saved.compressedHistory, price) + overhead;
+      expect(saved.resumePromptTokenCount).toBe(durable);
+      expect(info.newTokenCount).toBeGreaterThanOrEqual(durable + price);
+      expect(target.compressFast().info.newTokenCount).toBe(info.newTokenCount);
+
+      const restored = newChat({
+        history: structuredClone(saved.compressedHistory),
+      });
+      restored.seedResumeTokenCounts(
+        saved.resumePromptTokenCount,
+        0,
+        true,
+        false,
+        price,
+      );
+      await sendDrain('resume', 'cold', restored);
+      expect(JSON.stringify(requestAt(2).contents)).not.toContain(
+        '"data":"new-shot"',
+      );
+      expect(restored.getLastPromptTokenCount()).toBe(
+        estimateContentTokens(restored.getHistory(), price) + overhead,
+      );
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       const reminder = '<system-reminder>\nstartup context\n</system-reminder>';
       chat.setHistory([userText(reminder)]);
@@ -17292,6 +17394,31 @@ describe('LlmChat', async () => {
     );
 
     it.each([
+      [100, 3200],
+      [3200, 100],
+    ])(
+      'keeps the checkpoint image price when history is reinstalled (%i to %i)',
+      (savedPrice, newPrice) => {
+        const prices = vi.mocked(mockConfig.getChatCompression);
+        prices.mockReturnValue({ imageTokenEstimate: savedPrice });
+        const history = [content('user', imagePart), modelText('ready')];
+        const target = newChat({ history });
+        const seed = 500 + estimateContentTokens(history, savedPrice);
+        target.seedResumeTokenCounts(seed, 0, true, false, savedPrice);
+        prices.mockReturnValue({ imageTokenEstimate: newPrice });
+        // ACP refresh reinstalls shallow copies. Other history editors use deep copies.
+        for (const copy of [target.getHistoryShallow(), target.getHistory()]) {
+          target.setHistory(copy);
+          expect(target.compressFast().info.newTokenCount).toBe(seed);
+        }
+        target.addHistory(content('user', structuredClone(imagePart)));
+        expect(target.compressFast().info.newTokenCount).toBe(
+          500 + estimateContentTokens(target.getHistory(), newPrice),
+        );
+      },
+    );
+
+    it.each([
       ['noop', false, false],
       ['compact', true, false],
       ['nested tool media', true, true],
@@ -17496,6 +17623,114 @@ describe('LlmChat', async () => {
       },
     );
 
+    it('preserves separately priced duplicate media when ACP reinstalls a snapshot', () => {
+      const original = content(
+        'user',
+        structuredClone(imagePart),
+        structuredClone(imagePart),
+      );
+      markApiHistoryPrompt(original, 'original');
+      const another = content('user', structuredClone(imagePart));
+      markApiHistoryPrompt(another, 'removed');
+      const history = [another, ...thoughtHistory(), original];
+      const recorder = { recordChatCompression: vi.fn() };
+      const target = newChat({ history, recorder });
+      target.seedResumeTokenCounts(
+        30000,
+        0,
+        true,
+        false,
+        undefined,
+        undefined,
+        {
+          trailingEntries: 0,
+          partCount: 2,
+          mediaTokenCosts: [[6000], [], [], [100, 4200]],
+        },
+      );
+      const restored = target.getHistory();
+      const replacement = content('user', structuredClone(imagePart));
+      markApiHistoryPrompt(replacement, 'new');
+      restored[0] = replacement;
+      target.setHistory(restored);
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 3,
+      });
+      target.compressFast();
+      const saved = recorder.recordChatCompression.mock.lastCall![0];
+      expect(saved.mediaTokenCosts).toEqual([[0], [], [], [100, 4200]]);
+      expect(saved.pruneContentChars.at(-1)).toBe((100 + 4200) * 4);
+    });
+
+    it.each(['retained', 'evicted', 'provider usage'])(
+      'keeps only known media charges across fast compression (%s)',
+      async (mode) => {
+        const history = [
+          content('user', structuredClone(imagePart)),
+          content(
+            'model',
+            { text: 'thinking'.repeat(1000), thought: true },
+            { text: 'done' },
+          ),
+          content(
+            'user',
+            structuredClone(imagePart),
+            structuredClone(imagePart),
+          ),
+        ];
+        const recorder = {
+          recordChatCompression: vi.fn(),
+          recordAssistantTurn: vi.fn(),
+        };
+        const target = newChat({ history, recorder });
+        vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+          imageTokenEstimate: 100,
+        });
+        vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+          toolResultsThresholdMinutes: 30,
+          toolResultsNumToKeep: 2,
+        });
+        target.seedResumeTokenCounts(
+          40000,
+          0,
+          true,
+          false,
+          undefined,
+          undefined,
+          {
+            trailingEntries: 0,
+            partCount: 2,
+            mediaTokenCosts: [[0], [], [4200, 4200]],
+          },
+        );
+        target.compressFast();
+        const first = recorder.recordChatCompression.mock.lastCall![0];
+        expect(first.mediaTokenCosts.at(-1)).toEqual([4200, 4200]);
+        expect(first.pruneContentChars.at(-1)).toBe(2 * 4200 * 4);
+        if (mode === 'retained') return;
+        if (mode === 'provider usage') {
+          mockStream(textStream('reply', { promptTokenCount: 30_000 }));
+          await sendDrain('next', 'new-usage', target);
+        }
+        vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+          toolResultsThresholdMinutes: 30,
+          toolResultsNumToKeep: 1,
+        });
+        const before = target.getLastPromptTokenCount();
+        target.compressFast();
+        const last = recorder.recordChatCompression.mock.lastCall![0];
+        if (mode === 'provider usage') {
+          expect(last.mediaTokenCosts).toBeUndefined();
+          expect(last.info.newTokenCount).toBe(before);
+        } else {
+          expect(last.mediaTokenCosts.at(-1)).toEqual([4200]);
+          expect(before - last.info.newTokenCount).toBeGreaterThan(4150);
+          expect(before - last.info.newTokenCount).toBeLessThanOrEqual(4200);
+        }
+      },
+    );
+
     it.each([true, false])(
       'only records a uniform history image price when pending input agrees (has image: %s)',
       async (hasImage) => {
@@ -17520,6 +17755,9 @@ describe('LlmChat', async () => {
         });
         const payload = recorder.recordChatCompression.mock.calls[0][0];
         expect(payload.info.historyImageTokenEstimate).toBe(1600);
+        expect(payload.mediaTokenCosts).toEqual(
+          hasImage ? [[1600], [], [6000]] : undefined,
+        );
         expect(payload.historyImageTokenEstimate).toBe(
           hasImage ? undefined : 1600,
         );

@@ -5,6 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import type { ChatCompressionRecordPayload } from '../services/chatRecordingService.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from './api-history-metadata.js';
 
 export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1600;
@@ -72,6 +73,21 @@ export function getFunctionResponseParts(part: Part): Part[] | undefined {
   return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
 }
 
+/** Media objects retain their identity when history copies its part containers. */
+type MediaPayload = NonNullable<Part['inlineData'] | Part['fileData']>;
+
+export function estimatedMedia(content: Content): MediaPayload[] {
+  const media: MediaPayload[] = [];
+  function visit(part: Part): void {
+    const data = part.inlineData ?? part.fileData;
+    if (data) media.push(data);
+    else if (typeof part.text !== 'string')
+      getFunctionResponseParts(part)?.forEach(visit);
+  }
+  content.parts?.forEach(visit);
+  return media;
+}
+
 export function catalogSnapshotChars(content: Content): number {
   let chars = 0;
   for (const part of content.parts ?? []) {
@@ -122,4 +138,46 @@ export function contentChars(
     totalChars += estimateContentChars(content, imageTokenEstimate);
   }
   return totalChars;
+}
+
+export function savedMediaTokenCosts(
+  payload: ChatCompressionRecordPayload,
+): number[][] | undefined {
+  if (!Array.isArray(payload.compressedHistory)) return undefined;
+  const costs = payload.mediaTokenCosts;
+  if (
+    Array.isArray(costs) &&
+    costs.length === payload.compressedHistory.length &&
+    costs.every(Array.isArray)
+  )
+    return costs;
+  // Older mixed checkpoints rounded pending input on its own. Its excess over
+  // the text charge identifies the media share only when it explains the entire override.
+  if (!Array.isArray(payload.pruneContentChars) || !payload.info)
+    return undefined;
+  const pending = payload.compressedHistory.at(-1);
+  const saved = payload.pruneContentChars.at(-1);
+  if (
+    !pending ||
+    pending.role !== 'user' ||
+    saved === undefined ||
+    payload.resumePromptTokenCount === undefined ||
+    payload.resumePromptTokenCount - payload.info.newTokenCount !==
+      saved / TOKEN_TO_CHAR_RATIO
+  )
+    return undefined;
+  const count = estimatedMedia(pending).length;
+  if (!count) return undefined;
+  const catalog = catalogSnapshotChars(pending);
+  const change = payload.catalogSwitchChars?.at(-1);
+  if (catalog && !change) return undefined;
+  const text =
+    estimateContentChars(pending, 0) - ((change ?? 0) > 0 ? catalog : 0);
+  const cost =
+    (saved / TOKEN_TO_CHAR_RATIO - Math.ceil(text / TOKEN_TO_CHAR_RATIO)) /
+    count;
+  if (!Number.isFinite(cost) || cost <= 0) return undefined;
+  const recovered: number[][] = payload.compressedHistory.map(() => []);
+  recovered[recovered.length - 1] = Array<number>(count).fill(cost);
+  return recovered;
 }

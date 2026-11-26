@@ -58,6 +58,7 @@ import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { WorkflowModeContext } from './workflow-mode.js';
+import { getPermissionContextSnapshot } from './permission-context.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -1522,6 +1523,51 @@ describe('Gemini Client (client.ts)', () => {
         3400,
       );
     });
+
+    it.each(['hook', 'permission'])(
+      'charges only new parts when permissions and hooks extend a saved %s',
+      async (savedPart) => {
+        const oldPart =
+          savedPart === 'hook'
+            ? createUserPromptSubmitContextPart('saved hook text '.repeat(500))
+            : getPermissionContextSnapshot([], ApprovalMode.PLAN)!;
+        const saved = content('user', { text: 'saved request' }, oldPart);
+        const first = getPermissionContextSnapshot([], ApprovalMode.DEFAULT)!;
+        const second = getPermissionContextSnapshot([], ApprovalMode.AUTO)!;
+        const hook = createUserPromptSubmitContextPart('a later hook');
+        const chars =
+          first.text!.length + second.text!.length + hook.text.length;
+        // Complete the next token so this delta is independent of the startup prelude's rounding.
+        const answer = 'done' + '.'.repeat((4 - (chars % 4)) % 4);
+        const seed = 3500;
+        const client = await resumeWith(
+          transcriptRecord('checkpoint', 'system', {
+            subtype: 'chat_compression',
+            systemPayload: {
+              info: compressionInfo(CompressionStatus.COMPRESSED, 7000, seed),
+              historyImageTokenEstimate: 100,
+              compressedHistory: [saved],
+            },
+          }),
+          ...[first, second].map((permission, i) =>
+            transcriptRecord('permission-' + i, 'system', {
+              subtype: 'permission_context_snapshot',
+              message: content('user', permission),
+            }),
+          ),
+          transcriptRecord('hook', 'user', {
+            subtype: 'mid_turn_user_message',
+            message: content('user', hook),
+          }),
+          transcriptRecord('reply', 'assistant', {
+            message: modelText(answer),
+          }),
+        );
+        expect(client.getChat().getLastPromptTokenCount()).toBe(
+          seed + (chars + answer.length) / 4,
+        );
+      },
+    );
 
     it('seeds recently completed tools from resumed history', async () => {
       const names = await resumedToolNames(

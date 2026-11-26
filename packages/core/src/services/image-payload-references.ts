@@ -40,6 +40,10 @@ interface CollectedImage {
 export class InMemoryImagePayloadStore implements ImagePayloadStore {
   private readonly images = new Map<string, StoredImagePayload>();
 
+  get size(): number {
+    return this.images.size;
+  }
+
   put(part: Part): StoredImagePayload {
     const stored = imagePartToStoredPayload(part);
     this.images.set(stored.id, stored);

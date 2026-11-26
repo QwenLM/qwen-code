@@ -11,9 +11,11 @@ import type {
 import {
   catalogSnapshotChars,
   estimateContentChars,
+  savedMediaTokenCosts,
   TOKEN_TO_CHAR_RATIO,
 } from '../utils/content-token-estimate.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../utils/api-history-metadata.js';
+import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 
 export interface PricedCatalogEntry {
@@ -22,8 +24,10 @@ export interface PricedCatalogEntry {
 }
 
 export interface ResumeHistoryBoundary {
+  mediaTokenCosts?: number[][];
   trailingEntries: number;
   partCount?: number;
+  endsWithHookContext?: boolean;
 }
 
 export interface ResumeTokenCounts {
@@ -35,7 +39,12 @@ export interface ResumeTokenCounts {
   /** Local image estimate shared by all entries in the restored token baseline. */
   historyImageTokenEstimate?: number;
   /** Saved history can be followed by new entries or a continuation of its last user turn. */
-  historyCheckpoint?: { entries: number; lastEntryParts?: number };
+  historyCheckpoint?: {
+    entries: number;
+    mediaTokenCosts?: number[][];
+    lastEntryParts?: number;
+    endsWithHookContext?: boolean;
+  };
   /** Apply a positive delta when enabling memory catalogs, a negative one when disabling them. */
   catalogSwitchTokens?: number;
   /** Saved per-entry adjustments when only part of the history was priced locally. */
@@ -183,18 +192,29 @@ export class ResumeTokenCountsAccumulator {
         const historyImageTokenEstimate =
           savedHistoryImageTokenEstimate(payload);
         const history = payload.compressedHistory;
+        const last = Array.isArray(history) ? history.at(-1) : undefined;
+        const mediaTokenCosts =
+          historyImageTokenEstimate === undefined
+            ? savedMediaTokenCosts(payload)
+            : undefined;
         this.value = {
           ...(historyImageTokenEstimate !== undefined && {
             historyImageTokenEstimate,
-            ...(Array.isArray(history) && {
+          }),
+          ...((historyImageTokenEstimate !== undefined || mediaTokenCosts) &&
+            Array.isArray(history) && {
               historyCheckpoint: {
                 entries: history.length,
+                ...(mediaTokenCosts && { mediaTokenCosts }),
                 ...(history.length && {
-                  lastEntryParts: history.at(-1)?.parts?.length ?? 0,
+                  lastEntryParts: last?.parts?.length ?? 0,
+                  ...(last?.role === 'user' &&
+                    isUserPromptSubmitContextPartText(
+                      last.parts?.at(-1)?.text ?? '',
+                    ) && { endsWithHookContext: true }),
                 }),
               },
             }),
-          }),
           ...resumeCatalogPricing(payload, historyImageTokenEstimate),
           promptTokenCount:
             payload.resumePromptTokenCount ?? payload.info.newTokenCount,

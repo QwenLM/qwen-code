@@ -1028,6 +1028,12 @@ export class LlmClient {
           ? {
               trailingEntries: restoredHistoryLength - checkpoint.entries,
               partCount: checkpoint.lastEntryParts,
+              ...(checkpoint.mediaTokenCosts && {
+                mediaTokenCosts: checkpoint.mediaTokenCosts,
+              }),
+              ...(checkpoint.endsWithHookContext && {
+                endsWithHookContext: true,
+              }),
             }
           : undefined,
       );

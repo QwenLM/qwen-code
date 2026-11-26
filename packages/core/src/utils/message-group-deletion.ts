@@ -23,6 +23,7 @@ import type { SerializedFileHistorySnapshot } from '../services/fileHistoryServi
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   estimateContentChars,
+  savedMediaTokenCosts,
   TOKEN_TO_CHAR_RATIO,
 } from './content-token-estimate.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
@@ -442,6 +443,7 @@ function pruneCompression(
           ),
         );
   const pruneContentChars = retained.map((index) => chars[index]!);
+  const mediaTokenCosts = savedMediaTokenCosts(payload);
   const tokens = (values: number[]) =>
     Math.ceil(
       values.reduce((sum, value) => sum + value, 0) / TOKEN_TO_CHAR_RATIO,
@@ -458,6 +460,9 @@ function pruneCompression(
     systemPayload: {
       ...payload,
       pruneContentChars,
+      ...(mediaTokenCosts && {
+        mediaTokenCosts: retained.map((index) => mediaTokenCosts[index]),
+      }),
       ...(payload.catalogSwitchChars && {
         catalogSwitchChars: retained.map(
           (index) => payload.catalogSwitchChars![index]!,
