@@ -121,6 +121,23 @@ describe('ToolApproval floating scroll layout', () => {
     expect(rules[0]!.selectors[0]).toContain(':not(.planContent)');
   });
 
+  it('renders the plan as flowing markdown, not pre-wrapped source', () => {
+    // .content sets white-space: pre-wrap for the raw <pre> approval text;
+    // the plan is rendered markdown, where a pre-wrapped container would turn
+    // every source line break into a hard visual break.
+    const rules = find('.planContent');
+    expect(rules).toHaveLength(1);
+    expect(declarations(rules[0]!)).toEqual([
+      'min-height: 0',
+      'max-height: min(240px, 25vh)',
+      'white-space: normal',
+    ]);
+    // The base .content keeps pre-wrap: the raw <pre> renders depend on it.
+    expect(declarations(find('.content')[0]!)).toContain(
+      'white-space: pre-wrap',
+    );
+  });
+
   it('lifts the command block cap and self-scroll inside the sheet only', () => {
     const rules = find('.floating .codeBlock');
     expect(rules).toHaveLength(1);

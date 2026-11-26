@@ -11,10 +11,13 @@ import type {
   AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   ToolErrorType,
+  ToolNames,
   MCPServerStatus,
   getMCPServerStatus,
   OutputFormat,
+  getPlanModeSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { createMinimalSettings } from '../config/settings.js';
@@ -25,6 +28,7 @@ import {
   extractPartsFromUserMessage,
   computeUsageFromMetrics,
   buildSystemMessage,
+  buildInitialSystemReminders,
   createToolProgressHandler,
   createAgentToolProgressHandler,
   functionResponsePartsToString,
@@ -1194,5 +1198,72 @@ describe('insertAfterFunctionResponses', () => {
     expect(insertAfterFunctionResponses([], [{ text: 'reminder' }])).toEqual([
       { text: 'reminder' },
     ]);
+  });
+});
+
+describe('buildInitialSystemReminders', () => {
+  const planConfig = (overrides: Record<string, unknown> = {}) =>
+    ({
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+      isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
+      ...overrides,
+    }) as unknown as Config;
+
+  const registryWith = (toolNames: string[]) =>
+    vi.fn().mockReturnValue({ getAllToolNames: () => toolNames });
+
+  it('emits the base plan reminder in PLAN mode', () => {
+    const parts = buildInitialSystemReminders(planConfig());
+    expect(parts).toHaveLength(1);
+    expect(parts[0].text).toBe(getPlanModeSystemReminder());
+  });
+
+  it('stays empty outside PLAN mode', () => {
+    const parts = buildInitialSystemReminders(
+      planConfig({
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      }),
+    );
+    expect(parts).toHaveLength(0);
+  });
+
+  it('keeps the Todo sentence out while either gate is off', () => {
+    const workflowOnly = buildInitialSystemReminders(
+      planConfig({
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+      }),
+    );
+    expect(workflowOnly[0].text).toBe(getPlanModeSystemReminder());
+
+    const todoOnly = buildInitialSystemReminders(
+      planConfig({ isTodoWriteEnabled: vi.fn().mockReturnValue(true) }),
+    );
+    expect(todoOnly[0].text).toBe(getPlanModeSystemReminder());
+  });
+
+  it('emits the Todo-capture variant when both gates are on', () => {
+    const parts = buildInitialSystemReminders(
+      planConfig({
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+        getToolRegistry: registryWith([ToolNames.TODO_WRITE]),
+      }),
+    );
+    expect(parts[0].text).toBe(getPlanModeSystemReminder(false, true, true));
+  });
+
+  it('keeps the Todo sentence out when the tool is not registered', () => {
+    // The opt-in flag alone is not enough: a core-tools allowlist or deny
+    // rule can remove todo_write from the registry while the flag stays on,
+    // and the reminder must not name a tool the model cannot invoke.
+    const parts = buildInitialSystemReminders(
+      planConfig({
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        isTodoWriteEnabled: vi.fn().mockReturnValue(true),
+        getToolRegistry: registryWith([ToolNames.READ_FILE]),
+      }),
+    );
+    expect(parts[0].text).toBe(getPlanModeSystemReminder());
   });
 });

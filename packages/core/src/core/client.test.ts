@@ -172,6 +172,7 @@ import {
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import {
   clearCacheSafeParams,
   getCacheSafeParams,
@@ -232,6 +233,10 @@ vi.mock('../config/config.js');
 // undefined.
 vi.mock('./prompts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./prompts.js')>();
+  // The composite helper must forward to the spied builder below: the
+  // actual one calls its module-local getPlanModeSystemReminder, which the
+  // gate tests assert on but would never see.
+  const getPlanModeSystemReminderMock = vi.fn();
   return {
     ...actual,
     getCustomSystemPrompt: vi.fn(),
@@ -239,7 +244,16 @@ vi.mock('./prompts', async (importOriginal) => {
     loadCoreSystemPromptSource: vi.fn(),
     getCompressionPrompt: vi.fn(),
     getProjectSummaryPrompt: vi.fn(),
-    getPlanModeSystemReminder: vi.fn(),
+    getPlanModeSystemReminder: getPlanModeSystemReminderMock,
+    getPlanModeReminderFor: (
+      config: Parameters<typeof actual.getPlanModeReminderFor>[0],
+      planOnly: Parameters<typeof actual.getPlanModeReminderFor>[1],
+    ) =>
+      getPlanModeSystemReminderMock(
+        planOnly,
+        config.isSessionWorkflowTodoContextActive?.() === true,
+        actual.isTodoWriteToolAvailable(config),
+      ),
     getArenaSystemReminder: vi.fn(),
     getInsightPrompt: vi.fn(),
     resolvePathFromEnv: vi.fn(),
@@ -417,17 +431,23 @@ vi.mock('../ide/ideContext.js');
 vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
-vi.mock('../telemetry/loggers.js', () => ({
-  logWorkflowKeyword: vi.fn(),
-  logHookCall: vi.fn(),
-  logChatCompression: vi.fn(),
-  logNextSpeakerCheck: vi.fn(),
-  logApiRequest: vi.fn(),
-  logLoopDetected: vi.fn(),
-  logLoopDetectionDisabled: vi.fn(),
-  logLoopProtection: vi.fn(),
-  logMemoryRecallConsumed: vi.fn(),
-}));
+vi.mock('../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logWorkflowKeyword: vi.fn(),
+    logHookCall: vi.fn(),
+    logChatCompression: vi.fn(),
+    logNextSpeakerCheck: vi.fn(),
+    logApiRequest: vi.fn(),
+    logLoopDetected: vi.fn(),
+    logLoopDetectionDisabled: vi.fn(),
+    logLoopProtection: vi.fn(),
+    logMemoryRecallConsumed: vi.fn(),
+    logStartSession: vi.fn(),
+  };
+});
 
 import * as telemetryIndex from '../telemetry/index.js';
 
@@ -930,6 +950,7 @@ describe('Gemini Client (client.ts)', () => {
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
@@ -11987,30 +12008,74 @@ Other open files:
     it.each([
       [
         'uses the subagent plan reminder when a subagent inherits PLAN mode',
-        { sdkMode: false, inSubagent: true },
+        {
+          sdkMode: false,
+          inSubagent: true,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'return plan to caller',
         'prompt-id-subagent-plan-reminder',
         true,
       ],
       [
         'uses the subagent plan reminder when SDK mode is active',
-        { sdkMode: true, inSubagent: false },
+        {
+          sdkMode: true,
+          inSubagent: false,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'return plan to caller',
         'prompt-id-sdk-plan-reminder',
         true,
       ],
       [
         'uses the main-session plan reminder outside subagent and SDK mode',
-        { sdkMode: false, inSubagent: false },
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: false,
+          todoFlag: false,
+          todoRegistered: false,
+        },
         'call exit_plan_mode',
         'prompt-id-main-plan-reminder',
+        false,
+      ],
+      [
+        'passes both todo gates through to the main-session plan reminder',
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: true,
+          todoFlag: true,
+          todoRegistered: true,
+        },
+        'call exit_plan_mode',
+        'prompt-id-main-plan-reminder-todo',
+        false,
+      ],
+      [
+        'keeps the todo gate off when todo_write is not registered',
+        {
+          sdkMode: false,
+          inSubagent: false,
+          workflow: true,
+          todoFlag: true,
+          todoRegistered: false,
+        },
+        'call exit_plan_mode',
+        'prompt-id-main-plan-reminder-todo-unregistered',
         false,
       ],
     ])(
       '%s',
       async (
         _title,
-        { sdkMode, inSubagent },
+        { sdkMode, inSubagent, workflow, todoFlag, todoRegistered },
         reminder,
         promptId,
         forSubagent,
@@ -12019,6 +12084,21 @@ Other open files:
           ApprovalMode.PLAN,
         );
         vi.mocked(mockConfig.getSdkMode).mockReturnValue(sdkMode);
+        vi.mocked(
+          mockConfig.isSessionWorkflowTodoContextActive,
+        ).mockReturnValue(workflow);
+        vi.mocked(mockConfig.isTodoWriteEnabled).mockReturnValue(todoFlag);
+        registryMock().getAllToolNames.mockReturnValue(
+          todoRegistered ? [ToolNames.TODO_WRITE] : [],
+        );
+        // startChat (driven by initialize() in beforeEach, before this
+        // setup) already recorded the prompt tool snapshot from the
+        // registry's default (empty) declarations, and the gate reads that
+        // snapshot — not the registry — once it exists. Mirror the
+        // declaration surface on the mock config directly.
+        vi.mocked(mockConfig.getPromptToolSnapshot).mockReturnValue(
+          new Set(todoRegistered ? [ToolNames.TODO_WRITE] : []),
+        );
         vi.mocked(getPlanModeSystemReminder).mockReturnValue(
           `<system-reminder>${reminder}</system-reminder>`,
         );
@@ -12028,9 +12108,56 @@ Other open files:
         const send = () => run([{ text: 'Plan this change' }], promptId);
         await (inSubagent ? runWithAgentContext('agent-1', send) : send());
 
-        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(forSubagent);
+        // The reminder's todo dimension is the AND of the opt-in flag and
+        // the registry: a core-tools allowlist can remove the tool while
+        // the flag stays on, and the reminder must not name it then.
+        expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+          forSubagent,
+          workflow,
+          todoFlag && todoRegistered,
+        );
       },
     );
+
+    it('keeps the todo gate off for a plan-required teammate even when the tool is registered', async () => {
+      // A plan-required teammate renders the main-session reminder (the
+      // subagent-only variant is for non-plan teammates), and its todo
+      // dimension must read the context exclusion, not the registry:
+      // teammates share the leader's persisted Todo sidecar, so
+      // todo_write is declared out for them whether or not the flag is on
+      // or the tool is registered.
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(mockConfig.isSessionWorkflowTodoContextActive).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.isTodoWriteEnabled).mockReturnValue(true);
+      registryMock().getAllToolNames.mockReturnValue([ToolNames.TODO_WRITE]);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>call exit_plan_mode</system-reminder>',
+      );
+      mockTurnRunFn.mockReturnValue(textTurn('Plan ready'));
+      installChat();
+
+      const identity = {
+        agentId: 'planner@demo',
+        agentName: 'planner',
+        teamName: 'demo',
+        isTeamLead: false,
+        planModeRequired: true,
+      };
+      await runWithTeammateIdentity(identity, () =>
+        run([{ text: 'Plan this change' }], 'prompt-id-main-plan-reminder'),
+      );
+
+      // (planOnly, workflowActive, todoAvailable): the third argument must
+      // stay false — the context exclusion beats flag + registration.
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+        false,
+        true,
+        false,
+      );
+    });
 
     it('tells the date on a Cron turn past midnight', async () => {
       dateSession('2026-06-05T12:00:00Z', [

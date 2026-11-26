@@ -1,6 +1,7 @@
 import {
   createElement,
   useCallback,
+  useContext,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -19,6 +20,7 @@ import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { cssUrlValue } from '../../utils/cssUrlVar';
 import knowledgeIcon from '../../assets/icons/knowledge.svg';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { MarkdownInertContext } from './Markdown';
 import type { FootnotePreview } from './rehype-footnote-cards';
 
 type PreviewData = Omit<WebShellFootnotePreviewInfo, 'sourceLink'>;
@@ -103,8 +105,17 @@ function FootnoteSourceLink({
   linkComponent?: Components['a'];
 }) {
   const openExternalLink = useExternalLinkOpener();
+  const inert = useContext(MarkdownInertContext);
   const className =
     'line-clamp-2 font-semibold break-words text-popover-foreground hover:underline';
+  // Inert (approval) renders degrade the same way the markdown tree does:
+  // the note's target is model-supplied, so the card shows the title as plain
+  // text and never emits the href as a live link. The context reaches the
+  // card through the portal because the popover content renders inside the
+  // provider subtree.
+  if (inert) {
+    return <div className={className}>{title}</div>;
+  }
   if (note.href && linkComponent) {
     return createElement(
       linkComponent,
@@ -145,6 +156,9 @@ function DefaultFootnoteContent({
   sourceLink: ReactNode;
 }) {
   const [failedImage, setFailedImage] = useState<string>();
+  // Inert (approval) renders: the note's image URL is model-supplied and the
+  // img src is assigned before any sanitization, so the card drops it.
+  const inert = useContext(MarkdownInertContext);
   return (
     <>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -176,7 +190,7 @@ function DefaultFootnoteContent({
             </p>
           )}
         </div>
-        {note.image && note.image !== failedImage && (
+        {!inert && note.image && note.image !== failedImage && (
           <img
             key={note.image}
             src={note.image}

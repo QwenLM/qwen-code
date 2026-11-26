@@ -223,7 +223,7 @@ import {
   isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
-  getPlanModeSystemReminder,
+  getPlanModeReminderFor,
   getArenaSystemReminder,
   getOutputStyleTurnReminder,
   getOptInToolNotFoundMessage,
@@ -17709,7 +17709,7 @@ export class Session implements SessionContext {
 
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
       reminders.push({
-        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+        text: getPlanModeReminderFor(this.config, this.config.getSdkMode?.()),
       });
     }
 

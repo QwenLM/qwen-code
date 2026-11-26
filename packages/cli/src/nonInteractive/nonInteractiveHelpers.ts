@@ -21,7 +21,7 @@ import {
   createDebugLogger,
   getArenaSystemReminder,
   getMCPServerStatus,
-  getPlanModeSystemReminder,
+  getPlanModeReminderFor,
   isShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
@@ -117,7 +117,9 @@ export function buildInitialSystemReminders(config: Config): Part[] {
   const reminders: Part[] = [];
 
   if (config.getApprovalMode() === ApprovalMode.PLAN) {
-    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+    reminders.push({
+      text: getPlanModeReminderFor(config, config.getSdkMode?.()),
+    });
   }
 
   const arenaManager = config.getArenaManager?.();
