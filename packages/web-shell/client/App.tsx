@@ -19236,10 +19236,6 @@ export function App({
         (boundRun.sessionId !== sessionId ||
           boundRun.workspaceCwd !== navigationWorkspaceCwd)
       ) {
-        if (boundRun.timer !== undefined) clearTimeout(boundRun.timer);
-        if (pendingBoundRunRef.current === boundRun) {
-          pendingBoundRunRef.current = null;
-        }
         boundRun.reject(
           createScheduledTaskCancellation('Bound run target was replaced'),
         );
@@ -19817,6 +19813,8 @@ export function App({
     sessionId: string;
     logicalSessionKey?: string;
     workspaceCwd?: string;
+    cancelledBeforeAdmission?: boolean;
+    dispatchStarted?: boolean;
     runtimeClient: typeof workspace.client;
     prompt: string;
     resolve: () => void;
@@ -19875,6 +19873,7 @@ export function App({
       scheduledScope?: {
         runtimeClient: typeof workspace.client;
         logicalSessionKey?: string;
+        cancelledBeforeAdmission?: () => boolean;
       },
     ): Promise<void> =>
       new Promise<void>((resolve, reject) => {
@@ -19889,6 +19888,9 @@ export function App({
                 connectionRef.current.workspaceCwd,
               ) === scheduledScope.logicalSessionKey));
         const assertRunnable = () => {
+          if (scheduledScope?.cancelledBeforeAdmission?.()) {
+            throw createScheduledTaskCancellation('Bound run was cancelled');
+          }
           if (!scheduledScopeIsCurrent()) {
             throw createScheduledTaskCancellation(
               'Bound run target or runtime was replaced',
@@ -19938,7 +19940,9 @@ export function App({
               }
             : {}),
           canRebindOwner: () =>
-            scheduledScope !== undefined && scheduledScopeIsCurrent(),
+            !scheduledScope?.cancelledBeforeAdmission?.() &&
+            scheduledScope !== undefined &&
+            scheduledScopeIsCurrent(),
           onAdmitted: admit,
           onCancelledBeforeAdmission: () => {
             if (!admitted) {
@@ -19972,7 +19976,7 @@ export function App({
   const tryFireBoundRun = useCallback(() => {
     const pending = pendingBoundRunRef.current;
     const conn = connectionRef.current;
-    if (!pending) return;
+    if (!pending || pending.dispatchStarted) return;
     if (pending.runtimeClient !== boundRunRuntimeClientRef.current) {
       clearPendingBoundRun(pending.sessionId);
       pending.reject(
@@ -20032,7 +20036,7 @@ export function App({
       return;
     }
     if (pending.timer !== undefined) clearTimeout(pending.timer);
-    pendingBoundRunRef.current = null;
+    pending.dispatchStarted = true;
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
     // dialog once this resolves.
@@ -20043,9 +20047,16 @@ export function App({
       {
         runtimeClient: pending.runtimeClient,
         logicalSessionKey: pending.logicalSessionKey,
+        cancelledBeforeAdmission: () =>
+          pending.cancelledBeforeAdmission === true,
       },
     ).then(
-      () => pending.resolve(),
+      () => {
+        if (pendingBoundRunRef.current === pending) {
+          pendingBoundRunRef.current = null;
+        }
+        pending.resolve();
+      },
       (error: unknown) => pending.reject(error),
     );
   }, [clearPendingBoundRun, enqueueManualRun, sessionOwnerGuard]);
@@ -20081,9 +20092,17 @@ export function App({
               ? undefined
               : getLogicalSessionKey(sessionId, workspaceCwd),
           runtimeClient: workspace.client,
+          cancelledBeforeAdmission: false,
           prompt,
           resolve,
-          reject,
+          reject: (error: unknown) => {
+            pending.cancelledBeforeAdmission = true;
+            if (pending.timer !== undefined) clearTimeout(pending.timer);
+            if (pendingBoundRunRef.current === pending) {
+              pendingBoundRunRef.current = null;
+            }
+            reject(error);
+          },
           taskIsStale,
           beforeTaskDispatch,
         };
@@ -20102,8 +20121,7 @@ export function App({
                   connectionRef.current.workspaceCwd,
                 ) !== getLogicalSessionKey(sessionId, workspaceCwd))
             ) {
-              clearPendingBoundRun(sessionId);
-              reject(
+              pending.reject(
                 createScheduledTaskCancellation(
                   'Bound run target was replaced',
                 ),
@@ -20124,15 +20142,13 @@ export function App({
           })
           .catch((error: unknown) => {
             if (pendingBoundRunRef.current !== pending) return;
-            clearPendingBoundRun(sessionId);
-            reject(error);
+            pending.reject(error);
           });
       });
     },
     [
       enqueueManualRun,
       loadSidebarSession,
-      clearPendingBoundRun,
       showChat,
       sessionOwnerGuard,
       tryFireBoundRun,

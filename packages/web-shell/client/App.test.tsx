@@ -60349,11 +60349,13 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await flush();
     testState.ownerVersion += 1;
 
-    const button = container.querySelector(
-      '[data-testid="load-session-with-count"]',
-    );
-    expect(button).not.toBeNull();
-    await act(async () => (button as HTMLButtonElement).click());
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+        workspaceCwd: undefined,
+      });
+    });
     const result = await settlement;
     expect(isScheduledTaskCancellation(result)).toBe(true);
 
@@ -60364,6 +60366,54 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       await Promise.resolve();
     });
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('blocks queued admission after a pending run is cancelled', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+    });
+    const rawCallbacks: Array<Record<string, () => unknown>> = [];
+    mockSessionActions.sendPrompt.mockImplementation(
+      (_prompt: string, options: unknown) => {
+        rawCallbacks.push(options as Record<string, () => unknown>);
+        return new Promise<void>(() => {});
+      },
+    );
+    const revalidation = deferred<void>();
+    const remoteRevalidation = vi.fn(async () => revalidation.promise);
+    let settlement!: Promise<unknown>;
+    act(() => {
+      settlement = run(
+        'do the thing',
+        'session-2',
+        '/repo/owner',
+        () => false,
+        remoteRevalidation,
+      ).catch((error) => error);
+    });
+    await vi.waitFor(() => {
+      expect(rawCallbacks[0]?.beforeDispatch).toBeDefined();
+    });
+    const queued = Promise.resolve(rawCallbacks[0]!.beforeDispatch!());
+    queued.catch(() => {});
+    await vi.waitFor(() => expect(remoteRevalidation).toHaveBeenCalledOnce());
+
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+        workspaceCwd: undefined,
+      });
+    });
+    revalidation.resolve();
+
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+    const result = await settlement;
+    expect(isScheduledTaskCancellation(result)).toBe(true);
   });
 
   it('R21 binds a live stale guard to the raw dispatch hooks', async () => {
