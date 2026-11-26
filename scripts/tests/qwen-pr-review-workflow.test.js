@@ -2078,12 +2078,13 @@ describe('docs-only medium gate', () => {
     return run.slice(start, end);
   }
 
-  function buildPrompt({ docsOnlyMedium, reviewMode }) {
+  function buildPrompt({ docsOnlyMedium, reviewMode, untrustedPr = 'false' }) {
     const script = [
       'set -euo pipefail',
       'REVIEW_URL="https://x/pull/1"',
       `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
       `REVIEW_MODE=${reviewMode}`,
+      `UNTRUSTED_PR=${untrustedPr}`,
       promptBranchSource(),
       'printf "%s" "$PROMPT"',
     ].join('\n');
@@ -2105,6 +2106,16 @@ describe('docs-only medium gate', () => {
       reviewMode: 'comment',
     });
     expect(prompt).toContain('--comment');
+    expect(prompt).not.toContain('--effort');
+  });
+
+  it('drops --comment on the untrusted fork path (the publisher owns fork writes)', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'false',
+      reviewMode: 'comment',
+      untrustedPr: 'true',
+    });
+    expect(prompt).not.toContain('--comment');
     expect(prompt).not.toContain('--effort');
   });
 
@@ -2626,6 +2637,7 @@ describe('docs-only gate and relay, executed', () => {
     );
     expect(normalizedIf(relay)).toBe(
       "steps.context.outputs.should_run == 'true' && " +
+        "needs.review-trust.outputs.untrusted != 'true' && " +
         "steps.review.outcome == 'success' && " +
         "steps.review.outputs.review_completed == 'true' && " +
         "steps.review.outputs.docs_only_medium == 'true' && " +
@@ -2640,6 +2652,7 @@ describe('docs-only gate and relay, executed', () => {
     );
     expect(normalizedIf(supersede)).toBe(
       '!cancelled() && ' +
+        "needs.review-trust.outputs.untrusted != 'true' && " +
         "steps.context.outputs.should_run == 'true' && " +
         "steps.context.outputs.pr_number != '' && " +
         "( steps.review.outputs.docs_only_medium == 'false' || " +
@@ -4996,10 +5009,11 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
 
   it('carries no cross-job head wiring to drift', () => {
     // An earlier revision published review-pr's reviewed head as a job output
-    // and read it here. The guard no longer keys on the head at all, so the
-    // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison.
-    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    // and read it here. The fallback guard no longer keys on the head at all,
+    // so none of the review-pr outputs the trusted publish-review relay
+    // consumes may reintroduce a head comparison into THIS job.
+    expect(doc.jobs['review-pr'].outputs).not.toBeUndefined();
+    expect(doc.jobs['review-pr'].outputs.reviewed_head_sha).toBeUndefined();
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
@@ -7866,17 +7880,27 @@ describe('review model canary routing', () => {
   // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
   // loses the bucket entirely — both with every row above still green. Slice
   // the real block (helper, router, trim, call site, endpoint override,
-  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
-  // supplies.
+  // endpoint-host capture) and execute it with the values the step's `env:`
+  // supplies. The slice ends before the fork-lane model proxy (it needs a
+  // Docker daemon); the notice and MODEL_ARGS are replayed verbatim from the
+  // workflow below, pinned by string containment so an edit on either side
+  // turns red here.
   it('routes and reports at the real call site, not a paraphrase of it', () => {
+    // The slice ends at the endpoint-host capture: the fork-lane model proxy
+    // between it and the notice needs a Docker daemon, which this suite must
+    // not require. The notice and MODEL_ARGS below consume only
+    // OPENAI_MODEL/OPENAI_BASE_URL/OPENAI_API_KEY, whose routing (incl. the
+    // canary endpoint swap) the slice executes for real.
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const args = run.indexOf('MODEL_ARGS=()', notice);
-    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const hostCapture = run.indexOf('REVIEW_ENDPOINT_HOST="$(openai_base_host)"');
+    expect(hostCapture).toBeGreaterThan(-1);
+    expect(hostCapture).toBeLessThan(notice);
+    const end =
+      run.indexOf('\n', hostCapture + 'REVIEW_ENDPOINT_HOST='.length) + 1;
     expect(start).toBeGreaterThan(-1);
     expect(notice).toBeGreaterThan(start);
-    expect(args).toBeGreaterThan(notice);
-    expect(end).toBeGreaterThan(args);
+    expect(end).toBeGreaterThan(hostCapture);
     // The step logs the pre-override host under its own label; reverting that
     // rename would report a same-named value the notice no longer means.
     expect(run).toContain('echo "initial_openai_host=${openai_host}"');
@@ -7887,7 +7911,16 @@ describe('review model canary routing', () => {
     const helperStart = run.indexOf('openai_base_host() {');
     expect(helperStart).toBeGreaterThan(-1);
     const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
-    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+    // The notice line and the MODEL_ARGS block are quoted verbatim from the
+    // workflow (the slice stops at the proxy); asserting their exact text
+    // keeps this a replay of the real call site, not a paraphrase.
+    const noticeLine =
+      'echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"';
+    const modelArgsBlock =
+      'MODEL_ARGS=()\nif [ -n "${OPENAI_MODEL:-}" ]; then\n  MODEL_ARGS=(--model "$OPENAI_MODEL")\nfi';
+    expect(run).toContain(noticeLine);
+    expect(run).toContain(modelArgsBlock);
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}\n${noticeLine}\n${modelArgsBlock}`;
 
     // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
     // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
@@ -7972,12 +8005,18 @@ describe('review model canary routing', () => {
   it('moves the endpoint only for the canary cohort, and only with its own key', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
-    const args = run.indexOf('MODEL_ARGS=()', notice);
-    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const hostCapture = run.indexOf('REVIEW_ENDPOINT_HOST="$(openai_base_host)"');
+    expect(hostCapture).toBeGreaterThan(-1);
+    expect(hostCapture).toBeLessThan(notice);
+    const end =
+      run.indexOf('\n', hostCapture + 'REVIEW_ENDPOINT_HOST='.length) + 1;
     const helperStart = run.indexOf('openai_base_host() {');
     expect(helperStart).toBeGreaterThan(-1);
     const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
-    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+    const noticeLine =
+      'echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"';
+    expect(run).toContain(noticeLine);
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}\n${noticeLine}`;
 
     const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
       execFileSync(

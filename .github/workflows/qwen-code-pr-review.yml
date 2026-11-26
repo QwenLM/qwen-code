@@ -577,8 +577,8 @@ jobs:
       docs_only_medium: '${{ steps.review.outputs.docs_only_medium }}'
       auto_review: '${{ steps.context.outputs.auto_review }}'
       review_mode: '${{ steps.context.outputs.review_mode }}'
-      review_failed: '${{ failure() && steps.context.outputs.should_run == ''true'' && steps.context.outputs.pr_number != '''' }}'
-      docs_only_failed: '${{ failure() && steps.review.outputs.docs_only_medium == ''true'' }}'
+      review_failed: '${{ steps.marker_failed.outputs.review_failed || steps.marker_ok.outputs.review_failed }}'
+      docs_only_failed: '${{ steps.marker_failed.outputs.docs_only_failed || steps.marker_ok.outputs.docs_only_failed }}'
       failure_reason: '${{ steps.review.outputs.failure_reason }}'
       failure_kind: '${{ steps.review.outputs.failure_kind }}'
       effective_timeout_minutes: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
@@ -1361,6 +1361,10 @@ jobs:
           # workflow-expression-length test in
           # scripts/tests/qwen-pr-review-workflow.test.js.
           FORK_LIFECYCLE_REVIEW: '${{ needs.review-trust.outputs.untrusted }}'
+          # The head SHA captured at trust resolution; the untrusted lane pins
+          # the review to it so a push racing trust resolution cannot swap the
+          # reviewed tree.
+          TRUSTED_HEAD_SHA: '${{ needs.review-trust.outputs.head_sha }}'
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
@@ -1879,7 +1883,7 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
-          if [ "$UNTRUSTED_PR" = 'true' ] && [ "$CURRENT_HEAD_SHA" != '${{ needs.review-trust.outputs.head_sha }}' ]; then
+          if [ "$UNTRUSTED_PR" = 'true' ] && [ "$CURRENT_HEAD_SHA" != "$TRUSTED_HEAD_SHA" ]; then
             echo 'The pull request moved after trust resolution; skip this historical review.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -2927,6 +2931,29 @@ jobs:
           # exit 0 without running Qwen (closed PR, stale head), and the
           # relay must not announce a review that never ran.
           echo "review_completed=true" >> "$GITHUB_OUTPUT"
+
+      # failure() is not allowed in job outputs, so the two failure-derived
+      # outcomes are produced by this pair of always()-gated marker steps:
+      # exactly one runs, mirroring the original output expressions.
+      - name: 'Mark review failure (failed path)'
+        id: 'marker_failed'
+        if: "always() && failure() && steps.context.outputs.should_run == 'true' && steps.context.outputs.pr_number != ''"
+        env:
+          REVIEW_DOCS_ONLY_MEDIUM: '${{ steps.review.outputs.docs_only_medium }}'
+        run: |-
+          {
+            echo "review_failed=true"
+            echo "docs_only_failed=${REVIEW_DOCS_ONLY_MEDIUM}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Mark review failure (success path)'
+        id: 'marker_ok'
+        if: "always() && steps.marker_failed.conclusion != 'success'"
+        run: |-
+          {
+            echo "review_failed=false"
+            echo "docs_only_failed=false"
+          } >> "$GITHUB_OUTPUT"
 
       # A salvaged review just posted against a head that is no longer
       # current (#10110). The review body itself carries the CLI's head-drift
