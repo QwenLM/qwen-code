@@ -403,6 +403,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               __restoreResult?: Record<string, unknown>;
               __rewritten?: boolean;
               __terminate?: boolean;
+              __hookStop?: string;
             };
             return {
               nativeAttemptsObserved: a.__modOutput !== undefined,
@@ -440,6 +441,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                 executionStatus:
                   a.__modOutput !== undefined ? 'not_started' : undefined,
                 ...(a.__terminate ? { terminateTurn: true } : {}),
+                ...(a.__hookStop ? { hookStopReason: a.__hookStop } : {}),
               },
             };
           }),
@@ -2200,7 +2202,12 @@ describe('livePromptEvents', () => {
       const config = createFakeConfig(sendMessageStream, undefined, undefined, {
         recordMidTurnUserMessage,
       });
-      const entry = {
+      const request = vi.fn().mockResolvedValue({
+        output: { hookSpecificOutput: { additionalContext: 'steer context' } },
+      });
+      config.getMessageBus = vi.fn().mockReturnValue({ request });
+      config.hasHooksForEvent = vi.fn((event) => event === 'UserPromptSubmit');
+      const entry: OpenTuiSteeringSubmission = {
         text: 'steered image',
         imagePaths: ['/owned/image.png'],
         submittedPrompt: 'raw steered image',
@@ -2229,6 +2236,8 @@ describe('livePromptEvents', () => {
       ).rejects.toThrow('not delivered');
       expect(restoreSteering).toHaveBeenCalledOnce();
       expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
+      expect(entry.promptHook).toEqual({ additionalContext: 'steer context' });
+      expect(request).toHaveBeenCalledOnce();
       expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
       expect(events.filter((event) => event.type === 'user')).toEqual([]);
     },
@@ -5257,6 +5266,57 @@ describe.each([false, true])(
       expect(
         (history.parts as Part[]).map((part) => part.functionResponse?.id),
       ).toEqual(['t1']);
+    });
+
+    it('ends the turn with the results in history when a tool hook stops it', async () => {
+      const send = batchStream([
+        { callId: 't1', name: 'test_tool', args: { __hookStop: 'halt' } },
+      ]);
+      const config = shared(createFakeConfig(send));
+      const events = await drain(livePromptEvents(config, 'start'));
+      expect(send).toHaveBeenCalledOnce();
+      const [history] = vi.mocked(config.getGeminiClient().addHistory).mock
+        .calls[0];
+      expect(
+        (history.parts as Part[]).map((part) => part.functionResponse?.id),
+      ).toEqual(['t1']);
+      expect(events).toContainEqual({
+        type: 'info',
+        text: 'A hook stopped the turn: halt',
+      });
+    });
+
+    it('finishes the Goal turn a tool hook stops', async () => {
+      const permit = { goalId: 'goal', revision: 1, turnId: 'goal-turn' };
+      const finishTurn = vi.fn(async () => {});
+      const runtime = {
+        permitForTurn: () => permit,
+        finishTurn,
+        dispatch: vi.fn(async () => {}),
+        getSnapshot: () => ({ goal: permit, activity: 'verifying' }),
+        subscribe: () => () => {},
+      };
+      const send = batchStream([
+        {
+          callId: 'read',
+          name: 'test_tool',
+          args: { __hookStop: 'halt' },
+          goalContext: permit,
+        },
+      ]);
+      const config = shared(
+        createFakeConfig(send, undefined, undefined, {
+          recordMidTurnUserMessage: vi.fn(),
+          recordToolResult: vi.fn(),
+          flush: vi.fn(async () => {}),
+        }),
+      );
+      Object.assign(config, { getGoalRuntime: () => runtime });
+
+      await drain(livePromptEvents(config, 'start'));
+
+      expect(send).toHaveBeenCalledOnce();
+      expect(finishTurn).toHaveBeenCalledExactlyOnceWith(permit);
     });
 
     it.each([

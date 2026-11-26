@@ -7,6 +7,53 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  user: 'usuário',
+  assistant: 'assistente',
+  thinking: 'raciocínio',
+  task: 'tarefa',
+  compaction: 'compactação',
+  info: 'informação',
+  warning: 'aviso',
+  retry: 'nova tentativa',
+  'stop-hook': 'hook de parada',
+  'away-recap': 'resumo de ausência',
+  'user-shell': 'comando do usuário',
+  advisor: 'consultor',
+  'arena-agent': 'agente de arena',
+  'arena-session': 'sessão de arena',
+  goal: 'objetivo',
+  'Protected input': 'Entrada protegida',
+  'Focused input. Cursor: {{position}}':
+    'Entrada em foco. Cursor: {{position}}',
+  'Unfocused input.': 'Entrada sem foco.',
+  'Focused Prompt: {{value}}': 'Prompt em foco: {{value}}',
+  'Prompt: {{value}}': 'Prompt: {{value}}',
+  'Focused Input: {{value}}': 'Entrada em foco: {{value}}',
+  'Input: {{value}}': 'Entrada: {{value}}',
+  'Placeholder: {{value}}': 'Texto de exemplo: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Selecionado {{value}}',
+  'Disabled {{value}}': 'Desativado {{value}}',
+  'Focused Toggle on: {{value}}': 'Em foco, opção ativada: {{value}}',
+  'Focused Toggle off: {{value}}': 'Em foco, opção desativada: {{value}}',
+  'Toggle on: {{value}}': 'Opção ativada: {{value}}',
+  'Toggle off: {{value}}': 'Opção desativada: {{value}}',
+  'Conversation cleared.': 'Conversa limpa.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Revisão {{value}}',
+  Dialog: 'Diálogo',
+  'Dialog closed. Focus: prompt.': 'Diálogo fechado. Foco: prompt.',
+  'Dialog closed.': 'Diálogo fechado.',
+  'Waiting for confirmation': 'Aguardando confirmação',
+  'Working. Escape to cancel.': 'Em execução. Escape para cancelar.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Histórico {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Árvore de trabalho: {{value}}',
+  'Workflow mode: on': 'Modo de fluxo de trabalho: ativado',
+  'Workflow mode: on (unavailable)':
+    'Modo de fluxo de trabalho: ativado (indisponível)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Cima/Baixo ou PageUp/PageDown para ler; Ctrl+Home/End para primeiro/mais recente.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Ativa o Generated UI integrado em sessões locais compatíveis. Reinicie a sessão correspondente para aplicar as alterações.',
@@ -433,6 +480,7 @@ export default {
   'Debug Keystroke Logging': 'Log de Depuração de Teclas',
   'Language: UI': 'Idioma: Interface',
   'Language: Model': 'Idioma: Modelo',
+  'Language: Display Translation': 'Idioma: Tradução da exibição',
   'Output Format': 'Formato de Saída',
   'Hide Window Title': 'Ocultar Título da Janela',
   'Show Status in Title': 'Mostrar Status no Título',
@@ -727,6 +775,8 @@ export default {
   'List all configured hooks': 'Listar todos os hooks configurados',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Um hook interrompeu o turno: {{reason}}',
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',
@@ -1103,6 +1153,8 @@ export default {
     'Não foi possível comprimir o histórico do chat porque o resumo da compressão foi truncado.',
   'Could not compress chat history due to an API error.':
     'Não foi possível comprimir o histórico do chat devido a um erro da API.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Não foi possível comprimir o histórico do chat porque ele é grande demais para a janela de contexto.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

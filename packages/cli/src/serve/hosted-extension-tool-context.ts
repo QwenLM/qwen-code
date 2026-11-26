@@ -128,12 +128,3 @@ export function extensionToolInput(
     },
   };
 }
-
-export function extensionInstructionText(
-  body: string,
-  extensionId: string,
-): string {
-  return body
-    .replaceAll('${extensionPath}', `extension://${extensionId}`)
-    .replaceAll('${CLAUDE_PLUGIN_ROOT}', `extension://${extensionId}`);
-}

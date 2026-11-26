@@ -84,9 +84,14 @@ vi.mock('./acp-output.js', () => ({
   }),
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
-  ndJsonStream: vi.fn().mockReturnValue({}),
-}));
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/acp-bridge/ndJsonStream')>();
+  return {
+    ...actual,
+    ndJsonStream: vi.fn().mockReturnValue({}),
+  };
+});
 
 vi.mock('node:stream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:stream')>();
@@ -523,7 +528,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,

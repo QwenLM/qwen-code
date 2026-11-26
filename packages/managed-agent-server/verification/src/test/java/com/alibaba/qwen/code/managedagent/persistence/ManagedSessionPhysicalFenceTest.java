@@ -5,8 +5,6 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,7 +32,7 @@ class ManagedSessionPhysicalFenceTest {
     protected TransactionTemplate transactions;
     protected JdbcManagedSessionStore sessions;
     protected long generation;
-    protected final String physical = ManagedSchemaKeys.key("same-native-device");
+    protected final String physical = WorkspaceTestStorage.key(TENANT, STORAGE);
 
     protected DataSource dataSource() {
         var source = new JdbcDataSource();
@@ -70,21 +68,17 @@ class ManagedSessionPhysicalFenceTest {
                 TENANT,
                 SESSION);
         jdbc.update(
-                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
-                        + " physical_key, storage_kind, registration_state, registration_revision,"
-                        + " registration_json) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
+                "INSERT INTO ma_storage (tenant_id, storage_id,"
+                        + " physical_id, storage_kind, registration_state, registration_revision,"
+                        + " registration_json) VALUES (?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
                         + " '{}')",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey(STORAGE),
                 TENANT,
                 STORAGE,
                 physical);
         jdbc.update(
-                "INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id,"
-                        + " storage_id, mount_state) VALUES (?, ?, 'LOCAL', 'first-tenant',"
+                "INSERT INTO ma_storage_owner (physical_id, storage_kind, tenant_id,"
+                        + " storage_id, mount_state) VALUES (?, 'LOCAL', 'first-tenant',"
                         + " 'first-alias', 'READY')",
-                physical,
                 physical);
     }
 
@@ -112,7 +106,7 @@ class ManagedSessionPhysicalFenceTest {
     @Test
     void physicalFreezeRejectsExistingWriterMutationsButAllowsSealing() throws Exception {
         jdbc.update(
-                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = ?",
+                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE physical_id = ?",
                 physical);
         assertThatThrownBy(
                         () ->
@@ -172,7 +166,7 @@ class ManagedSessionPhysicalFenceTest {
         var committed =
                 transactions.execute(status -> sessions.commit(TENANT, SESSION, TOKEN, request));
         jdbc.update(
-                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = ?",
+                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE physical_id = ?",
                 physical);
         var replay =
                 transactions.execute(status -> sessions.commit(TENANT, SESSION, TOKEN, request));
@@ -202,8 +196,8 @@ class ManagedSessionPhysicalFenceTest {
     void logicalRetirementAllowsAdmittedFinalResultsWhilePhysicalOwnerIsOpen() throws Exception {
         jdbc.update(
                 "UPDATE ma_storage SET registration_state = 'RETIRING', fence_operation_id ="
-                        + " 'retirement' WHERE alias_key = ?",
-                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
+                        + " 'retirement' WHERE tenant_id = ? AND storage_id = ?",
+                TENANT, STORAGE);
         assertThatThrownBy(
                         () ->
                                 transactions.execute(
@@ -281,7 +275,7 @@ class ManagedSessionPhysicalFenceTest {
         assertThat(control.get("workspace_id")).isEqualTo("workspace");
         assertThat(control.get("workspace_storage_id")).isEqualTo(STORAGE);
         jdbc.update(
-                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = ?",
+                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE physical_id = ?",
                 physical);
         assertThatThrownBy(
                         () ->
@@ -354,7 +348,7 @@ class ManagedSessionPhysicalFenceTest {
                                                 List.of(), null, lineage))
                         .sessionId();
         jdbc.update(
-                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = ?",
+                "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE physical_id = ?",
                 physical);
         var replay =
                 transactions.execute(
@@ -409,7 +403,7 @@ class ManagedSessionPhysicalFenceTest {
                     assertThat(
                                     jdbc.queryForObject(
                                             "SELECT mount_state FROM ma_storage_owner WHERE"
-                                                    + " storage_key = ?",
+                                                    + " physical_id = ?",
                                             String.class,
                                             physical))
                             .isEqualTo("READY");
@@ -417,7 +411,7 @@ class ManagedSessionPhysicalFenceTest {
                             var freeze =
                                     independent.prepareStatement(
                                             "UPDATE ma_storage_owner SET mount_state = 'FENCED'"
-                                                    + " WHERE storage_key = ?")) {
+                                                    + " WHERE physical_id = ?")) {
                         freeze.setString(1, physical);
                         assertThat(freeze.executeUpdate()).isEqualTo(1);
                     } catch (java.sql.SQLException error) {

@@ -969,6 +969,16 @@ export class LoadedSettings {
     }
   }
 
+  setTopLevelValues(scope: SettingScope, values: Partial<Settings>): void {
+    const settingsFile = this.forScope(scope);
+    saveSettings(settingsFile, values, [], { throwOnWriteFailure: true });
+    for (const [key, value] of Object.entries(values)) {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
+    this._merged = this.computeMergedSettings();
+  }
+
   setValues(
     writes: ReadonlyArray<{
       scope: SettingScope;

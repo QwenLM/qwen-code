@@ -276,6 +276,7 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'general', key: 'displayLanguage' },
   { section: 'memory', key: 'mem0' },
   { section: 'memory', key: 'agentMaxTurns' },
   { section: 'memory', key: 'agentTimeoutMinutes' },

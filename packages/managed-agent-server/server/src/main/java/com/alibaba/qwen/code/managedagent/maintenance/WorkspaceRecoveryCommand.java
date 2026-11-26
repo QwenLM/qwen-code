@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.maintenance;
 import com.alibaba.qwen.code.maintenance.WorkspaceRecoveryApplication;
 import com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -13,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtecto
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,14 +47,14 @@ public final class WorkspaceRecoveryCommand {
             throw new IllegalArgumentException("Expected inspect, prepare or complete.");
         }
         var localFactory = new RuntimeProviderRegistry()
-                .require(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
+                .require(RuntimeProviderKinds.LOCAL_PROCESS);
         try (ConfigurableApplicationContext context = new SpringApplicationBuilder(
                 WorkspaceRecoveryApplication.class).web(WebApplicationType.NONE).run(args)) {
             var settings = context.getBean(ManagedAgentSettings.class);
             ManagedAgentSettings.RuntimeBroker options = settings.getRuntimeBroker();
             if (!options.isOperatorRecoveryEnabled()
                     || !options.isDurableLocalProcess()
-                    || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(options.getProvisioner())
+                    || !RuntimeProviderKinds.LOCAL_PROCESS.equals(options.getProvisioner())
                     || options.getStateDirectory() == null || options.getStateDirectory().isBlank()) {
                 throw new IllegalStateException("Operator recovery requires enabled durable local workers.");
             }
@@ -63,7 +65,7 @@ public final class WorkspaceRecoveryCommand {
                     AesGcmSecretProtector.fromBase64(options.getCredentialKeyId(),
                             options.getCredentialKey(), options.getPreviousCredentialKeys()),
                     MaintenanceObjectStores.readPacks(
-                            new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), objects));
+                            new ManagedSchemaJdbcTemplate(dataSource), objects));
             var sessions = new JdbcRuntimeSessionRepository(dataSource);
             var executions = new JdbcToolExecutionRepository(dataSource, bindings);
             var manager = new JdbcTransactionManager(dataSource);

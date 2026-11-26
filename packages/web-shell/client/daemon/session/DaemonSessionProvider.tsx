@@ -47,6 +47,7 @@ import {
   normalizeDaemonEvent,
   parseQwenAgentMessageMeta,
   QWEN_AGENT_MESSAGE_META_KEY,
+  rebuildDaemonTranscriptBlockIndex,
   type CreateSessionRequest,
   type DaemonApprovalMode,
   type DaemonEvent,
@@ -109,6 +110,10 @@ import {
   HookStatisticsContext,
   type HookStatisticsSource,
 } from '../../components/messages/hook-statistics-context.js';
+import {
+  ModRowAsker,
+  ModRowAskerContext,
+} from '../../components/messages/mod-rows.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -161,6 +166,7 @@ import {
   parseSidechannelMidTurnInjected,
   publishSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import { publishSidechannelRemotePrompt } from '../remotePromptSidechannel.js';
 import {
   isPendingPromptEvent,
   publishPendingPromptEvent,
@@ -252,6 +258,7 @@ interface LiveJournalRepairEpisode {
 
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
+  droppedModLogIds: ReadonlySet<string>;
   nextOrdinal: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
@@ -379,6 +386,38 @@ function isHistoricalReplayMarker(event: DaemonEvent): boolean {
   );
 }
 
+function isEvictableModLog(block: DaemonTranscriptBlock): boolean {
+  return (
+    block.kind === 'status' &&
+    block.source === 'mod_log' &&
+    !block.sourceRecordIds?.length
+  );
+}
+
+function reclaimModLogCapacity(
+  current: DaemonTranscriptState,
+  remainingBlocks: number,
+  remainingBytes: number,
+  maxBlocks: number,
+) {
+  // Reclaim ephemeral Mod rows before rejecting any persisted history, just
+  // as the transcript store does when trimming live updates.
+  const droppedModLogIds = new Set<string>();
+  for (const block of current.blocks) {
+    if (
+      remainingBlocks <= maxBlocks &&
+      remainingBytes <= current.maxRetainedBytes
+    ) {
+      break;
+    }
+    if (!isEvictableModLog(block)) continue;
+    droppedModLogIds.add(block.id);
+    remainingBlocks -= 1;
+    remainingBytes -= estimateDaemonTranscriptBlockBytes(block);
+  }
+  return { droppedModLogIds, remainingBlocks, remainingBytes };
+}
+
 function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
@@ -471,12 +510,14 @@ function materializeTranscriptHistory(
     current.blocks,
     pageBlockList,
   );
-  const pageBytes =
-    mergedBlocks.reduce(
-      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
-      0,
-    ) - current.retainedBytes;
+  const mergedBytes = mergedBlocks.reduce(
+    (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+    0,
+  );
+  const pageBytes = mergedBytes - current.retainedBytes;
   const pageBlocks = mergedBlocks.length - current.blocks.length;
+  const { droppedModLogIds, remainingBlocks, remainingBytes } =
+    reclaimModLogCapacity(current, mergedBlocks.length, mergedBytes, maxBlocks);
   // `impossible` must be evaluated across BOTH dimensions, regardless of
   // which branch rejects: a page that alone fills the whole block window can
   // never be admitted (an anchored window always retains at least one block),
@@ -490,7 +531,7 @@ function materializeTranscriptHistory(
   // is idle, and the next live trim evicts the freshly prepended oldest
   // records, which the exclusive pagination anchor can never re-fetch — a
   // permanent silent gap. Reject atomically.
-  if (pageBlocks + current.blocks.length > maxBlocks) {
+  if (remainingBlocks > maxBlocks) {
     return {
       admitted: false,
       reason: 'count',
@@ -501,7 +542,7 @@ function materializeTranscriptHistory(
   }
   // Byte-budget admission: same silent-gap hazard as the count cap — an
   // over-budget merge is evicted oldest-first by the next live trim.
-  if (current.retainedBytes + pageBytes > current.maxRetainedBytes) {
+  if (remainingBytes > current.maxRetainedBytes) {
     return {
       admitted: false,
       reason: 'bytes',
@@ -514,6 +555,7 @@ function materializeTranscriptHistory(
     admitted: true,
     materialization: {
       blocks: pageBlockList,
+      droppedModLogIds,
       nextOrdinal: history.nextOrdinal,
       toolBlockByCallId: history.toolBlockByCallId,
       permissionBlockByRequestId: history.permissionBlockByRequestId,
@@ -611,10 +653,17 @@ function applyTranscriptHistory(
     }
     permissionBlockByRequestId[requestId] = blockId;
   }
-  const blocks = mergeTranscriptHistoryBlocks(current.blocks, history.blocks);
+  const retainedBlocks =
+    history.droppedModLogIds.size > 0
+      ? current.blocks.filter(
+          (block) => !history.droppedModLogIds.has(block.id),
+        )
+      : current.blocks;
+  const blocks = mergeTranscriptHistoryBlocks(retainedBlocks, history.blocks);
   return {
     ...current,
     blocks,
+    blockIndexById: rebuildDaemonTranscriptBlockIndex(blocks),
     retainedBytes: blocks.reduce(
       (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
       0,
@@ -856,12 +905,22 @@ const GeneratedUiScopeContext = createContext<
  *
  * 404/410 (session-not-found) leave the requested session disconnected instead
  * of silently creating a replacement empty session.
+ *
+ * Most 413 responses will not resolve on their own; blindly retrying loops
+ * forever, clears the visible error, and repeatedly cold-spawn ACP
+ * workers. An explicitly retryable memory-pressure error is the exception:
+ * reopening after the daemon has headroom is safe, while the deterministic
+ * oversized-input cases remain terminal.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([
   ...AUTH_FAILURE_HTTP_STATUSES,
   ...MISSING_SESSION_HTTP_STATUSES,
+  413,
 ]);
+// Cap automatic retries for retryable HTTP 413 responses so a persistent
+// memory-pressure failure cannot loop forever rebuilding a large index.
+const MAX_RETRYABLE_PAYLOAD_TOO_LARGE_ATTEMPTS = 3;
 
 interface HeartbeatFailureState {
   session?: DaemonSessionClient;
@@ -1231,17 +1290,53 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? rejected.blocks + postTrimBlockCount <= blockCap &&
                 rejected.bytes + postTrimRetainedBytes <= byteCap
               : postTrimBlockCount < blockCap;
-            if (!admissionHeadroom) {
+            const reopenHistory = () => {
+              history.rejectedPage = undefined;
+              history.hasMore = true;
+              history.capacityReached = false;
+              setTranscriptHistoryState({
+                hasMore: true,
+                loading: false,
+                capacityReached: false,
+                paginationError: history.paginationError,
+              });
+            };
+            if (admissionHeadroom) {
+              reopenHistory();
               return;
             }
-            history.rejectedPage = undefined;
-            history.hasMore = true;
-            history.capacityReached = false;
-            setTranscriptHistoryState({
-              hasMore: true,
-              loading: false,
-              capacityReached: false,
-              paginationError: history.paginationError,
+            if (!rejected || detail.evictedOldest !== false) return;
+            const { beforeRecordId, cursor } = history;
+            const generation = paginationGenerationRef.current;
+            // Only the committed rewind snapshot knows which Mod logs survived.
+            queueMicrotask(() => {
+              if (
+                sessionRef.current !== activeSession ||
+                transcriptHistoryRef.current !== history ||
+                paginationGenerationRef.current !== generation ||
+                history.rejectedPage !== rejected ||
+                history.beforeRecordId !== beforeRecordId ||
+                history.cursor !== cursor ||
+                !history.capacityReached ||
+                history.loading
+              ) {
+                return;
+              }
+              const current = store.getSnapshot();
+              const { droppedModLogIds, remainingBlocks, remainingBytes } =
+                reclaimModLogCapacity(
+                  current,
+                  current.blocks.length + rejected.blocks,
+                  current.retainedBytes + rejected.bytes,
+                  blockCap,
+                );
+              if (
+                droppedModLogIds.size > 0 &&
+                remainingBlocks <= blockCap &&
+                remainingBytes <= byteCap
+              ) {
+                reopenHistory();
+              }
             });
           }
         },
@@ -1986,6 +2081,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         !restoreSessionId &&
         newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let retryablePayloadTooLargeAttempts = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let resyncSnapshotPending = false;
       let skipMetadataRefresh = false;
@@ -2763,6 +2859,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   sessionId: nextSession.sessionId,
                   restoredArtifacts: nextSession.restoredArtifacts,
                   restoredArtifactsSessionId: nextSession.sessionId,
+                  // Authoritative data landed; the click-time hint is retired.
+                  artifactCountHint: undefined,
+                  artifactCountHintSessionId: undefined,
                 }));
               });
             }
@@ -3291,7 +3390,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // Repair rebuilds reconcile too: they evict the anchor just as
               // an ordinary rebuild does.
               replayExceededCapacity =
-                replayTrimmed || replayState.blocks.length >= replayMaxBlocks;
+                replayTrimmed ||
+                (replayState.blocks.length >= replayMaxBlocks &&
+                  !replayState.blocks.some(isEvictableModLog));
               if (replayExceededCapacity) {
                 // The pre-trim anchor can sit inside the trimmed stretch;
                 // re-anchor below to the oldest RETAINED record so
@@ -3400,7 +3501,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
                 ) &&
                 transcriptHistoryRef.current.beforeRecordId !== undefined &&
-                postRebuild.retainedBytes < postRebuild.maxRetainedBytes;
+                (postRebuild.retainedBytes < postRebuild.maxRetainedBytes ||
+                  postRebuild.blocks.some(isEvictableModLog));
               transcriptHistoryRef.current.hasMore = olderHistoryReachable;
               transcriptHistoryRef.current.capacityReached = true;
               setTranscriptHistoryState({
@@ -3520,6 +3622,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : undefined,
             restoredArtifacts: activeSession.restoredArtifacts,
             restoredArtifactsSessionId: activeSession.sessionId,
+            artifactCountHint: undefined,
+            artifactCountHintSessionId: undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -4046,6 +4150,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
+              retryablePayloadTooLargeAttempts = 0;
             }
             const currentRepair = liveJournalRepairRef.current;
             if (
@@ -4109,6 +4214,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+                if (event.originatorClientId !== activeSession.clientId) {
+                  publishSidechannelRemotePrompt({
+                    sessionId: activeSession.sessionId,
+                    kind: 'prompt',
+                  });
+                }
                 if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
@@ -4163,6 +4274,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // A `/send` message is recorded here without a turn here, so it
               // never says this session is working.
               const turnEvents = uiEvents.filter((e) => !isSentMessageEvent(e));
+              if (
+                event.originatorClientId !== activeSession.clientId &&
+                uiEvents.some((item) => item.type === 'user.text.delta')
+              ) {
+                publishSidechannelRemotePrompt({
+                  sessionId: activeSession.sessionId,
+                  kind: 'prompt',
+                });
+              }
               if (
                 event.type === 'model_switched' &&
                 isRecord(event.data) &&
@@ -4671,6 +4791,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
           }
           trajectoryLiveStore.invalidate(activeSession, 'stream_closed');
+          retryablePayloadTooLargeAttempts = 0;
           if (
             sessionRef.current !== activeSession &&
             !resyncRequested &&
@@ -4929,7 +5050,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             reconnectSessionId ??
             epochResetSessionIdRef.current;
           const isAuthFailure = isAuthFailureHttpError(error);
-          const isTerminal = isTerminalSessionHttpError(error);
+          const isRetryable413 = isRetryablePayloadTooLargeHttpError(error);
+          if (isRetryable413) {
+            retryablePayloadTooLargeAttempts += 1;
+          }
+          const isTerminal =
+            isTerminalSessionHttpError(error) ||
+            (isRetryable413 &&
+              retryablePayloadTooLargeAttempts >
+                MAX_RETRYABLE_PAYLOAD_TOO_LARGE_ATTEMPTS);
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             locallyBoundPromptIdsRef.current.delete(failedSessionId);
             if (epochResetSessionIdRef.current === failedSessionId) {
@@ -5925,7 +6054,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
         }
-        const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
+        const { blocks } = store.getSnapshot();
+        const hasCapacity =
+          blocks.length < maxBlocks || blocks.some(isEvictableModLog);
         history.capacityReached = page.hasMore && !hasCapacity;
         history.cursor =
           nextBeforeRecordId === undefined ? page.nextCursor : undefined;
@@ -6098,6 +6229,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 
   const appSession = sessionRef.current;
+  const modRowEpoch = appSession?.eventEpoch;
+  const modRowsSupported =
+    connection.capabilities?.features.includes('session_mod_rows') ?? false;
+  const modRows = useMemo(() => {
+    if (
+      !modRowsSupported ||
+      !appSession ||
+      appSession.sessionId !== connection.sessionId
+    )
+      return undefined;
+    return new ModRowAsker(async (row) => {
+      if (
+        sessionRef.current !== appSession ||
+        appSession.eventEpoch !== modRowEpoch
+      )
+        return { status: 'unanswered' };
+      return await appSession.askModRow(row);
+    });
+  }, [appSession, connection.sessionId, modRowEpoch, modRowsSupported]);
   const hookStatistics = useMemo<HookStatisticsSource | undefined>(() => {
     const session = appSession;
     if (
@@ -6326,7 +6476,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                                   <HookStatisticsContext.Provider
                                     value={hookStatistics}
                                   >
-                                    {children}
+                                    <ModRowAskerContext.Provider
+                                      value={modRows}
+                                    >
+                                      {children}
+                                    </ModRowAskerContext.Provider>
                                   </HookStatisticsContext.Provider>
                                 </DaemonPromptSettlementContext.Provider>
                               </DaemonTranscriptHistoryContext.Provider>
@@ -6721,6 +6875,12 @@ export function useDaemonHistoryNavigationStore(): DaemonHistoryNavigationStore 
     );
   }
   return store;
+}
+
+export function useOptionalDaemonHistoryNavigationStore():
+  | DaemonHistoryNavigationStore
+  | undefined {
+  return useContext(DaemonTurnNavigationContext);
 }
 
 export function useDaemonTurnNavigationState(): DaemonTurnNavigationSnapshot {
@@ -7172,8 +7332,19 @@ function bumpSessionEventSignals(
   });
 }
 
+function isRetryablePayloadTooLargeHttpError(error: unknown): boolean {
+  const status = extractHttpStatus(error);
+  return (
+    status === 413 &&
+    error instanceof DaemonHttpError &&
+    isRecord(error.body) &&
+    error.body['retryable'] === true
+  );
+}
+
 function isTerminalSessionHttpError(error: unknown): boolean {
   if (isSessionArchivedHttpError(error)) return true;
+  if (isRetryablePayloadTooLargeHttpError(error)) return false;
   const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
 }

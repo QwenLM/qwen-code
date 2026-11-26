@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -462,17 +463,17 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
-    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.preparePackage(metadata, source);
     }
 
     @Override
-    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.inspectPackage(metadata, source);
     }
 
     @Override
-    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
         return packagePreparationMember().connector.previewPackage(metadata, source);
     }
 
@@ -560,9 +561,14 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
             return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
         }
-        return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
-                ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
-                : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+        // D3: ordinary files joins the negotiated v2 profiles, keeping its
+        // availability gate; external-files stays on the saved v1 path above.
+        if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        return contract != null
+                && WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                && contract.profiles().contains(profile);
     }
 
     @Override
@@ -570,6 +576,16 @@ public class HarnessPoolConnector implements HarnessConnector {
         return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
                 ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
                 : supportsLifecycle(profile);
+    }
+
+    @Override
+    public boolean supportsPublicChildAgents() {
+        // D5′: the negotiated pool contract gates children — the same feature
+        // token and lifecycle v2 Shell the single connector reads.
+        Contract negotiated = contract;
+        return negotiated != null
+                && HarnessFeature.PUBLIC_CHILD_AGENTS.in(negotiated.features())
+                && supportsLifecycle(WorkspaceToolProfiles.SHELL);
     }
 
     @Override

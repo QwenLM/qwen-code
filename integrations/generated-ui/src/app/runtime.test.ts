@@ -586,4 +586,94 @@ describe('UiRuntime', () => {
       );
     });
   });
+
+  describe('copy and download', () => {
+    it('carries one effect from a click handler, including its microtasks', () => {
+      const runtime = createRuntime();
+      runtime.initialize(
+        `ui.on('copy', 'click', () => ui.copy('Total: 12.30'));
+         ui.on('export', 'click', () =>
+           Promise.resolve().then(() =>
+             ui.download('plans', 'text/csv', 'plan,payment\\n')));
+         ui.on('look', 'click', () => ui.text('out', 'looked'));`,
+        {},
+      );
+      expect(runtime.dispatch(event('copy'), {})).toEqual({
+        patches: [],
+        effect: { kind: 'copy', text: 'Total: 12.30' },
+        handled: true,
+      });
+      expect(runtime.dispatch(event('export'), {})).toEqual({
+        patches: [],
+        effect: {
+          kind: 'download',
+          filename: 'plans',
+          mimeType: 'text/csv',
+          text: 'plan,payment\n',
+        },
+        handled: true,
+      });
+      expect(runtime.dispatch(event('look'), {})).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: 'looked' }],
+        handled: true,
+      });
+    });
+
+    it('throws catchable errors outside a click, twice in a round and for bad arguments', () => {
+      const runtime = createRuntime();
+      runtime.initialize(
+        `function attempt(call) {
+           try { call(); return 'ok'; }
+           catch (error) { return error.name + ': ' + error.message; }
+         }
+         const atInit = attempt(() => ui.copy('a'));
+         ui.on('field', 'input', () => ui.text('out', attempt(() => ui.copy('a'))));
+         ui.on('run', 'click', () => {
+           const results = [
+             () => ui.copy(''),
+             () => ui.copy(1),
+             () => ui.copy('x'.repeat(${16 * 1024 + 1})),
+             () => ui.download('', 'text/csv', 'a'),
+             () => ui.download('x'.repeat(101), 'text/csv', 'a'),
+             () => ui.download('a', 'text/html', 'a'),
+             () => ui.download('a', 'text/plain', 'x'.repeat(${64 * 1024 + 1})),
+             () => ui.copy('first'),
+             () => ui.copy('second'),
+           ].map(attempt);
+           ui.text('out', JSON.stringify([atInit].concat(results)));
+         });`,
+        {},
+      );
+      expect(runtime.dispatch(event('field', 'x', 'input'), {})).toEqual({
+        patches: [
+          {
+            kind: 'text',
+            id: 'out',
+            value: 'Error: ui.copy can only be called while handling a click.',
+          },
+        ],
+        handled: true,
+      });
+      const round = runtime.dispatch(event('run'), {});
+      expect(round.effect).toEqual({ kind: 'copy', text: 'first' });
+      expect(JSON.parse(round.patches[0].value)).toEqual([
+        'Error: ui.copy can only be called while handling a click.',
+        'TypeError: ui.copy needs non-empty text.',
+        'TypeError: ui.copy needs non-empty text.',
+        'RangeError: ui.copy text exceeds 16 KiB.',
+        'TypeError: ui.download needs a file name.',
+        'RangeError: ui.download file name exceeds 100 characters.',
+        'TypeError: ui.download supports text/csv, text/plain, application/json, text/markdown.',
+        'RangeError: ui.download text exceeds 64 KiB.',
+        'ok',
+        'Error: A click can copy or download only once.',
+      ]);
+    });
+
+    it('fails initialization that copies without catching the error', () => {
+      expect(() => createRuntime().initialize("ui.copy('a');", {})).toThrow(
+        /Script error: ui.copy can only be called while handling a click/,
+      );
+    });
+  });
 });

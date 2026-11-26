@@ -1835,15 +1835,13 @@ describe('ReadFileTool', () => {
     });
 
     describe('with FileReadCache', () => {
-      const PLACEHOLDER = /unchanged since last read in this session/;
+      const PLACEHOLDER = /unchanged since it was last read/;
 
       it('treats null pagination as a full text read for caching', async () => {
         const filePath = await put('nullable.txt', 'first\nsecond\nthird');
         const result = await read({ file_path: filePath, ...nullPagination });
         expect(result.llmContent).toBe('first\nsecond\nthird');
-        expect((await read(filePath)).llmContent).toContain(
-          'unchanged since last read',
-        );
+        expect((await read(filePath)).llmContent).toContain('Wasted call');
       });
 
       it('returns a short error when a text-only model reads a large PDF without pages', async () => {
@@ -1885,6 +1883,9 @@ describe('ReadFileTool', () => {
         const second = await read(filePath);
         expect(typeof second.llmContent).toBe('string');
         expect(second.llmContent).toMatch(PLACEHOLDER);
+        expect(second.llmContent).toContain(
+          're-read with a different offset/limit',
+        );
         // Placeholder must not echo the original content.
         expect(second.llmContent).not.toContain('hello world');
         expect(second.returnDisplay).toMatch(/^Unchanged: /);
@@ -1952,7 +1953,7 @@ describe('ReadFileTool', () => {
         expect(after.llmContent).not.toMatch(/unchanged since/);
       });
 
-      it('never short-circuits a ranged Read (offset/limit set)', async () => {
+      it('re-emits when the ranged view differs from the recorded one', async () => {
         const filePath = await put('multi.txt', 'a\nb\nc\nd\ne');
         await read(filePath);
 
@@ -1989,6 +1990,172 @@ describe('ReadFileTool', () => {
         expect(typeof followUp.llmContent).toBe('string');
         expect(followUp.llmContent).not.toMatch(/unchanged since/);
         expect(followUp.llmContent).toContain('e');
+      });
+
+      it('returns the placeholder on a repeat ranged Read of an unchanged file', async () => {
+        const filePath = await put(
+          'ranged-dedup.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        const first = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(first.llmContent).toContain('Line 6');
+
+        const second = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(second.llmContent).toMatch(PLACEHOLDER);
+        expect(second.llmContent).not.toContain('Line 6');
+      });
+
+      // The omitted parameter is the point: these pin the fast-path's
+      // `offset ?? 0` / `limit ?? undefined` normalizations.
+      it('returns the placeholder on a repeat offset-only ranged Read', async () => {
+        const filePath = await put(
+          'ranged-open.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5 });
+        const repeat = await read({ file_path: filePath, offset: 5 });
+        expect(repeat.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('returns the placeholder on a repeat limit-only ranged Read', async () => {
+        const filePath = await put(
+          'ranged-limit.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, limit: 3 });
+        const repeat = await read({ file_path: filePath, limit: 3 });
+        expect(repeat.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('serves content when the ranged request differs from the recorded view', async () => {
+        const filePath = await put(
+          'ranged-other.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        const other = await read({ file_path: filePath, offset: 5, limit: 4 });
+        expect(other.llmContent).not.toMatch(PLACEHOLDER);
+        expect(other.llmContent).toContain('Line 9');
+      });
+
+      it('serves content when only the offset differs from the recorded view', async () => {
+        const filePath = await put(
+          'ranged-offset.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        const shifted = await read({
+          file_path: filePath,
+          offset: 10,
+          limit: 3,
+        });
+        expect(shifted.llmContent).not.toMatch(PLACEHOLDER);
+        expect(shifted.llmContent).toContain('Line 11');
+      });
+
+      it('does not treat a truncated no-args Read as a recorded {offset: 0} view', async () => {
+        // 700 lines exceed the mock Config's caps, so the no-args Read is
+        // truncated and never arms the full-read half. The explicit
+        // {offset: 0} request is a different request shape: it must serve
+        // content (the placeholder's documented escape), not quote back.
+        const filePath = await put('long-noargs.txt', numberedLines(700));
+
+        await read(filePath);
+        expect(cachedEntry(filePath).lastReadRange).toBeUndefined();
+        const explicit = await read({ file_path: filePath, offset: 0 });
+        expect(explicit.llmContent).not.toMatch(PLACEHOLDER);
+        expect(explicit.returnDisplay).toMatch(/Read lines .* of 700/);
+      });
+
+      it('dedups a repeat ranged Read even when the cap truncated its view', async () => {
+        // An explicit limit bypasses the line cap; the 2500-char cap still
+        // cuts the body. The truncated view is deterministic per Config, so
+        // the model already holds exactly what a repeat would return.
+        const filePath = await put('ranged-long.txt', numberedLines(700));
+
+        const first = await read({
+          file_path: filePath,
+          offset: 0,
+          limit: 700,
+        });
+        expect(first.returnDisplay).toMatch(/\(truncated\)/);
+        const repeat = await read({
+          file_path: filePath,
+          offset: 0,
+          limit: 700,
+        });
+        expect(repeat.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('does not dedup a ranged Read past EOF that produced no content', async () => {
+        const filePath = await put('past-eof.txt', numberedLines(20));
+
+        for (let i = 0; i < 2; i++) {
+          const result = await read({
+            file_path: filePath,
+            offset: 1000,
+            limit: 3,
+          });
+          expect(result.llmContent).toMatch(/of 20 total lines/);
+          expect(result.llmContent).not.toMatch(PLACEHOLDER);
+        }
+      });
+
+      it('escapes a ranged placeholder only via a different offset/limit', async () => {
+        const filePath = await put('ranged-escape.txt', numberedLines(20));
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        const placeholder = await read({
+          file_path: filePath,
+          offset: 5,
+          limit: 3,
+        });
+        expect(placeholder.llmContent).toMatch(/different offset\/limit/);
+        expect(
+          (await read({ file_path: filePath, offset: 5, limit: 3 })).llmContent,
+        ).toMatch(PLACEHOLDER);
+        expect(
+          (await read({ file_path: filePath, offset: 5, limit: 4 })).llmContent,
+        ).not.toMatch(PLACEHOLDER);
+      });
+
+      it('overwrites the view per Read so a ranged Read after a full Read re-emits once before deduping again', async () => {
+        const filePath = await put(
+          'ranged-full.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        await read(filePath);
+        // The full Read replaced the recorded view, so this ranged Read
+        // re-emits its slice (and re-records it) instead of quoting back.
+        const repeat = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(repeat.llmContent).toContain('Line 6');
+        const fourth = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(fourth.llmContent).toMatch(PLACEHOLDER);
+      });
+
+      it('re-emits bytes (no placeholder) after a ranged Read was evicted from history', async () => {
+        const filePath = await put(
+          'evicted-range.txt',
+          numberedLines(20, 'Line'),
+        );
+
+        await read({ file_path: filePath, offset: 5, limit: 3 });
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+
+        const repeat = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(repeat.llmContent).not.toMatch(/unchanged since/);
+        expect(repeat.llmContent).toContain('Line 6');
+
+        // And a re-read re-arms the ranged fast-path (slice back in history).
+        const again = await read({ file_path: filePath, offset: 5, limit: 3 });
+        expect(again.llmContent).toMatch(PLACEHOLDER);
       });
 
       it('does not return the placeholder for binary files', async () => {
