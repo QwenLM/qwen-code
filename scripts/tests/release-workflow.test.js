@@ -577,16 +577,16 @@ describe('release workflow', () => {
     ]);
   });
 
-  it('uses shallow history only for validation jobs', () => {
+  it('uses shallow history for prepare and validation jobs', () => {
     const checkoutDepth = (id) =>
       releaseYaml.jobs[id].steps.find((step) =>
         String(step.uses ?? '').includes('actions/checkout'),
       ).with['fetch-depth'];
 
-    expect(checkoutDepth('prepare')).toBe(0);
     expect(checkoutDepth('publish')).toBe(0);
     expect(checkoutDepth('build_release')).toBe(0);
     for (const id of [
+      'prepare',
       'quality_static',
       'quality_build',
       'quality_typecheck',
@@ -1052,6 +1052,95 @@ describe('release workflow', () => {
         expect(result.stdout + result.stderr).toContain(
           'For preview releases, version must be X.Y.Z or X.Y.Z-preview.N',
         );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fetches version tags in a shallow checkout before resolving the release version',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-shallow-tags-'));
+      const origin = join(directory, 'origin.git');
+      const seed = join(directory, 'seed');
+      const shallow = join(directory, 'shallow');
+      const bin = join(directory, 'bin');
+      const seenTags = join(directory, 'seen-tags');
+      const output = join(directory, 'github-output');
+      const gitEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Test',
+        GIT_AUTHOR_EMAIL: 'test@example.com',
+        GIT_COMMITTER_NAME: 'Test',
+        GIT_COMMITTER_EMAIL: 'test@example.com',
+      };
+      const runGit = (cwd, args) => {
+        const res = spawnSync('git', args, {
+          cwd,
+          env: gitEnv,
+          encoding: 'utf8',
+        });
+        expect(res.status, res.stderr).toBe(0);
+        return res.stdout.trim();
+      };
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'node'),
+        '#!/bin/sh\n' +
+          'git tag -l "v*" > "$SEEN_TAGS"\n' +
+          'echo \'{"releaseTag":"v0.28.5","releaseVersion":"0.28.5","npmTag":"latest","previousReleaseTag":"v0.28.4"}\'\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(output, '');
+      try {
+        runGit(directory, ['init', '--bare', origin]);
+        runGit(origin, ['config', 'uploadpack.allowFilter', 'true']);
+        runGit(directory, ['init', seed]);
+        writeFileSync(join(seed, 'README.md'), 'one\n');
+        runGit(seed, ['add', 'README.md']);
+        runGit(seed, ['commit', '-m', 'first']);
+        runGit(seed, ['tag', 'v0.28.4']);
+        writeFileSync(join(seed, 'README.md'), 'two\n');
+        runGit(seed, ['add', 'README.md']);
+        runGit(seed, ['commit', '-m', 'second']);
+        runGit(seed, ['remote', 'add', 'origin', origin]);
+        runGit(seed, ['push', 'origin', 'HEAD:refs/heads/main', '--tags']);
+
+        runGit(directory, [
+          'clone',
+          '--depth=1',
+          '--no-tags',
+          '--branch',
+          'main',
+          `file://${origin}`,
+          shallow,
+        ]);
+        expect(runGit(shallow, ['rev-parse', '--is-shallow-repository'])).toBe(
+          'true',
+        );
+        expect(runGit(shallow, ['tag', '-l', 'v*'])).toBe('');
+
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'resolve-version'],
+          {
+            cwd: shallow,
+            encoding: 'utf8',
+            env: {
+              ...gitEnv,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_NIGHTLY: 'false',
+              IS_PREVIEW: 'false',
+              MANUAL_VERSION: 'v0.28.5',
+              SEEN_TAGS: seenTags,
+              GITHUB_OUTPUT: output,
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(seenTags, 'utf8').trim()).toBe('v0.28.4');
+        expect(readFileSync(output, 'utf8')).toContain('RELEASE_TAG=v0.28.5');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }

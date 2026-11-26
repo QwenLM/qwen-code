@@ -482,6 +482,12 @@ export function useInputHistory(
     [readCurrentHistory],
   );
 
+  const endNavigation = useCallback((): string | null => {
+    if (indexRef.current === -1) return null;
+    indexRef.current = -1;
+    return draftRef.current;
+  }, []);
+
   const navigateDown = useCallback((): string | null => {
     const h = historyRef.current;
     if (indexRef.current === -1) return null;
@@ -489,11 +495,9 @@ export function useInputHistory(
     if (indexRef.current < h.length - 1) {
       indexRef.current++;
       return h[indexRef.current];
-    } else {
-      indexRef.current = -1;
-      return draftRef.current;
     }
-  }, []);
+    return endNavigation();
+  }, [endNavigation]);
 
   const isNavigating = useCallback(() => indexRef.current !== -1, []);
 
@@ -569,6 +573,7 @@ export function useInputHistory(
     getMutationVersion,
     navigateUp,
     navigateDown,
+    endNavigation,
     isNavigating,
     reset,
     searchReverse,

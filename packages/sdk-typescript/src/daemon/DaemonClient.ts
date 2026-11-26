@@ -960,6 +960,8 @@ export interface RestoreSessionRequest extends ResumeSessionRequest {
   compactedReplayMode?: 'full' | 'summary';
 }
 
+export type RestoreWorktreeSessionRequest = RestoreSessionRequest;
+
 export interface WorktreeResetSessionRequest {
   /**
    * Workspace path the daemon must have registered. Omit to let the daemon use
@@ -4291,6 +4293,56 @@ export class DaemonClient {
         return (await res.json()) as DaemonSession;
       },
       this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Reconstruct a registered worktree from its managed snapshot. The server
+   * owns archive selection; callers provide the owning workspace, never a
+   * raw archive path or restore target. Secondary workspaces require cwd.
+   */
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-restore`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.historyPageSize !== undefined
+            ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(req.compactedReplayMode !== undefined
+            ? { compactedReplayMode: req.compactedReplayMode }
+            : {}),
+          ...(req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+        signal: req.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-restore',
+          );
+        }
+        return (await res.json()) as DaemonRestoredSession;
+      },
+      timeoutMs,
     );
   }
 
@@ -8669,6 +8721,30 @@ export class WorkspaceDaemonClient {
     private readonly client: DaemonClient,
     private readonly workspaceSelector: string,
   ) {}
+
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    // workspaceByCwd stores an encoded URL selector, not a filesystem path.
+    const selector = decodeURIComponent(this.workspaceSelector);
+    const workspaceCwd =
+      req.workspaceCwd ??
+      (selector.startsWith('/') ||
+      /^[A-Za-z]:[\\/]/.test(selector) ||
+      selector.startsWith('\\\\')
+        ? selector
+        : undefined);
+    if (workspaceCwd === undefined) {
+      throw new Error('Worktree restore requires a registered workspace cwd');
+    }
+    return await this.client.restoreWorktreeSession(
+      sessionId,
+      { ...req, workspaceCwd },
+      clientId,
+    );
+  }
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');

@@ -427,7 +427,7 @@ final class JournalWriterLifecycle {
                 throw JournalStoreRows.invalid(
                         "A parked Turn claims a wake exactly when the wake pump owns it.");
             }
-            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 64);
+            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId", 128);
             JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
             if (parked.approvalRevision() != null) {
                 JournalStoreRows.validateCounter(parked.approvalRevision(),

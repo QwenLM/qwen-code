@@ -4465,6 +4465,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sessionsOverview.popupBlocked':
     '彈出視窗被攔截。請允許本站彈窗，以便在新標籤頁中開啟會話。',
   'sessionsOverview.refresh': '重新整理',
+  'sessionsOverview.restoreWorktree': '復原快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '此工作區沒有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '復原中…',
+  'sessionsOverview.restoreWorktreeFailed': '復原快照失敗',
   'sessionsOverview.selectAll': '全選',
   'sessionsOverview.titleColumn': '標題',
   'sessionsOverview.actions': '操作',
@@ -5856,6 +5861,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.ui.chatWidth': '屏寬',
   'settings.description.ui.chatWidth':
     '純前端的聊天內容寬度設定，儲存在當前瀏覽器中。',
+  'settings.arrowKeyHistory.label': '用上下鍵取回歷史訊息',
+  'settings.arrowKeyHistory.description':
+    '在訊息輸入框中按 ↑ 或 ↓ 可取回歷史訊息。此設定儲存在目前的瀏覽器中。',
+  'settings.arrowKeyHistory.disabledByHost':
+    '宿主應用程式已關閉方向鍵歷史尋回。',
   'settings.option.ui.chatWidth.1000': '常規',
   'settings.option.ui.chatWidth.wide': '超寬',
   'settings.category.General': '通用',
@@ -6114,6 +6124,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.omni.enabled': '啟用 Omni 媒體投遞',
   'settings.description.omni.enabled':
     '啟用 omni 媒體管線。用 @ 引用的媒體檔案（影片、圖片、音訊）以及 @https:// URL 提供的媒體會被識別（ffprobe）、以內容定址儲存在 .qwen/omni/objects/ 下，經 DashScope 臨時上傳通道上傳，並以 oss:// URL 投遞，而不是內聯 base64。僅對 DashScope 相容端點生效。也可透過 QWEN_CODE_ENABLE_OMNI=1 啟用。',
+  'settings.label.worktree.maxRetained': '保留的會話 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每個歸屬唯一的管理根保留最近相應數量的合規會話 worktree，預設 15。活躍及置頂會話不佔刪除候選配額。設為 0 只關閉自動清掃，不禁止明確復原快照。歸屬不明、根重疊或設定不可讀時保留；不順帶刪除孤立快照。不影響工具/agent worktree。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 產物',
   'settings.description.agents.arena.preserveArtifacts':
     '啟用後，Arena worktree 和會話狀態檔案會在會話結束或主智慧體退出後保留。',
