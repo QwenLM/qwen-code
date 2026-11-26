@@ -24,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/tokenUsageService.js';
 import {
   buildUsageDayTable,
+  countActiveSessions,
   filterUsageRecordsByLocalDay,
   loadLedgerOrEmpty,
   localDateKey,
@@ -419,12 +420,20 @@ export async function loadStatsData(
     scopedEvidenceDaily,
     currentSession,
   );
-  const report = aggregateUsage(
-    filterUsageRecordsByLocalDay(records, currentStartKey, currentEndKey),
-    'all',
+  const currentRecords = filterUsageRecordsByLocalDay(
+    records,
+    currentStartKey,
+    currentEndKey,
   );
+  const report = aggregateUsage(currentRecords, 'all');
 
   applyTokenWindow(report, table, currentStartKey, currentEndKey);
+  report.sessionCount = countActiveSessions(
+    currentRecords,
+    currentStartKey,
+    currentEndKey,
+    ledgerDaily,
+  );
 
   const heatmap = buildHeatmap(table, currentStartKey, currentEndKey);
   const heatmapDates = Object.entries(heatmap)
@@ -456,6 +465,18 @@ export async function loadStatsData(
       );
       const currentDeltaReport = aggregateUsage(currentCompletedRecords, 'all');
       const previousReport = aggregateUsage(prevFiltered, 'all');
+      currentDeltaReport.sessionCount = countActiveSessions(
+        currentCompletedRecords,
+        currentStartKey,
+        currentCompletedEndKey,
+        ledgerDaily,
+      );
+      previousReport.sessionCount = countActiveSessions(
+        prevFiltered,
+        prevStartKey,
+        prevEndKey,
+        ledgerDaily,
+      );
       if (
         canUseLedgerDelta(
           currentCompletedRecords,

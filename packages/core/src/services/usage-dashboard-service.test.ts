@@ -884,7 +884,7 @@ describe('loadUsageDashboard', () => {
         sources.ledgerDaily,
         sources.runtimeScopes,
       ).summary,
-    ).toMatchObject({ sessions: 2, requests: 2, totalTokens: 300 });
+    ).toMatchObject({ sessions: 1, requests: 2, totalTokens: 300 });
   });
 
   it('keeps exact proof from each runtime within the per-table budget', async () => {
@@ -3170,7 +3170,7 @@ describe('loadUsageDashboard', () => {
         sources.ledgerDaily,
         sources.runtimeScopes,
       ).summary,
-    ).toMatchObject({ totalTokens: 300, requests: 3, sessions: 3 });
+    ).toMatchObject({ totalTokens: 300, requests: 3, sessions: 1 });
   });
 
   it('today totals include a daemon / Web Shell transcript session, not just the persisted file', async () => {
@@ -5791,6 +5791,149 @@ describe('loadUsageDashboard', () => {
     expect(dash.summary).toMatchObject({
       requests: 3,
       totalTokens: 300,
+    });
+  });
+
+  it('counts distinct active sessions from the ledger alongside ended records in summary and daily series', async () => {
+    const now = Date.now();
+    const today = dayKey(now);
+    const yesterdayMs = now - 24 * 60 * 60 * 1000;
+    const yesterday = dayKey(yesterdayMs);
+    const rootA = path.join(tmpHome, 'census-root-a');
+    const rootB = path.join(tmpHome, 'census-root-b');
+    fs.mkdirSync(rootA, { recursive: true });
+    fs.mkdirSync(rootB, { recursive: true });
+
+    // Three ledger-only sessions (never persisted to usage_record.jsonl):
+    // two on today across two roots (with one shared sessionId across both
+    // roots to verify cross-root deduplication) and one on yesterday.
+    writeTestLedgerRows(rootA, [
+      {
+        timestamp: new Date(now - 3_000).toISOString(),
+        localDate: today,
+        sessionId: 'ledger-only-today-1',
+        executionId: 'exec-c-1',
+        model: 'qwen-max',
+        authType: 'openai',
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+      },
+      {
+        timestamp: new Date(now - 2_000).toISOString(),
+        localDate: today,
+        sessionId: 'shared-multi-run',
+        executionId: 'exec-c-2',
+        model: 'qwen-max',
+        authType: 'openai',
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+      },
+      {
+        timestamp: new Date(yesterdayMs).toISOString(),
+        localDate: yesterday,
+        sessionId: 'ledger-only-yesterday',
+        executionId: 'exec-c-4',
+        model: 'qwen-max',
+        authType: 'openai',
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+      },
+    ]);
+    writeTestLedgerRow(rootB, {
+      timestamp: new Date(now - 1_500).toISOString(),
+      localDate: today,
+      sessionId: 'shared-multi-run',
+      executionId: 'exec-c-3',
+      model: 'qwen-max',
+      authType: 'openai',
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+    });
+
+    // Persisted records: two runs of `shared-multi-run` (must deduplicate to 1
+    // together with the ledger rows) plus one skill-only run without ledger.
+    seed([
+      {
+        ...rec({
+          sessionId: 'shared-multi-run',
+          timestamp: now - 1_800,
+          startTime: now - 2_200,
+          model: {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['exec-c-2'],
+        successfulRequestExecutionIds: ['exec-c-2'],
+      },
+      {
+        ...rec({
+          sessionId: 'shared-multi-run',
+          timestamp: now - 1_000,
+          startTime: now - 1_600,
+          model: {
+            requests: 1,
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+          },
+        }),
+        runScoped: true,
+        requestExecutionIds: ['exec-c-3'],
+        successfulRequestExecutionIds: ['exec-c-3'],
+      },
+      {
+        ...rec({
+          sessionId: 'skills-only-today',
+          timestamp: now - 500,
+          startTime: now - 600,
+          model: undefined,
+        }),
+        models: {},
+        skills: { totalCalls: 1, totalSuccess: 1, totalFail: 0, byName: {} },
+        runScoped: true,
+      },
+    ]);
+
+    const sources = await loadUsageDashboardSources([rootA, rootB]);
+    const todayDash = buildUsageDashboard(
+      sources.records,
+      { range: 'today' },
+      sources.ledgerDaily,
+      sources.runtimeScopes,
+    );
+    // Today: ledger-only-today-1 + shared-multi-run + skills-only-today = 3
+    expect(todayDash.summary.sessions).toBe(3);
+    expect(todayDash.daily).toEqual([
+      { date: today, tokens: 300, sessions: 3 },
+    ]);
+
+    const weekDash = buildUsageDashboard(
+      sources.records,
+      { range: 'week' },
+      sources.ledgerDaily,
+      sources.runtimeScopes,
+    );
+    // Week adds ledger-only-yesterday = 4 distinct active sessions total.
+    expect(weekDash.summary.sessions).toBe(4);
+    const yesterdayPoint = weekDash.daily.find((d) => d.date === yesterday);
+    const todayPoint = weekDash.daily.find((d) => d.date === today);
+    expect(yesterdayPoint).toEqual({
+      date: yesterday,
+      tokens: 100,
+      sessions: 1,
+    });
+    expect(todayPoint).toEqual({
+      date: today,
+      tokens: 300,
+      sessions: 3,
     });
   });
 

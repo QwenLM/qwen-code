@@ -1266,21 +1266,95 @@ export function filterUsageRecordsByLocalDay(
 }
 
 /**
- * Per-day tokens + ended-run counts on a continuous day axis (zero-filled).
- * The two sources can attribute a cross-midnight run to different days: tokens
- * follow each request, while sessions follow the run record's end timestamp.
+ * Counts distinct active `sessionId`s across `[startKey, endKey]` by taking
+ * the union of non-supplement run records ending in the window and every
+ * session recorded in the per-request ledger on days in the window.
+ */
+export function countActiveSessions(
+  records: readonly UsageSummaryRecord[],
+  startKey: string,
+  endKey: string,
+  ledgerDaily?: TokenUsageDailyByModel,
+  runtimeScopes?: readonly UsageDashboardSources[],
+): number {
+  const sessions = new Set<string>();
+  for (const r of records) {
+    if (r.transcriptSupplement === true || !Number.isFinite(r.timestamp)) {
+      continue;
+    }
+    const key = localDateKey(r.timestamp);
+    if (key < startKey || key > endKey) continue;
+    if (r.sessionId) sessions.add(r.sessionId);
+  }
+  const ledgerSources = runtimeScopes
+    ? runtimeScopes.map((scope) => scope.ledgerDaily)
+    : ledgerDaily
+      ? [ledgerDaily]
+      : [];
+  for (const ledger of ledgerSources) {
+    for (const [day, models] of ledger) {
+      if (day < startKey || day > endKey) continue;
+      for (const model of models.keys()) {
+        const ids = getLedgerSessionIds(ledger, day, model);
+        if (!ids) continue;
+        for (const id of ids) {
+          if (id) sessions.add(id);
+        }
+      }
+    }
+  }
+  return sessions.size;
+}
+
+/**
+ * Per-day tokens + active-session counts on a continuous day axis (zero-filled).
+ * Each day counts distinct `sessionId`s from ended non-supplement records on
+ * that day unioned with ledger-recorded sessions on that day.
  */
 function buildDaily(
   table: UsageDayModelTable,
   records: UsageSummaryRecord[],
   startMs: number,
   endMs: number,
+  ledgerDaily?: TokenUsageDailyByModel,
+  runtimeScopes?: readonly UsageDashboardSources[],
 ): UsageDailyPoint[] {
-  const sessionByDay = new Map<string, number>();
+  const startKey = localDateKey(startMs);
+  const endKey = localDateKey(endMs);
+  const sessionsByDay = new Map<string, Set<string>>();
+  const addSession = (day: string, sessionId: string) => {
+    if (!sessionId || day < startKey || day > endKey) return;
+    let bucket = sessionsByDay.get(day);
+    if (!bucket) {
+      bucket = new Set<string>();
+      sessionsByDay.set(day, bucket);
+    }
+    bucket.add(sessionId);
+  };
   for (const r of records) {
-    if (r.timestamp > endMs || r.transcriptSupplement === true) continue;
-    const key = localDateKey(r.timestamp);
-    sessionByDay.set(key, (sessionByDay.get(key) ?? 0) + 1);
+    if (
+      !Number.isFinite(r.timestamp) ||
+      r.timestamp > endMs ||
+      r.transcriptSupplement === true
+    ) {
+      continue;
+    }
+    addSession(localDateKey(r.timestamp), r.sessionId);
+  }
+  const ledgerSources = runtimeScopes
+    ? runtimeScopes.map((scope) => scope.ledgerDaily)
+    : ledgerDaily
+      ? [ledgerDaily]
+      : [];
+  for (const ledger of ledgerSources) {
+    for (const [day, models] of ledger) {
+      if (day < startKey || day > endKey) continue;
+      for (const model of models.keys()) {
+        const ids = getLedgerSessionIds(ledger, day, model);
+        if (!ids) continue;
+        for (const id of ids) addSession(day, id);
+      }
+    }
   }
   const out: UsageDailyPoint[] = [];
   const cursor = startOfLocalDay(startMs);
@@ -1292,7 +1366,7 @@ function buildDaily(
     out.push({
       date: key,
       tokens: byModel ? dayTokens(byModel).tokens : 0,
-      sessions: sessionByDay.get(key) ?? 0,
+      sessions: sessionsByDay.get(key)?.size ?? 0,
     });
     cursor.setDate(cursor.getDate() + 1);
   }
@@ -1395,7 +1469,13 @@ export function buildUsageDashboard(
     cachedTokens,
     thoughtsTokens,
     requests,
-    sessions: report.sessionCount,
+    sessions: countActiveSessions(
+      endedRecords,
+      rangeStartKey,
+      todayKey,
+      ledgerDaily,
+      runtimeScopes,
+    ),
     toolCalls: report.tools.totalCalls,
     linesAdded: report.files.linesAdded,
     linesRemoved: report.files.linesRemoved,
@@ -1420,7 +1500,14 @@ export function buildUsageDashboard(
     rangeStart.getTime(),
     shiftLocalDays(nowDate, -(MAX_DAILY_DAYS - 1)).getTime(),
   );
-  const daily = buildDaily(table, records, dailyStart, now);
+  const daily = buildDaily(
+    table,
+    records,
+    dailyStart,
+    now,
+    ledgerDaily,
+    runtimeScopes,
+  );
 
   // The heatmap covers the trailing `heatmapDays` (~12 months in the UI),
   // independent of `range`.

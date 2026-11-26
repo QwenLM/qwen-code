@@ -267,6 +267,7 @@ import {
   UserFeedbackRating,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
+import { persistSessionUsageOnClose } from '../utils/usage-persistence.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -4850,6 +4851,11 @@ class QwenAgent implements Agent {
     }
     try {
       this.mcpPool?.releaseSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      persistSessionUsageOnClose(session.getConfig(), sessionId);
     } catch (error) {
       cleanupErrors.push(error);
     }

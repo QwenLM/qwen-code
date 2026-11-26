@@ -49,3 +49,33 @@ export function flushRunUsageOnSessionSwap(
   persistLiveUsage(config, outgoingSessionId);
   uiTelemetryService.resetLiveMetrics();
 }
+
+/**
+ * Commits a single daemon/ACP session's own live spend when that session is
+ * closed, retired, or torn down on daemon shutdown. Must run before
+ * `uiTelemetryService.removeSession(sessionId)` discards the per-session live
+ * bucket. Replayed/restored history is excluded by `getLiveMetricsForSession`.
+ */
+export function persistSessionUsageOnClose(
+  config: Config,
+  sessionId: string,
+): void {
+  try {
+    const metrics = uiTelemetryService.getLiveMetricsForSession?.(sessionId);
+    if (!metrics || !hasRunActivity(metrics)) return;
+    const startTime =
+      uiTelemetryService.getRunStartTimeForSession?.(sessionId) ?? new Date();
+    const endTime = new Date(Math.max(startTime.getTime(), Date.now()));
+    const project = config.getProjectRoot?.();
+    if (!project) return;
+    persistSessionUsage({
+      sessionId,
+      startTime,
+      endTime,
+      project,
+      metrics,
+    });
+  } catch {
+    // Best-effort — usage must not block session teardown or shutdown.
+  }
+}

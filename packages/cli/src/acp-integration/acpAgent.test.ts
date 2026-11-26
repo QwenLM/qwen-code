@@ -89,9 +89,15 @@ const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
     byName: {},
   }),
 }));
+const { mockPersistSessionUsageOnClose } = vi.hoisted(() => ({
+  mockPersistSessionUsageOnClose: vi.fn(),
+}));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
   registerCleanup: mockRegisterCleanup,
+}));
+vi.mock('../utils/usage-persistence.js', () => ({
+  persistSessionUsageOnClose: mockPersistSessionUsageOnClose,
 }));
 vi.mock('../services/housekeeping/scheduler.js', () => ({
   startNonInteractiveOpenAILogHousekeeping:
@@ -6978,6 +6984,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
 
       await vi.waitFor(() => expect(expireQueued).toHaveBeenCalledWith(unread));
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('persists session live usage before removing session telemetry on close', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      await setupSessionMocks('hosted-usage-persist');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await agent.extMethod('qwen/control/session/close', {
+        sessionId: 'hosted-usage-persist',
+        requireFlush: false,
+      });
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledExactlyOnceWith(
+        expect.any(Object),
+        'hosted-usage-persist',
+      );
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-persist',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[0]!,
+      );
       mockConnectionState.resolve();
       await agentPromise;
     });
