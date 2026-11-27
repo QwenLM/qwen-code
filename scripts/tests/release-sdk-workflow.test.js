@@ -56,6 +56,17 @@ describe('TypeScript SDK release workflow', () => {
     }
   });
 
+  it('creates the GitHub release with the CI bot PAT', () => {
+    // `gh release create` for this workflow requires the `workflow` scope, so
+    // the default GITHUB_TOKEN fails with "Failed to create release" after
+    // npm publish already succeeded (issue #18493).
+    const parsed = parse(workflow);
+    const step = parsed.jobs['release-sdk'].steps.find(
+      (s) => s.name === 'Create GitHub Release and Tag',
+    );
+    expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+  });
+
   it('spaces PR creation out from the release to avoid secondary rate limits', () => {
     // `gh pr create` runs right after the branch push and release creation,
     // which can trip GitHub's "was submitted too quickly" GraphQL secondary
