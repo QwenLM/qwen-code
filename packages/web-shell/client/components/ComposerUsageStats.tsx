@@ -5,13 +5,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DaemonSessionStatsStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 import { DatabaseIcon, GaugeIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   formatCompact,
   outputSpeed,
   summarizeSessionUsage,
+  type SessionUsageStatsSnapshot,
 } from './artifacts/tokenUsageTotals';
 import styles from './ComposerUsageStats.module.css';
 
@@ -22,8 +22,11 @@ const RUNNING_POLL_MS = 5_000;
 
 interface ComposerUsageStatsProps {
   sessionId?: string;
-  /** Reads `GET /session/:id/stats` without raising a user-facing notice. */
-  loadStats?: (sessionId: string) => Promise<DaemonSessionStatsStatus>;
+  /** Reads session statistics without raising a user-facing notice. */
+  loadStats?: (
+    sessionId: string,
+    signal?: AbortSignal,
+  ) => Promise<SessionUsageStatsSnapshot>;
   /**
    * Changes whenever the session may hold new usage, such as the context
    * token count after a model response.
@@ -31,7 +34,7 @@ interface ComposerUsageStatsProps {
   refreshSignal?: unknown;
   /** The session is working; usage is read on a slow poll meanwhile. */
   running: boolean;
-  /** Opens the full token usage panel. */
+  /** Opens the full token usage or diagnostics statistics panel. */
   onOpen?: () => void;
 }
 
@@ -72,12 +75,13 @@ export function ComposerUsageStats({
   onOpen,
 }: ComposerUsageStatsProps) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<DaemonSessionStatsStatus | null>(null);
+  const [status, setStatus] = useState<SessionUsageStatsSnapshot | null>(null);
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const loadStatsRef = useRef(loadStats);
   loadStatsRef.current = loadStats;
   const inFlightRef = useRef<symbol | undefined>(undefined);
+  const abortRef = useRef<AbortController | undefined>(undefined);
   const pendingRef = useRef(false);
   const lastStartRef = useRef(0);
   const timerRef = useRef<number | undefined>(undefined);
@@ -103,12 +107,15 @@ export function ComposerUsageStats({
       return;
     }
     const request = Symbol();
+    const abort = new AbortController();
     inFlightRef.current = request;
+    abortRef.current = abort;
     lastStartRef.current = Date.now();
     Promise.resolve()
-      .then(() => load(id))
+      .then(() => load(id, abort.signal))
       .then((snapshot) => {
         if (
+          abort.signal.aborted ||
           inFlightRef.current !== request ||
           sessionIdRef.current !== id ||
           snapshot.sessionId !== id
@@ -121,6 +128,7 @@ export function ComposerUsageStats({
       .finally(() => {
         if (inFlightRef.current !== request) return;
         inFlightRef.current = undefined;
+        abortRef.current = undefined;
         if (pendingRef.current) {
           pendingRef.current = false;
           refresh();
@@ -134,6 +142,8 @@ export function ComposerUsageStats({
     setStatus(null);
     lastStartRef.current = 0;
     return () => {
+      abortRef.current?.abort();
+      abortRef.current = undefined;
       inFlightRef.current = undefined;
       pendingRef.current = false;
       if (timerRef.current !== undefined) {
@@ -171,7 +181,9 @@ export function ComposerUsageStats({
     status.promptCount > 0
       ? t('tokenUsage.bar.turns', { count: status.promptCount })
       : undefined;
-  const cachePercent = formatCacheHitPercent(totals.cached, totals.prompt);
+  const cachePercent = status.cacheHitUnknown
+    ? undefined
+    : formatCacheHitPercent(totals.cached, totals.prompt);
   const cacheText =
     cachePercent !== undefined
       ? t('tokenUsage.bar.cacheHit', { percent: cachePercent })
@@ -202,7 +214,7 @@ export function ComposerUsageStats({
         onClick={onOpen}
         disabled={!onOpen}
         aria-label={`${reading}. ${t('tokenUsage.open')}`}
-        title={detail}
+        title={status.cacheHitUnknown ? undefined : detail}
       >
         {activity.length > 0 && (
           <span className={styles.group} data-stat="activity">

@@ -101,9 +101,10 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 `localDate -> model -> counters` 表（即原有的「按结束日归属」），随后只**替换**实际被台账覆盖的
 模型 / session 条目，并加上台账计数。所有与 token 有关的输出——summary 的各 token 字段、请求数、
 逐模型占比、日粒度 token、热力图格——都由这张表派生。会话数、已结束运行时长、工具调用、变更行数与技能
-仍取自 `aggregateUsage`，因为台账有意不携带这些。两个表面都按与 token 切片相同的本地日闭区间过滤这些记录，
-而不是使用滚动毫秒截止点。按日的 `sessions` 特指**在该日结束的运行**；跨午夜运行的请求和它的结束记录
-因此可以出现在不同日期。
+仍取自 `aggregateUsage`，因为台账有意不携带这些。两个表面都按与 token 切片相同的本地日闭区间过滤这些记录，而不是使用滚动毫秒截止点。按日的 `sessions`
+最初按该日结束的运行计数；该规则随后由
+[台账口径会话普查与 Daemon 会话结束用量持久化](./2026-11-25-usage-ledger-session-census.zh-CN.md)
+取代，汇总与按日 `sessions` 改为统计当日已结束非 supplement 记录与逐请求台账行并集中的唯一活跃 `sessionId` 数。
 
 - `loadTokenUsageDailyByModel(sinceLocalDate)` 流式读取起始月及之后的每个按月文件，用既有的
   `isTokenUsageRecord` 校验每条记录，并在不物化整份历史的前提下累加计数。usage 目录不存在时返回空表；
@@ -527,8 +528,10 @@ transcript 补充仍保留明确的豁免，读取不会改写历史。
   真实 transcript 重建仍与后续不相交运行并存（见上文「有意的取舍」）。
 - **按项目的 token 仍然虚高。** TUI 的项目表无法由台账修正，因此与它上方已修正的总量不一致。
 - **按日历日取窗口现在适用于每个记录派生 tile。** token、会话数、时长、工具、变更行与技能都包括完整的
-  边界日；TUI 上一环比窗口与当前窗口互不相交且已完成天数相同。daemon 按日的 `sessions` 仍表示结束运行序列，
-  并不声称当日全部 token 都由当天结束的那些运行产生。Today 的展示仍包括未过完的今天，
+  边界日；TUI 上一环比窗口与当前窗口互不相交且已完成天数相同。daemon 按日的 `sessions` 最初仅统计结束运行，
+  随后已由
+  [台账口径会话普查与 Daemon 会话结束用量持久化](./2026-11-25-usage-ledger-session-census.zh-CN.md)
+  更新为统计当日已结束非 supplement 记录与台账行并集中的唯一活跃 `sessionId` 数。Today 的展示仍包括未过完的今天，
   而环比若没有至少一个已完成的本地日就不显示。
 - 本次改动之前写入的记录仍然虚增，因此本 PR 未转换的 `loadUsageHistory` 消费方
   （例如按项目的 token 列与修复前的回退窗口）对那段历史看到的仍是旧数字。只有新写入的记录是正确的。

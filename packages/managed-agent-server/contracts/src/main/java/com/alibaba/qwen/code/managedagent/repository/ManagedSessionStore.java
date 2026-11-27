@@ -112,6 +112,15 @@ public interface ManagedSessionStore {
 
     public boolean hasLiveWriter(String tenantId, String sessionId);
 
+    /**
+     * Authenticates an event-ingest request as the Session's current writer
+     * and returns the head's committed sequence. The writer must be live; with
+     * {@code sealed} it may instead be the incarnation of a clean seal.
+     */
+    public long authenticateEventIngest(String tenantId, String sessionId,
+            String writerToken, String workspaceId, String writerId,
+            long writerGeneration, boolean sealed);
+
     public static String sessionScopeKey(String tenantId, String sessionId) {
         return ManagedSchemaKeys.key(tenantId, sessionId);
     }

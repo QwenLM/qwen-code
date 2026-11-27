@@ -25,8 +25,6 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -57,9 +55,7 @@ class EmbeddedRuntimeBrokerTest {
             "550e8400-e29b-41d4-a716-446655440000";
 
     @Test
-    void usesFetchCompatibleDefaultBrokerPort() {
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
-                .isEqualTo(4182);
+    void usesDurableLocalProvisioningByDefault() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isTrue();
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isTrue();
     }
@@ -107,8 +103,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void startsPrivateListenerAndResolvesTenantFromTheSessionStore()
-            throws Exception {
+    void resolvesTenantFromTheSessionStore() throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         when(store.findSessionById(SESSION_ID)).thenReturn(
                 Optional.of(new SessionRecord("tenant-a", SESSION_ID,
@@ -119,16 +114,6 @@ class EmbeddedRuntimeBrokerTest {
         try (EmbeddedRuntimeBroker broker = broker(store, properties)) {
             broker.warm(SESSION_ID).toCompletableFuture().join();
             verify(store).findSessionById(SESSION_ID);
-
-            URI endpoint = broker.getBaseUri().resolve(
-                    "/internal/runtime-broker/v1/tool-sessions:acquire");
-            HttpURLConnection connection = (HttpURLConnection) endpoint
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization", "Bearer wrong");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write("{}".getBytes());
-            assertThat(connection.getResponseCode()).isEqualTo(401);
         }
     }
 
@@ -150,34 +135,6 @@ class EmbeddedRuntimeBrokerTest {
                             ((RuntimeBrokerException) error.getCause())
                                     .getCode())
                             .isEqualTo("workspace_unavailable"));
-        }
-    }
-
-    @Test
-    void rejectsUnsupportedOrMalformedBrokerRoutesBeforeAnySideEffects()
-            throws Exception {
-        ManagedAgentStore store = mock(ManagedAgentStore.class);
-        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
-            for (String route : java.util.List.of("executions:prepare",
-                    "executions/execution-1:start",
-                    "executions/execution-1:resolve")) {
-                HttpURLConnection connection = (HttpURLConnection) broker
-                        .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                                + route).toURL().openConnection();
-                connection.setRequestMethod("POST");
-                connection.setRequestProperty("Authorization",
-                        "Bearer broker-token");
-                connection.setDoOutput(true);
-                connection.getOutputStream().write("{}".getBytes());
-                boolean unsupported = route.endsWith(":resolve");
-                assertThat(connection.getResponseCode()).isEqualTo(unsupported ? 501 : 409);
-                assertThat(new String(connection.getErrorStream()
-                        .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                        .contains(unsupported ? "runtime_broker_operation_unsupported"
-                                : "runtime_broker_protocol_conflict");
-                connection.disconnect();
-            }
-            org.mockito.Mockito.verifyNoInteractions(store);
         }
     }
 
@@ -206,7 +163,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void closingTheListenerAlsoClosesTheBrokerService() throws Exception {
+    void closingTheBrokerClosesTheBrokerService() throws Exception {
         EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class),
                 properties());
 
@@ -336,26 +293,10 @@ class EmbeddedRuntimeBrokerTest {
                 properties, bindings, sessions,
                 new JdbcToolExecutionRepository(source))) {
             // The admission fence refuses new work on a closed Session, but
-            // release is a teardown route: it must still resolve the
-            // Session's scope so an already-released Runtime Session
-            // answers idempotently.
-            HttpURLConnection connection = (HttpURLConnection) broker
-                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                            + "tool-sessions/" + RUNTIME_ID + ":release")
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization",
-                    "Bearer broker-token");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write(("{\"protocolVersion\":1,"
-                    + "\"requestId\":\"req-release\","
-                    + "\"harnessSessionId\":\"" + SESSION_ID + "\"}")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            assertThat(connection.getResponseCode()).isEqualTo(200);
-            assertThat(new String(connection.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8))
-                    .contains("\"released\":true");
-            connection.disconnect();
+            // release is teardown: it must still resolve the Session's scope
+            // so an already-released Runtime Session answers idempotently.
+            assertThat(broker.service().release(SESSION_ID, RUNTIME_ID)
+                    .toCompletableFuture().join()).isTrue();
         }
     }
 
@@ -372,25 +313,13 @@ class EmbeddedRuntimeBrokerTest {
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             // A Runtime Session this process does not hold would provision a
             // Runtime, which is new work on a closed Session.
-            HttpURLConnection connection = (HttpURLConnection) broker
-                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                            + "tool-sessions:acquire")
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization",
-                    "Bearer broker-token");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write(("{\"protocolVersion\":1,"
-                    + "\"requestId\":\"req-acquire\","
-                    + "\"harnessSessionId\":\"" + SESSION_ID + "\","
-                    + "\"runtimeSessionId\":\"" + RUNTIME_ID + "\","
-                    + "\"turnKind\":\"bootstrap\"}")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            assertThat(connection.getResponseCode()).isEqualTo(409);
-            assertThat(new String(connection.getErrorStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8))
-                    .contains("runtime_broker_session_closed");
-            connection.disconnect();
+            assertThatThrownBy(() -> broker.service().acquire(SESSION_ID,
+                    RUNTIME_ID, "bootstrap").toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
         }
     }
 
@@ -506,20 +435,6 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setHost("0.0.0.0");
-
-        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
-                properties))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("could not start")
-                .cause()
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("non-loopback");
-    }
-
-    @Test
     void refusesAV3ResultWindowBelowThePollFloor() throws Exception {
         // An absent value binds as null and a suffix-less one as seconds;
         // every shape below the floor must be refused here rather than
@@ -535,20 +450,6 @@ class EmbeddedRuntimeBrokerTest {
                     .as("window %s", window)
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("v3 result window");
-        }
-    }
-
-    @Test
-    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
-            throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setHost("0.0.0.0");
-        properties.getRuntimeBroker().setAllowNonLoopback(true);
-
-        try (EmbeddedRuntimeBroker broker = broker(
-                mock(ManagedAgentStore.class), properties)) {
-            assertThat(broker.getBaseUri()).isNotNull();
-            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
         }
     }
 
@@ -682,8 +583,6 @@ class EmbeddedRuntimeBrokerTest {
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
-        broker.setHost("127.0.0.1");
-        broker.setPort(0);
         broker.setToken("broker-token");
         broker.setProvisioner("static");
         broker.setTrustedLocalRebootRecovery(false);

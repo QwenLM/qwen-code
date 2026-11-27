@@ -4,32 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
-import {
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryMetadataPath,
-} from './paths.js';
+import { getAutoMemoryRoot, type ProjectMemoryOwner } from './paths.js';
 import {
   ensureAutoMemoryScaffold,
   ensureUserAutoMemoryScaffold,
 } from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import {
+  rebuildProjectMemoryIndexLocked,
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
-  type AutoMemoryExtractCursor,
-  type AutoMemoryMetadata,
-  type AutoMemoryType,
-} from './types.js';
+  readProjectMemoryCursor,
+  readProjectMemoryCursorLocked,
+  updateProjectMemoryMetadata,
+  withProjectMemoryCommit,
+  writeProjectMemoryCursorLocked,
+} from './project-commit.js';
+import { type AutoMemoryExtractCursor, type AutoMemoryType } from './types.js';
+import { UnreadableProjectMemoryTopicError } from './structured-scan.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
@@ -53,11 +53,14 @@ export interface AutoMemoryExtractResult {
 
 function getSessionMismatchResult(
   sessionId: string,
-  expectedSessionId: string,
+  config: Config,
   now: Date,
 ): AutoMemoryExtractResult | null {
   const cachedSessionId = getCacheSafeParamsSessionId();
-  if (cachedSessionId === undefined || cachedSessionId === expectedSessionId) {
+  if (
+    config.getSessionId() === sessionId &&
+    (cachedSessionId === undefined || cachedSessionId === sessionId)
+  ) {
     return null;
   }
   debugLogger.debug('Skipping auto-memory extract: session_mismatch.');
@@ -71,32 +74,45 @@ function getSessionMismatchResult(
   };
 }
 
-async function readExtractCursor(
-  projectRoot: string,
-): Promise<AutoMemoryExtractCursor> {
-  try {
-    const content = await fs.readFile(
-      getAutoMemoryExtractCursorPath(projectRoot),
-      'utf-8',
-    );
-    return JSON.parse(content) as AutoMemoryExtractCursor;
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === 'ENOENT') {
-      return { updatedAt: new Date(0).toISOString() };
-    }
-    throw error;
-  }
-}
-
 async function writeExtractCursor(
-  projectRoot: string,
+  root: string,
   cursor: AutoMemoryExtractCursor,
+  flushReplay = false,
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  await atomicWriteFile(
-    getAutoMemoryExtractCursorPath(projectRoot),
-    `${JSON.stringify(cursor, null, 2)}\n`,
-    { encoding: 'utf-8' },
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      const latest = (await readProjectMemoryCursorLocked(root, owner)) ?? {
+        updatedAt: cursor.updatedAt,
+      };
+      const sessions = new Map(Object.entries(latest.sessions ?? {}));
+      if (latest.sessionId && !sessions.has(latest.sessionId)) {
+        sessions.set(latest.sessionId, {
+          processedOffset: latest.processedOffset,
+          updatedAt: latest.updatedAt,
+        });
+      }
+      const sessionId = cursor.sessionId!;
+      const previous = sessions.get(sessionId);
+      if (flushReplay && previous) {
+        cursor.processedOffset = Math.max(
+          cursor.processedOffset ?? 0,
+          previous.processedOffset ?? 0,
+        );
+      }
+      sessions.delete(sessionId);
+      sessions.set(sessionId, {
+        processedOffset: cursor.processedOffset,
+        updatedAt: cursor.updatedAt,
+      });
+      await writeProjectMemoryCursorLocked(root, {
+        ...cursor,
+        sessions: Object.fromEntries([...sessions].slice(-64)),
+        projectIndexRebuildPending: latest.projectIndexRebuildPending,
+      });
+    },
+    owner,
   );
 }
 
@@ -105,31 +121,32 @@ async function bumpMetadata(
   now: Date,
   sessionId: string,
   touchedTopics: AutoMemoryType[],
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
   try {
-    const content = await fs.readFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      'utf-8',
-    );
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    metadata.lastExtractionAt = now.toISOString();
-    metadata.lastExtractionSessionId = sessionId;
-    metadata.lastExtractionTouchedTopics = touchedTopics;
-    metadata.lastExtractionStatus =
-      touchedTopics.length > 0 ? 'updated' : 'noop';
-    await atomicWriteFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      { encoding: 'utf-8' },
+    await updateProjectMemoryMetadata(
+      projectRoot,
+      now,
+      (metadata) => {
+        const iso = now.toISOString();
+        if (metadata.lastExtractionAt && metadata.lastExtractionAt > iso)
+          return;
+        metadata.lastExtractionAt = iso;
+        metadata.lastExtractionSessionId = sessionId;
+        metadata.lastExtractionTouchedTopics = touchedTopics;
+        metadata.lastExtractionStatus =
+          touchedTopics.length > 0 ? 'updated' : 'noop';
+      },
+      owner,
     );
   } catch {
     // Scaffold creation already writes metadata; ignore non-critical update errors.
   }
 }
 
-export async function runAutoMemoryExtract(params: {
+interface ExtractParameters {
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   sessionId: string;
   history: Content[];
   now?: Date;
@@ -142,27 +159,29 @@ export async function runAutoMemoryExtract(params: {
   // snapshot's history can be shorter than the cursor a later run already
   // persisted, so this run's write must not move that cursor backwards.
   flushReplay?: boolean;
-}): Promise<AutoMemoryExtractResult> {
+}
+
+export async function runAutoMemoryExtract(
+  params: ExtractParameters,
+): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
-  if (!params.config) {
+  const { config } = params;
+  if (!config) {
     throw new Error(
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
   params.abortSignal?.throwIfAborted();
-  const expectedSessionId = params.config.getSessionId();
-  const earlyMismatch = getSessionMismatchResult(
-    params.sessionId,
-    expectedSessionId,
-    now,
-  );
+  const earlyMismatch = getSessionMismatchResult(params.sessionId, config, now);
   if (earlyMismatch) return earlyMismatch;
 
+  const owner = params.projectMemoryOwner ?? config.getProjectMemoryOwner?.();
+  const memoryRoot = getAutoMemoryRoot(params.projectRoot, owner);
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
   // write access to `~/.qwen/memories/` should still be able to use
   // project-level memory, so swallow the failure and continue.
-  await ensureAutoMemoryScaffold(params.projectRoot, now);
+  await ensureAutoMemoryScaffold(params.projectRoot, now, owner);
   try {
     await ensureUserAutoMemoryScaffold();
   } catch (error) {
@@ -176,18 +195,38 @@ export async function runAutoMemoryExtract(params: {
   // text was never read — fork agent context comes from the session-scoped
   // cache-safe params lookup.
   const { projectIndexRebuildPending, ...currentCursor } =
-    await readExtractCursor(params.projectRoot);
+    (await readProjectMemoryCursor(memoryRoot, owner)) ?? {
+      updatedAt: now.toISOString(),
+    };
   if (projectIndexRebuildPending) {
-    await rebuildManagedAutoMemoryIndex(params.projectRoot);
-    await writeExtractCursor(params.projectRoot, currentCursor);
-    await refreshMemoryInstruction(params.config, {
-      logContext: 'managed auto-memory index repair',
+    const repaired = await withProjectMemoryCommit(
+      memoryRoot,
+      async () => {
+        if (
+          (await readProjectMemoryCursor(memoryRoot, owner))
+            ?.projectIndexRebuildPending
+        ) {
+          await rebuildProjectMemoryIndexLocked(memoryRoot, owner);
+        }
+        return true;
+      },
+      owner,
+    ).catch((error) => {
+      debugLogger.warn('Failed to repair the project memory index:', error);
+      return false;
     });
+    if (repaired) {
+      await refreshMemoryInstruction(config, {
+        logContext: 'managed auto-memory index repair',
+      });
+    }
   }
   const rawOffset =
-    currentCursor.sessionId === params.sessionId
-      ? (currentCursor.processedOffset ?? 0)
-      : 0;
+    currentCursor.sessions?.[params.sessionId]?.processedOffset ??
+    (currentCursor.sessionId === params.sessionId
+      ? currentCursor.processedOffset
+      : 0) ??
+    0;
   // History may shrink between extract calls (compression). Clamp to length
   // so new messages after compression are not permanently skipped.
   const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
@@ -213,22 +252,19 @@ export async function runAutoMemoryExtract(params: {
       processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
-    await writeExtractCursor(params.projectRoot, cursor);
+    await writeExtractCursor(memoryRoot, cursor, params.flushReplay, owner);
     return { touchedTopics: [], cursor };
   }
 
-  const lateMismatch = getSessionMismatchResult(
-    params.sessionId,
-    expectedSessionId,
-    now,
-  );
+  const lateMismatch = getSessionMismatchResult(params.sessionId, config, now);
   if (lateMismatch) return lateMismatch;
 
   const agentResult = await runAutoMemoryExtractionByAgent(
-    params.config,
+    config,
     params.projectRoot,
     params.skippedHistory,
     params.abortSignal,
+    owner,
   );
 
   const { failure, touchedTopics, touchedProjectScope, touchedUserScope } =
@@ -241,7 +277,7 @@ export async function runAutoMemoryExtract(params: {
   if (rebuildProject || rebuildUser) {
     const [projectResult] = await Promise.allSettled([
       rebuildProject
-        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot, owner)
         : Promise.resolve(),
       rebuildUser
         ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
@@ -251,22 +287,17 @@ export async function runAutoMemoryExtract(params: {
     ]);
 
     if (projectResult.status === 'rejected') {
-      // The topic is already on disk. A retry can find it and skip writing,
-      // so remember the index repair independently of the history offset.
-      await writeExtractCursor(params.projectRoot, {
-        ...currentCursor,
-        projectIndexRebuildPending: true,
-      }).catch((error: unknown) => {
-        debugLogger.warn(
-          `Could not record pending auto-memory index repair: ${error}`,
-        );
-      });
-      if (!failure) throw projectResult.reason;
+      if (
+        !failure &&
+        !(projectResult.reason instanceof UnreadableProjectMemoryTopicError)
+      ) {
+        throw projectResult.reason;
+      }
       debugLogger.warn(
         `Auto-memory project index repair failed: ${projectResult.reason}`,
       );
     }
-    await refreshMemoryInstruction(params.config, {
+    await refreshMemoryInstruction(config, {
       logContext: 'managed auto-memory extraction',
     });
   }
@@ -278,6 +309,7 @@ export async function runAutoMemoryExtract(params: {
       now,
       params.sessionId,
       touchedTopics,
+      owner,
     );
   }
 
@@ -297,7 +329,7 @@ export async function runAutoMemoryExtract(params: {
     ),
     updatedAt: now.toISOString(),
   };
-  await writeExtractCursor(params.projectRoot, cursor);
+  await writeExtractCursor(memoryRoot, cursor, params.flushReplay, owner);
 
   debugLogger.debug(
     `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,

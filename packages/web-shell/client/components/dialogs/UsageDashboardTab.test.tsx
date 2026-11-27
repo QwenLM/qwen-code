@@ -188,16 +188,16 @@ describe('UsageDashboardTab', () => {
     expect(
       container!.querySelectorAll('svg[role="img"]').length,
     ).toBeGreaterThanOrEqual(1);
-    // The label states that sessions follow the run's end day, not request day.
-    expect(text).toContain('runsendedperday');
+    // The label states that daily sessions count distinct active sessions per day.
+    expect(text).toContain('activesessionsperday');
   });
 
   it.each([
-    ['en', 'runs ended per day'],
-    ['zh-CN', '每日结束运行数'],
-    ['zh-TW', '每日結束執行數'],
-    ['ru', 'завершённые запуски по дням'],
-  ] as const)('labels ended runs in %s', (language, label) => {
+    ['en', 'active sessions per day'],
+    ['zh-CN', '每日活跃会话数'],
+    ['zh-TW', '每日活躍會話數'],
+    ['ru', 'активные сессии по дням'],
+  ] as const)('labels active sessions in %s', (language, label) => {
     mockState = {
       dashboard: makeDashboard(),
       loading: false,

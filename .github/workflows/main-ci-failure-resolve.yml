@@ -35,10 +35,7 @@ permissions:
 jobs:
   resolve:
     name: 'Retire resolved failure issues'
-    # Same main-side events the reporter files from, restricted to green
-    # conclusions. A pull-request run proves nothing about main and must not
-    # retire a main-side issue. SDK Java publishes no push run, so its dispatch
-    # and schedule arms are its only chances to go green.
+    # A green PR gate only retires an earlier red run of its own commit.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       github.event.workflow_run.conclusion == 'success' &&
@@ -48,7 +45,10 @@ jobs:
       contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' &&
       github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow.name == 'SDK Java')) }}
+      github.event.workflow.name == 'SDK Java') ||
+      ((github.event.workflow_run.event == 'pull_request' ||
+      github.event.workflow_run.event == 'pull_request_review') &&
+      github.event.workflow.name == 'Managed Agent gate')) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     concurrency:
@@ -65,6 +65,8 @@ jobs:
           RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_STARTED_AT: '${{ github.event.workflow_run.run_started_at }}'
           RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_EVENT: '${{ github.event.workflow_run.event }}'
         run: |-
           set -euo pipefail
           work="$(mktemp -d)"
@@ -187,9 +189,34 @@ jobs:
             if [[ "${covered}" != true ]]; then
               continue
             fi
+            # A PR gate is proof only at its own commit, for its own PR.
+            resolved_from_pr=false
+            if [[ "${RUN_EVENT}" == 'pull_request' ||
+              "${RUN_EVENT}" == 'pull_request_review' ]]; then
+              failure_sha="$(printf '%s\n' "${latest_record}" \
+                | grep -oE '· commit `[^`]+`' | head -1 \
+                | sed -e 's/^· commit `//' -e 's/`$//')"
+              if [[ -z "${failure_sha}" || "${RUN_HEAD_SHA}" != "${failure_sha}"* ]]; then
+                continue
+              fi
+              associated_pr="${work}/associated-pr-${number}.json"
+              if ! gh api "repos/${REPO}/commits/${RUN_HEAD_SHA}/pulls" \
+                --jq 'map(select(.base.ref == "main" and .head.sha == "'"${RUN_HEAD_SHA}"'")) | length == 1' \
+                > "${associated_pr}"; then
+                echo "::warning::Could not verify the PR behind #${number}; leaving it open."
+                continue
+              fi
+              if [[ "$(cat "${associated_pr}")" != true ]]; then
+                continue
+              fi
+              resolved_from_pr=true
+            fi
+            close_comment="Main green run ${RUN_URL} covered this report's failed jobs."
+            [[ "${resolved_from_pr}" != true ]] ||
+              close_comment="This PR's green run ${RUN_URL} at the same commit covered this report's failed jobs."
             if gh issue close "${number}" --repo "${REPO}" \
               --reason completed \
-              --comment "Main \`${WORKFLOW_NAME}\` run ${RUN_URL} completed green and covered every job this report's latest failure record named. Closing; the reporter reopens this issue if the signature recurs."; then
+              --comment "${close_comment} Closing; the reporter reopens this issue if the signature recurs."; then
               closed=$((closed + 1))
             else
               echo "::warning::Could not close #${number}."

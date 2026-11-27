@@ -87,6 +87,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_agents: ['tasks'],
   session_agent_trace: ['diagnostics'],
   scheduled_task_session_reuse: [],
+  scheduled_task_owner_selection: [],
   scheduled_task_gate: [],
   autofix_pr_watches: [],
   session_monitor_tool_correlation: [],
