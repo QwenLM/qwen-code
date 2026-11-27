@@ -1040,6 +1040,34 @@ describe('Settings Loading and Merging', () => {
       expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
     });
 
+    it('warns on a non-boolean dead key without rewriting the file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: { folderTrust: { featureEnabled: 'yes' } },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // The key is left as written for the loader and the daemon validator to
+      // refuse; the warning is the only way the operator learns which key it is.
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        featureEnabled: 'yes',
+      });
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(false);
+      expect(settings.migrationWarnings).toEqual([
+        expect.stringContaining('security.folderTrust.featureEnabled'),
+      ]);
+      expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
+    });
+
     it('repairs a workspace dead key in memory without rewriting the tracked file', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(

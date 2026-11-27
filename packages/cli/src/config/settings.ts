@@ -352,7 +352,7 @@ const FOLDER_TRUST_DEAD_KEY = 'featureEnabled';
  */
 function repairDeadFolderTrustKey(
   settings: Record<string, unknown>,
-): string | undefined {
+): { readonly warning: string; readonly persist: boolean } | undefined {
   const folderTrust = getNestedProperty(settings, 'security.folderTrust');
   if (!isPlainObject(folderTrust)) {
     return undefined;
@@ -363,7 +363,13 @@ function repairDeadFolderTrustKey(
 
   const legacy = folderTrust[FOLDER_TRUST_DEAD_KEY];
   if (typeof legacy !== 'boolean') {
-    return undefined;
+    // Warn without writing: the key stays for the loader and the daemon
+    // validator to refuse, since silently reading it as off would admit every
+    // workspace while the same value makes the daemon reject every workspace.
+    return {
+      persist: false,
+      warning: `Ignored 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}': expected a boolean, found ${typeof legacy}. Set the folder-trust choice through '${FOLDER_TRUST_ENABLED_PATH}'.`,
+    };
   }
 
   // Any present canonical value keeps precedence; the dead key is dropped
@@ -375,11 +381,17 @@ function repairDeadFolderTrustKey(
   delete folderTrust[FOLDER_TRUST_DEAD_KEY];
   const canonical = getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH);
   if (canonical !== undefined && canonical !== null) {
-    return `Removed the unused 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' key; '${FOLDER_TRUST_ENABLED_PATH}' already set the folder-trust choice.`;
+    return {
+      persist: true,
+      warning: `Removed the unused 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' key; '${FOLDER_TRUST_ENABLED_PATH}' already set the folder-trust choice.`,
+    };
   }
 
   setNestedPropertySafe(settings, FOLDER_TRUST_ENABLED_PATH, legacy);
-  return `Migrated 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' to '${FOLDER_TRUST_ENABLED_PATH}'.`;
+  return {
+    persist: true,
+    warning: `Migrated 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' to '${FOLDER_TRUST_ENABLED_PATH}'.`,
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1602,25 +1614,28 @@ function readSettingsLayers(
         // at the current version still carry the dead key. Skipped on
         // recovered settings for the same reason as version normalization —
         // the repair persists on the next startup.
-        const folderTrustRepairWarning = corruptedSaved
+        const folderTrustRepair = corruptedSaved
           ? undefined
           : repairDeadFolderTrustKey(settingsObject);
-        if (folderTrustRepairWarning !== undefined) {
+        if (folderTrustRepair !== undefined) {
           // The repair stays scope-blind in memory, but the persist is gated:
           // `security.folderTrust` is stripped from workspace settings before
           // the merge, so rewriting a repository-tracked .qwen/settings.json
           // would only dirty the checkout for a choice this scope can never
           // contribute.
           const persisted =
+            folderTrustRepair.persist &&
             scope !== SettingScope.Workspace &&
             persistSettingsObject(
               'Error repairing folder-trust settings on disk',
             );
           migrationWarnings = [
             ...(migrationWarnings ?? []),
-            persisted
-              ? folderTrustRepairWarning
-              : `${folderTrustRepairWarning} (repaired in memory for this run; the file could not be updated)`,
+            !folderTrustRepair.persist
+              ? folderTrustRepair.warning
+              : persisted
+                ? folderTrustRepair.warning
+                : `${folderTrustRepair.warning} (repaired in memory for this run; the file could not be updated)`,
           ];
         }
 
