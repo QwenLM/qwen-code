@@ -334,7 +334,9 @@ def cmd_model_bridge(args):
     server = socket.socket(family, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((args.listen, args.local_port))
-    server.listen(32)
+    # Keep the listen backlog above MAX_BRIDGE_CONNECTIONS so bursts are
+    # rejected in user space rather than overflowing Linux's SYN-cookie queue.
+    server.listen(max(128, MAX_BRIDGE_CONNECTIONS * 2))
     server.settimeout(0.25)
     host, port = server.getsockname()[:2]
     sys.stdout.write(json.dumps({"host": host, "port": port}) + "\n")

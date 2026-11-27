@@ -2,7 +2,7 @@
 
 [English](2026-11-25-verify-pr-round-input-hardening.md) | [简体中文](2026-11-25-verify-pr-round-input-hardening.zh-CN.md)
 
-**状态：已实现；独立复核及远端发布检查仍未结束。当前评审跟进修改在 macOS arm64、Node 24.18.1 上的三个相关文件有 67 项聚焦检查通过。§8.6 保留先前 Linux、capability 探测与 KVM 测量，这些仅是历史证据，不证明当前 guest；旧 head 的计数与能力探测范围、确切源码、KVM 及不支持环境的边界也见该节。其有界重试、字节预算、前置校验和 bridge 修复及对应的源码级重放状态见 §§8.7–8.8。不宣称远端提交 CI 或合并已获批准。日期：2026-11-25；后续证据：2026-11-27。**
+**状态：已实现；独立复核及远端发布检查仍未结束。当前评审跟进修改在 macOS arm64、Node 24.18.1 上的三个相关文件有 67 项聚焦检查通过。§8.6 保留先前 Linux、capability 探测与 KVM 测量，这些仅是历史证据，不证明当前 guest；旧 head 的计数与能力探测范围、确切源码、KVM 及不支持环境的边界也见该节。其有界重试、字节预算、前置校验和 bridge 修复及对应的源码级重放状态见 §§8.7–8.10。不宣称远端提交 CI 或合并已获批准。日期：2026-11-25；后续证据：2026-11-27。**
 
 ## 1. 背景与问题
 
@@ -142,7 +142,7 @@ Linux 调查使用 aarch64 宿主、真实 Node 22、Git/Python/UDS 夹具和去
 
 ### 8.5 最新输入增量之前的历史 Linux 与真实 KVM 证据
 
-本节记录私有副本及空白凭据修复之前的旧 guest 证据，不证明当前 guest；当前源码的新重放见 §8.6。
+本节记录私有副本及空白凭据修复之前的旧 guest 证据，不证明当前 guest；后续重放见 §§8.6–8.10。
 
 完整相关 Linux 聚焦运行使用真实 Node 22.23.5：11 个文件通过，532 项通过，8 项因环境跳过，原先未处理的 `ECONNRESET` 没有复现。扩展后的 bridge burst 连续六次重放通过，保持原有 96 客户端、64 并发上限、5 秒 poll、排空与健康断言；还验证了真实 upstream 失败恢复、下批前 accept/handler/reject 完成账目，以及恰好一条有界饱和诊断。独立 root 子进程仅清除了 `CAP_DAC_OVERRIDE|CAP_DAC_READ_SEARCH`（mask 6），并核对 effective、permitted、bounding 与 securebit 变化。mode-000 目录的读、写都实际返回 `EACCES`；随后 scratch 清理与 unreadable-worktree-config 两项测试得到 **2 passed，另有 37 项仅因测试名过滤器跳过**，目标未因权限门跳过，没有用普通 root 的结果替代这项证据。
 
@@ -228,3 +228,24 @@ Linux 调查使用 aarch64 宿主、真实 Node 22、Git/Python/UDS 夹具和去
 本增量实测为：本机三份聚焦文件 **67 passed**；`qa-r3-final` 的 Linux 十一文件 **541 passed、8 environment skips**；受限 root 权限目标 **2 passed、40 个仅由测试名过滤跳过**。`scripts/verify-pr-vm-guest-vsock.py` 保持已用于 KVM 报告的 `8d00890261d7ab4e7b453209a65df8536cd50f52a28f644fb3b78e42f97b2f8b`，channel 与 runner 的 SHA 也未变。本增量是测试和说明修订，不是用旧 guest 冒称新 replay。
 
 扩展饱和用例之初还出现过一次 90 秒的 inner relay 超时，随后聚焦重放和完整 Linux 套件均通过。原触发没有再次重现，不能把反复通过当成已修复。现在测试在失败时保留阶段、客户端 readiness、真实上游数量及完成数，未延长时限；这仍不是对所有调度时序的普遍证明。
+
+### 8.10 Bridge 监听队列、名额归还同步与有界诊断（R4 / F5 / F6）
+
+对 96 客户端 burst 排空失败做 Linux 并发加载复现，捕获到实时 SIGUSR1 线程栈与对端归因日志（`.qwen/tmp/pr18400-f5-live-attribution.json`），从而查明了此前未解释的间歇性排空失败（`accepted=96 / completed=94` 以及早期的 `accepted=97 / completed=95`）：
+
+- **根因（F5）：`server.listen(32)` 仅为 `MAX_BRIDGE_CONNECTIONS = 64` 的一半。**在开启 `net.ipv4.tcp_syncookies = 1`、`tcp_abort_on_overflow = 0`、`tcp_tw_reuse = 2` 的 Linux 6.6 上，96 客户端突发溢出 32 槽监听队列，引发 1 秒 SYN 重传空洞，并在某客户端（`127.0.0.1:46658`，在 `seq 135` 被拒关闭）已被 Node 侧关闭后，由重传握手包再次合成出第二条已建连服务端 socket（`seq 149`，不同 inode）。由于两条 `relay_half` 线程都在 `recv()` 上被动等待，这条幽灵连接永久占用一个 bridge 槽位和一条上游连接（`upstream.active = 1`）。
+- **受控 A/B 证实。**在隔离 Linux 副本中以 4 路并发各跑 6 波（共 24 次）：仅将 `server.listen(32)` 改为 `server.listen(128)`（保留 `sys.setswitchinterval(0.000001)` 与原 `checkpoint()`）取得 **24/24 全通过**；相反，保留 `server.listen(32)` 而仅移除 `setswitchinterval` 并精简 `checkpoint()` 写盘仍有 **3/24 失败**。现将生产监听改为 `server.listen(max(128, MAX_BRIDGE_CONNECTIONS * 2))`，保持 `MAX_BRIDGE_CONNECTIONS = 64`、单条饱和诊断及全部突发/时限断言不变。
+- **名额归还同步（R4-1）与快速失败诊断（F6）。**先前仅等待 `relay_half` 结束（`relay-done`）早于 `handle_bridge_client` 的 `finally: on_done()`（`finish_client()`），在高负载 63/64 饱和时会导致第二次健康 echo 偶发撞限流。现改以 `handle_bridge_client` 退出（`client-done`，严格晚于 `on_done()` 返回）作为恢复 echo 间的同步点，并对 `failed.closed` 以及健康 `once(client, 'data')` 增加与 `healthy.closed` 及 5 秒 `AbortController` 的有界竞速，使干净 TCP FIN 拒绝毫秒级失败并真实进入 `catch` 输出诊断快照，而非挂起到 90 秒。burst 夹具的 epoch 快照也移出 `counts_lock`，在 drain 完成或每 32 次事件单调写盘，同时保留 `sys.setswitchinterval(0.000001)`。
+
+| R4 / F5 / F6 实测                             | 结果                                                                                                                                                                                                                            |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS arm64、Node 24.18.1                     | 三份聚焦文件 **67 项通过**；变更测试与文档通过 ESLint 与 Prettier。                                                                                                                                                             |
+| Linux aarch64、Node 22.23.5（`qa-r4-verify`） | 十一相关文件 **541 项通过、8 项环境跳过**（`bounds guest bridge concurrency` 用时 2.24 秒）。                                                                                                                                   |
+| Linux 并发加载压测                            | 饱和槽位恢复 **24/24 通过**（6 波 × 4 并发）；96 客户端 burst **32/32 通过**（8 波 × 4 并发），保持 96 客户端、64 上限、5 秒 poll、六批与 `setswitchinterval(0.000001)` 不变。                                                  |
+| Linux 守卫移除负控制                          | 删除 `on_done()`（S1，4.37s）、外层 `finish_client()`（S2，3.39s）或内层 `RuntimeError` shutdown（S3，8.70s）均快速失败并实际输出 `catch` JSON 诊断（S1/S2 含 `connection limit 64 reached`，S3 含 `RuntimeError` traceback）。 |
+| capability-stripped root                      | `CapEff=0`、`CapBnd=…f9`、`NoNewPrivs=1`，mode-000 读写均返回 `EACCES`；**2 项通过、40 项仅由测试名过滤跳过**。                                                                                                                 |
+| healthy 真实 KVM 重放（新 guest 字节）        | guest `9cc5977f3edb9ec7b11d9c42a3b86b4bbc6fe951b4079342eccfd8340b7f70f6`；镜像 `5df6986ab567b6e30162cd8f10fa7e5281a79588d12785c57f89b9ad597598b7`；**15 项通过**。                                                              |
+| 故障 peer 非法 UTF-8 KVM 重放                 | 同一新 guest；镜像 `2ac77ea9dd634f98de7c4b5612141710e78dd3ec3604a4170d085813c8a44226`；**3 项通过**。                                                                                                                           |
+| Unicode header / 受控 bridge KVM 重放         | 同一新 guest；镜像 `b1cb2f6230273f5941e6b70b4388522a5a6ead8816bb9c84071d190e6b77d4a2`；**73 项通过**，释放前 64 条活动上游，最终残余活动上游为 0。                                                                              |
+
+三份新 KVM 报告均记录完整输出、destroyed teardown、token 吊销、worker 消失、ownership 清理零错误、无 NIC 和无目录共享，且 golden kernel/rootfs 哈希未变（`.qwen/tmp/pr18400-r4-kvm-*.json` 与 `.qwen/tmp/pr18400-r4-linux-matrix.json`）。推送 head 的远端 CI、维护者评审批准、云数据面 provider、Apple vfkit、Windows IPC、外部模型调用与完整仓库输入 bundle 仍是独立边界。

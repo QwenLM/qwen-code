@@ -1605,6 +1605,7 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
         const upstreamPath = join(root, 'upstream.sock');
         const failureCountPath = join(root, 'start-failure-count');
         const relayDonePath = join(root, 'relay-done');
+        const clientDonePath = join(root, 'client-done');
         const upstreamSockets = new Set();
         const upstream = net.createServer((socket) => {
           upstreamSockets.add(socket);
@@ -1632,6 +1633,7 @@ import threading
 
 failure_count_path = os.environ['QC_FIXTURE_THREAD_FAILURE_COUNT']
 relay_done_path = os.environ['QC_FIXTURE_RELAY_DONE_PATH']
+client_done_path = os.environ['QC_FIXTURE_CLIENT_DONE_PATH']
 failure_target = os.environ['QC_FIXTURE_THREAD_FAILURE_TARGET']
 failure_after = int(os.environ['QC_FIXTURE_THREAD_FAILURE_AFTER'])
 failed = 0
@@ -1651,13 +1653,18 @@ class StartFailureThread(threading.Thread):
         return super().start()
 
     def run(self):
-        handles_relay = getattr(self._target, '__name__', None) == 'relay_half'
+        target = getattr(self._target, '__name__', None)
+        handles_relay = target == 'relay_half'
+        handles_client = target == 'handle_bridge_client'
         try:
             return super().run()
         finally:
             if handles_relay:
                 with open(relay_done_path, 'a', encoding='ascii') as output:
                     output.write('relay-done\\n')
+            if handles_client:
+                with open(client_done_path, 'a', encoding='ascii') as output:
+                    output.write('client-done\\n')
 
 threading.Thread = StartFailureThread
 `,
@@ -1691,6 +1698,7 @@ threading.Thread = StartFailureThread
               PYTHONPATH: root,
               QC_FIXTURE_THREAD_FAILURE_COUNT: failureCountPath,
               QC_FIXTURE_RELAY_DONE_PATH: relayDonePath,
+              QC_FIXTURE_CLIENT_DONE_PATH: clientDonePath,
               QC_FIXTURE_THREAD_FAILURE_TARGET: innerRelayFailure
                 ? 'relay_half'
                 : 'handle_bridge_client',
@@ -1732,25 +1740,49 @@ threading.Thread = StartFailureThread
         };
         let phase = 'injection';
         let completedRelays = () => null;
+        let completedClients = () => null;
         try {
           const failed = await connectClient();
           await expect
             .poll(() => existsSync(failureCountPath), { timeout: 5_000 })
             .toBe(true);
-          await failed.closed;
+          let failedCloseTimer;
+          try {
+            await Promise.race([
+              failed.closed,
+              new Promise((_, reject) => {
+                failedCloseTimer = setTimeout(
+                  () =>
+                    reject(
+                      new Error('injected failure client did not close in 5s'),
+                    ),
+                  5_000,
+                );
+                failedCloseTimer.unref();
+              }),
+            ]);
+          } finally {
+            clearTimeout(failedCloseTimer);
+          }
           phase = 'before-holds';
           expect(failed.client.destroyed).toBe(true);
           expect(readFileSync(failureCountPath, 'utf8')).toBe(
             innerRelayFailure ? '2' : '1',
           );
-          completedRelays = () =>
-            existsSync(relayDonePath)
-              ? readFileSync(relayDonePath, 'utf8')
+          const countLines = (filePath) =>
+            existsSync(filePath)
+              ? readFileSync(filePath, 'utf8')
                   .trim()
                   .split('\n')
                   .filter(Boolean).length
               : 0;
+          completedRelays = () => countLines(relayDonePath);
+          completedClients = () => countLines(clientDonePath);
+          const failedClientsBeforeRecovery = innerRelayFailure ? 1 : 0;
           const failedRelaysBeforeRecovery = innerRelayFailure ? 1 : 0;
+          await expect
+            .poll(completedClients, { timeout: 5_000 })
+            .toBe(failedClientsBeforeRecovery);
           await expect
             .poll(completedRelays, { timeout: 5_000 })
             .toBe(failedRelaysBeforeRecovery);
@@ -1766,26 +1798,54 @@ threading.Thread = StartFailureThread
             .poll(() => upstreamSockets.size, { timeout: 5_000 })
             .toBe(63);
           for (let index = 0; index < 2; index += 1) {
-            const completedBeforeHealthy = completedRelays();
+            const completedClientsBeforeHealthy = completedClients();
             const healthy = await connectClient();
             phase = `healthy-data-${index}`;
-            const echoed = once(healthy.client, 'data');
-            healthy.client.end(`healthy-after-start-failure-${index}`);
-            expect((await echoed)[0].toString('utf8')).toBe(
+            const echoAbort = new AbortController();
+            const echoTimer = setTimeout(() => {
+              echoAbort.abort(
+                new Error(`healthy echo ${index} timed out waiting for data`),
+              );
+            }, 5_000);
+            echoTimer.unref();
+            let chunk;
+            try {
+              const echoed = once(healthy.client, 'data', {
+                signal: echoAbort.signal,
+              });
+              echoed.catch(() => {});
+              healthy.client.end(`healthy-after-start-failure-${index}`);
+              [chunk] = await Promise.race([
+                echoed,
+                healthy.closed.then(() => {
+                  throw new Error(
+                    `healthy echo ${index} closed before echoing data`,
+                  );
+                }),
+              ]);
+            } finally {
+              clearTimeout(echoTimer);
+              echoAbort.abort();
+            }
+            expect(chunk.toString('utf8')).toBe(
               `healthy-after-start-failure-${index}`,
             );
             phase = `healthy-close-${index}`;
             await healthy.closed;
-            // A peer close can arrive before handle_bridge_client returns its slot.
+            // Wait for handle_bridge_client (strictly after on_done()/finish_client())
+            // rather than relay_half completion so the 64th slot is returned.
             await expect
-              .poll(completedRelays, { timeout: 5_000 })
-              .toBe(completedBeforeHealthy + 2);
+              .poll(completedClients, { timeout: 5_000 })
+              .toBe(completedClientsBeforeHealthy + 1);
           }
           phase = 'drain';
           for (const client of held) client.client.destroy();
           await expect
             .poll(() => upstreamSockets.size, { timeout: 5_000 })
             .toBe(0);
+          await expect
+            .poll(completedClients, { timeout: 5_000 })
+            .toBe(failedClientsBeforeRecovery + 65);
           await expect
             .poll(completedRelays, { timeout: 5_000 })
             .toBe(failedRelaysBeforeRecovery + 130);
@@ -1799,6 +1859,7 @@ threading.Thread = StartFailureThread
               error: { code: error.code, message: error.message },
               bridgeExitCode: bridge.exitCode,
               bridgeStderr: stderr,
+              completedClientCount: completedClients(),
               completedRelayCount: completedRelays(),
               upstreamCount: upstreamSockets.size,
               failureCount: existsSync(failureCountPath)
@@ -1890,30 +1951,40 @@ def socket_identity(sock):
 
 counts = {'accepted': 0, 'handled': 0, 'rejected': 0}
 counts_lock = threading.Lock()
+snapshot_lock = threading.Lock()
+last_written_total = -1
 snapshot_path = os.path.join(os.environ['PYTHONPATH'], 'bridge-epochs.json')
 temporary_path = snapshot_path + '.tmp'
 
-def checkpoint():
-    if not (
-        (counts['accepted'] > 0 and counts['accepted'] % 16 == 0)
-        or (counts['handled'] > 0 and counts['handled'] % 64 == 0)
-        or (counts['rejected'] > 0 and counts['rejected'] % 32 == 0)
-        or (
-            counts['accepted'] > 0
-            and counts['accepted'] == counts['handled'] + counts['rejected']
-        )
-    ):
-        return
-    with open(temporary_path, 'w', encoding='utf-8') as output:
-        json.dump(counts, output)
-        output.write('\\n')
-    os.replace(temporary_path, snapshot_path)
+def write_snapshot(snapshot):
+    global last_written_total
+    total = snapshot['accepted'] + snapshot['handled'] + snapshot['rejected']
+    with snapshot_lock:
+        if total <= last_written_total:
+            return
+        with open(temporary_path, 'w', encoding='utf-8') as output:
+            json.dump(snapshot, output)
+            output.write('\\n')
+        os.replace(temporary_path, snapshot_path)
+        last_written_total = total
 
 def record(kind):
+    snapshot = None
     with counts_lock:
         counts[kind] += 1
-        trace_event('record', kind=kind, counts=dict(counts))
-        checkpoint()
+        current = dict(counts)
+        total = current['accepted'] + current['handled'] + current['rejected']
+        if (
+            (
+                current['accepted'] > 0
+                and current['accepted'] == current['handled'] + current['rejected']
+            )
+            or total % 32 == 0
+        ):
+            snapshot = current
+    trace_event('record', kind=kind, counts=current)
+    if snapshot is not None:
+        write_snapshot(snapshot)
 
 class ScannedSocket(socket.socket):
     def listen(self, *args):
@@ -1964,7 +2035,8 @@ threading.Thread = ScannedThread
 
 def write_final_counts():
     with counts_lock:
-        checkpoint()
+        snapshot = dict(counts)
+    write_snapshot(snapshot)
 
 atexit.register(write_final_counts)
 `,
