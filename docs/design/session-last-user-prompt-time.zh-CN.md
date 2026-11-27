@@ -34,8 +34,8 @@
 
 - **持久化 `.prompt-time.json` sidecar**：`chats/<sessionId>.prompt-time.json`（归档后为 `chats/archive/<sessionId>.prompt-time.json`）保存经校验的 `{ version: 1, fileIdentity, snapshotSize, lastUpdated, lastUserPromptAt, leafUuid, firstRecordOwner, tailHex?, managed? }` 检查点。recorder 在持久化真实用户提问时更新它，在 rewind 或删除消息组时移除它；受信任的冷读取在确认首记录归属当前工作区后也会自愈落盘。归档、取消归档、冲突消解与删除会话同步迁移或清理该 sidecar。只读/不可信次级工作区检查（`allowSidecarWrite: false`）与跨项目转录绝不写入 sidecar。
 - **精确命中与尾部线性增量扫描**：进程内热标量未命中时，读取器先复用同快照已驻留的稠密索引，再读取 sidecar。`(dev, ino, snapshotSize, lastUpdated)` 完全匹配时以 O(1) 返回且不读 JSONL。当 `ino !== 0`、同文件增长（`stats.size > sidecar.snapshotSize`）、非 Managed 且前缀尾部 64 字节指纹（`tailHex`，以 `\n` 结尾）仍与活文件匹配时，仅扫描增量区间 `[sidecar.snapshotSize .. stats.size)`（上限 10,000 条新增对话记录）；若新增对话记录严格沿 `leafUuid` 线性前推，则直接推进 `leafUuid` 与 `lastUserPromptAt` 并更新 sidecar。任何指纹失配或非线性追加（原地改写前缀、rewind、分支回跳、重复 UUID、Managed 头、sidecar 缺失/损坏、截断或替换）均安全回退到从字节 0 开始的轻量冷扫描。
-- **轻量冷扫描**：必须冷扫描时，`getLastUserPromptAt` 走专用的最小信封扫描路径，不再构造完整 `TranscriptIndex`——跳过 `validateTranscriptRecord` 对象拷贝、branch-point parts 投影、`resolveBranchPoints`、导航 turn 装配、执行引擎累加及稠密索引缓存写入，同时保持完全一致的 session-id 校验、环/缺口遍历、Managed 投影、单行长度限制与堆增长护栏。
-- **进程级并发闸与 `AbortSignal` 贯通**：冷扫描与完整索引构建共用进程级信号量（默认并发 2），防止多工作区并发列表瞬间在主线程堆积数十路全量解析。`AbortSignal` 从 `session-list` 补齐一路透传到引用计数的共享在飞任务、信号量等待队列及 `forEachLineInSnapshot` 流读取：单个等待方取消立即脱离且不影响其余共享者；最后一个活跃等待方取消时立即中止底层流并清理在飞槽位。
+- **轻量冷扫描**：`lastUserPromptAt` 是活动分支敏感的而非文件物理顺序位置性的——持久化的 `rewind` 会放弃非活动分支上更新的用户提问，必须返回仍处于活动分支上的最近真实提问。必须冷扫描时，`getLastUserPromptAt` 走专用的最小信封扫描路径并沿 `leafUuid` 父链回溯活动分支，不再构造完整 `TranscriptIndex`——跳过 `validateTranscriptRecord` 对象拷贝、branch-point parts 投影、`resolveBranchPoints`、导航 turn 装配、执行引擎累加及稠密索引缓存写入，同时保持完全一致的 session-id 校验、环/缺口遍历、Managed 投影、单行长度限制与堆增长护栏。
+- **进程级并发闸与 `AbortSignal` 贯通**：冷扫描、完整稠密索引构建与增量扩展共用进程级信号量（默认并发 2），防止多工作区并发列表与转录分页在主线程堆积数十路全量解析。`AbortSignal` 从 `session-list` 补齐与 daemon HTTP 转录/轮次索引路由一路透传到引用计数的共享在飞任务、信号量等待队列及 `forEachLineInSnapshot` 流读取：单个等待方取消立即脱离且不影响其余共享者；最后一个活跃等待方取消时立即中止底层流并清理在飞槽位。
 
 ## 归属与消费者
 

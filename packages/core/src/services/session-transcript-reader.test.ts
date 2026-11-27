@@ -7735,6 +7735,120 @@ describe('SessionTranscriptReader', () => {
         code: 'ENOENT',
       });
     });
+
+    it('cancels queued readPage and readTurnIndexPage waiters immediately before the active build completes and isolates shared page builds', async () => {
+      setSessionTranscriptMaxConcurrentBuildsForTest(1);
+
+      const makeWs = async (idx: number, count: number) => {
+        const ws = path.join(runtimeDir, `ws-page-abort-${idx}`);
+        const sid = `22222222-2222-4222-8222-22222222220${idx}`;
+        const reader = new SessionTranscriptReader(ws);
+        const filePath = reader.getSessionFilePath(sid);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        const recs = longTurn(count, () => `payload-${idx} `.repeat(48)).map(
+          (r) => ({ ...r, sessionId: sid, cwd: ws }),
+        );
+        await fs.writeFile(
+          filePath,
+          `${recs.map((r) => JSON.stringify(r)).join('\n')}\n`,
+          'utf8',
+        );
+        return { ws, sid, reader, filePath, recs };
+      };
+
+      const s1 = await makeWs(1, 20);
+      const s2 = await makeWs(2, 6);
+      const s3 = await makeWs(3, 6);
+
+      const builtFiles: string[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) =>
+        builtFiles.push(e.filePath),
+      );
+
+      let firstCompleted = false;
+      let queuedPageRejectedWhileFirstRunning = false;
+      let queuedTurnRejectedWhileFirstRunning = false;
+      const queuedPageAbort = new AbortController();
+      const queuedTurnAbort = new AbortController();
+      let abortedQueued = false;
+
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        const stats = getSessionTranscriptBuildSemaphoreStatsForTest();
+        if (!abortedQueued && stats.active === 1 && stats.queued === 2) {
+          abortedQueued = true;
+          queuedPageAbort.abort(new DOMException('page aborted', 'AbortError'));
+          queuedTurnAbort.abort(new DOMException('turn aborted', 'AbortError'));
+        }
+      });
+
+      const p1 = s1.reader.readPage(s1.sid, { limit: 5 }).then((res) => {
+        firstCompleted = true;
+        return res;
+      });
+      const p2 = s2.reader
+        .readPage(s2.sid, { limit: 5, signal: queuedPageAbort.signal })
+        .catch((err) => {
+          queuedPageRejectedWhileFirstRunning = !firstCompleted;
+          throw err;
+        });
+      const p3 = s3.reader
+        .readTurnIndexPage(s3.sid, {
+          limit: 5,
+          signal: queuedTurnAbort.signal,
+        })
+        .catch((err) => {
+          queuedTurnRejectedWhileFirstRunning = !firstCompleted;
+          throw err;
+        });
+
+      const [r1, r2, r3] = await Promise.allSettled([p1, p2, p3]);
+      expect(abortedQueued).toBe(true);
+      expect(r1.status).toBe('fulfilled');
+      expect(r2.status).toBe('rejected');
+      expect(r3.status).toBe('rejected');
+      expect(queuedPageRejectedWhileFirstRunning).toBe(true);
+      expect(queuedTurnRejectedWhileFirstRunning).toBe(true);
+      expect(builtFiles).toEqual([s1.filePath]);
+      expect(getSessionTranscriptBuildSemaphoreStatsForTest()).toEqual({
+        active: 0,
+        queued: 0,
+      });
+
+      // In-flight sole abort stops readPage early and cleans cache; two sharers isolate cancellation.
+      resetSessionTranscriptIndexCacheForTest();
+      const soleAbort = new AbortController();
+      let soleYields = 0;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        soleYields += 1;
+        if (soleYields === 1) {
+          soleAbort.abort(new DOMException('sole page gone', 'AbortError'));
+        }
+      });
+      await expect(
+        s1.reader.readPage(s1.sid, { limit: 5, signal: soleAbort.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(soleYields).toBe(1);
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+
+      const waiterA = new AbortController();
+      const waiterB = new AbortController();
+      let sharedYields = 0;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        sharedYields += 1;
+        if (sharedYields === 1) {
+          waiterA.abort(new DOMException('sharer A gone', 'AbortError'));
+        }
+      });
+      const [resA, resB] = await Promise.allSettled([
+        s1.reader.readPage(s1.sid, { limit: 5, signal: waiterA.signal }),
+        s1.reader.readPage(s1.sid, { limit: 5, signal: waiterB.signal }),
+      ]);
+      expect(resA.status).toBe('rejected');
+      expect(resB.status).toBe('fulfilled');
+      if (resB.status === 'fulfilled') {
+        expect(resB.value.records.length).toBe(5);
+      }
+    });
   });
 });
 

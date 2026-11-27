@@ -1681,14 +1681,27 @@ export class ChatRecordingService {
     );
   }
 
-  private promptTimeSidecarPath(legacyConversationFile?: string): string {
+  private resolvePromptTimeTranscriptPath(
+    legacyConversationFile?: string,
+  ): string | undefined {
+    if (legacyConversationFile) return legacyConversationFile;
+    if (this.binding?.lease.transcriptPath) {
+      return this.binding.lease.transcriptPath;
+    }
+    if (!this.config?.storage) return undefined;
+    return path.join(this.ensureChatsDir(), `${this.getSessionId()}.jsonl`);
+  }
+
+  private promptTimeSidecarPath(
+    legacyConversationFile?: string,
+  ): string | undefined {
+    const transcriptPath = this.resolvePromptTimeTranscriptPath(
+      legacyConversationFile,
+    );
+    if (!transcriptPath) return undefined;
     return sessionPromptTimeSidecarPath(
-      legacyConversationFile
-        ? path.dirname(legacyConversationFile)
-        : this.ensureChatsDir(),
-      legacyConversationFile
-        ? path.basename(legacyConversationFile, '.jsonl')
-        : this.getSessionId(),
+      path.dirname(transcriptPath),
+      path.basename(transcriptPath, '.jsonl'),
     );
   }
 
@@ -1698,25 +1711,28 @@ export class ChatRecordingService {
     legacyConversationFile: string | undefined,
     updateActiveTail: boolean,
   ): void {
-    const sidecarPath = this.promptTimeSidecarPath(legacyConversationFile);
-    if (record.subtype === 'rewind') {
-      removeSessionPromptTimeSidecar(sidecarPath);
-      return;
-    }
-    if (
-      promptTime === undefined ||
-      !updateActiveTail ||
-      this.managedSink ||
-      typeof record.cwd !== 'string' ||
-      record.cwd.length === 0
-    ) {
-      return;
-    }
-    const transcriptPath =
-      legacyConversationFile ??
-      this.binding?.lease.transcriptPath ??
-      path.join(this.ensureChatsDir(), `${this.getSessionId()}.jsonl`);
     try {
+      const transcriptPath = this.resolvePromptTimeTranscriptPath(
+        legacyConversationFile,
+      );
+      if (!transcriptPath) return;
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(transcriptPath),
+        path.basename(transcriptPath, '.jsonl'),
+      );
+      if (record.subtype === 'rewind') {
+        removeSessionPromptTimeSidecar(sidecarPath);
+        return;
+      }
+      if (
+        promptTime === undefined ||
+        !updateActiveTail ||
+        this.managedSink ||
+        typeof record.cwd !== 'string' ||
+        record.cwd.length === 0
+      ) {
+        return;
+      }
       const stats = fs.statSync(transcriptPath);
       let tailHex: string | undefined;
       if (stats.size > 0) {
@@ -2792,7 +2808,8 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
-        removeSessionPromptTimeSidecar(this.promptTimeSidecarPath());
+        const sidecarPath = this.promptTimeSidecarPath();
+        if (sidecarPath) removeSessionPromptTimeSidecar(sidecarPath);
         this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
         this.userDisplayTextsForTitle.length = 0;
         this.modPromptKeysForTitle.clear();

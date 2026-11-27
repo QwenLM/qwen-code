@@ -263,6 +263,7 @@ export interface SessionTranscriptReadTurnIndexOptions {
   snapshot?: string;
   start?: number;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export interface SessionTranscriptTurnIndexPage {
@@ -288,6 +289,7 @@ export interface SessionTranscriptReadPageOptions {
   direction?: 'backward';
   limit?: number;
   maxBytes?: number;
+  signal?: AbortSignal;
 }
 
 export interface SessionTranscriptRecordPage {
@@ -649,6 +651,7 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  task?: SharedAbortableTask<TranscriptIndex>;
   hookTurns?: Map<
     string,
     Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
@@ -3077,9 +3080,11 @@ async function buildIndex(params: {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   lastUpdated: string;
+  signal?: AbortSignal;
   base?: { index: TranscriptIndex; state: IncrementalIndexState };
 }): Promise<TranscriptIndex> {
-  const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
+  const { filePath, fileIdentity, snapshotSize, lastUpdated, signal } = params;
+  signal?.throwIfAborted();
   const sessionId = path.basename(filePath, '.jsonl');
   if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
     debugLogger.warn(
@@ -3099,8 +3104,9 @@ async function buildIndex(params: {
     | undefined;
   let scanStartOffset = 0;
 
-  const releaseBuild = await transcriptBuildSemaphore.acquire();
+  const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
   try {
+    signal?.throwIfAborted();
     if (
       params.base &&
       params.base.index.snapshotSize > 0 &&
@@ -3109,6 +3115,7 @@ async function buildIndex(params: {
         filePath,
         params.base.index.snapshotSize,
         params.base.state.tailFingerprint,
+        signal,
       ))
     ) {
       usedBase = params.base;
@@ -3337,6 +3344,7 @@ async function buildIndex(params: {
         },
         {
           startOffset: scanStartOffset,
+          signal,
           onRawChunk: (chunk) => {
             tailFingerprint = updateTailFingerprint(tailFingerprint, chunk);
           },
@@ -3560,8 +3568,10 @@ async function getCachedIndex(params: {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   lastUpdated: string;
+  signal?: AbortSignal;
   onCacheState?: (state: 'hit' | 'pending' | 'miss') => void;
 }): Promise<TranscriptIndex> {
+  params.signal?.throwIfAborted();
   const now = Date.now();
   pruneCache(now);
   const key = makeCacheKey(
@@ -3578,10 +3588,10 @@ async function getCachedIndex(params: {
     params.onCacheState?.('hit');
     return cached.value;
   }
-  if (cached?.pending && cached.expiresAt > now) {
+  if (cached?.pending && cached.expiresAt > now && !cached.task?.aborted()) {
     debugLogger.debug(`index cache pending hit ${key}`);
     params.onCacheState?.('pending');
-    return cached.pending;
+    return cached.task ? cached.task.attach(params.signal) : cached.pending;
   }
 
   debugLogger.debug(`index cache miss ${key}`);
@@ -3595,146 +3605,148 @@ async function getCachedIndex(params: {
   // Waiters share the verified completion, not the raw build: a snapshot
   // rewritten under the build must fail every sharer closed, not only the
   // initiator's cache admission.
-  const owner: { pending?: Promise<TranscriptIndex> } = {};
+  const owner: { task?: SharedAbortableTask<TranscriptIndex> } = {};
   const clearIfOwned = () => {
-    if (owner.pending && indexCache.get(key)?.pending === owner.pending) {
+    if (owner.task && indexCache.get(key)?.task === owner.task) {
       indexCache.delete(key);
     }
   };
-  const pending = (async () => {
-    const value = await buildIndex({
-      ...params,
-      base,
-    });
-    // A build can complete after the file was rewritten or replaced under it
-    // (equal-size mtime move, identity change, truncation). Re-verify the
-    // frozen snapshot before ANY early return or admission: cache-entry
-    // ownership only governs cache writes and deletes, never whether the
-    // built index is safe to serve, so every sharer of the build fails
-    // closed together. allowAppend keeps a prefix frozen across a concurrent
-    // append valid.
-    let verifiedSize: number | undefined;
+  const task = createSharedAbortableTask(async (taskSignal) => {
     try {
-      verifiedSize = await verifiedSnapshotSize(
-        params.filePath,
-        params.fileIdentity,
-        params.snapshotSize,
-        params.lastUpdated,
-        true,
-      );
-    } catch (error) {
-      // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
-      // unknown: serve the built snapshot uncached rather than fail a page
-      // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
-      clearIfOwned();
-      debugLogger.debug(
-        `index cache skipped verify after stat error ${key}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return value;
-    }
-    if (verifiedSize === undefined) {
-      clearIfOwned();
-      debugLogger.debug(`index cache skipped changed snapshot ${key}`);
-      throw new SessionTranscriptSnapshotUnavailableError(
-        path.basename(params.filePath, '.jsonl'),
-      );
-    }
-    // The signature check yielded; the pending entry may have been replaced
-    // (TTL expiry or the 32-entry LRU). The verified value is still safe to
-    // serve, but this completion no longer owns the cache slot. Everything
-    // from here to the cache write is synchronous: the ownership check, the
-    // class budget math and the reclaim all see one consistent cache state,
-    // and the reclaim uses the length the signature was verified against
-    // instead of a second stat that could fail or observe a newer file.
-    if (indexCache.get(key)?.pending !== owner.pending) {
-      debugLogger.debug(`index cache skipped stale completion ${key}`);
-      return value;
-    }
-    const { byteSize, oversized, classBudget, incrementalState } =
-      resolveAdmissionSizeAndIncrementalState(value);
-    pendingIncrementalIndexStates.delete(value);
-    if (byteSize > classBudget) {
-      clearIfOwned();
-      debugLogger.debug(
-        `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
-      );
-      return value;
-    }
-    const classBytes = getIndexCacheBytesByClass();
-    if (
-      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
-      classBudget
-    ) {
-      // Evict superseded prefixes only when the new snapshot fits after the
-      // reclaim; otherwise the eviction would force their still-readable
-      // frozen cursors to rebuild for an admission that is refused anyway.
-      // The verified current file length decides whether a longer cached
-      // prefix is unreachable (a same-millisecond truncation keeps the
-      // mtime).
-      const reclaimable = supersededSnapshotBytes(
-        params.filePath,
-        params.snapshotSize,
-        params.lastUpdated,
-        params.fileIdentity,
-        { size: verifiedSize, verified: true },
-        oversized,
-      );
-      if (
-        (oversized ? classBytes.oversized : classBytes.shared) -
-          reclaimable +
-          byteSize >
-        classBudget
-      ) {
-        indexCache.delete(key);
+      const value = await buildIndex({
+        ...params,
+        signal: taskSignal,
+        base,
+      });
+      // A build can complete after the file was rewritten or replaced under it
+      // (equal-size mtime move, identity change, truncation). Re-verify the
+      // frozen snapshot before ANY early return or admission: cache-entry
+      // ownership only governs cache writes and deletes, never whether the
+      // built index is safe to serve, so every sharer of the build fails
+      // closed together. allowAppend keeps a prefix frozen across a concurrent
+      // append valid.
+      let verifiedSize: number | undefined;
+      try {
+        verifiedSize = await verifiedSnapshotSize(
+          params.filePath,
+          params.fileIdentity,
+          params.snapshotSize,
+          params.lastUpdated,
+          true,
+        );
+      } catch (error) {
+        // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
+        // unknown: serve the built snapshot uncached rather than fail a page
+        // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
+        clearIfOwned();
         debugLogger.debug(
-          `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+          `index cache skipped verify after stat error ${key}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
         return value;
       }
-      evictSupersededSnapshots(
-        params.filePath,
-        params.snapshotSize,
-        params.lastUpdated,
-        params.fileIdentity,
-        { size: verifiedSize, verified: true },
-        oversized,
+      if (verifiedSize === undefined) {
+        clearIfOwned();
+        debugLogger.debug(`index cache skipped changed snapshot ${key}`);
+        throw new SessionTranscriptSnapshotUnavailableError(
+          path.basename(params.filePath, '.jsonl'),
+        );
+      }
+      // The signature check yielded; the pending entry may have been replaced
+      // (TTL expiry or the 32-entry LRU). The verified value is still safe to
+      // serve, but this completion no longer owns the cache slot. Everything
+      // from here to the cache write is synchronous: the ownership check, the
+      // class budget math and the reclaim all see one consistent cache state,
+      // and the reclaim uses the length the signature was verified against
+      // instead of a second stat that could fail or observe a newer file.
+      if (indexCache.get(key)?.task !== owner.task) {
+        debugLogger.debug(`index cache skipped stale completion ${key}`);
+        return value;
+      }
+      const { byteSize, oversized, classBudget, incrementalState } =
+        resolveAdmissionSizeAndIncrementalState(value);
+      pendingIncrementalIndexStates.delete(value);
+      if (byteSize > classBudget) {
+        clearIfOwned();
+        debugLogger.debug(
+          `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
+        );
+        return value;
+      }
+      const classBytes = getIndexCacheBytesByClass();
+      if (
+        (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+        classBudget
+      ) {
+        // Evict superseded prefixes only when the new snapshot fits after the
+        // reclaim; otherwise the eviction would force their still-readable
+        // frozen cursors to rebuild for an admission that is refused anyway.
+        // The verified current file length decides whether a longer cached
+        // prefix is unreachable (a same-millisecond truncation keeps the
+        // mtime).
+        const reclaimable = supersededSnapshotBytes(
+          params.filePath,
+          params.snapshotSize,
+          params.lastUpdated,
+          params.fileIdentity,
+          { size: verifiedSize, verified: true },
+          oversized,
+        );
+        if (
+          (oversized ? classBytes.oversized : classBytes.shared) -
+            reclaimable +
+            byteSize >
+          classBudget
+        ) {
+          indexCache.delete(key);
+          debugLogger.debug(
+            `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+          );
+          return value;
+        }
+        evictSupersededSnapshots(
+          params.filePath,
+          params.snapshotSize,
+          params.lastUpdated,
+          params.fileIdentity,
+          { size: verifiedSize, verified: true },
+          oversized,
+        );
+      }
+      // Map.set updates an existing key in place; the placeholder has held
+      // its insertion position through the build while the count-cap prune
+      // skipped it. Delete first so the completion lands at the MRU tail
+      // instead of being the prune's first eviction candidate.
+      indexCache.delete(key);
+      const cacheEntry: CacheEntry = {
+        value,
+        byteSize,
+        expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
+      };
+      indexCache.set(key, cacheEntry);
+      if (incrementalState) {
+        incrementalIndexStates.set(value, incrementalState);
+      }
+      pruneCache();
+      return value;
+    } catch (error) {
+      clearIfOwned();
+      debugLogger.debug(
+        `index cache completion rejected ${key}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
+      throw error;
     }
-    // Map.set updates an existing key in place; the placeholder has held
-    // its insertion position through the build while the count-cap prune
-    // skipped it. Delete first so the completion lands at the MRU tail
-    // instead of being the prune's first eviction candidate.
-    indexCache.delete(key);
-    const cacheEntry: CacheEntry = {
-      value,
-      byteSize,
-      expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
-    };
-    indexCache.set(key, cacheEntry);
-    if (incrementalState) {
-      incrementalIndexStates.set(value, incrementalState);
-    }
-    pruneCache();
-    return value;
-  })();
-  owner.pending = pending;
+  }, clearIfOwned);
+  owner.task = task;
   indexCache.set(key, {
-    pending,
+    pending: task.promise,
+    task,
     expiresAt: now + INDEX_CACHE_TTL_MS,
   });
-  try {
-    return await pending;
-  } catch (error) {
-    clearIfOwned();
-    debugLogger.debug(
-      `index cache completion rejected ${key}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    throw error;
-  }
+  return task.attach(params.signal);
 }
 
 function makeReplayIndex(
@@ -5319,7 +5331,9 @@ export class SessionTranscriptReader {
   private async readTurnIndexSnapshot(
     sessionId: string,
     encodedSnapshot?: string,
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     const snapshot =
       encodedSnapshot === undefined
         ? undefined
@@ -5330,6 +5344,7 @@ export class SessionTranscriptReader {
 
     const filePath = this.getSessionFilePath(sessionId);
     const stats = await fsp.stat(filePath);
+    signal?.throwIfAborted();
     const currentIdentity = fileIdentityFromStats(stats);
     const snapshotSize = snapshot?.snapshotSize ?? stats.size;
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
@@ -5352,6 +5367,7 @@ export class SessionTranscriptReader {
         fileIdentity,
         snapshotSize,
         lastUpdated,
+        signal,
       });
     } catch (error) {
       if (!(error instanceof EmptySessionTranscriptError)) throw error;
@@ -5391,12 +5407,15 @@ export class SessionTranscriptReader {
     const { index, snapshotState } = await this.readTurnIndexSnapshot(
       sessionId,
       options.snapshot,
+      options.signal,
     );
+    options.signal?.throwIfAborted();
     const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
         ? await this.readManagedRecords(sessionId, index, {})
         : undefined;
+    options.signal?.throwIfAborted();
     const navigationTurns = projected
       ? managedNavigationTurns(projected)
       : (index?.navigationTurns ?? []);
@@ -6612,8 +6631,10 @@ export class SessionTranscriptReader {
       throw new InvalidSessionTranscriptCursorError();
     }
 
+    options.signal?.throwIfAborted();
     const filePath = this.getSessionFilePath(sessionId);
     const stats = await fsp.stat(filePath);
+    options.signal?.throwIfAborted();
     const currentIdentity = fileIdentityFromStats(stats);
     const snapshotSize =
       cursor?.snapshotSize ?? snapshot?.snapshotSize ?? stats.size;
@@ -6665,7 +6686,9 @@ export class SessionTranscriptReader {
         cursor?.lastUpdated ??
         snapshot?.lastUpdated ??
         new Date(stats.mtimeMs).toISOString(),
+      signal: options.signal,
     });
+    options.signal?.throwIfAborted();
     // The physical lines of a Managed log are the authority's wrapper records,
     // so paging that index would hand a client those envelopes as if they were
     // the conversation. Page the projection instead, the way the restore and

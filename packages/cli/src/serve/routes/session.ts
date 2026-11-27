@@ -1190,6 +1190,36 @@ export function registerSessionRoutes(
   // runtime resolution before this helper runs; the loadable re-check here
   // mirrors the workspace route and tolerates an active conflict the caller
   // already admitted.
+  const withRequestAbortSignal = async <T>(
+    req: Request,
+    res: Response,
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T | undefined> => {
+    const controller = new AbortController();
+    const onRequestAborted = () => {
+      controller.abort(new DOMException('Request aborted', 'AbortError'));
+    };
+    const onResponseClosed = () => {
+      if (!res.writableEnded) {
+        controller.abort(new DOMException('Response closed', 'AbortError'));
+      }
+    };
+    req.once('aborted', onRequestAborted);
+    res.once('close', onResponseClosed);
+    if (req.aborted || res.destroyed) onRequestAborted();
+    try {
+      const value = await fn(controller.signal);
+      if (controller.signal.aborted || res.destroyed) return undefined;
+      return value;
+    } catch (err) {
+      if (controller.signal.aborted || res.destroyed) return undefined;
+      throw err;
+    } finally {
+      req.off('aborted', onRequestAborted);
+      res.off('close', onResponseClosed);
+    }
+  };
+
   const readDaemonLocalTranscriptPage = async (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1200,14 +1230,22 @@ export function registerSessionRoutes(
       beforeRecordId?: string;
       atRecordId?: string;
       snapshot?: string;
+      signal?: AbortSignal;
     },
     readerCodec: SessionTranscriptCursorCodec | undefined,
     encodeCursor: (state: SessionTranscriptCursorState) => string,
     assertRuntimeGenerationOpen?: () => void,
     recheckLoadable = true,
   ) => {
-    const { limit, cursor, direction, beforeRecordId, atRecordId, snapshot } =
-      opts;
+    const {
+      limit,
+      cursor,
+      direction,
+      beforeRecordId,
+      atRecordId,
+      snapshot,
+      signal,
+    } = opts;
     return runWithWorkspaceRuntimeStorage(runtime, async () => {
       const service = createWorkspaceRuntimeSessionService(runtime);
       // The default route's resolution already gated loadability: the
@@ -1274,6 +1312,7 @@ export function registerSessionRoutes(
           ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           ...(atRecordId !== undefined ? { atRecordId } : {}),
           ...(snapshot !== undefined ? { snapshot } : {}),
+          ...(signal !== undefined ? { signal } : {}),
           maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
         });
       } catch (error) {
@@ -7863,35 +7902,45 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime = await resolveTranscriptSessionRuntime(
-            res,
-            route,
-            sessionId,
-            cursor !== undefined || snapshot !== undefined,
-          );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          // Read daemon-local so the index cache survives ACP child exits
-          // (session switch, idle TTL, child respawn) instead of rebuilding
-          // in a fresh child on every cold reopen. undefined readerCodec =>
-          // the reader's persisted per-workspace key, the same key the ACP
-          // child signs cursors with, so cursors issued by either side stay
-          // interchangeable. Ownership is enforced by the resolution above.
-          return readDaemonLocalTranscriptPage(
-            runtime,
-            sessionId,
-            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
-            undefined,
-            (state) =>
-              encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
-            assertRuntimeGenerationOpen,
-            false,
-          );
-        }),
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = await resolveTranscriptSessionRuntime(
+              res,
+              route,
+              sessionId,
+              cursor !== undefined || snapshot !== undefined,
+            );
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            // Read daemon-local so the index cache survives ACP child exits
+            // (session switch, idle TTL, child respawn) instead of rebuilding
+            // in a fresh child on every cold reopen. undefined readerCodec =>
+            // the reader's persisted per-workspace key, the same key the ACP
+            // child signs cursors with, so cursors issued by either side stay
+            // interchangeable. Ownership is enforced by the resolution above.
+            return readDaemonLocalTranscriptPage(
+              runtime,
+              sessionId,
+              {
+                limit,
+                cursor,
+                direction,
+                beforeRecordId,
+                atRecordId,
+                snapshot,
+                signal,
+              },
+              undefined,
+              (state) =>
+                encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
+              assertRuntimeGenerationOpen,
+              false,
+            );
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -7985,31 +8034,41 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            preResolvedRuntime ??
-            (await resolveQualifiedSessionRuntime(
-              req,
-              res,
-              route,
-              [sessionId],
-              'active',
-            ));
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          const codec = getTranscriptCursorCodec(runtime);
-          return readDaemonLocalTranscriptPage(
-            runtime,
-            sessionId,
-            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
-            codec,
-            (state) => codec.encode(state),
-            assertRuntimeGenerationOpen,
-          );
-        }),
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime =
+              preResolvedRuntime ??
+              (await resolveQualifiedSessionRuntime(
+                req,
+                res,
+                route,
+                [sessionId],
+                'active',
+              ));
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            const codec = getTranscriptCursorCodec(runtime);
+            return readDaemonLocalTranscriptPage(
+              runtime,
+              sessionId,
+              {
+                limit,
+                cursor,
+                direction,
+                beforeRecordId,
+                atRecordId,
+                snapshot,
+                signal,
+              },
+              codec,
+              (state) => codec.encode(state),
+              assertRuntimeGenerationOpen,
+            );
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -8322,75 +8381,80 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime = await resolveTranscriptSessionRuntime(
-            res,
-            route,
-            sessionId,
-            snapshot !== undefined,
-          );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          // Read daemon-local so turn navigation's anchor snapshot survives
-          // ACP child exit, the same reason as the default transcript route.
-          // undefined codec => the persisted per-workspace key, matching the
-          // default transcript route that consumes this snapshot. Resolution
-          // already asserted loadability, so skip the redundant re-check.
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            // Mirror the child handler's live-first-page flush barrier: a
-            // snapshot-less read must drain the recorder so a just-accepted
-            // turn is not omitted from the index and its anchor snapshot. Stay
-            // behind the liveness check so a cold session does not ensure a
-            // child (which would undo the cold-start win); the workspace-
-            // qualified turn-index route carries no such barrier (no-bridge).
-            if (snapshot === undefined) {
-              let live = false;
-              try {
-                runtime.bridge.getSessionSummary(sessionId);
-                live = true;
-              } catch (error) {
-                if (!(error instanceof SessionNotFoundError)) throw error;
-              }
-              if (live) {
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = await resolveTranscriptSessionRuntime(
+              res,
+              route,
+              sessionId,
+              snapshot !== undefined,
+            );
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            // Read daemon-local so turn navigation's anchor snapshot survives
+            // ACP child exit, the same reason as the default transcript route.
+            // undefined codec => the persisted per-workspace key, matching the
+            // default transcript route that consumes this snapshot. Resolution
+            // already asserted loadability, so skip the redundant re-check.
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              // Mirror the child handler's live-first-page flush barrier: a
+              // snapshot-less read must drain the recorder so a just-accepted
+              // turn is not omitted from the index and its anchor snapshot. Stay
+              // behind the liveness check so a cold session does not ensure a
+              // child (which would undo the cold-start win); the workspace-
+              // qualified turn-index route carries no such barrier (no-bridge).
+              if (snapshot === undefined) {
+                let live = false;
                 try {
-                  await runtime.bridge.flushSessionTranscript?.(sessionId);
+                  runtime.bridge.getSessionSummary(sessionId);
+                  live = true;
                 } catch (error) {
                   if (!(error instanceof SessionNotFoundError)) throw error;
                 }
+                if (live) {
+                  try {
+                    await runtime.bridge.flushSessionTranscript?.(sessionId);
+                  } catch (error) {
+                    if (!(error instanceof SessionNotFoundError)) throw error;
+                  }
+                }
               }
-            }
-            try {
-              const page = await new SessionTranscriptReader(
-                runtime.workspaceCwd,
-              ).readTurnIndexPage(sessionId, {
-                ...(snapshot !== undefined ? { snapshot } : {}),
-                ...(start !== undefined ? { start } : {}),
-                ...(limit !== undefined ? { limit } : {}),
-              });
-              assertRuntimeGenerationOpen?.();
-              return page;
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                ).readTurnIndexPage(sessionId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                  signal,
+                });
+                assertRuntimeGenerationOpen?.();
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                if (snapshot !== undefined) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const location = await service.getSessionLocation(sessionId);
+                if (location === 'archived') {
+                  throw new SessionArchivedError(sessionId);
+                }
+                if (location === 'conflict') {
+                  throw new SessionConflictError(sessionId);
+                }
+                throw new SessionNotFoundError(sessionId);
               }
-              if (snapshot !== undefined) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-              }
-              const service = createWorkspaceRuntimeSessionService(runtime);
-              const location = await service.getSessionLocation(sessionId);
-              if (location === 'archived') {
-                throw new SessionArchivedError(sessionId);
-              }
-              if (location === 'conflict') {
-                throw new SessionConflictError(sessionId);
-              }
-              throw new SessionNotFoundError(sessionId);
-            }
-          });
-        }),
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -8442,60 +8506,65 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            preResolvedRuntime ??
-            (await resolveQualifiedSessionRuntime(
-              req,
-              res,
-              route,
-              [sessionId],
-              'active',
-            ));
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            if (snapshot === undefined) {
-              await assertSessionLoadable(
-                runtime.workspaceCwd,
-                sessionId,
-                runtime.sessionRuntimeBaseDir,
-                { allowActiveConflict: true },
-              );
-            }
-            try {
-              const page = await new SessionTranscriptReader(
-                runtime.workspaceCwd,
-                getTranscriptCursorCodec(runtime),
-              ).readTurnIndexPage(sessionId, {
-                ...(snapshot !== undefined ? { snapshot } : {}),
-                ...(start !== undefined ? { start } : {}),
-                ...(limit !== undefined ? { limit } : {}),
-              });
-              assertRuntimeGenerationOpen?.();
-              return page;
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime =
+              preResolvedRuntime ??
+              (await resolveQualifiedSessionRuntime(
+                req,
+                res,
+                route,
+                [sessionId],
+                'active',
+              ));
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
               }
-              if (snapshot !== undefined) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnIndexPage(sessionId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                  signal,
+                });
+                assertRuntimeGenerationOpen?.();
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                if (snapshot !== undefined) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const location = await service.getSessionLocation(sessionId);
+                if (location === 'archived') {
+                  throw new SessionArchivedError(sessionId);
+                }
+                if (location === 'conflict') {
+                  throw new SessionConflictError(sessionId);
+                }
+                throw new SessionNotFoundError(sessionId);
               }
-              const service = createWorkspaceRuntimeSessionService(runtime);
-              const location = await service.getSessionLocation(sessionId);
-              if (location === 'archived') {
-                throw new SessionArchivedError(sessionId);
-              }
-              if (location === 'conflict') {
-                throw new SessionConflictError(sessionId);
-              }
-              throw new SessionNotFoundError(sessionId);
-            }
-          });
-        }),
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
