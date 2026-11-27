@@ -223,10 +223,14 @@ import { useWorkspaceSessionLiveState } from './session-catalog/workspace-sessio
 import { isAbsolutePath } from './components/sidebar/WorkspaceSection';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import { LiveVoiceSettingsCard } from './live/LiveVoiceSettingsCard';
-import {
-  ChatEditor,
-  type ComposerToolbarAction,
-} from './components/ChatEditor';
+import type {
+  Admission,
+  PendingApproval,
+  PendingQuestion,
+} from './chat-core/contract';
+import { ChatSurface } from './chat-core/ChatSurface';
+import { useDaemonChatControllerFromState } from './daemon/useDaemonChatController';
+import type { ComposerToolbarAction } from './components/ChatEditor';
 import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
@@ -433,8 +437,6 @@ import {
   formatAskUserQuestions,
   isAskUserPermission,
 } from './utils/askUserPermission';
-import { ToolApproval } from './components/messages/ToolApproval';
-import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
@@ -18617,16 +18619,45 @@ export function App({
     editorRef.current?.focus();
   }, [dismissNewSessionSuggestion, newSessionSuggestion]);
 
-  const handleConfirm = useCallback(
-    async (
-      id: string,
-      selectedOption: string,
-      answers?: Record<string, string>,
-    ) => {
+  // Carries the specific host diagnostic across ChatSurface's generic
+  // approval/question-rejection error sinks so transport errors and mode-lock
+  // refusals preserve their cause without double-reporting.
+  const pendingPermissionFailureRef = useRef<{
+    error: unknown;
+    fallback: string;
+  } | null>(null);
+  useEffect(() => {
+    pendingPermissionFailureRef.current = null;
+  }, [connection.sessionId]);
+
+  const handleSurfaceError = useCallback(
+    (error: unknown, fallback: string) => {
+      const pending = pendingPermissionFailureRef.current;
+      if (
+        pending &&
+        (fallback === t('chat.approvalNotAccepted') ||
+          fallback === t('askUser.submitFailed'))
+      ) {
+        pendingPermissionFailureRef.current = null;
+        reportError(pending.error, pending.fallback);
+        return;
+      }
+      reportError(error, fallback);
+    },
+    [reportError, t],
+  );
+
+  const submitMainPermission = useCallback(
+    async (id: string, selectedOption: string): Promise<Admission> => {
+      pendingPermissionFailureRef.current = null;
       const request = pendingApprovalRef.current;
       const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
       if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
-        throw new Error('Approval mode or plan confirmation is still pending');
+        pendingPermissionFailureRef.current = {
+          error: new Error(t('mode.changePending')),
+          fallback: 'Failed to submit permission choice',
+        };
+        return 'rejected';
       }
       const owner = sessionOwnerGuard.capture();
       const option = request?.options.find(
@@ -18654,30 +18685,76 @@ export function App({
         setModeControlsBusy(true);
       }
       try {
-        if (approvesPlan && connection.planExecutionMode !== undefined) {
-          await sessionActions.respondToPermission(id, {
-            outcome: { outcome: 'selected', optionId: selectedOption },
-            expectedPlanExecutionMode: connection.planExecutionMode,
-          });
-        } else {
-          await sessionActions.submitPermission(id, selectedOption, answers);
+        const applied =
+          approvesPlan && connection.planExecutionMode !== undefined
+            ? await sessionActions.respondToPermission(id, {
+                outcome: { outcome: 'selected', optionId: selectedOption },
+                expectedPlanExecutionMode: connection.planExecutionMode,
+              })
+            : await sessionActions.submitPermission(id, selectedOption);
+        if (transition && (!approvesPlan || applied === false)) {
+          releaseModeTransition(transition);
         }
-        if (transition && !approvesPlan) releaseModeTransition(transition);
+        return applied !== false ? 'accepted' : 'rejected';
       } catch (error) {
         if (transition) releaseModeTransition(transition);
-        if (owner.isCurrent())
-          reportError(error, 'Failed to submit permission choice');
-        throw error;
+        if (owner.isCurrent()) {
+          pendingPermissionFailureRef.current = {
+            error,
+            fallback: 'Failed to submit permission choice',
+          };
+        }
+        return 'unknown';
       }
     },
     [
       sessionActions,
-      reportError,
       sessionOwnerGuard,
       releaseModeTransition,
       connection.planExecutionMode,
+      t,
     ],
   );
+
+  const mainPendingApprovals = useMemo<readonly PendingApproval[]>(
+    () =>
+      mainView === 'chat' && pendingToolApproval
+        ? [
+            {
+              id: pendingToolApproval.id,
+              status: 'pending',
+              request: pendingToolApproval,
+            },
+          ]
+        : [],
+    [mainView, pendingToolApproval],
+  );
+  const mainPendingQuestions = useMemo<readonly PendingQuestion[]>(
+    () =>
+      mainView === 'chat' && pendingAskUserApproval
+        ? [{ id: pendingAskUserApproval.id, request: pendingAskUserApproval }]
+        : [],
+    [mainView, pendingAskUserApproval],
+  );
+  const mainPendingSignature =
+    mainView === 'chat'
+      ? pendingToolApproval
+        ? `a:${pendingToolApproval.id}`
+        : pendingAskUserApproval
+          ? `q:${pendingAskUserApproval.id}`
+          : ''
+      : '';
+  const mainSurfaceController = useDaemonChatControllerFromState({
+    connection,
+    actions: sessionActions,
+    transcriptHistory,
+    messages,
+    pendingApprovals: mainPendingApprovals,
+    pendingQuestions: mainPendingQuestions,
+    pendingSignature: mainPendingSignature,
+    transcriptState: connection.loadingTranscript ? 'loading' : 'ready',
+    submitPermission: submitMainPermission,
+  });
 
   const respondToPendingPermission = useCallback(
     async (
@@ -18723,10 +18800,22 @@ export function App({
       if (!option) {
         return false;
       }
-      await handleConfirm(request.id, option.id);
+      const result = await mainSurfaceController.respondApproval(
+        request.id,
+        option.id,
+      );
+      if (result.admission !== 'accepted') {
+        const pending = pendingPermissionFailureRef.current;
+        pendingPermissionFailureRef.current = null;
+        if (pending) {
+          reportError(pending.error, pending.fallback);
+          throw pending.error;
+        }
+        throw new Error(t('chat.approvalNotAccepted'));
+      }
       return true;
     },
-    [hostOwnsEditDiffPreview, handleConfirm],
+    [hostOwnsEditDiffPreview, mainSurfaceController, reportError, t],
   );
 
   const shellApi = useMemo<WebShellApi>(
@@ -22109,12 +22198,6 @@ export function App({
       return accepted;
     },
     [resumeChatBottomFollow],
-  );
-
-  const handleAskUserConfirm = useCallback(
-    (id: string, selectedOption: string, answers?: Record<string, string>) =>
-      sessionActions.submitPermission(id, selectedOption, answers),
-    [sessionActions],
   );
 
   // The composer is hidden while a question is pending, so the panel itself
@@ -27156,10 +27239,44 @@ export function App({
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
                     <McpAppVisibilityContext.Provider value={chatActive && !showMissingSessionState}>
-                      <TodoContextsProvider
-                        timeline={todoTimeline}
-                        details={todoDetails}
-                      >
+                      <ChatSurface
+                        controller={mainSurfaceController}
+                        className={styles.chatSurface}
+                        onError={handleSurfaceError}
+                        decisionClassName={styles.approvalOverlay}
+                        decisionTestId="approval-overlay"
+                        decisionRef={
+                          mainView === 'chat' && pendingAskUserApproval
+                            ? askUserOverlayRef
+                            : undefined
+                        }
+                        showBrowserNotifications
+                        approvalDisabled={
+                          isExitPlanApprovalRequest(pendingToolApproval) &&
+                          modeControlsBusy
+                        }
+                        planExecutionMode={connection.planExecutionMode}
+                        planTodos={
+                          sessionWorkflowEnabled ? approvalPlanTodos : []
+                        }
+                        approvalKeyboardActive={toolApprovalOverlayVisible}
+                        questionKeyboardActive={askUserOverlayVisible}
+                        generateContent={
+                          connection.capabilities?.features.includes(
+                            'session_generation',
+                          )
+                            ? sessionActions.generateSessionContent
+                            : undefined
+                        }
+                        askUserFreeTextLabel={askUserFreeTextLabel}
+                        askUserDetails={
+                          sideTasksAvailable ? handleAskUserDetails : undefined
+                        }
+                        transcriptContent={
+                          <TodoContextsProvider
+                            timeline={todoTimeline}
+                            details={todoDetails}
+                          >
                         <InteractionBlockContext.Provider
                           value={registerInteractionBlocker}
                         >
@@ -27424,16 +27541,16 @@ export function App({
                           })()}
                         </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
-
-                    <div
-                      ref={footerRef}
-                      style={contentStyle}
-                      className={
-                        CustomFooter
-                          ? `${styles.footer} ${styles.footerWithCustomFooter}`
-                          : styles.footer
-                      }
-                    >
+                        }
+                        footerRef={footerRef}
+                        footerStyle={contentStyle}
+                        footerClassName={
+                          CustomFooter
+                            ? `${styles.footer} ${styles.footerWithCustomFooter}`
+                            : styles.footer
+                        }
+                        footerHeader={
+                          <>
                       {canScrollMessageListToBottom && (
                         <div
                           className={
@@ -27487,78 +27604,30 @@ export function App({
                           />
                         </div>
                       )}
-                      {/* Only render the outer session's approval on the chat
-                          view. Under a full-page view (Workflow / split / scheduled tasks)
-                          it would sit hidden and unreachable. Each split pane
-                          surfaces its own approval. `keyboardActive` tells the
-                          overlay to grab focus only when it's the topmost one. */}
-                      {pendingToolApproval && mainView === 'chat' && (
-                        <div
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <ToolApproval
-                            showBrowserNotifications
-                            disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
-                            planExecutionMode={connection.planExecutionMode}
-                            request={pendingToolApproval}
-                            onConfirm={handleConfirm}
-                            variant="floating"
-                            keyboardActive={toolApprovalOverlayVisible}
-                            generateContent={
-                              connection.capabilities?.features.includes(
-                                'session_generation',
-                              )
-                                ? sessionActions.generateSessionContent
-                                : undefined
-                            }
-                            planTodos={
-                              sessionWorkflowEnabled ? approvalPlanTodos : []
-                            }
-                          />
-                        </div>
-                      )}
-                      {/* Workspace-level hooks trust decision uses the same
-                          approval slot and card as tool approvals; it is not
-                          a session permission request. */}
-                      {workspaceContextActive &&
-                        !managedMode &&
-                        !pendingToolApproval &&
-                        mainView === 'chat' && (
-                          <div className={styles.approvalOverlay}>
-                            <ProjectHooksApprovalCard
-                              onActiveChange={setProjectHooksApprovalActive}
-                            />
-                          </div>
-                        )}
-                      {pendingAskUserApproval && mainView === 'chat' && (
-                        <div
-                          ref={askUserOverlayRef}
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <AskUserQuestion
-                            request={pendingAskUserApproval}
-                            onConfirm={handleAskUserConfirm}
-                            onError={reportError}
-                            variant="floating"
-                            keyboardActive={askUserOverlayVisible}
-                            customInputLabel={askUserFreeTextLabel}
-                            onAskDetails={
-                              sideTasksAvailable
-                                ? handleAskUserDetails
-                                : undefined
-                            }
-                          />
-                        </div>
-                      )}
-                      <div
-                        className={
-                          approvalOverlayActive && mainView === 'chat'
+                          </>
+                        }
+                        panels={
+                          /* Workspace-level hooks trust decision uses the same
+                             approval slot and card as tool approvals; it is not
+                             a session permission request. */
+                          workspaceContextActive &&
+                          !managedMode &&
+                          !pendingToolApproval &&
+                          mainView === 'chat' ? (
+                            <div className={styles.approvalOverlay}>
+                              <ProjectHooksApprovalCard
+                                onActiveChange={setProjectHooksApprovalActive}
+                              />
+                            </div>
+                          ) : undefined
+                        }
+                        composerClassName={
+                          projectHooksApprovalActive && mainView === 'chat'
                             ? `${styles.composer} ${styles.composerHidden}`
                             : styles.composer
                         }
-                      >
+                        composerStatus={
+                          <>
                         {connection.runtimeStopped && (
                           <div className={styles.composerActionTip} role="status" data-testid="workspace-runtime-stopped">
                             <span className={styles.composerActionTipText}>{t('capacityChoice.stopped')}
@@ -27877,63 +27946,67 @@ export function App({
                             onDismiss={() => setSessionLimitReached(false)}
                           />
                         )}
-                        <ChatEditor
-                          ref={setEditorHandle}
-                          liveVoicePortalContainer={
-                            liveVoiceSlot ?? liveVoicePageSlot
-                          }
-                          compactOverlays={compactComposerOverlays}
-                          onSubmit={submitComposerInput}
-                          onInputTextChange={handleComposerTextChange}
-                          slashArgumentCompleter={sendArgumentCompleter}
-                          onAttachmentsChange={
-                            handleComposerAttachmentsChange
-                          }
-                          btwEnabled={
+                          </>
+                        }
+                        composerRef={setEditorHandle}
+                        onComposerSubmit={submitComposerInput}
+                        onComposerCancel={handleCancel}
+                        composerSubmitBlocked={sessionWriteBlocked}
+                        commands={commands}
+                        atWorkspaceCwd={composerWorkspaceCwd}
+                        composerScopeKey={
+                          effectiveSessionContext?.kind === 'standalone'
+                            ? 'standalone'
+                            : effectiveSessionContext?.kind === 'live'
+                              ? 'live'
+                              : undefined
+                        }
+                        workspaceFeaturesEnabled={workspaceContextActive}
+                        visibleToolbarActions={visibleComposerToolbarActions}
+                        composerProps={{
+                          liveVoicePortalContainer:
+                            liveVoiceSlot ?? liveVoicePageSlot,
+                          compactOverlays: compactComposerOverlays,
+                          onInputTextChange: handleComposerTextChange,
+                          slashArgumentCompleter: sendArgumentCompleter,
+                          onAttachmentsChange: handleComposerAttachmentsChange,
+                          btwEnabled:
                             Boolean(connection.sessionId) &&
-                            !hiddenCommands.has('btw')
-                          }
-                          onImageIngestionNotice={pushToast}
-                          onImagePreview={openImagePanel}
-                          onAttachmentPreview={openAttachmentPanel}
-                          onCycleMode={handleCycleMode}
-                          cycleModeOnTab={cycleModeOnTab}
-                          onToggleShortcuts={handleToggleShortcuts}
-                          onCancel={handleCancel}
-                          isRunning={
+                            !hiddenCommands.has('btw'),
+                          onImageIngestionNotice: pushToast,
+                          onImagePreview: openImagePanel,
+                          onAttachmentPreview: openAttachmentPanel,
+                          onCycleMode: handleCycleMode,
+                          cycleModeOnTab,
+                          onToggleShortcuts: handleToggleShortcuts,
+                          isRunning:
                             streamingState !== 'idle' ||
-                            sessionHasActivePrompt
-                          }
-                          isPreparing={
-                            isPreparingPrompt || isStartingNewSessionSuggestion
-                          }
-                          cancelArmed={cancelArmed}
-                          disabled={
-                            (collaborationAvailable && agentChatEntry.pending) ||
+                            sessionHasActivePrompt,
+                          isPreparing:
+                            isPreparingPrompt || isStartingNewSessionSuggestion,
+                          cancelArmed,
+                          disabled:
+                            (collaborationAvailable &&
+                              agentChatEntry.pending) ||
                             composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            approvalOverlayActive
-                          }
-                          submitDisabled={sessionWriteBlocked}
-                          commands={commands}
-                          skills={composerSkills}
-                          onSkillsOpenChange={
-                            workspaceContextActive
-                              ? setComposerSkillsOpen
-                              : undefined
-                          }
-                          skillsLoading={
-                            skillsLoading || Boolean(
+                            approvalOverlayActive,
+                          skills: composerSkills,
+                          onSkillsOpenChange: workspaceContextActive
+                            ? setComposerSkillsOpen
+                            : undefined,
+                          skillsLoading:
+                            skillsLoading ||
+                            Boolean(
                               connection.sessionId &&
-                                commandsRefreshingSession === connection.sessionId,
-                            )
-                          }
-                          skillsLoadError={
+                                commandsRefreshingSession ===
+                                  connection.sessionId,
+                            ),
+                          skillsLoadError:
                             skillsLoadError ||
-                            commandsRefreshErrorOwner?.isCurrent() === true
-                          }
-                          skillsLoaded={
+                            commandsRefreshErrorOwner?.isCurrent() === true,
+                          skillsLoaded:
                             !sessionCatalogPending &&
                             (Boolean(
                               connection.sessionId &&
@@ -27941,261 +28014,220 @@ export function App({
                             ) ||
                               (loadedSkillsReady &&
                                 skillsCatalogCacheRef.current?.key ===
-                                  skillsCatalogKey))
-                          }
-                          slashCommandCategoryOrder={slashCommandCategoryOrder}
-                          autoSubmitSlashCommands={autoSubmitSlashCommands}
-                          builtinAtProviders={
-                            workspaceContextActive ? builtinAtProviders : false
-                          }
-                          atProviders={composerAtProviders}
-                          composerTagIcons={composerTagIcons}
-                          voiceTarget={
+                                  skillsCatalogKey)),
+                          slashCommandCategoryOrder,
+                          autoSubmitSlashCommands,
+                          builtinAtProviders: workspaceContextActive
+                            ? builtinAtProviders
+                            : false,
+                          atProviders: composerAtProviders,
+                          composerTagIcons,
+                          voiceTarget:
                             activePanel !== null || mainView !== 'chat'
                               ? undefined
-                              : mainVoiceTarget
-                          }
-                          voiceStatusRevision={mainVoiceStatusRevision}
-                          queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskChips}
-                          onPopQueuedMessages={editLastQueuedPrompt}
-                          onClearQueuedMessages={clearQueuedPrompts}
-                          currentMode={executionMode}
-                          availableModes={availableApprovalModes}
-                          modeControlsDisabled={modeControlsBusy}
-                          planMode={currentMode === 'plan'}
-                          onTogglePlan={handleTogglePlan}
-                          sessionWorkflowEnabled={sessionWorkflowEnabled}
-                          currentModel={currentModel}
-                          gitBranch={
-                            workspaceContextActive
-                              ? activeGitBranch
-                              : undefined
-                          }
-                          gitWorktree={
-                            workspaceContextActive && Boolean(sessionWorktree)
-                          }
-                          gitCwd={
-                            workspaceContextActive
-                              ? sessionWorktree?.path
-                              : undefined
-                          }
-                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? handleGitModeIntentChange : undefined}
-                          gitStatus={
-                            workspaceContextActive
-                              ? selectedWorkspaceGitStatus
-                              : undefined
-                          }
-                          onOpenGitDiff={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenGitDiff
-                              : undefined
-                          }
-                          onOpenCommit={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenCommit
-                              : undefined
-                          }
-                          onOpenWorktrees={
+                              : mainVoiceTarget,
+                          voiceStatusRevision: mainVoiceStatusRevision,
+                          queuedMessages: queuedTexts,
+                          onFocusFooter: handleFocusTaskChips,
+                          onPopQueuedMessages: editLastQueuedPrompt,
+                          onClearQueuedMessages: clearQueuedPrompts,
+                          currentMode: executionMode,
+                          availableModes: availableApprovalModes,
+                          modeControlsDisabled: modeControlsBusy,
+                          planMode: currentMode === 'plan',
+                          onTogglePlan: handleTogglePlan,
+                          sessionWorkflowEnabled,
+                          currentModel,
+                          gitBranch: workspaceContextActive
+                            ? activeGitBranch
+                            : undefined,
+                          gitWorktree:
+                            workspaceContextActive && Boolean(sessionWorktree),
+                          gitCwd: workspaceContextActive
+                            ? sessionWorktree?.path
+                            : undefined,
+                          gitModeIntent: gitModeEligible
+                            ? gitModeIntent
+                            : undefined,
+                          onGitModeIntentChange: gitModeEligible
+                            ? handleGitModeIntentChange
+                            : undefined,
+                          gitStatus: workspaceContextActive
+                            ? selectedWorkspaceGitStatus
+                            : undefined,
+                          onOpenGitDiff: gitDiffWorkspaceCwd
+                            ? handleOpenGitDiff
+                            : undefined,
+                          onOpenCommit: gitDiffWorkspaceCwd
+                            ? handleOpenCommit
+                            : undefined,
+                          onOpenWorktrees:
                             gitDiffWorkspaceCwd && gitWorktreesSupported
                               ? handleOpenWorktrees
-                              : undefined
-                          }
-                          onOpenLog={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenLog
-                              : undefined
-                          }
-                          onCreateWorktreeBranch={
+                              : undefined,
+                          onOpenLog: gitDiffWorkspaceCwd
+                            ? handleOpenLog
+                            : undefined,
+                          onCreateWorktreeBranch:
                             sessionWorktree &&
                             !sessionWorktree.branch &&
                             workspace.capabilities?.features?.includes(
                               'session_worktree_branch_v1',
                             )
                               ? handleCreateWorktreeBranch
-                              : undefined
-                          }
-                          onHandoff={
+                              : undefined,
+                          onHandoff:
                             connection.sessionId &&
                             workspaceContextActive &&
                             workspace.capabilities?.features?.includes(
                               'session_worktree_handoff_v1',
                             )
                               ? handleHandoff
-                              : undefined
-                          }
-                          chatWidthMode={chatWidthMode}
-                          showChatWidthToggle={!isChatEmptyState}
-                          visibleToolbarActions={visibleComposerToolbarActions}
+                              : undefined,
+                          chatWidthMode,
+                          showChatWidthToggle: !isChatEmptyState,
                           // Before the session exists the workspace and git
                           // chips sit under the composer, next to the prompt
                           // they describe; once it does, the header owns the
                           // workspace and the composer keeps only git.
-                          contextChipPlacement={
-                            isChatEmptyState ? 'below' : 'header'
-                          }
-                          tokenCount={
-                            contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
-                          }
-                          contextWindow={
-                            contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
-                          }
-                          contextUsageAlwaysVisible={
-                            contextUsageAlwaysVisible
-                          }
-                          contextUsageControls={
-                            connection.sessionId
-                              ? contextUsageControls[connection.sessionId]
-                              : undefined
-                          }
-                          onOpenContextUsage={
-                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
-                          }
-                          modelRefresh={modelRefresh}
-                          availableModels={availableModels}
-                          modelPickerScope={modelPickerScope}
-                          unavailableModels={unavailableModels}
-                          mountUnavailableModelTooltip={
-                            mountUnavailableModelTooltip
-                          }
-                          onSelectMode={handleSetMode}
-                          onSelectModel={handleModelSelect}
-                          workflowMode={connection.workflowMode}
-                          workflowModeStatus={
-                            managedMode
-                              ? undefined
-                              : !connection.sessionId
-                                ? 'unbound'
-                                : sessionWriteBlocked ||
-                                    connection.catchingUp ||
-                                    connection.status !== 'connected'
-                                  ? 'syncing'
-                                  : (connection.workflowModeStatus ?? 'unknown')
-                          }
-                          workflowModePending={connection.workflowModePending}
-                          onWorkflowModeChange={handleWorkflowModeChange}
-                          reasoning={displayedReasoning}
-                          onSelectReasoningEffort={
+                          contextChipPlacement: isChatEmptyState
+                            ? 'below'
+                            : 'header',
+                          tokenCount: contextUsageAvailable
+                            ? (connection.tokenCount ?? 0)
+                            : 0,
+                          contextWindow: contextUsageAvailable
+                            ? (connection.contextWindow ?? 0)
+                            : 0,
+                          contextUsageAlwaysVisible,
+                          contextUsageControls: connection.sessionId
+                            ? contextUsageControls[connection.sessionId]
+                            : undefined,
+                          onOpenContextUsage: contextUsageAvailable
+                            ? openCurrentContextUsagePanel
+                            : undefined,
+                          modelRefresh,
+                          availableModels,
+                          modelPickerScope,
+                          unavailableModels,
+                          mountUnavailableModelTooltip,
+                          onSelectMode: handleSetMode,
+                          onSelectModel: handleModelSelect,
+                          workflowMode: connection.workflowMode,
+                          workflowModeStatus: managedMode
+                            ? undefined
+                            : !connection.sessionId
+                              ? 'unbound'
+                              : sessionWriteBlocked ||
+                                  connection.catchingUp ||
+                                  connection.status !== 'connected'
+                                ? 'syncing'
+                                : (connection.workflowModeStatus ?? 'unknown'),
+                          workflowModePending: connection.workflowModePending,
+                          onWorkflowModeChange: handleWorkflowModeChange,
+                          reasoning: displayedReasoning,
+                          onSelectReasoningEffort:
                             hasAuthoritativeReasoningContext
                               ? handleReasoningEffort
                               : welcomeReasoningPreview && !sessionWriteBlocked
                                 ? handleWelcomeReasoningEffort
-                                : undefined
-                          }
-                          workspaces={
-                            composerWorkspaceSelectEnabled
-                              ? composerWorkspaces
-                              : undefined
-                          }
-                          workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
-                          workspaceMenuItems={
-                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                                : undefined,
+                          workspaces: composerWorkspaceSelectEnabled
+                            ? composerWorkspaces
+                            : undefined,
+                          workspaceSelectorAlwaysVisible:
+                            Boolean(managedAgentProvider) &&
+                            composerWorkspaceSelectEnabled,
+                          workspaceMenuItems:
+                            composerWorkspaceSelectEnabled &&
+                            !lockedWorkspaceCwd &&
                             managedAgentProvider &&
                             managedWorkspaceCatalog &&
-                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                            managedWorkspaceCatalog.providerKey ===
+                              managedProviderKey &&
                             managedWorkspaceCatalog.workspaces.map((item) => (
                               <DropdownMenuItem
                                 key={item.workspaceId}
                                 disabled={!item.canCreateSession}
-                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                                onSelect={() =>
+                                  handleSelectManagedWorkspace(item.workspaceId)
+                                }
                               >
                                 {item.displayName} · {t('managed.managedMode')}
                               </DropdownMenuItem>
-                            ))
-                          }
-                          selectedWorkspaceCwd={
-                            workspaceContextActive
-                              ? connection.sessionId
-                                ? ordinaryWorkspaces.find(
-                                    (entry) =>
-                                      entry.cwd === connection.workspaceCwd &&
-                                      !entry.primary,
-                                  )?.cwd
-                                : selectedWorkspaceCwd
-                              : undefined
-                          }
-                          workspaceSelectionDisabled={
-                            !composerWorkspaceSelectEnabled
-                          }
-                          atWorkspaceCwd={composerWorkspaceCwd}
-                          composerScopeKey={
-                            effectiveSessionContext?.kind === 'standalone'
-                              ? 'standalone'
-                              : effectiveSessionContext?.kind === 'live'
-                                ? 'live'
-                                : undefined
-                          }
-                          workspaceFeaturesEnabled={workspaceContextActive}
-                          attachmentsEnabled={composerAttachmentsEnabled}
-                          onSelectWorkspace={
-                            composerWorkspaceSelectEnabled
-                              ? handleSelectComposerWorkspace
-                              : undefined
-                          }
-                          onSelectHostedWorkspace={
+                            )),
+                          selectedWorkspaceCwd: workspaceContextActive
+                            ? connection.sessionId
+                              ? ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === connection.workspaceCwd &&
+                                    !entry.primary,
+                                )?.cwd
+                              : selectedWorkspaceCwd
+                            : undefined,
+                          workspaceSelectionDisabled:
+                            !composerWorkspaceSelectEnabled,
+                          attachmentsEnabled: composerAttachmentsEnabled,
+                          onSelectWorkspace: composerWorkspaceSelectEnabled
+                            ? handleSelectComposerWorkspace
+                            : undefined,
+                          onSelectHostedWorkspace:
                             composerWorkspaceSelectEnabled
                               ? handleSelectHostedWorkspace
-                              : undefined
-                          }
-                          standaloneTargetSupported={
+                              : undefined,
+                          standaloneTargetSupported:
                             composerWorkspaceSelectEnabled &&
                             standaloneSessionsSupported &&
-                            !lockedWorkspaceCwd
-                          }
-                          selectedStandaloneTarget={
-                            effectiveSessionContext?.kind === 'standalone'
-                          }
-                          onSelectStandaloneTarget={
+                            !lockedWorkspaceCwd,
+                          selectedStandaloneTarget:
+                            effectiveSessionContext?.kind === 'standalone',
+                          onSelectStandaloneTarget:
                             composerWorkspaceSelectEnabled
                               ? handleSelectComposerStandalone
-                              : undefined
-                          }
-                          scratchWorkspaceSupported={
+                              : undefined,
+                          scratchWorkspaceSupported:
                             composerWorkspaceSelectEnabled &&
-                            scratchWorkspaceRegistrationSupported
-                          }
-                          existingFolderWorkspaceSupported={
+                            scratchWorkspaceRegistrationSupported,
+                          existingFolderWorkspaceSupported:
                             composerWorkspaceSelectEnabled &&
-                            dynamicWorkspaceRegistrationSupported
-                          }
-                          workspaceMutationBusy={workspaceMutationBusy}
-                          onCreateScratchWorkspace={
+                            dynamicWorkspaceRegistrationSupported,
+                          workspaceMutationBusy,
+                          onCreateScratchWorkspace:
                             composerWorkspaceSelectEnabled
                               ? handleCreateComposerScratchWorkspace
-                              : undefined
-                          }
-                          onOpenExistingWorkspace={
+                              : undefined,
+                          onOpenExistingWorkspace:
                             composerWorkspaceSelectEnabled
                               ? handleOpenExistingWorkspace
-                              : undefined
-                          }
-                          onChatWidthModeChange={handleChatWidthModeChange}
-                          sessionId={connection.sessionId}
-                          sessionName={sessionDisplayName}
-                          dialogOpen={
-                            interactionBlocked || approvalOverlayActive
-                          }
-                          followupState={followupState}
-                          onAcceptFollowup={onAcceptFollowup}
-                          onDismissFollowup={onDismissFollowup}
-                          composerInput={composerInput}
-                          composerInputVersion={composerInputVersion}
-                          placeholderText={composerPlaceholderText}
-                        />
-                        {CustomComposerFooter && (
-                          <CustomComposerFooter
-                            disabled={isDisabled}
-                            isRunning={
-                              streamingState !== 'idle' ||
-                              sessionHasActivePrompt
-                            }
-                            currentMode={currentMode}
-                            currentModel={currentModel}
-                            sessionName={sessionDisplayName}
-                          />
-                        )}
-                      </div>
+                              : undefined,
+                          onChatWidthModeChange: handleChatWidthModeChange,
+                          sessionId: connection.sessionId,
+                          sessionName: sessionDisplayName,
+                          dialogOpen:
+                            interactionBlocked || approvalOverlayActive,
+                          followupState,
+                          onAcceptFollowup,
+                          onDismissFollowup,
+                          composerInput,
+                          composerInputVersion,
+                          placeholderText: composerPlaceholderText,
+                        }}
+                        composerFooter={
+                          CustomComposerFooter ? (
+                            <CustomComposerFooter
+                              disabled={isDisabled}
+                              isRunning={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
+                              }
+                              currentMode={currentMode}
+                              currentModel={currentModel}
+                              sessionName={sessionDisplayName}
+                            />
+                          ) : undefined
+                        }
+                        footerTrailing={
+                          <>
                       {CustomFooter ? (
                         hasMobileComposerBottom ? (
                           <div className={styles.customFooter}>
@@ -28286,7 +28318,9 @@ export function App({
                           {welcomeFooter}
                         </div>
                       )}
-                    </div>
+                          </>
+                        }
+                      />
                     </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>

@@ -2,7 +2,7 @@
 
 [English](2026-11-21-web-shell-worktree-retention-restore.md) | [简体中文](2026-11-21-web-shell-worktree-retention-restore.zh-CN.md)
 
-- 状态：U4/U5 已实现。2026-11-21 隔离的 primary＋secondary 真实 HTTP/Chromium 基线只验证了当时的状态。后续加固及其新验证仍在进行；本文不表示当前 head 的 CI 已通过或已合入，也不表示后续 P6/P7 范围已完成。
+- 状态：U4/U5 已在 [PR #18009](https://github.com/QwenLM/qwen-code/pull/18009) 交付到 `main`（squash 提交 `ed5d033e813f90ecb12153ae3307fd035d4b3741`）；U4/U5 验收仍在 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪。在该 PR squash 前的 head（`68a4074b60a4a161e94eb8eaa9e7a467f9977653`，不是 `main` 上的提交）上完成的后续验证覆盖保留守卫、快照搬移、恢复围栏以及隔离的 primary＋secondary HTTP/Chromium 恢复。合入提交的 GitHub CI 结果仍另行观察；本文不把它混同为已完成的本地交付事实。后续 P6/P7 仍不在本阶段范围。
 - 调查基线：`01b7e92f61b1593517acd1e4afe752d431280e90`。
 - 跟踪：[#17237](https://github.com/QwenLM/qwen-code/issues/17237) 中 P6 的 U4/U5，不扩展其它范围。
 - 承接：`2026-11-17-worktree-carry-metadata.md` 与 `2026-11-17-worktree-retention-snapshots.md`。

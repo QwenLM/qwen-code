@@ -764,14 +764,22 @@ If the hooks fail, or do not finish within 15 seconds, the batch continues with 
 
 **Purpose**: Runs once when admitting a fresh user message, including a user message steered into an active turn. It can validate, block, or enrich that message. Tool results, Stop-driven continuations, model-request retries, and automated prompts skip the event. If a hook blocks a steering message, tool results in the same continuation can still proceed. ACP cancellation can preserve a message that the host has already delivered. This history operation skips the event.
 
+Set `"enableDelegatedPromptHooks": true` in the receiving workspace's `.qwen/settings.json` and restart its sessions to check messages sent from another session via `create_sub_session` or `/send`. With this setting enabled, delegated text that starts with a slash is handled as message text. The setting defaults to `false`. Scheduled task runs skip the event.
+
 **Event-specific fields**:
 
 ```json
 {
   "prompt": "legacy prompt for this invocation; semantics depend on the execution path",
-  "submitted_prompt": "optional user text captured at a supported submission boundary"
+  "submitted_prompt": "optional user text captured at a supported submission boundary",
+  "source": {
+    "session_id": "the session that sent this prompt (optional)",
+    "cwd": "that session's workspace"
+  }
 }
 ```
+
+`source` is present only on a prompt that another session sent. It names the sending session and its workspace. The event's own `session_id` and `cwd` belong to the receiving session. The daemon sets this field, and a prompt request cannot supply it. Such a prompt omits `submitted_prompt`. If a hook blocks it, the first-turn result has stop reason `blocked`, and any `sent` completion notification reports failure.
 
 `submitted_prompt` is optional. It is present on supported interactive TUI submissions and first-turn headless `UserQuery` sends. On the ACP session path used by ACP clients, `serve`, and daemon hosts, a fresh turn includes this field when it carries an explicit nonblank string declaration. Its value comes from the declaration, independently of `prompt` or a display label. Channel-classified turns omit this field, including human messages relayed through channel adapters.
 

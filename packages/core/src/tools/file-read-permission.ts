@@ -72,7 +72,11 @@ export function getFileReadDefaultPermission(
     // `.qwen -> /outside` relocate the allowed root — see
     // getAutoMemoryTrustedAnchor. Candidate-only is fail-closed and still
     // refuses a link planted inside the root.
-    isAnyAutoMemPath(filePath, config.getTargetDir())
+    isAnyAutoMemPath(
+      filePath,
+      config.getTargetDir(),
+      config.getProjectMemoryOwner?.(),
+    )
   ) {
     return 'allow';
   }
