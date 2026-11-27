@@ -17,6 +17,10 @@ describe('mediaMime', () => {
     ['audio/x-wav; codecs=1', 'audio/wav'],
     [' AUDIO/WAVE ', 'audio/wav'],
     ['audio/vnd.wave', 'audio/wav'],
+    ['audio/x-mp3', 'audio/mpeg'],
+    ['audio/x-mpeg', 'audio/mpeg'],
+    ['audio/mpeg3', 'audio/mpeg'],
+    ['audio/x-ogg; codecs=opus', 'audio/ogg'],
     ['audio/x-flac', 'audio/flac'],
     ['audio/x-aac', 'audio/aac'],
     ['audio/x-m4a', 'audio/m4a'],
@@ -39,6 +43,22 @@ describe('mediaMime', () => {
     expect(resolveAudioMimeAndFormat('audio/webm;codecs=opus')).toEqual({
       mimeType: 'audio/webm',
       format: 'webm',
+    });
+    expect(resolveAudioMimeAndFormat('audio/x-mp3')).toEqual({
+      mimeType: 'audio/mpeg',
+      format: 'mp3',
+    });
+    expect(resolveAudioMimeAndFormat('audio/x-mpeg')).toEqual({
+      mimeType: 'audio/mpeg',
+      format: 'mp3',
+    });
+    expect(resolveAudioMimeAndFormat('audio/mpeg3')).toEqual({
+      mimeType: 'audio/mpeg',
+      format: 'mp3',
+    });
+    expect(resolveAudioMimeAndFormat('audio/x-ogg; codecs=opus')).toEqual({
+      mimeType: 'audio/ogg',
+      format: 'ogg',
     });
     expect(resolveAudioMimeAndFormat('constructor')).toBeUndefined();
     expect(resolveAudioMimeAndFormat('toString')).toBeUndefined();

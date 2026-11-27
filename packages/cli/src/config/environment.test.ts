@@ -137,6 +137,7 @@ const TRACKED_ENV = [
   'QWEN_SANDBOX_NET',
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
+  'OPENAI_WIRE_API',
   'DASHSCOPE_PROXY_BASE_URL',
   'QWEN_TEST_PROVIDER_KEY',
   'DEMO_VAR',
@@ -2279,11 +2280,12 @@ describe('hasLoadedEnvironmentValues', () => {
     fs.mkdirSync(path.dirname(envFile), { recursive: true });
     fs.writeFileSync(
       envFile,
-      'OPENAI_API_KEY=sk-file\nOPENAI_BASE_URL=https://api.example/v1\n',
+      'OPENAI_API_KEY=sk-file\nOPENAI_BASE_URL=https://api.example/v1\nOPENAI_WIRE_API=responses\n',
     );
     loadEnvironment(testSettings({}), workspace);
 
     expect(process.env['OPENAI_API_KEY']).toBe('sk-file');
+    expect(process.env['OPENAI_WIRE_API']).toBe('responses');
     expect(hasLoadedEnvironmentValues()).toBe(false);
   });
 

@@ -2461,6 +2461,35 @@ describe('ResponsesPipeline', () => {
       },
     );
 
+    it('does not re-tier reasoning.effort for profile-less declared capabilities', async () => {
+      const calls = captureNext();
+      const cliConfig = makeCliConfig();
+      cliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            disableField: 'reasoning_effort',
+            efforts: ['low', 'medium', 'xhigh'],
+            defaultEffort: 'medium',
+          },
+        },
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'custom-declared-model',
+          authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'high' },
+        }),
+        cliConfig,
+      );
+      await drain(pipeline.executeStream(textRequest('hi'), 'p1'));
+      expect(calls[0]?.body['reasoning']).toEqual({
+        effort: 'high',
+        summary: 'auto',
+      });
+    });
+
     it('keeps tool_choice required for non-Qwen models on DashScope gateways and strips thinking_budget even with reasoning off', async () => {
       const calls = captureNext();
       const nonQwen = new ResponsesPipeline(
@@ -2658,6 +2687,58 @@ describe('ResponsesPipeline', () => {
         );
       },
     );
+
+    it('detects oss:// URIs inside function_call_output and preserves explicit customHeaders OSS override', async () => {
+      const calls = captureNext();
+      const toolOssReq = {
+        model: 'qwen3.8-omni-flash',
+        contents: [
+          content('model', fnCall('read_file', { path: 'a.jpg' }, 'call_oss')),
+          content('user', {
+            functionResponse: {
+              id: 'call_oss',
+              name: 'read_file',
+              response: { output: 'Loaded' },
+              parts: [
+                {
+                  fileData: {
+                    mimeType: 'image/jpeg',
+                    fileUri: 'oss://bucket/tool-frame.jpg',
+                  },
+                },
+              ],
+            },
+          }),
+        ],
+      };
+
+      const defaultOssPipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'qwen3.8-omni-flash',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          modalities: { image: true },
+        }),
+        makeCliConfig(),
+      );
+      await drain(defaultOssPipeline.executeStream(toolOssReq, 'p1'));
+      expect(calls[0]?.headers['x-dashscope-ossresourceresolve']).toBe(
+        'enable',
+      );
+
+      const customOverridePipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'qwen3.8-omni-flash',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          modalities: { image: true },
+          customHeaders: { 'X-DashScope-OssResourceResolve': 'disable' },
+        }),
+        makeCliConfig(),
+      );
+      await drain(customOverridePipeline.executeStream(toolOssReq, 'p2'));
+      expect(calls[1]?.headers['x-dashscope-ossresourceresolve']).toBe(
+        'disable',
+      );
+    });
 
     it('ignores SSE :HTTP_STATUS/200 comment lines and handles CRLF framing', async () => {
       const rawSse = [

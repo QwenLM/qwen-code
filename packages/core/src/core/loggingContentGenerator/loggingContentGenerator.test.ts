@@ -3014,6 +3014,65 @@ describe('LoggingContentGenerator', () => {
     expect(toolMessage?.content).toBe('hello world');
   });
 
+  it.each([
+    [
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      true,
+      'data:audio/wav;base64,UklGRg==',
+    ],
+    ['https://api.openai.com/v1', false, 'UklGRg=='],
+  ] as const)(
+    'mirrors useAudioDataUri=%s in reconstructed OpenAI logs for %s',
+    async (baseUrl, expectedUseAudioDataUri, expectedAudioData) => {
+      convertLlmRequestToOpenAISpy.mockImplementationOnce(
+        (request, requestContext, options) =>
+          realConvertLlmRequestToOpenAI(request, requestContext, options),
+      );
+      const request = {
+        model: 'test-model',
+        contents: [
+          content('user', {
+            inlineData: {
+              mimeType: 'audio/wav',
+              data: 'UklGRg==',
+            },
+          }),
+        ],
+      } as unknown as GenerateContentParameters;
+
+      await runContent(resolving(resp('resp-audio-log')), 'prompt-audio-log', {
+        request,
+        overrides: {
+          enableOpenAILogging: true,
+          baseUrl,
+          modalities: { audio: true },
+        },
+      });
+
+      expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          useAudioDataUri: expectedUseAudioDataUri,
+        }),
+        { cleanOrphanToolCalls: false },
+      );
+      expect(loggedOpenAIRequest().messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_audio',
+              input_audio: {
+                data: expectedAudioData,
+                format: 'wav',
+              },
+            },
+          ],
+        },
+      ]);
+    },
+  );
+
   it('logs the captured wire request including provider-injected fields (generateContent)', async () => {
     const wireRequest = {
       model: 'deepseek-v4-pro',

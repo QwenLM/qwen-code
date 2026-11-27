@@ -119,7 +119,10 @@ export function resolveEndpoint(
   }
   const selectedAuthType =
     settings.security?.auth?.selectedType ?? getAuthTypeFromEnv(env);
-  if (selectedAuthType !== AuthType.USE_OPENAI) {
+  if (
+    selectedAuthType !== AuthType.USE_OPENAI &&
+    selectedAuthType !== AuthType.USE_OPENAI_RESPONSES
+  ) {
     throw new Error(
       `qwen batch needs an API key (auth type "openai") for a DashScope endpoint; current auth type is "${selectedAuthType ?? 'none'}".`,
     );

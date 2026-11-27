@@ -5,7 +5,7 @@
  */
 
 import { AuthType } from '../../utils/auth-type.js';
-import { DashScopeOpenAICompatibleProvider } from '../openaiContentGenerator/provider/dashscope.js';
+import { isDashScopeProvider } from '../openaiContentGenerator/provider/dashscope-detection.js';
 
 export type ResponsesWireDialectName = 'openai' | 'dashscope';
 
@@ -70,7 +70,6 @@ const DASHSCOPE_INLINE_AUDIO_FORMATS: ReadonlySet<string> = new Set([
   'flac',
   'ogg',
   'm4a',
-  'webm',
 ]);
 
 /**
@@ -117,7 +116,7 @@ export function resolveResponsesWireDialect(
   if (!baseUrl) {
     return OPENAI_RESPONSES_DIALECT;
   }
-  return DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+  return isDashScopeProvider({
     authType: AuthType.USE_OPENAI_RESPONSES,
     baseUrl,
   })

@@ -40,6 +40,7 @@ describe('responses-dialect', () => {
       });
       expect(dialect.inlineAudioFormats.has('wav')).toBe(true);
       expect(dialect.inlineAudioFormats.has('aac')).toBe(extended);
+      expect(dialect.inlineAudioFormats.has('webm')).toBe(false);
     },
   );
 

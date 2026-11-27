@@ -429,7 +429,10 @@ export class ResponsesStreamState {
     itemId?: string,
   ): 'reasoning_text' | 'summary_text' | undefined {
     const keyed = this.getReasoningChannel(outputIndex, itemId);
-    if (keyed) return keyed;
+    if (keyed) {
+      this.reasoningChannels.delete('default');
+      return keyed;
+    }
     const fallback = this.reasoningChannels.get('default');
     if (fallback) {
       this.reasoningChannels.delete('default');
@@ -728,16 +731,17 @@ export function convertResponsesEventToGemini(
           reasoningItem.id &&
           (plaintextChunks.length > 0 || streamedChannel === 'reasoning_text')
         ) {
-          return makeChunkResponse(model, state, [
-            {
-              thought: true,
-              ...(alreadyStreamed ? {} : { text: plaintextChunks.join('') }),
-              thoughtSignature: encodeReasoningSignature({
-                id: reasoningItem.id,
-                plaintext: true,
-              }),
-            },
-          ]);
+          const thoughtSignature = encodeReasoningSignature({
+            id: reasoningItem.id,
+            plaintext: true,
+          });
+          const part: Part = alreadyStreamed
+            ? { thought: true, thoughtSignature }
+            : Object.assign(
+                createOpenAIReasoningThoughtPart(plaintextChunks.join('')),
+                { thoughtSignature },
+              );
+          return makeChunkResponse(model, state, [part]);
         }
         return null;
       }

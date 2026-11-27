@@ -332,6 +332,13 @@ describe('modelConfigUtils', () => {
           OPENAI_WIRE_API: 'responses',
         }),
       ).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(
+        getAuthTypeFromEnv({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_MODEL: 'gpt-5',
+          OPENAI_WIRE_API: '  RESPONSES  ',
+        }),
+      ).toBe(AuthType.USE_OPENAI_RESPONSES);
     });
 
     it('uses an injected env instead of process.env when provided', () => {

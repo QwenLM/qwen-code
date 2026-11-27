@@ -682,7 +682,7 @@ export class ResponsesPipeline {
     const reasoning: ResponsesApiReasoning = {};
     if (r?.effort) {
       reasoning.effort =
-        resolvedReasoning &&
+        resolvedReasoning?.profile &&
         !resolvedReasoning.toggleOnly &&
         resolvedReasoning.efforts.length > 0
           ? clampReasoningEffort(r.effort, resolvedReasoning.efforts)

@@ -37,7 +37,10 @@ import type {
 } from './types.js';
 import { ToolCallTool } from '../../tools/tool-call.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
-import { getThoughtSummary } from '../../utils/thoughtUtils.js';
+import {
+  getThoughtSummary,
+  isOpenAIReasoningThoughtPart,
+} from '../../utils/thoughtUtils.js';
 import {
   content,
   fnCall,
@@ -952,6 +955,56 @@ describe('convertGeminiContentsToResponsesInput', () => {
     ]);
   });
 
+  it('clears stale unkeyed default channel when a mixed-key reasoning item finishes', () => {
+    const state = new ResponsesStreamState();
+    // Item A starts with an unkeyed delta (populating 'default'), then sends a
+    // keyed delta (populating 'id:rs_mixed'). Completing item A must clear
+    // 'default' so a later plaintext-only item B is not suppressed.
+    expect(
+      partsOf(
+        conv('response.reasoning_text.delta', { delta: 'part 1 ' }, state),
+      ),
+    ).toEqual([{ text: 'part 1 ', thought: true }]);
+    expect(
+      partsOf(
+        conv(
+          'response.reasoning_text.delta',
+          { output_index: 0, item_id: 'rs_mixed', delta: 'part 2' },
+          state,
+        ),
+      ),
+    ).toEqual([{ text: 'part 2', thought: true }]);
+    expect(
+      partsOf(
+        outputItem(
+          state,
+          'done',
+          plainReasoningItem('rs_mixed', 'part 1 part 2'),
+        ),
+      ),
+    ).toEqual([
+      {
+        thought: true,
+        thoughtSignature: JSON.stringify({ id: 'rs_mixed', plaintext: true }),
+      },
+    ]);
+
+    const itemBDone = outputItem(
+      state,
+      'done',
+      plainReasoningItem('rs_next', 'unstreamed item B'),
+      1,
+    );
+    expect(partsOf(itemBDone)).toEqual([
+      {
+        thought: true,
+        text: 'unstreamed item B',
+        thoughtSignature: JSON.stringify({ id: 'rs_next', plaintext: true }),
+      },
+    ]);
+    expect(isOpenAIReasoningThoughtPart(partsOf(itemBDone)![0]!)).toBe(true);
+  });
+
   it('drops the thought part entirely when both thoughtSignature and text are missing', () => {
     expect(inputOf(content('model', { thought: true } as never))).toEqual([]);
   });
@@ -1600,6 +1653,72 @@ describe('convertGeminiContentsToResponsesInput', () => {
       ).toEqual([msgItem('user', [inVideo('data:video/mp4;base64,VIDDATA')])]);
     });
 
+    it('rejects audio/webm on DashScope dialect and preserves pre-encoded data: URIs without double-prefixing', () => {
+      expect(
+        convertWith(
+          [
+            content(
+              'user',
+              inline('audio/webm', 'WEBMDATA'),
+              inline('audio/mpeg', 'data:audio/mpeg;base64,ALREADY_INLINE'),
+              file('audio/mpeg', 'data:audio/mpeg;base64,ALREADY_FILE'),
+            ),
+          ],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([
+        msgItem('user', [
+          inText('[Unsupported inline media type: audio/webm]'),
+          inAudio('mp3', 'data:audio/mpeg;base64,ALREADY_INLINE'),
+          inAudio('mp3', 'data:audio/mpeg;base64,ALREADY_FILE'),
+        ]),
+      ]);
+    });
+
+    it('converts tool-result fileData image inline and promotes tool-result fileData audio/video', () => {
+      expect(
+        convertWith(
+          [
+            content('model', fnCall('read_media', {}, 'call_fd')),
+            content('user', {
+              functionResponse: {
+                id: 'call_fd',
+                name: 'read_media',
+                response: { output: 'Loaded files' },
+                parts: [
+                  file('image/png', 'https://cdn.example.com/tool.png'),
+                  file('audio/mpeg', 'https://cdn.example.com/tool.mp3'),
+                  file('video/mp4', 'https://cdn.example.com/tool.mp4'),
+                ] as FunctionResponsePart[],
+              },
+            }),
+          ],
+          { modalities: ALL_MOD, dialect: DASHSCOPE_RESPONSES_DIALECT },
+        ),
+      ).toEqual([
+        callItem('call_fd', 'read_media', {}),
+        {
+          type: 'function_call_output',
+          call_id: 'call_fd',
+          output: [
+            inText(
+              'Loaded files\n[Attached audio media in following user message]\n[Attached video media in following user message]',
+            ),
+            inImage('https://cdn.example.com/tool.png'),
+          ],
+        },
+        msgItem('user', [
+          inText('(attached media from previous tool call)'),
+          {
+            type: 'input_audio',
+            format: 'mp3',
+            audio_url: 'https://cdn.example.com/tool.mp3',
+          },
+          inVideo('https://cdn.example.com/tool.mp4'),
+        ]),
+      ]);
+    });
+
     it('preserves plaintext reasoning content on output_item.done when only summary_text deltas were streamed', () => {
       const state = new ResponsesStreamState();
       expect(
@@ -1614,18 +1733,23 @@ describe('convertGeminiContentsToResponsesInput', () => {
       const done = outputItem(
         state,
         'done',
-        plainReasoningItem('rs_sum_only', 'full plaintext chain'),
+        plainReasoningItem('rs_sum_only', '**Step 1** full plaintext chain'),
       );
       expect(partsOf(done)).toEqual([
         {
           thought: true,
-          text: 'full plaintext chain',
+          text: '**Step 1** full plaintext chain',
           thoughtSignature: JSON.stringify({
             id: 'rs_sum_only',
             plaintext: true,
           }),
         },
       ]);
+      expect(isOpenAIReasoningThoughtPart(partsOf(done)![0]!)).toBe(true);
+      expect(getThoughtSummary(done!)).toEqual({
+        subject: '',
+        description: '**Step 1** full plaintext chain',
+      });
     });
   });
 

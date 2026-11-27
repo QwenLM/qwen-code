@@ -44,6 +44,7 @@ import type {
   InputModalities,
 } from '../contentGenerator.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { isDashScopeProvider } from '../openaiContentGenerator/provider/dashscope-detection.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
@@ -1307,6 +1308,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // request actually sent. Opt out via generationConfig.splitToolMedia = false.
       splitToolMedia: this.splitToolMedia ?? true,
       toolResultContentFormat: this.toolResultContentFormat ?? 'parts',
+      useAudioDataUri: isDashScopeProvider(this.generatorConfig),
       startTime: 0,
     };
   }

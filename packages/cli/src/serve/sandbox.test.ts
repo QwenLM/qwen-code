@@ -198,6 +198,19 @@ describe('start_sandbox', () => {
     expect(entrypoint).not.toContain('npm run debug --');
   });
 
+  it('forwards OPENAI_WIRE_API and QWEN_MODEL into a container sandbox', async () => {
+    const args = await runContainerSandbox({
+      OPENAI_WIRE_API: 'responses',
+      QWEN_MODEL: 'qwen3.8-omni-flash',
+    });
+    const wireIndex = args.indexOf('OPENAI_WIRE_API=responses');
+    expect(wireIndex).toBeGreaterThan(0);
+    expect(args[wireIndex - 1]).toBe('--env');
+    const modelIndex = args.indexOf('QWEN_MODEL=qwen3.8-omni-flash');
+    expect(modelIndex).toBeGreaterThan(0);
+    expect(args[modelIndex - 1]).toBe('--env');
+  });
+
   it('lets the runtime choose a hostname for image-ID containers', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
