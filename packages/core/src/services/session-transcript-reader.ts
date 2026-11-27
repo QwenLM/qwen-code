@@ -4202,6 +4202,27 @@ function indexHasManagedHeader(index: TranscriptIndex): boolean {
   );
 }
 
+function assertManagedProjectedBodyBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  maxBodyBytes: number | undefined,
+): void {
+  if (maxBodyBytes === undefined) return;
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBodyBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBodyBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
+}
+
 function assertManagedAllReplayBudget(
   records: readonly ChatRecord[],
   sessionId: string,
@@ -4209,19 +4230,12 @@ function assertManagedAllReplayBudget(
   replay: SessionRestoreReplaySelection,
 ): void {
   if (replay.kind !== 'all') return;
-  const maxBytes = getMaxAllReplayBytes();
-  let total = 0;
-  for (const record of records) {
-    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
-    if (total > maxBytes) {
-      throw new SessionTranscriptTooLargeError(
-        sessionId,
-        snapshotSize,
-        maxBytes,
-        { dimension: 'replay', measuredBytes: total },
-      );
-    }
-  }
+  assertManagedProjectedBodyBudget(
+    records,
+    sessionId,
+    snapshotSize,
+    getMaxAllReplayBytes(),
+  );
 }
 
 /**
@@ -5190,7 +5204,12 @@ export class SessionTranscriptReader {
       const managed = indexHasManagedHeader(index);
       const timestamp = managed
         ? promptTimeFromProjectedRecords(
-            await this.readManagedRecords(sessionId, index, { signal }),
+            await this.readManagedRecords(
+              sessionId,
+              index,
+              { signal },
+              getMaxAllReplayBytes(),
+            ),
             sessionId,
           )
         : lastUserPromptFromIndex(index);
@@ -6608,7 +6627,14 @@ export class SessionTranscriptReader {
       // the whole log on every request. The gate above stays outside the cache
       // because it authorises this caller, not the projection.
       let projection = managedProjections.get(index);
-      if (projection === undefined) {
+      if (projection !== undefined) {
+        assertManagedProjectedBodyBudget(
+          projection.records,
+          sessionId,
+          index.snapshotSize,
+          maxBodyBytes,
+        );
+      } else {
         try {
           projection = await readManagedSessionRecordsAndTitle({
             transcriptPath: index.filePath,

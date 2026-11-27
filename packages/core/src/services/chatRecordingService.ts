@@ -1335,6 +1335,9 @@ export class ChatRecordingService {
   private prefixUuidBloomPath: string | undefined;
   private prefixHash: Hash | undefined;
   private prefixHashOffset = 0;
+  private prefixExpectedSize = 0;
+  private prefixFileIdentity: { dev: number; ino: number } | undefined;
+  private prefixExpectedMtimeMs: number | undefined;
   private prefixBloomNeedsResize = false;
   private rejectedSidecarSignature: string | undefined;
   private legacyArchiveGeneration?: { filePath: string; value?: string };
@@ -1729,8 +1732,29 @@ export class ChatRecordingService {
     this.prefixUuidBloomPath = undefined;
     this.prefixHash = undefined;
     this.prefixHashOffset = 0;
+    this.prefixExpectedSize = 0;
+    this.prefixFileIdentity = undefined;
+    this.prefixExpectedMtimeMs = undefined;
     this.prefixBloomNeedsResize = false;
     this.rejectedSidecarSignature = undefined;
+  }
+
+  private matchesExpectedPrefixFile(stats: fs.Stats | undefined): boolean {
+    if (
+      this.prefixExpectedSize === 0 &&
+      this.prefixFileIdentity === undefined
+    ) {
+      return !stats || stats.size === 0;
+    }
+    return (
+      stats !== undefined &&
+      typeof stats.size === 'number' &&
+      this.prefixFileIdentity !== undefined &&
+      stats.size === this.prefixExpectedSize &&
+      stats.dev === this.prefixFileIdentity.dev &&
+      stats.ino === this.prefixFileIdentity.ino &&
+      stats.mtimeMs === this.prefixExpectedMtimeMs
+    );
   }
 
   private async catchUpPrefixStateFromSidecarAsync(
@@ -1740,10 +1764,11 @@ export class ChatRecordingService {
       prefixSha256: string;
       prefixUuidBloom: { bits: string; hashes: number; count: number };
     },
-    targetSize: number,
+    targetStats: fs.Stats,
   ): Promise<
     'caught_up' | 'bloom_ceiling' | 'verified_prefix_only' | 'unverified'
   > {
+    const targetSize = targetStats.size;
     const hash = await this.seedVerifiedPrefixHashAsync(
       transcriptPath,
       existing.snapshotSize,
@@ -1835,6 +1860,9 @@ export class ChatRecordingService {
     this.prefixUuidBloomPath = transcriptPath;
     this.prefixHash = hash;
     this.prefixHashOffset = targetSize;
+    this.prefixExpectedSize = targetStats.size;
+    this.prefixFileIdentity = { dev: targetStats.dev, ino: targetStats.ino };
+    this.prefixExpectedMtimeMs = targetStats.mtimeMs;
     this.rejectedSidecarSignature = undefined;
     if (bloom.count > bloom.buffer.length) {
       await this.resizePrefixUuidBloomFromFileAsync(transcriptPath, targetSize);
@@ -1992,13 +2020,6 @@ export class ChatRecordingService {
       this.clearPrefixUuidBloom();
       return undefined;
     }
-    if (this.prefixUuidBloomPath !== undefined) {
-      if (this.prefixUuidBloomPath !== transcriptPath) {
-        this.clearPrefixUuidBloom();
-      } else if (this.prefixUuidBloom && this.prefixHash) {
-        return undefined;
-      }
-    }
     let stats: fs.Stats | undefined;
     try {
       stats = fs.existsSync(transcriptPath)
@@ -2008,6 +2029,16 @@ export class ChatRecordingService {
       this.clearPrefixUuidBloom();
       return undefined;
     }
+    if (this.prefixUuidBloomPath !== undefined) {
+      if (
+        this.prefixUuidBloomPath !== transcriptPath ||
+        !this.matchesExpectedPrefixFile(stats)
+      ) {
+        this.clearPrefixUuidBloom();
+      } else if (this.prefixUuidBloom && this.prefixHash) {
+        return undefined;
+      }
+    }
     const currentSize = stats?.size ?? 0;
     if (currentSize === 0) {
       if (record.parentUuid === null && this.lastPersistedRecordUuid === null) {
@@ -2015,6 +2046,11 @@ export class ChatRecordingService {
         this.prefixUuidBloomPath = transcriptPath;
         this.prefixHash = createHash('sha256');
         this.prefixHashOffset = 0;
+        this.prefixExpectedSize = 0;
+        this.prefixFileIdentity = stats
+          ? { dev: stats.dev, ino: stats.ino }
+          : undefined;
+        this.prefixExpectedMtimeMs = stats?.mtimeMs;
         this.prefixBloomNeedsResize = false;
       } else {
         this.clearPrefixUuidBloom();
@@ -2094,6 +2130,9 @@ export class ChatRecordingService {
       this.prefixUuidBloomPath = transcriptPath;
       this.prefixHash = hash;
       this.prefixHashOffset = stats.size;
+      this.prefixExpectedSize = stats.size;
+      this.prefixFileIdentity = { dev: stats.dev, ino: stats.ino };
+      this.prefixExpectedMtimeMs = stats.mtimeMs;
       this.rejectedSidecarSignature = undefined;
       this.prefixBloomNeedsResize =
         decodedBloom.count >= decodedBloom.buffer.length;
@@ -2151,6 +2190,26 @@ export class ChatRecordingService {
     // the file and in the filter, so keep the bloom + hash across rewind and
     // record the rewind record's own UUID as well.
     if (!this.prefixUuidBloom || this.prefixUuidBloomPath === undefined) return;
+    let postStats: fs.Stats;
+    try {
+      postStats = fs.statSync(this.prefixUuidBloomPath);
+    } catch {
+      this.clearPrefixUuidBloom();
+      return;
+    }
+    if (
+      typeof postStats?.size !== 'number' ||
+      postStats.size <= this.prefixExpectedSize ||
+      (this.prefixFileIdentity !== undefined &&
+        (postStats.dev !== this.prefixFileIdentity.dev ||
+          postStats.ino !== this.prefixFileIdentity.ino))
+    ) {
+      this.clearPrefixUuidBloom();
+      return;
+    }
+    this.prefixExpectedSize = postStats.size;
+    this.prefixFileIdentity = { dev: postStats.dev, ino: postStats.ino };
+    this.prefixExpectedMtimeMs = postStats.mtimeMs;
     addPromptUuidToBloom(this.prefixUuidBloom, record.uuid);
     if (this.prefixUuidBloom.count > this.prefixUuidBloom.buffer.length) {
       this.prefixBloomNeedsResize = true;
@@ -2186,6 +2245,12 @@ export class ChatRecordingService {
         return;
       }
       const stats = fs.statSync(transcriptPath);
+      if (
+        this.prefixUuidBloomPath === transcriptPath &&
+        !this.matchesExpectedPrefixFile(stats)
+      ) {
+        this.clearPrefixUuidBloom();
+      }
       if (
         this.prefixBloomNeedsResize &&
         this.prefixUuidBloom &&
@@ -2237,7 +2302,7 @@ export class ChatRecordingService {
               prefixSha256: existing.prefixSha256,
               prefixUuidBloom: existing.prefixUuidBloom,
             },
-            stats.size,
+            stats,
           );
           if (
             catchUp === 'caught_up' &&
