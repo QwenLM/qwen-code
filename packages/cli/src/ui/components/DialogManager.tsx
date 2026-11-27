@@ -175,7 +175,11 @@ export const DialogManager = ({
         onConfirm={uiState.confirmationRequest.onConfirm}
         dismissOnEscape
         terminalWidth={terminalWidth}
-        availableTerminalHeight={constrainedDialogHeight}
+        availableTerminalHeight={
+          uiState.confirmationRequest.allowHistoryScroll
+            ? undefined
+            : constrainedDialogHeight
+        }
       />
     );
   }

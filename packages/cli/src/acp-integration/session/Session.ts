@@ -80,6 +80,7 @@ import {
   isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import type { UserPromptSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   appendAsyncHookContextPart,
@@ -383,6 +384,7 @@ import {
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -479,6 +481,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import {
   getSlashCommandFirstToken,
+  isPrivateBuiltinSlashCommand,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
@@ -682,6 +685,13 @@ function readDaemonInputAnnotations(
       !!item && typeof item === 'object' && !Array.isArray(item),
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
+}
+function readPromptSource(value: unknown): UserPromptSource | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { sessionId, workspaceCwd } = value as Record<string, unknown>;
+  return typeof sessionId === 'string' && typeof workspaceCwd === 'string'
+    ? { session_id: sessionId, cwd: workspaceCwd }
+    : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -7344,11 +7354,23 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const delegatedPromptSource = readPromptSource(
+              promptMetadata?.[DAEMON_PROMPT_SOURCE_META_KEY],
+            );
+            const checkDelegatedPrompt =
+              delegatedPromptSource !== undefined &&
+              this.settings.merged.enableDelegatedPromptHooks === true;
+            // Opted-in delegated text enters message admission, where hooks
+            // can block it or add context before any model request.
             const isSlashInput =
+              !checkDelegatedPrompt &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const deferSlashRecording =
+              isSlashInput &&
+              isPrivateBuiltinSlashCommand(inputText, slashCommandName);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7425,13 +7447,9 @@ export class Session implements SessionContext {
                 this.config
                   .getLlmClient()!
                   .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
+            } else if (!deferSlashRecording) {
+              // /clear rotates the recorder, so record it before its action.
+              // Private command candidates wait until command resolution.
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
@@ -7506,6 +7524,19 @@ export class Session implements SessionContext {
                     this.mods?.invalidateTools();
                     this.rebindGoalRuntimeForNewSession();
                   },
+                  ...(!isRetry &&
+                  !channelTurn &&
+                  modelPrompt === undefined &&
+                  goalTurn?.origin !== 'runtime'
+                    ? {
+                        confirmAction: (title, content) =>
+                          this.#requestSlashCommandConfirmation(
+                            title,
+                            content,
+                            pendingSend.signal,
+                          ),
+                      }
+                    : {}),
                 },
                 this.slashCommandPolicy,
               );
@@ -7513,7 +7544,7 @@ export class Session implements SessionContext {
               await this.mods?.syncSession();
 
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 pendingSend.signal.aborted &&
                 slashCommandResult.type === 'message'
               ) {
@@ -7528,18 +7559,18 @@ export class Session implements SessionContext {
                 return { stopReason: 'cancelled' };
               }
 
-              // Classify by the RESOLVED command, not the raw token: a
-              // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
+              // A custom command shadowing a private built-in keeps its
+              // transcript records.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                resolvedCommandInfo.name === 'advisor'
+                isPrivateBuiltinSlashCommand(
+                  inputText,
+                  resolvedCommandInfo.name,
+                )
               );
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
@@ -7639,11 +7670,15 @@ export class Session implements SessionContext {
               isFreshUserTurn &&
               (channelTurn
                 ? getChannelWorkflowOrigin()?.userInitiated === true
-                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false);
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false &&
+                  (!delegatedPromptSource || checkDelegatedPrompt));
             const hookSubmittedPrompt =
               isUserSubmissionTurn && submittedPrompt.trim().length > 0
                 ? submittedPrompt
                 : undefined;
+            const hookSource = isUserSubmissionTurn
+              ? delegatedPromptSource
+              : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
             // prompt, a channel's or a Goal turn's included, as a UserQuery,
@@ -7687,6 +7722,7 @@ export class Session implements SessionContext {
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
                   submittedPrompt: hookSubmittedPrompt,
+                  source: hookSource,
                   signal: pendingSend.signal,
                 });
               if (promptAdmission.blocked) {
@@ -7721,7 +7757,10 @@ export class Session implements SessionContext {
                     },
                   },
                 });
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
             } else if (isNewUserPrompt) {
               const decision = await runUserPromptSubmit(
@@ -7729,12 +7768,17 @@ export class Session implements SessionContext {
                 promptText,
                 hookSubmittedPrompt,
                 pendingSend.signal,
+                undefined,
+                hookSource,
               );
               if (decision?.blockReason !== undefined) {
                 await this.messageEmitter.emitAgentMessage(
                   userPromptBlockedNotice(decision.blockReason),
                 );
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
 
               // Add additional context from hooks to the request, wrapped in
@@ -15419,6 +15463,49 @@ export class Session implements SessionContext {
       params,
       signal,
     );
+  }
+
+  async #requestSlashCommandConfirmation(
+    title: string,
+    content: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const response = await this.#requestPermissionQueued(
+      {
+        sessionId: this.sessionId,
+        toolCall: {
+          toolCallId: `slash-command:${randomUUID()}`,
+          title,
+          kind: 'other',
+          status: 'pending',
+          content: [
+            { type: 'content', content: { type: 'text', text: content } },
+          ],
+        },
+        options: [
+          {
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+            name: 'Apply changes',
+            kind: 'allow_once',
+          },
+          {
+            optionId: ToolConfirmationOutcome.Cancel,
+            name: 'Cancel',
+            kind: 'reject_once',
+          },
+        ],
+      },
+      signal,
+    );
+    if (
+      signal.aborted ||
+      response.outcome.outcome !== 'selected' ||
+      response.outcome.optionId !== ToolConfirmationOutcome.ProceedOnce
+    ) {
+      return false;
+    }
+    await this.assertCanStartTurn();
+    return !signal.aborted;
   }
 
   /**
