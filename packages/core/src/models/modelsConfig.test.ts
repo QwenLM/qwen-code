@@ -2383,6 +2383,41 @@ describe('Qwen Subscription model selection', () => {
     expect(config.getGenerationConfig().timeout).toBeUndefined();
     expect(config.getGenerationConfigSources()['timeout']).toBeUndefined();
   });
+
+  it('preserves flex queue default timeout for hand-written api.deepinfra.com model without envKey', async () => {
+    const config = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'handwritten-deepinfra',
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+            generationConfig: {
+              service_tier: 'flex',
+            },
+          },
+        ],
+      },
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'handwritten-deepinfra',
+        service_tier: 'flex',
+        timeout: 600000,
+      },
+      generationConfigSources: {
+        timeout: {
+          kind: 'default',
+          detail: 'DeepInfra flex queue default (10m)',
+        },
+      },
+    });
+
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'handwritten-deepinfra');
+    expect(config.getGenerationConfig().timeout).toBe(600000);
+    expect(config.getGenerationConfigSources()['timeout']).toEqual({
+      kind: 'default',
+      detail: 'DeepInfra flex queue default (10m)',
+    });
+  });
 });
 
 vi.mock('../qwen/subscription-models.js', async (original) => ({
