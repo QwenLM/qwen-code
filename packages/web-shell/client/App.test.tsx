@@ -20465,11 +20465,16 @@ describe('App session callbacks', () => {
   );
 
   it.each([
-    { scenario: 'switch is refused', switchStarted: true },
-    { scenario: 'switch is aborted and never starts', switchStarted: false },
+    { scenario: 'switch is refused', switchStarted: true, completion: false },
+    {
+      scenario: 'switch is aborted and never starts',
+      switchStarted: false,
+      completion: false,
+    },
+    { scenario: 'switch completes', switchStarted: true, completion: true },
   ])(
     'surfaces branch source warnings when the $scenario',
-    async ({ switchStarted }) => {
+    async ({ switchStarted, completion }) => {
       const switchCompletion = deferred<boolean>();
       mockSessionActions.branchSession.mockResolvedValue({
         sessionId: 'branch-1',
@@ -20484,7 +20489,7 @@ describe('App session callbacks', () => {
 
       const request =
         testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
-      switchCompletion.resolve(false);
+      switchCompletion.resolve(completion);
       await act(async () => {
         await request;
       });
@@ -20493,12 +20498,17 @@ describe('App session callbacks', () => {
         'warning',
         'Session sources could not be copied.',
       );
-      expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      const switched = [
         expect.objectContaining({
           type: 'status',
           text: expect.stringContaining('Historical branch') as string,
         }),
-      ]);
+      ];
+      if (completion) {
+        expect(mockStore.dispatch).toHaveBeenCalledWith(switched);
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(switched);
+      }
     },
   );
 
