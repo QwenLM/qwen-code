@@ -4826,17 +4826,32 @@ class QwenAgent implements Agent {
     session: Session,
     cleanupErrors?: unknown[],
   ): void {
-    const sessionConfig = session.getConfig();
-    const activeSessionId = sessionConfig.getSessionId?.();
+    let sessionConfig: ReturnType<Session['getConfig']> | undefined;
+    try {
+      sessionConfig =
+        typeof session?.getConfig === 'function'
+          ? session.getConfig()
+          : undefined;
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    let activeSessionId: string | undefined;
+    try {
+      activeSessionId = sessionConfig?.getSessionId?.();
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
     const sessionIdsToFinalize =
       activeSessionId && activeSessionId !== sessionId
         ? [sessionId, activeSessionId]
         : [sessionId];
     for (const id of sessionIdsToFinalize) {
-      try {
-        persistSessionUsageOnClose(sessionConfig, id);
-      } catch (error) {
-        cleanupErrors?.push(error);
+      if (sessionConfig) {
+        try {
+          persistSessionUsageOnClose(sessionConfig, id);
+        } catch (error) {
+          cleanupErrors?.push(error);
+        }
       }
       try {
         uiTelemetryService.removeSession(id);

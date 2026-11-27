@@ -7136,6 +7136,37 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     });
 
+    it('completes disposeSessions without throwing when a staged session lacks getConfig', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      // Stage a partial session without getConfig (mirrors newSession staging
+      // or minimal mocks) alongside a real drain failure so the sweep executes.
+      const stagedWithoutConfig = {
+        waitForActiveTurnsToSettle: vi
+          .fn()
+          .mockRejectedValue(new Error('staged drain error')),
+      };
+      (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+        'staged-no-config',
+        stagedWithoutConfig,
+      );
+
+      await expect(
+        (
+          agent as unknown as { disposeSessions(): Promise<void> }
+        ).disposeSessions(),
+      ).resolves.toBeUndefined();
+      expect(mockPersistSessionUsageOnClose).not.toHaveBeenCalled();
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'staged-no-config',
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it("registers nothing when the session's own settings turn messaging off, whatever the process started with", async () => {
       // Startup settings on, session settings off: the per-setting
       // contract the docs state is about the session, and a session that
