@@ -1,0 +1,303 @@
+# Managed Harness 对已释放 Session 的拉取（P1）
+
+[English](2026-11-27-managed-harness-pull-released-sessions.md) | [简体中文](2026-11-27-managed-harness-pull-released-sessions.zh-CN.md)
+
+状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `cc652838c4` 核实。本文是 #18514 拉取调度提案中的 P1 阶段，基于[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md) 和 [Harness 事件上报](2026-11-27-managed-harness-event-ingest.zh-CN.md)。第一个切片不依赖上报，第二个切片依赖。
+
+## 1. 问题与现状
+
+自 #18404 起，干净的空闲挂起或 Action 停靠会让 Session 进入一个明确的已释放状态：placement 为 `RELEASED`，head 为 `SEALED`，且该 placement epoch 有一份 release 回执。任何成员都可以接管这样的 Session，无需等待租约。
+
+由谁接管由 Java 在 `HarnessPoolConnector.select` 中决定。当某个调用需要该 Session 且 placement 不是 `ACTIVE` 时，Java 按轮询挑一个接受新工作的成员，为它执行 `JdbcHarnessPlacementStore.takeover`，然后调用该成员。已释放 Session 的每一种工作来源最终都落到这一次调用上：
+
+| 工作                           | 现在的 Java 路径                                                                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Wake 输入（seal 时的戳或输入） | `WakeRecovery.scan`（每 2 秒）和 `TransportWakeActivator` 调用 `recoverForWake`，即一次被动 load。被加载的 Session 由其 wake pump 处理这些输入                                 |
+| 停靠的 Action 决定             | 决定受理时解除 Turn 的停靠。`ActionResponseCoordinator` 调用 `resolveAction`，缓存未命中时会先 load。`HarnessCoordinator` 的扫描认领该 Turn，并在事件流上走它的恢复路径        |
+| Relay 工作                     | `SessionMessageRelay`、`ChildResultRelay`、`ManagedChannelService` 等调用 `runMessageOperation`、`runChildOperation` 或 `runChannelOperation`；每次应答推动 relay 自己的状态机 |
+
+由此产生三个问题。
+
+1. **Java 在知道容量之前就做了放置。** 达到冷启动上限（`HOSTED_COLD_OPEN_LIMIT`，默认 8 个并发冷启动）的成员会回答 409 `hosted_session_open_busy`。Session 随后一直等这个成员，而空闲的成员只有在轮询轮到它时才会拿到 Session。
+2. **分配与准入共用一个有效期。** takeover 消费 release 回执时，会把已 seal 的 writer 租约截到当前时间（`takeover` 中的注释："A successor that never acquires a writer must not inherit the released writer's lease"）。下一次 takeover 因此会立即通过"租约已过期"分支。在推模式下这无害，因为分配成员的那个 Java 实例会立即调用它。在拉模式下，认领响应可能丢失，而其他 poller 仍在不断 poll，于是另一个 poller 可能在认领者获取 writer 之前就把它挤掉。fence 仍然成立，被挤掉的认领者获取 writer 时会因 placement epoch 失败，但 Session 会反复易主。#18514 中提出这一点的评论建议在分配与获取 writer 之间加一个有上限的预留。
+3. **Java 必须知道并能连到每一个 Harness。** 每次调用都经 HTTP 发往静态池列表中的某个成员，因此 Java 没有配置、或连不到的 Harness 永远无法持有 Session。拉取调度要去掉的正是这一点：Harness 只需要能连到 Java。
+
+## 2. 目标与范围
+
+### 目标
+
+- 有待处理工作的已释放 Session，由有空闲容量并认领它的 Harness 放置，而不是由 Java 轮询放置。
+- 一次分配只有一次认领：认领响应丢失、重复 poll、第二个 poller、以及先前持有者的迟到写入，都不会产生第二个有效 writer；丢失响应的认领者在有限时间内保有其认领。
+- 经由认领持有的 Session，在 Java 不知道也连不到持有者地址的情况下得到服务。Java 为它发出的每一次调用，包括决定、relay 工作、取消、下一个 Turn 和生命周期操作，都经由持有者自己的 poll 送达，且该 Session 上的任何 Turn 都不需要 Harness 事件流。
+- 已释放 Session 的 wake 工作不经过任何 Java 到 Harness 的调用。
+- 开关关闭时，行为与现在一致。开关开启时，已释放 Session 等待认领的时间不超过兜底时长。
+
+### 非目标
+
+- 放置还没有 placement 的 Session，例如新 Session 的第一个 Turn。这部分在 P3 之前仍由推送池负责，P3 还需要为没有 head 的 Session 定义预留规则。side query 也仍然挑选推送成员。
+- 从存活的、由推送放置的持有者手中接管 Session。推送放置的 placement 保持其 owner 路由。
+- Java 侧读取（P5），移除 Harness 私有监听器或静态池（P6）。
+- poller 的逐实例身份（例如 mTLS），这在 Harness Pod 离开 Java Pod 的信任边界之后才变得重要。
+- 消息队列提示、比"最早优先"更细的租户公平性，以及针对取消和决定的专用低延迟信号。P3 会把通道与现在的直接调用做对比测量，只在未达到延迟预算的地方加原生信号。
+
+## 3. 设计决策
+
+| 决策                    | 选择                                                                                                                                                 | 理由                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 由谁放置已释放 Session  | 认领它的 poller。推送路径不再为它分配成员                                                                                                            | 只有 Harness 知道自己是否有空闲槽位                                                    |
+| 工作的来源              | 推送路径在将要分配或接管时，在 Session 行上记录认领需求（`harness_claim_requested_at`）。获取 writer 时清除                                          | 复用每种工作来源自己的持久记录和重试循环。不需要按类型写谓词，同一列也是扩缩容信号     |
+| 路由                    | 内部监听器上的 `POST /internal/managed-harness-work/v1/poll`                                                                                         | 由 Harness 向外调用；内部 origin 后面的任一 Java 实例都能处理                          |
+| poller 认证             | Harness bearer token。每次 poll 都对照 Java 配置的 capability digest 和必需特性检查兼容性。不查成员表                                                | Java 不需要知道有哪些 Harness 实例。授权绑定在上报的实例和 boot 上，只有那个进程能使用 |
+| 认领                    | 现有 `takeover` CAS 加一个预留，在同一事务中完成                                                                                                     | 不引入第二套所有权协议；Store 的 placement fence 不变                                  |
+| 预留                    | 数据库时间 30 秒。同一 boot 再次 poll 会拿回同一个认领。获取 writer 时在 placement 锁下消费它。过期后 Session 对任一 poller 重新开放                 | 即 #18514 中"分配到准入"的契约，不需要新的注册表就有了上限                             |
+| 认领内容                | Java 原本会发给成员的被动 load 请求                                                                                                                  | 只有一份 load 实现；Harness 不需要自己读取 Session 配置                                |
+| 对已持有 Session 的调用 | 经拉取认领的 placement 标记为 pull-held。对它的每一次连接器调用都变成 SQL 中的一个请求项，在持有者的 poll 中下发、由持有者应答（§7）                 | Java 永远不需要持有者的地址。连接器和 SDK 的逻辑原样运行在另一种传输上                 |
+| 事件流                  | pull-held Session 上的 Turn 永不打开 Harness 事件流。派发器原本要打开事件流的地方，改为把 Turn 交给持有者并请它从游标处开始推送（§8）                | 事件流是请求项唯一承载不了的交换                                                       |
+| 取消                    | 在 pull-held Session 上，取消作为一个请求送达持有者；Turn 留在 Harness 手中，由它通过上报写入终态                                                    | 收回 Turn 需要事件流                                                                   |
+| 长轮询                  | 最长 20 秒。处理程序每 500 毫秒重查一次 SQL，本实例记录需求或请求时提前唤醒                                                                          | 无需消息队列即可跨 Java 实例工作                                                       |
+| 容量                    | poll 上报空闲的冷启动槽位；Java 最多返回同等数量的认领，最早的需求优先。发给已持有 Session 的请求不受容量限制                                        | 满载的 Harness 不再认领，但继续服务已持有的 Session                                    |
+| 活性兜底                | 需求 30 秒无人认领时，推送路径按现在的方式分配                                                                                                       | 只要还有推送成员，poller 故障就不会让工作卡住                                          |
+| 启用                    | `qwen.managed-agent.harness-pull.enabled`（默认 `false`）以及 Harness 特性 `work-pull/1`。持有者通道还要求 `qwen.managed-agent.event-ingest.enabled` | 可按部署回滚                                                                           |
+| 时钟                    | 预留、需求和请求截止时间都使用数据库时间（`ManagedSchemaTime.SQL_NOW`）                                                                              | 多个实例同时读写它们；避免重蹈 Turn 租约的时钟问题（#14248）                           |
+
+## 4. 工作拉取协议
+
+### 请求
+
+```json
+{
+  "instanceId": "harness-b",
+  "bootId": "1f0c…",
+  "capabilityDigest": "sha256:…",
+  "features": ["work-pull/1", "event-ingest/1"],
+  "freeSlots": 3,
+  "waitMillis": 20000
+}
+```
+
+请求带 `Authorization: Bearer <harness token>`。`freeSlots` 是冷启动上限减去进行中的冷启动数。Harness 只要还有空闲槽位或持有任何 pull-held Session 就持续 poll；正在静默的 Harness 上报零空闲槽位，并继续为已持有的 Session poll。
+
+### 处理
+
+1. **认证。** 以常数时间比较 bearer token 与 `qwen.managed-agent.harness.token`。要求 `capabilityDigest` 等于 `qwen.managed-agent.harness.capability-digest`，`features` 包含 `work-pull/1` 以及本 Java 实例对任何 Harness 都要求的特性。用现有的标识符规则校验 `instanceId` 和 `bootId`。否则回答 403 `harness_work_poller_refused`。不查成员表；只有 P1.1 中有一条过渡规则把认领限制在已配置成员内（§9）。
+2. **请求。** 下发本实例和 boot 在当前 epoch 所持有 Session 的待处理请求项（§7）。它们不计入 `freeSlots`。
+3. **重新提供。** 返回所有 placement 为 `ACTIVE`、属于本实例和 boot、且预留未被消费也未过期的 Session。epoch、token 和截止时间保持不变。它们计入 `freeSlots`。
+4. **认领。** 按需求从早到晚读取候选：`harness_claim_requested_at IS NOT NULL` 且没有有效预留。对每个候选执行认领事务（§5）。是否可接管完全由 takeover CAS 按现有规则判断：带回执的已释放 placement，或 writer 租约已过期且 activation 已知。遇到拒绝（`harness_owner_still_live`、`harness_placement_changed`、`harness_placement_not_admitted`）则跳过该候选。
+5. **构造内容。** 对每个认领，构造成员连接器为 `recoverForWake` 会发送的被动 load 请求，所用 pool call 携带新的 placement 及其 writer token；构造后返回而不发送。
+6. **等待。** 没有可返回的内容且还有剩余时间时，等到本实例记录需求或请求、或过了 500 毫秒，然后回到第 2 步。
+
+### 应答
+
+```json
+{
+  "claims": [
+    {
+      "tenantId": "…",
+      "sessionId": "…",
+      "placementEpoch": 8,
+      "reservedUntil": 1764260000000,
+      "load": {
+        "sessionId": "…",
+        "managedSessionStore": { "…": "…" },
+        "harnessPlacement": { "…": "…" },
+        "passiveManagedRuntimeRecovery": true
+      }
+    }
+  ],
+  "requests": [
+    {
+      "requestId": "…",
+      "sessionId": "…",
+      "placementEpoch": 8,
+      "method": "POST",
+      "path": "/session/…/actions/…",
+      "headers": { "content-type": "application/json" },
+      "body": "…",
+      "deadline": 1764260030000
+    }
+  ]
+}
+```
+
+列表为空表示等待时间已到。Harness 立即再次 poll。
+
+### Harness 侧
+
+- 在 `hosted-harness` profile 下，设置了 `QWEN_MANAGED_HARNESS_WORK_URL` 时运行 poll 循环，使用 `QWEN_HOSTED_HARNESS_INSTANCE_ID` 和 `QWEN_SERVER_TOKEN`。
+- 每个认领的 `load` 请求体交给现有的 load 处理逻辑执行，就像 Java 发来的一样，并像任何 load 一样占用一个冷启动槽位。load 会像现在一样拒绝没有把本进程列为 writer 和 placement owner 的描述符，因此以其他实例名义得到的授权毫无用处。
+- load 中的 writer 获取会消费预留。load 失败时，Harness 记录日志，让预留自然过期。
+- 每个请求在进程内交给 Harness 自己的 HTTP 处理逻辑执行，使用原始的方法、路径、请求头和请求体。状态码和响应体提交到 `POST /internal/managed-harness-work/v1/requests/{requestId}:reply`。
+- 传输失败时退避重试。收到 403 时退避一分钟并记录日志，因为这说明 Harness 与 Java 对契约的认识不一致。
+
+## 5. 认领预留
+
+`ma_session` 在 V1 baseline 中新增三列（按本模块在首次发布前的规定，原地修改 V1）：可空的 `harness_claim_requested_at` 和 `harness_claim_reserved_until`，单位都是数据库时间的毫秒；以及 `is_harness_pull_held`，默认 `FALSE`。`(harness_claim_requested_at)` 上的索引用于候选查询。
+
+**认领事务。** 按现有 placement 锁顺序，以 poller 的实例和 boot、针对刚读到的 placement 执行 `takeover`，然后设置 `harness_claim_reserved_until = now + 30 s`；持有者通道启用时，同时设置 `is_harness_pull_held = TRUE`。takeover 消费 release 回执时仍像现在一样截断已 seal 的 writer 租约；现在保护认领者的是预留，而不是那个租约。
+
+**接管。** `takeover` 增加一种拒绝：`ACTIVE` 且 `harness_claim_reserved_until > now` 的 placement 回答 `harness_owner_still_live`，无论 head 处于何种状态。推送路径的接管和离开成员 placement 回收器都经过同一个 CAS，因此同样遵守它。推送路径的接管会清除 `is_harness_pull_held`。
+
+**消费。** `JournalWriterLifecycle.acquireWriter` 在 `requirePlacement` 中已先锁住 placement 行，再处理 head。它在同一事务中，针对已核验的 placement epoch 清除 `harness_claim_reserved_until` 和 `harness_claim_requested_at`。此后的每次接管都由现有的 writer 租约和恢复规则决定。
+
+| Placement 状态                        | 同一实例和 boot 再次 poll                        | 另一个 poller poll                     | 推送路径                             |
+| ------------------------------------- | ------------------------------------------------ | -------------------------------------- | ------------------------------------ |
+| `RELEASED`，已记录需求                | 认领（新 epoch）                                 | 认领；最先成功的 CAS 胜出              | 记录需求并等待，最长到兜底时间（§6） |
+| `ACTIVE`，预留有效，尚未获取 writer   | 再次拿到同一个认领：不产生新 epoch，截止时间不变 | 什么也拿不到                           | 送达认领者（§6）                     |
+| `ACTIVE`，预留已过期，尚未获取 writer | 可以重新认领（新 epoch）                         | 可以经"租约已过期"分支认领（新 epoch） | 记录需求并等待                       |
+| `ACTIVE`，已获取 writer（预留已消费） | 什么也拿不到；它已持有该 Session                 | 什么也拿不到；按 writer 租约规则       | 送达持有者（§6）                     |
+
+来自更早 epoch 的授权在获取 writer 时会以 `harness_placement_changed` 被拒绝，即使其 token 本身尚未过期。在截止时间之前刚好获取到 writer 的认领者，会在 writer 租约下保有该 Session；截止时间永远不构成接管存活 writer 的理由。
+
+## 6. 推送侧闸门与兜底
+
+在 `HarnessPoolConnector.select` 中，当 `mayAcquire` 为真、没有生命周期操作且开关开启时，将要分配或接管的选择不再走轮询。在 P1.1 中，闸门还要求池契约包含 `work-pull/1`，因为只有成员能认领。在 P1.2 中，闸门不查阅池，因为 poller 不必是成员。
+
+1. 如果 `harness_claim_requested_at` 为空，则把它设为当前时间（`IS NULL` CAS），并唤醒本实例的 poll 等待者。
+2. 如果需求存在不到 30 秒，抛出 409 `harness_placement_released`。
+3. 否则按现在的方式分配。这个兜底让没有 poller 运行时工作仍能推进；兜底次数是上线时的观测指标。
+
+`harness_placement_released` 现在就会在 owner 于选择与调用之间释放时到达调用方。`HarnessCoordinator` 把它当作不扣重试预算的池等待；`WakeRecovery` 在认领候选时已把 `wake_retry_at` 推后 30 秒。实现时需确认 `ActionResponseCoordinator`、消息、子结果和 channel relay 以及自动化扫描器都会重试它而不进入终态，并在不满足的地方补上。
+
+认领之后，各推送路径的下一次尝试会看到属于认领者的 `ACTIVE` placement。推送放置的 owner 像现在一样经 HTTP 调用。pull-held 的 owner 经持有者通道调用（§7）。认领者自己的 load 尚未结束时到达的调用，会在同一套 attachment 规则（#17521）下收敛到同一个驻留实例；正是这套规则让现在的决定投递 load 与派发 load 收敛。
+
+## 7. 持有者通道
+
+**路由。** 当 `select` 返回一个 pull-held 的 placement 时，`call` 用同一套 `QwenHostedHarnessConnector` 逻辑，作用在一个 SDK 客户端上，该客户端的 HTTP 交换走通道而不是 socket。SDK 客户端接受注入的 `HttpClient`，由通道来实现它：一次交换变成一个请求项，请求项的应答变成响应。通道客户端像任何客户端一样协商能力，也是通过一个请求项，因此从未见过该持有者 poll 的 Java 实例也能得知它的契约。
+
+**持有者存活。** Java 没有成员条目可以把 pull 持有者标为不可达，因此从 Store 读取存活状态。`select` 在读 placement 的同时读取 head 的 writer 租约。当持有者已获取 writer 且 writer 租约已过期，或预留在任何获取之前就已过期时，pull-held placement 视同不可达的 owner。此时 `select` 按 §6 记录需求，而不是排入请求，由某个 poller 经"租约已过期"分支认领该 Session。仍处于预留期内的 placement 路由到通道，认领者一旦 poll 就会看到该请求。
+
+**请求项。** 新表 `ma_harness_request` 保存 `request_id`、`tenant_id`、`session_id`、`placement_epoch`、`holder_boot_id`、`method`、`path`、选定的请求头、`body`（`MEDIUMBLOB`，能容纳 8 MiB 的附件输入）、`deadline`、`state`（`PENDING`、`DELIVERED`、`ANSWERED`、`EXPIRED`）、`reply_status`、`reply_body` 以及时间戳。请求项按租户隔离，以 `request_id` 为键。
+
+**下发。** 一次 poll 用一个 CAS 把持有者当前 epoch 的 `PENDING` 请求项改为 `DELIVERED` 并返回。只接受来自请求项被下发到的那个 boot、且 epoch 与请求项一致的应答。takeover 在其事务中让旧 epoch 尚未下发的请求项过期，于是这些请求的调用方看到 `harness_placement_changed`，重新选择。
+
+**等待。** 调用方最多等待其现有的调用超时时间。应答落在调用方所在的 Java 实例上时立即唤醒它；否则每 100 毫秒重查一次 SQL。超时时，调用方得到的异常与"请求可能已送达后发生传输失败"时相同。调用方现在已把这种情况视为结果未知，并以自己的操作 ID 或命令 ID 重试，而 Harness 路由今天就会对其去重。
+
+**限制。** 一个请求就是一次交换。通道拒绝流式交换，Harness 事件流就是其中之一；§8 让 pull-held Session 不再需要事件流，实现时再列出 pull-held Session 可能用到的其他流式路由。已应答和已过期的请求项在 10 分钟后删除。
+
+## 8. pull-held Session 上的 Turn
+
+pull-held Session 永不打开 Harness 事件流。
+
+- **全新提交**按 #18557 的定义使用上报：提交请求 `eventDelivery`，受理时把 Turn 交给 Harness。
+- **其他所有打开事件流的位置。** `HarnessCoordinator` 在 `runClaimed` 末尾（恢复受理、续跑或取消之后）、`observeBlockedHarness` 和 `replaySettledTurn` 中打开事件流。对于 pull-held Session，这些位置改为：
+  1. 以派发器的有效租约和已记录的事件 epoch 为条件做 CAS，把 Turn 的派发租约交给 `harness:` + 持有者的 boot，适用于 `RUNNING` 或 `CANCELLING` 的 Turn；
+  2. 经通道调用一条新的 Harness 路由 `POST /session/:id/events:push`，带上 `turnId`、`promptId`、`eventEpoch`，以及设为 Turn 已消费游标的 `afterSequence`；Harness 启动一个上报器，替换该 prompt 已有的上报器；
+  3. 不打开事件流，直接返回。
+
+  交接必须在前：先启动的上报器会得到 `managed_event_ingest_not_owner` 并停止。如果调用失败，租约在 60 秒内过期，Turn 按现有路径恢复。在 `observeBlockedHarness` 中，recovery-blocked 探测改为经通道读取 Harness 状态，而不是读事件流。
+
+- **取消。** #18557 在 `findDispatchable` 和 `claimTurn` 中加入的收回条件排除 pull-held Session。对于 pull-held Session 上由 Harness 持有的 Turn，`HarnessCoordinator.cancel` 和一个每秒一次的扫描经通道投递 `cancelOriginalTurn`，但不收回 Turn。扫描通过 `retry_after` 为每个 Turn 控制节奏，Harness 的租约续期不会改动它。Harness 中止该 Turn，其上报器写入终态。派发器自己在 `runClaimed` 中投递的取消，按上面的方式把 Turn 交还，所以交接允许 `CANCELLING`。
+
+恢复逻辑本身不迁移。Java 仍然执行挂接、接管、恢复受理、续跑以及 `runClaimed` 中的每一项检查；改变的只是传输和事件投递。
+
+## 9. 切片
+
+P1 分两个切片落地，都在同一个开关之后。
+
+1. **P1.1 —— 认领、预留与 wake。** 即 §4 到 §6 的全部内容。已释放 Session 的 wake 工作不再有 Java 到 Harness 的调用。在 P1.2 之前，其他调用经推送送达认领者，因此有一条过渡规则：只向实例和 boot 与已配置、已协商的池成员一致的 poller 发放认领。这是 P1 唯一查阅成员表的地方，P1.2 会删除它。不依赖上报。
+2. **P1.2 —— 持有者通道与无事件流的 Turn。** 即 §7、§8 以及 pull-held 标记。任何兼容的 poller 都可以认领，Java 不再向 pull-held Session 发出任何 HTTP 调用。依赖 #18557 和 `qwen.managed-agent.event-ingest.enabled`；上报关闭时，部署停留在 P1.1。
+
+提案中 P1 的退出条件是"这些路径不再调用 Harness"：wake 在 P1.1 满足，pull-held Session 上的其余一切在 P1.2 满足。取消和决定的原生信号不属于 P1。P3 会在通道未达到延迟预算（与现在的直接调用对比测量）的地方加上它们，并把认领扩展到没有 placement 的 Session。
+
+## 10. 兼容与上线
+
+| 控制面             | Harness              | 行为                                                          |
+| ------------------ | -------------------- | ------------------------------------------------------------- |
+| 开关关闭，任意版本 | 任意                 | 与现在一致                                                    |
+| 开关开启，上报关闭 | 池不含 `work-pull/1` | 与现在一致；闸门不生效                                        |
+| 开关开启，上报关闭 | 含 `work-pull/1`     | P1.1：已释放 Session 由已配置成员的认领放置；调用经推送       |
+| 开关开启，上报开启 | 含 `work-pull/1`     | P1.2：已释放 Session 由任一兼容 poller 的认领放置；调用经通道 |
+| 开关开启，上报开启 | 没有 poller 运行     | 每个已释放 Session 都要等满 30 秒兜底，然后由推送放置         |
+
+- **开启。** 先部署带路由、闸门、预留和通道的控制面。再滚动发布带 `work-pull/1` 和 poll URL 的 Harness。最后打开开关。P1.2 中闸门无法判断是否有 poller 在运行，因此在 Harness 发布之前打开开关，会让每个已释放 Session 都多等一个兜底时长。
+- **关闭。** 闸门立即打开，不再产生新的认领。未完成的预留在 30 秒内过期。pull-held Session 保留其持有者，并继续使用通道，直到它们释放或持有者死掉；只要还有这样的 Session，poll 和应答路由就继续提供服务。
+- **控制面回滚。** 只在 pull-held Session 都已释放之后回滚。持有者无法被 Java 寻址的 pull-held Session 会等到持有者的 writer 租约过期，再由推送恢复。poller 收到 404 后退避。
+- **Harness 回滚。** 不含该特性的 Harness 从不 poll；它的 Session 保持由推送放置。
+
+## 11. 失败与竞态语义
+
+| 窗口                                           | 要求的结果                                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------- |
+| 认领响应丢失                                   | 同一 poller 下次 poll 时拿回同一个认领；预留过期前其他 poller 什么也拿不到            |
+| 认领者在获取 writer 之前死掉                   | 预留过期；任一 poller 以新 epoch 认领；死掉的认领者的迟到授权被 fence                 |
+| 持有者在获取 writer 之后死掉                   | 其 writer 租约过期；待处理的工作记录需求；任一 poller 经"租约已过期"分支认领          |
+| 不同 Java 实例上的两个 poller 认领同一 Session | placement CAS 只放行一个；另一个跳过                                                  |
+| 需求或请求记录在 Java A，poll 挂在 Java B      | B 在下一次 500 毫秒重查时发现                                                         |
+| 没有 poller 运行                               | 30 秒后推送路径按现在的方式分配                                                       |
+| 推送兜底与一次 poll 竞争                       | placement CAS 只放行一个；推送路径的下一次尝试送达持有该 placement 的一方             |
+| 请求的应答丢失或迟到                           | 调用方以结果未知超时并重试；Harness 路由去重                                          |
+| 有待处理请求时发生接管                         | 尚未下发的请求项随旧 epoch 过期；旧 boot 的迟到应答被拒绝                             |
+| 交接之后启动上报器失败                         | Turn 租约在 60 秒内过期，Turn 按现有路径恢复                                          |
+| pull-held 的 Turn 运行中被取消                 | 通道送达取消；Turn 留在 Harness 手中，经上报写入唯一的终态                            |
+| 先前的持有者迟到写入                           | 与现在一样被 placement epoch 和 writer generation 拒绝                                |
+| load 比预留更慢                                | 另一个 poller 可能认领；慢的 load 在获取 writer 时因 epoch 失败；作为反复易主计入观测 |
+| Java 重启                                      | 需求、预留和请求都在 SQL 中；poll 在任一实例上继续                                    |
+
+## 12. 涉及的文件
+
+### 控制面
+
+- `persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql`：`ma_session` 的三列及其索引，以及 `ma_harness_request`。
+- `persistence/.../JdbcHarnessPlacementStore.java`：认领事务、`takeover` 中的预留拒绝与 pull-held 清除、需求标记、候选查询和重新提供查询。
+- `persistence/.../JournalWriterLifecycle.java`：在 `acquireWriter` 中消费预留。
+- `persistence/.../AgentTurnExecution.java`：事件流位置的交接、收回条件中对 pull-held 的排除，以及取消投递扫描。
+- `persistence/`（新增 store）：请求项。
+- `adapters/.../harness/HarnessPoolConnector.java`：闸门、把 pull-held placement 路由到通道，以及 P1.1 的过渡规则。
+- `adapters/.../harness/QwenHostedHarnessConnector.java`：为 pool call 构造但不发送被动 load 请求。
+- `adapters/.../harness/HarnessRequestChannel.java`（新增）：通道 `HttpClient`。
+- `adapters/.../harness/HarnessFeature.java`：`work-pull/1`。
+- `control-plane/.../session/HarnessWorkPoll.java`（新增）：认证、请求、重新提供、认领与长轮询。
+- `control-plane/.../session/HarnessCoordinator.java`：事件流位置与 pull-held 的取消。
+- `server/.../api/`（新增 controller）与 `SurfaceRegistry`：poll 和应答路由。
+- `packages/sdk-java/qwencode/.../daemon/HostedHarnessClient.java`：接受注入的 `HttpClient`。
+- `application.yml` 与 `configuration-descriptions.json`：`qwen.managed-agent.harness-pull.enabled`。
+
+### Harness
+
+- `packages/cli/src/serve/hosted-harness-contract.ts`：`work-pull/1`。
+- `packages/cli/src/serve/hosted-harness-work-poll.ts`（新增）：poll 循环、容量、认领与请求的执行、应答以及退避。
+- `packages/cli/src/serve/hosted-harness-session/session-open.ts`：用 load 处理逻辑执行认领中的 load 请求体。
+- `packages/cli/src/serve/hosted-harness-session/observation-routes.ts`：`events:push` 路由。
+- `deploy/kubernetes/chart`：把内部 origin 作为 `QWEN_MANAGED_HARNESS_WORK_URL` 传给每个 Harness。
+
+### 测试
+
+- Java，H2 与 MySQL 8.4：§5 的预留矩阵、闸门与兜底、需求清除、poller 拒绝、请求下发、应答 fence 与过期、事件流位置的交接、pull-held 的取消、开关关闭时的行为，以及现有的接管和回收器测试。
+- TypeScript：poll 节奏、容量控制、认领与请求的执行、应答、`events:push` 以及描述符拒绝。
+- 真实进程：两个 Java 实例和两个 Harness 进程，MySQL 8.4（§13）。
+
+## 13. 验证计划
+
+- **先确认基线。** 在现有 store 上证明：release 被一次从未获取 writer 的 takeover 消费之后，第二次 takeover 会立即成功。这正是预留要消除的反复易主。
+- **预留矩阵**，在 H2 和 MySQL 8.4 上：
+  - 扣住 A 的认领响应。B 在截止时间之前以 A 当前的 epoch poll，什么也拿不到。B 在截止时间之后 poll，认领成功。A 延迟到达的 load 在获取 writer 时被 fence。
+  - A 在截止时间之前刚好获取到 writer。B 随后按 writer 租约规则，什么也拿不到。
+  - A 在截止时间之前再次 poll，拿到相同的 epoch 和截止时间。
+- **闸门。** 开关关闭以及 Harness 实例不含该特性时与现在一致。开关开启时记录需求、返回等待码，并在 30 秒后兜底。
+- **通道。** 应答丢失、截止时间之后才到的应答、来自错误 boot 或 epoch 的应答、有待处理请求项时发生接管，以及应答落在另一个 Java 实例上。每次调用的调用方看到的结果，都与对应的 HTTP 失败现在的结果一致。
+- **真实进程，P1.1。** 即 #18514 中的第一个 P1 场景：两个 Java 实例和两个 Harness 进程，MySQL 8.4。Harness A 提出一个结构化问题，停靠并释放，同时保持健康。通过 Java 提交答案。B 认领该 Session，原 Turn 继续。再分别在获取 writer 之前丢失认领响应、重复提交答案、A 迟到写入的情况下重复。要求只有一个有效 writer、只应用一次答案、只有一个终态事件。在关闭 RocketMQ 的情况下运行。
+- **真实进程，P1.2。** 同一场景，但 B 不在 Java 的池配置中。认领之后，答案、续跑、续跑中的一次取消、下一个 Turn 以及关闭都送达 B，期间没有任何 Java 到 Harness 的 HTTP 调用，每个 Turn 的事件都经上报到达。
+- **测量**需求到获取 writer 的延迟、兜底次数、请求往返时间、经通道的取消与审批投递延迟、poll 和请求的查询速率以及锁等待，并与推送基线对比。
+
+## 14. 验收标准
+
+- 开关关闭，或在 P1.1 中池不含 `work-pull/1` 时，行为与现在逐字节一致。
+- 有 poller 运行时，有待处理工作的已释放 Session 只由认领的 poller 放置；没有空闲槽位的 poller 不认领任何东西。
+- 认领响应丢失绝不会在预留期内导致第二次认领；来自更早 epoch 的授权绝不会获取到 writer。
+- 已释放 Session 的 wake 工作在没有任何 Java 到 Harness 调用的情况下完成。
+- P1.2 之后，不在 Java 配置中的 poller 能认领已释放的 Session，并服务它之后的所有调用。Java 不向它发出任何 HTTP 调用，该 Session 上也没有任何 Turn 打开 Harness 事件流。
+- 已被认领 Session 的决定、relay 工作和取消以现在的结果完成：Allow 只执行一次，Deny 不执行，被取消的 Turn 只结算一次。
+- 没有 poller 运行时，工作在兜底之后继续推进。
+- 不改变公共路由或投影。schema 变更只在 V1 baseline 中。
+
+## 15. 风险与待定问题
+
+1. **兜底时长。** 只要还有推送成员，30 秒就限定了 poller 故障的代价，但 poller 只是变慢时也会延迟工作。默认开启前需要测量。没有推送成员的部署没有兜底。
+2. **预留时长。** 认领者必须在 30 秒内获取 writer。在固定这个常量之前，先在负载下测量认领到获取 writer 的时间。
+3. **poller 身份。** bearer token 由所有 Harness 共享，因此知道另一个 Harness boot ID 的 Harness 可以冒充它 poll。它用不了那些授权，因为它自己的 load 会拒绝属于另一个 boot 的描述符；但它能读到认领中的 load 请求体和请求，其中带有 Session 配置和内容，而真正的持有者会错过这些请求。boot ID 不是秘密。Harness Pod 离开 Java Pod 的信任边界之前必须有逐实例身份。
+4. **通道的成本与延迟。** 每次调用需要一次插入、一次下发更新和一次应答更新，跨实例时还有 100 毫秒的应答重查。经通道的取消与审批延迟是 P3 的退出测量项。
+5. **流式路由。** 实现时必须列出 pull-held Session 可能用到的每一种流式交换，并替换掉或以带码的等待拒绝。
+6. **load 收敛。** 认领 load 与经通道送达的决定 load 或恢复 load 必须收敛到同一个驻留实例。要用测试覆盖，而不是从现在的双 load 情形推断。
+7. **等待码的调用方。** 部分 relay 调用方可能把 `harness_placement_released` 当作终态。P1.1 中逐个核查。
+8. **公平性。** 最早需求优先无法阻止单个租户占满队列。
+9. **剩余的成员依赖。** 在 P3 之前，新 Session 的首次放置和 side query 仍然需要推送成员。
