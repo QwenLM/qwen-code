@@ -38,11 +38,17 @@ const MOD = `export function register(on) {
   on('command.run', { command: 'reads' }, async ($) => {
     await $.telemetry.log({ event: 'reads_ran', props: { count: 1 } });
     await $.telemetry.mark({ feature: 'reads', kind: 'ok' });
+    const mcp = (await $.settings.read({ key: 'mcpServers' })).fixture;
     return { text: JSON.stringify({
       home: await $.env.get('HOME'),
       key: (await $.env.get('OPENAI_API_KEY')) ?? null,
       authValue: (await $.env.get('PROBE_AUTH_VALUE')) ?? null,
       authAlias: (await $.env.get('PROBE_AUTH_ALIAS')) ?? null,
+      mcpValue: (await $.env.get('PROBE_MCP_VALUE')) ?? null,
+      mcpAlias: (await $.env.get('PROBE_MCP_ALIAS')) ?? null,
+      mcpUrl: await $.env.get('PROBE_MCP_URL'),
+      mcpSettingsUrl: mcp.httpUrl,
+      mcpHasHeaders: 'headers' in mcp,
       alias: (await $.env.get('PROBE_ALIAS')) ?? null,
       priorAlias: (await $.env.get('PROBE_PRIOR_ALIAS')) ?? null,
       workspaceEnv: await $.env.get('PROBE_WORKSPACE_ACTIVE'),
@@ -94,11 +100,19 @@ describe('a Mod reading the environment and settings in headless runs', () => {
         PROBE_TOKEN: 'settings-secret',
         PROBE_ALIAS: '${OPENAI_API_KEY}',
         PROBE_AUTH_ALIAS: 'prefix ${PROBE_AUTH_VALUE}',
+        PROBE_MCP_ALIAS: 'prefix ${PROBE_MCP_VALUE}',
         PROBE_PRIOR_ALIAS: '${PROBE_SOURCE_TOKEN}',
       },
       security: {
         folderTrust: { enabled: false },
         auth: { selectedType: 'openai', apiKey: '${PROBE_AUTH_VALUE}' },
+      },
+      mcpServers: {
+        fixture: {
+          disabled: true,
+          httpUrl: '${PROBE_MCP_URL}',
+          headers: { 'X-Auth': '${PROBE_MCP_VALUE}' },
+        },
       },
     });
     json(join(plugin, '.claude-plugin/plugin.json'), {
@@ -122,6 +136,8 @@ describe('a Mod reading the environment and settings in headless runs', () => {
       QWEN_CODE_NO_RELAUNCH: '1',
       OPENAI_API_KEY: 'env-api-key',
       PROBE_AUTH_VALUE: 'settings-api-key',
+      PROBE_MCP_VALUE: 'mcp-header-fixture',
+      PROBE_MCP_URL: 'http://127.0.0.1:1/mcp',
     };
     await run(
       process.execPath,
@@ -162,6 +178,11 @@ describe('a Mod reading the environment and settings in headless runs', () => {
       key: null,
       authValue: null,
       authAlias: null,
+      mcpValue: null,
+      mcpAlias: null,
+      mcpUrl: 'http://127.0.0.1:1/mcp',
+      mcpSettingsUrl: 'http://127.0.0.1:1/mcp',
+      mcpHasHeaders: false,
       alias: null,
       priorAlias: null,
       workspaceEnv: 'loaded',
@@ -178,6 +199,7 @@ describe('a Mod reading the environment and settings in headless runs', () => {
     for (const secret of [
       'env-api-key',
       'settings-api-key',
+      'mcp-header-fixture',
       'settings-secret',
       'fixture-home-value',
       'fixture-workspace-value',

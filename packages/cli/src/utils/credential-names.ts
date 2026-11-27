@@ -50,13 +50,26 @@ export function configuredCredentialVariables(settings: unknown): Set<string> {
   return names;
 }
 
-export function credentialFieldReferences(settings: unknown): Set<string> {
+export function credentialFieldReferences(
+  settings: Record<string, unknown>,
+): Set<string> {
   const names = new Set<string>();
+  const addReferences = (value: string) => {
+    for (const name of getEnvVarReferences(value)) names.add(name);
+  };
   collectStringSettings(settings, (key, value) => {
-    if (isCredentialName(key)) {
-      for (const name of getEnvVarReferences(value)) names.add(name);
-    }
+    if (isCredentialName(key)) addReferences(value);
   });
+  const servers = settings['mcpServers'];
+  if (servers && typeof servers === 'object') {
+    for (const server of Object.values(servers) as unknown[]) {
+      if (server && typeof server === 'object' && 'headers' in server) {
+        collectStringSettings(server.headers, (_key, value) =>
+          addReferences(value),
+        );
+      }
+    }
+  }
   return names;
 }
 

@@ -60,6 +60,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 检查过的 Mod 读的是 `HOME`、`TERM`、`CI`、`TMUX` 这类终端和 CI 变量，以及 `enabledPlugins`、policy 来源这类设置，没有一个读凭据，所以遮住凭据不会让它们出错。
   - 按名字判断凭据。把变量名或设置键按 `_`、`-` 和驼峰拆开，含有 `TOKEN`、`SECRET`、`API_KEY`、`ACCESS_KEY`、`PRIVATE_KEY`、`CREDENTIAL`、`PASSWORD`、`PASSPHRASE`、`AUTHORIZATION`、`DSN` 或 `CONNECTION_STRING` 等词的，就是凭据。完整列表就是 daemon 遮蔽 worker 诊断信息时已有的那条规则，这次抽出来共用。
   - 任一设置来源在 `envKey`、`credentialEnv` 或 `apiKeyEnv` 中指定的变量，以及在 `security.auth.apiKey` 等凭据字段中引用的变量，都按凭据处理。
+  - MCP 服务器 HTTP 请求头引用的变量也按凭据处理，适用于任意请求头名称。
   - 对凭据以及值包含至少四个字符的已识别凭据的变量，`$.env.get` 都回答 `undefined`，包括通过设置复制凭据的别名。变量未设置时也得到同样的回答。
   - 已写入进程环境的凭据别名会保持遮蔽，直到其环境变量值发生变化。仅重载设置、CLI 以继承的环境重新启动，或 daemon 将工作区环境交给 ACP 子进程时也保留此遮蔽。
   - `$.settings.read` 去掉任意层级下凭据键对应的字符串，包括顶层 `env` 里的这些变量。每个 MCP 服务器的 `env` 和 `headers` 整个去掉，因为它们的名字没有规律可循。

@@ -1238,6 +1238,7 @@ describe('serve fast path environment bootstrap', () => {
     'FAST_PATH_FIXTURE_TOKEN',
     'FAST_PATH_PROVIDER_INPUT',
     'FAST_PATH_AUTH_INPUT',
+    'FAST_PATH_MCP_INPUT',
   ])(
     'preserves the credential origin of %s aliases for the ACP environment',
     async (source) => {
@@ -1275,6 +1276,11 @@ describe('serve fast path environment bootstrap', () => {
             },
             ...(source === 'FAST_PATH_PROVIDER_INPUT' && {
               modelProviders: { openai: [{ id: 'fixture', envKey: source }] },
+            }),
+            ...(source === 'FAST_PATH_MCP_INPUT' && {
+              mcpServers: {
+                fixture: { headers: { 'X-Auth': '$' + source } },
+              },
             }),
             env: {
               [alias]: '$' + source,

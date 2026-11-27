@@ -726,8 +726,11 @@ model, a prompt or the store:
 - `$.env.get` answers `undefined` for a variable whose name marks a credential
   (`TOKEN`, `SECRET`, `API_KEY`, `PASSWORD` and the like, such as
   `OPENAI_API_KEY`), and for each variable that a settings `envKey`,
-  `credentialEnv` or `apiKeyEnv` names in any source. It also hides variables
-  whose values contain a recognized credential of at least four characters.
+  `credentialEnv` or `apiKeyEnv` names in any source. It hides variables
+  referenced by credential fields such as `security.auth.apiKey` or by an MCP
+  server's HTTP headers, regardless of the header name. It also hides
+  variables whose values contain a recognized credential of at least four
+  characters.
 - `$.settings.read` leaves out every string under a key named the same way
   (`apiKey`, an `Authorization` header), those variables in `env`, each MCP
   server's `env` and `headers`, and every string that contains a hidden
