@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-runtime-broker-shared-listener.md) | [简体中文](2026-11-27-managed-runtime-broker-shared-listener.zh-CN.md)
 
-状态为上线前提案，2026-11-27。范围是 Qwen Code 的独立 Managed Agent Server 及其启动器。源码基线是 Qwen Code `main` 的 `94b1d9dc0d42dabab71adc6f94a23eab80d95889`。实现和运行验收待完成。
+状态为上线前提案，2026-11-27。范围是 Qwen Code 的独立 Managed Agent Server 及其启动器、参考 systemd 分发包和现役 Kubernetes Helm chart。源码基线是 Qwen Code `main` 的 `94b1d9dc0d42dabab71adc6f94a23eab80d95889`。实现和运行验收待完成。
 
 ## 现状与目标
 
@@ -32,7 +32,11 @@ Anthropic 的自托管 Managed Agents 有类似的监听方式，Worker 和应�
 
 ## 部署配置
 
-启动器或部署模板只配置一次 MA 内部 origin，同时用于 Session Store 基础地址和 `QWEN_MANAGED_RUNTIME_BROKER_URL`。Hosted Harness 按现有方式拼接路径。更新 `--check`、systemd bootstrap 和本地启动器，移除本地端口分配和状态中的 `brokerPort`。
+启动器或部署模板只配置一次 MA 内部 origin，同时用于 Session Store 基础地址和 `QWEN_MANAGED_RUNTIME_BROKER_URL`。Hosted Harness 按现有方式拼接路径。更新 `--check`、systemd bootstrap 和本地启动器，移除本地端口分配和状态中的 `brokerPort`。独立分发包的 bootstrap 默认使用 `http://127.0.0.1:8080`；本地启动器使用 Java 回环 origin；Helm 使用现有的 `http://127.0.0.1:8081` 内部 origin。
+
+同一次交付更新 Helm 模板、chart 测试、Dockerfile、systemd 示例、包 README 和现役双语部署指南。升级说明必须替换旧的专用监听 URL 并移除废弃监听配置；回滚时恢复与旧版匹配的配置。第 1 档纯文本部署继续无需 Broker 凭据。
+
+更新 `configuration-descriptions.json` 和随包配置元数据，再用文档规定的生成器重建双语配置参考，不能只手改生成页面。历史设计、实施计划和已归档 Kubernetes 分发保持不变。
 
 ## 验收
 
@@ -42,3 +46,4 @@ Anthropic 的自托管 Managed Agents 有类似的监听方式，Worker 和应�
 4. 对 Broker 施加请求压力，同时调用 MA API 和 Session Store。验证有界准入、其他请求仍能推进以及正常关闭。
 5. 验证预检、本地启动和 reload 减少一个端口。分别记录真实进程、MySQL 和协议夹具的结果。
 6. 在 Broker 停用时，启动独立服务端和不带 Broker URL 或 token 的真实 Hosted Harness。验证不会创建 Broker 服务或路由，且现有纯文本会话流程仍然可用。
+7. 运行 Helm、bootstrap/打包和配置参考检查。验证生成的独立部署与 Helm 配置让 Session Store 和 Broker 使用同一 origin，废弃监听配置已移除，且现役部署指南写明升级与回滚的配置组合。

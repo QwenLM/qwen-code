@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-runtime-broker-shared-listener.md) | [简体中文](2026-11-27-managed-runtime-broker-shared-listener.zh-CN.md)
 
-Status: prelaunch proposal, 2026-11-27. Scope covers the standalone Managed Agent Server and its launchers in Qwen Code. Source baseline is Qwen Code `main` at `94b1d9dc0d42dabab71adc6f94a23eab80d95889`. Implementation and runtime acceptance are pending.
+Status: prelaunch proposal, 2026-11-27. Scope covers the standalone Managed Agent Server, its Qwen Code launchers, the reference systemd distribution, and the active Kubernetes Helm chart. Source baseline is Qwen Code `main` at `94b1d9dc0d42dabab71adc6f94a23eab80d95889`. Implementation and runtime acceptance are pending.
 
 ## Current behavior and objective
 
@@ -32,7 +32,11 @@ Preserve the raw path and protocol version checks, response status and JSON fiel
 
 ## Deployment configuration
 
-Set the internal MA origin once in the launcher or deployment template. Use it for the Session Store base URL and `QWEN_MANAGED_RUNTIME_BROKER_URL`. Hosted Harness appends the current path. Update `--check`, the systemd bootstrap, and the local launcher to use that origin. Remove `brokerPort` from local port allocation and state.
+Set the internal MA origin once in the launcher or deployment template. Use it for the Session Store base URL and `QWEN_MANAGED_RUNTIME_BROKER_URL`. Hosted Harness appends the current path. Update `--check`, the systemd bootstrap, and the local launcher to use that origin. Remove `brokerPort` from local port allocation and state. The default standalone bootstrap uses `http://127.0.0.1:8080`; the local launcher uses its Java loopback origin; Helm uses its existing `http://127.0.0.1:8081` internal origin.
+
+Update the Helm template, chart tests, Dockerfile, systemd examples, package README, and active bilingual deployment guides in the same delivery. Upgrade instructions must replace an old dedicated-listener URL and remove the obsolete listener settings; rollback restores the matching old configuration. Tier 1 text-only deployment remains valid without Broker credentials.
+
+Update `configuration-descriptions.json` and the packaged configuration metadata, then regenerate the bilingual configuration reference with its documented generator. Do not hand-edit only the generated pages. Historical designs, plans, and archived Kubernetes distributions remain unchanged.
 
 ## Acceptance
 
@@ -42,3 +46,4 @@ Set the internal MA origin once in the launcher or deployment template. Use it f
 4. Apply Broker request pressure while exercising MA API and Session Store traffic. Verify bounded admission, that those calls continue to make progress, and that shutdown completes cleanly.
 5. Verify preflight and local startup and reload with one fewer port. Record real process and MySQL results separately from protocol fixtures.
 6. With the Broker disabled, start the standalone server and a real Hosted Harness without a Broker URL or token. Verify that no Broker service or routes are created and that the existing pure-text session flow still works.
+7. Run the Helm, bootstrap/package, and configuration-reference checks. Verify that generated standalone and Helm configurations use the same origin for Session Store and Broker, obsolete listener settings are absent, and the active deployment guides describe the upgrade and rollback configuration pairs.
