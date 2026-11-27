@@ -98,7 +98,7 @@ const ENV_DUMP_PATTERN = new RegExp(
     `${ENV_DUMP_PLAIN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}`,
     `${ENV_DUMP_PAREN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}(?!\\)[ \\t]*=>)`,
     `(?:${ENV_DUMP_PLAIN_ANCHOR}|${ENV_DUMP_PAREN_ANCHOR})printenv\\b`,
-    String.raw`\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{1,64}["']?[ \t]{0,64}(?:printenv\b|${ENV_DUMP_COMMAND}(?=[ \t]{0,64}(?:[|;&>]|["']|$)))`,
+    String.raw`\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{1,64}["']?[ \t]{0,64}(?:printenv\b|${ENV_DUMP_COMMAND}(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|["']|$)))`,
   ].join('|'),
   'm',
 );
@@ -219,7 +219,7 @@ const SYSTEM_PROMPT_PHRASE = /\bsystem prompt\b/i;
 // phrase rule so CLI flag docs (#16803) and the main-session cache comment stay
 // ungated without opening a noun-phrase or verb-list bypass in PR bodies.
 const RELEASED_SYSTEM_PROMPT_TABLE_ROW =
-  /^[ \t]*\|[ \t]*`--(?:append-)?system-prompt`[ \t]*\|(?:[ \t]*(?:`-[A-Za-z]`[ \t]*)?\|)?[ \t]*(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?[ \t]*(?:\||$)/i;
+  /^[ \t]*\|[ \t]*`--(?:append-)?system-prompt`[ \t]*\|(?:[ \t]*(?:`-[A-Za-z]`[ \t]*)?\|)?[ \t]*(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?[ \t]*(?:\|[ \t]*Your prompt text[ \t]*\|[ \t]*(?:Loaded context files such as `QWEN\.md` are still appended after this override\. Can be combined with `--append-system-prompt`\.|Applied after the built-in prompt and loaded context files\. Can be combined with `--system-prompt`\. See \[Headless Mode\]\(\.\.\/features\/headless\) for examples\.)[ \t]*\|[ \t]*|\|[ \t]*`qwen -p "query" (?:--system-prompt "You are a terse reviewer\."|--append-system-prompt "Focus on concrete findings\.")`[ \t]*\|[ \t]*|\|?[ \t]*)$/i;
 const RELEASED_SYSTEM_PROMPT_EXACT_LINE =
   /^[ \t]*(?:['"](?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.(?: Can be combined with --(?:append-)?system-prompt\.)?['"],?|(?:\*[ \t]*)?The cross-session-stable prefix of the main-session system prompt(?:\s+—|\.)?)[ \t]*$/i;
 
@@ -227,11 +227,9 @@ function hasSystemPromptMention(text) {
   for (const rawLine of text.split('\n')) {
     const line = rawLine.replace(/\r$/, '');
     if (!SYSTEM_PROMPT_PHRASE.test(line)) continue;
-    if (RELEASED_SYSTEM_PROMPT_EXACT_LINE.test(line)) continue;
-    const tableMatch = RELEASED_SYSTEM_PROMPT_TABLE_ROW.exec(line);
     if (
-      tableMatch &&
-      !SYSTEM_PROMPT_PHRASE.test(line.slice(tableMatch[0].length))
+      RELEASED_SYSTEM_PROMPT_EXACT_LINE.test(line) ||
+      RELEASED_SYSTEM_PROMPT_TABLE_ROW.test(line)
     ) {
       continue;
     }

@@ -326,6 +326,12 @@ test('keeps docs mixed with helper files or Markdown off application tests', () 
     'github_ci_only',
   );
   assert.equal(
+    classifyChangedFiles([
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
+    ]),
+    'github_ci_only',
+  );
+  assert.equal(
     classifyChangedFiles(['docs/usage.md', 'packages/web-shell/README.md']),
     'github_ci_only',
   );
