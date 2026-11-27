@@ -73,7 +73,7 @@ describe('main CI failure resolver', () => {
         "github.event.workflow.name == 'SDK Java') || " +
         "((github.event.workflow_run.event == 'pull_request' || " +
         "github.event.workflow_run.event == 'pull_request_review') && " +
-        "github.event.workflow.name == 'Managed Agent gate'))) }}",
+        "github.event.workflow.name == 'Managed Agent gate')) }}",
     );
     expect(yml.permissions).toEqual({
       actions: 'read',
