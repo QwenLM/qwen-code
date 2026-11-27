@@ -8642,6 +8642,87 @@ describe('LlmChat', async () => {
       },
     );
 
+    it.each(['extra_body', 'samplingParams'] as const)(
+      'sizes the primary Hugging Face request from fixed messages in %s',
+      async (field) => {
+        const messages = [{ role: 'user', content: mongolianLine.repeat(270) }];
+        mockGeneratorConfig({ ...narrowPrimary, [field]: { messages } });
+        mockCompress(noop());
+        const declaration = {
+          functionDeclarations: [
+            {
+              name: 'read_report',
+              description: 'Read the report.',
+              parametersJsonSchema: { type: 'object', properties: {} },
+            },
+          ],
+        };
+        streamMock().mockResolvedValueOnce(textStream('completed'));
+
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Summarize the report.',
+              config: { tools: [declaration] },
+            },
+            'primary-fixed-messages',
+          ),
+        );
+
+        const config = streamMock().mock.calls[0][0].config;
+        const outputTokens = config?.maxOutputTokens ?? 0;
+        expect(outputTokens).toBeGreaterThan(4_000);
+        // The MiniMax tokenizer counts 32,029 input tokens with this tool.
+        expect(outputTokens + 32_029).toBeLessThanOrEqual(65_536);
+        expect(config?.tools).toEqual([declaration]);
+      },
+    );
+
+    it('retains a usable fixed-message budget for long separators and reuses measured input', async () => {
+      const text =
+        'Summarize this run of the partition loader and extract events that need follow-up.\n\n' +
+        Array.from(
+          { length: 1_050 },
+          (_, index) =>
+            '='.repeat(80) +
+            `\nPartition job ${index} completed for ledger-apne2-20261127 with no unexpected missing input records.\n`,
+        ).join('');
+      mockGeneratorConfig({
+        ...narrowPrimary,
+        extra_body: {
+          messages: [{ role: 'user', content: text }],
+          max_tokens: 32_000,
+        },
+      });
+      mockCompress(noop());
+      const measuredInput = 25_304;
+      streamMock().mockImplementation(async () =>
+        textStream('completed', {
+          promptTokenCount: measuredInput,
+          totalTokenCount: measuredInput + 5,
+        }),
+      );
+      for (let turn = 1; turn <= 2; turn++) {
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Generate the incident summary for this report replay.',
+            },
+            `fixed-partition-log-${turn}`,
+          ),
+        );
+      }
+
+      const first = streamMock().mock.calls[0][0].config?.maxOutputTokens ?? 0;
+      expect(first).toBeGreaterThan(4_000);
+      expect(first + measuredInput).toBeLessThanOrEqual(65_536);
+      expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
+        65_536 - measuredInput - 10_000,
+      );
+    });
+
     it.each([
       {
         name: 'fixed Khmer messages',

@@ -91,6 +91,7 @@ import type {
 } from './contentGenerator.js';
 import { getRequestModel, getSystemPromptModel } from './request-model.js';
 import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
+import { filterIsolatedModelOverrides } from './openaiContentGenerator/provider/utils.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
@@ -1029,16 +1030,16 @@ function openAIChatPromptSource(
   if (!model || config?.authType !== AuthType.USE_OPENAI) {
     return undefined;
   }
+  const extraBody = filterIsolatedModelOverrides(config.extra_body);
   const { messages, tools } = {
-    ...config.samplingParams,
-    ...config.extra_body,
+    ...filterIsolatedModelOverrides(config.samplingParams),
+    ...extraBody,
   };
   const rawMessages = Array.isArray(messages) ? messages : undefined;
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
   const generatedTools =
-    generation?.tools?.length &&
-    !Object.hasOwn(config.extra_body ?? {}, 'tools')
+    generation?.tools?.length && !Object.hasOwn(extraBody ?? {}, 'tools')
       ? generation.tools
       : undefined;
   return {
@@ -1086,7 +1087,42 @@ function estimateRawChatMessagesTokens(
     }
     return value;
   });
-  return estimateHuggingFaceUnpaddedTextTokens(text) + imageTokens;
+  let textTokens = estimateHuggingFaceUnpaddedTextTokens(text);
+  // Long repeated separators like log dividers use merged tokens.
+  for (const [separator] of text.matchAll(/([=_-])\1{7,}/g)) {
+    textTokens +=
+      Math.ceil(separator.length / 8) - Math.floor(separator.length / 2);
+  }
+  return textTokens + imageTokens;
+}
+
+async function prepareHuggingFacePromptTools(
+  promptSource: OpenAIChatPromptSource,
+  tools: GenerateContentConfig['tools'],
+  params: SendMessageParameters,
+): Promise<{ params: SendMessageParameters; toolTokens: number }> {
+  let wireTools = promptSource.tools;
+  if (promptSource.schemaCompliance && tools) {
+    // Resolve callable tools once so sizing and dispatch see the same declarations.
+    const declarations: Tool[] = [];
+    for (const tool of tools) {
+      declarations.push('tool' in tool ? await tool.tool() : tool);
+    }
+    const { convertLlmToolsToOpenAI } = await import(
+      './openaiContentGenerator/converter.js'
+    );
+    wireTools = await convertLlmToolsToOpenAI(
+      declarations,
+      promptSource.schemaCompliance,
+    );
+    params = { ...params, config: { ...params.config, tools: declarations } };
+  }
+  return {
+    params,
+    toolTokens: estimateHuggingFaceFallbackTextTokens(
+      JSON.stringify(wireTools) ?? '',
+    ),
+  };
 }
 
 /**
@@ -4632,26 +4668,39 @@ export class LlmChat {
               `count=${this.lastPromptTokenCount}`,
           );
         }
-        const clampedMaxOutputTokens = clampOutputTokensToWindow(
-          outputCeiling,
-          contextWindowForClamp,
-          promptTokensForClamp,
-        );
-        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
-        params = {
-          ...params,
-          config: {
-            ...params.config,
-            maxOutputTokens: clampedMaxOutputTokens,
-          },
-        };
+        const generation = primaryUsesHuggingFace
+          ? { ...this.generationConfig, ...params.config }
+          : undefined;
+        let primaryPromptSource = generation
+          ? openAIChatPromptSource(
+              cgConfigForThresholds,
+              budgetModel,
+              generation,
+            )
+          : undefined;
+        let rawToolTokens = 0;
+        if (primaryPromptSource?.messages) {
+          const prepared = await prepareHuggingFacePromptTools(
+            primaryPromptSource,
+            generation?.tools,
+            params,
+          );
+          if (prepared.params !== params) {
+            primaryPromptSource = {
+              ...primaryPromptSource,
+              tools: prepared.params.config?.tools,
+            };
+          }
+          params = prepared.params;
+          rawToolTokens = prepared.toolTokens;
+        }
         requestContents = this.getRequestHistoryForRoute(
           currentUserContent,
           requestModalities,
         );
         const usageAnchor = this.toolBudgetUsageAnchor;
         if (
-          primaryUsesHuggingFace &&
+          primaryPromptSource &&
           !promptCountIsEstimated &&
           usageAnchor?.routeKey === requestRouteKey &&
           usageAnchor.history.every(
@@ -4662,13 +4711,7 @@ export class LlmChat {
           // model or prompt supplied the usage. Check the successful dispatch.
           const usageRequest = this.dispatchedRequest;
           const usageConfig = usageRequest?.runtimeView?.contentGeneratorConfig;
-          const primaryPromptSource = openAIChatPromptSource(
-            cgConfigForThresholds,
-            budgetModel,
-            { ...this.generationConfig, ...params.config },
-          );
           if (
-            primaryPromptSource &&
             isHuggingFaceRouterUrl(usageConfig?.baseUrl) &&
             isDeepStrictEqual(
               primaryPromptSource,
@@ -4705,6 +4748,31 @@ export class LlmChat {
             };
           }
         }
+        if (primaryPromptSource?.messages) {
+          // Matched usage covers the complete fixed body.
+          promptTokensForClamp =
+            usageBackedPrompt?.tokens ??
+            Math.max(
+              promptTokensForClamp,
+              estimateRawChatMessagesTokens(
+                primaryPromptSource.messages,
+                imageTokenEstimate,
+              ) + rawToolTokens,
+            );
+        }
+        const clampedMaxOutputTokens = clampOutputTokensToWindow(
+          outputCeiling,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
+        params = {
+          ...params,
+          config: {
+            ...params.config,
+            maxOutputTokens: clampedMaxOutputTokens,
+          },
+        };
       }
     } catch (error) {
       if (userContentAdded) {
@@ -6926,28 +6994,11 @@ export class LlmChat {
       );
       let toolTokens = 0;
       if (promptSource && usagePromptTokens === undefined) {
-        let wireTools = promptSource.tools;
-        if (promptSource.schemaCompliance && tools) {
-          // Resolve callable tools once so sizing and dispatch see the same declarations.
-          const declarations: Tool[] = [];
-          for (const tool of tools) {
-            declarations.push('tool' in tool ? await tool.tool() : tool);
-          }
-          const { convertLlmToolsToOpenAI } = await import(
-            './openaiContentGenerator/converter.js'
-          );
-          wireTools = await convertLlmToolsToOpenAI(
-            declarations,
-            promptSource.schemaCompliance,
-          );
-          params = {
-            ...params,
-            config: { ...params.config, tools: declarations },
-          };
-        }
-        toolTokens = estimateHuggingFaceFallbackTextTokens(
-          JSON.stringify(wireTools) ?? '',
-        );
+        ({ params, toolTokens } = await prepareHuggingFacePromptTools(
+          promptSource,
+          tools,
+          params,
+        ));
       }
       if (promptSource?.messages) {
         promptTokensForClamp =
