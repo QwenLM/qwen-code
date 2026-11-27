@@ -86,6 +86,12 @@ describe('parseEventEpochHeader', () => {
     expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
   });
 
+  it('accepts the SDK token for a saved cursor with no paired epoch', () => {
+    const token = 'unpaired-cursor-epoch';
+    expect(parseEventEpochHeader(token)).toBe(token);
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalled();
+  });
+
   it('accepts underscores and a 64-char token (boundary)', () => {
     const raw = '_'.repeat(64);
     expect(parseEventEpochHeader(raw)).toBe(raw);

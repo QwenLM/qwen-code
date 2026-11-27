@@ -152,6 +152,15 @@ console.log(result.stopReason);
 subscription by default. Pass `{ resume: false }` to start a fresh subscription
 without sending `Last-Event-ID`.
 
+Persist the event id together with `session.eventEpoch`. A positive saved cursor
+without its epoch requests resynchronization on an epoch-aware daemon; older
+daemons continue numeric replay. Learning a different epoch resets an existing
+cursor without turning a live-only subscription into replay. After such a reset,
+an explicit `lastEventId` without `epoch` cannot advance beyond the cursor observed
+in the current epoch. Pass both `lastEventId` and `epoch` when intentionally seeking
+to a different cursor; explicit seeks within an unchanged epoch keep their normal
+behavior.
+
 When `createOrAttach()` is called with `modelServiceId`, the returned session
 client seeds its first event subscription with `Last-Event-ID: 0`. This replays
 the daemon ring from the oldest available event so adapters can observe
