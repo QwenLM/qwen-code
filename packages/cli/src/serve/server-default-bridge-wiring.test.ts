@@ -843,6 +843,20 @@ describe('createServeApp load admission factory injection', () => {
         javaUrl: 'invalid-url',
         error: /Invalid URL/,
       },
+      {
+        scenario: 'non-loopback Java URL',
+        requireAuth: true,
+        token: 'test-token',
+        javaUrl: 'https://example.com',
+        error: /Managed local Java URL must be a loopback HTTP origin/,
+      },
+      {
+        scenario: 'Java URL with non-root path',
+        requireAuth: true,
+        token: 'test-token',
+        javaUrl: 'http://127.0.0.1:8080/prefix',
+        error: /Managed local Java URL must be a loopback HTTP origin/,
+      },
     ])(
       'rejects invalid managed local Web settings before creating a monitor: $scenario',
       async ({ requireAuth, token, javaUrl, error }) => {

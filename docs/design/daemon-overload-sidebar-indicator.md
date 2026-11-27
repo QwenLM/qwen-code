@@ -113,6 +113,7 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | `docs/design/daemon-overload-sidebar-indicator.md`                                     | English design doc                                                |
 | `docs/design/daemon-overload-sidebar-indicator.zh-CN.md`                               | Chinese design doc                                                |
+| `packages/cli/src/serve/managed-local-web.ts`                                          | Export shared `parseManagedLocalJavaUrl` for pre-monitor check    |
 | `packages/cli/src/serve/routes/session.ts`                                             | Cold `worktree-restore` pre-disk overload check (warm unblocked)  |
 | `packages/cli/src/serve/routes/session-worktree-restore.test.ts`                       | Cold overload 503 & warm negative-control tests                   |
 | `packages/cli/src/serve/server.ts`                                                     | Default-bridge `loadAdmissionMonitor` ownership & disposal        |

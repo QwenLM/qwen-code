@@ -36,7 +36,7 @@
 
 ### 侧栏呈现
 
-`WebShellSidebar` 新增 `overloadPaused`、`overloadDetail` 与可选 `onOverloadRefused` prop。暂停期间：
+`WebShellSidebar` 新增可选 `overloadPaused`、`overloadDetail` 与 `onOverloadRefused` prop。暂停期间：
 
 - 新建任务 nav 行内、按钮上方渲染警示条：警告图标加 `sidebar.overloadPaused`（"系统过载 · 暂停新建"），`title`/`aria-label` 携带 `overloadDetail`。
 - 在 rail 模式下，折叠 rail 或打开非 Home 页面会隐藏 Home surface，此时同样的警示以图标形式放在始终可见的 rail 中，保留详情 tooltip 与无障碍标签。打开 Home 预览时隐藏该图标，改在预览内显示完整警示条；同一个 pause 不会同时显示两条可见警示。
@@ -113,6 +113,7 @@
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `docs/design/daemon-overload-sidebar-indicator.md`                                     | 英文设计文档                                                 |
 | `docs/design/daemon-overload-sidebar-indicator.zh-CN.md`                               | 中文设计文档                                                 |
+| `packages/cli/src/serve/managed-local-web.ts`                                          | 导出共享 `parseManagedLocalJavaUrl` 供 monitor 创建前校验    |
 | `packages/cli/src/serve/routes/session.ts`                                             | 冷 `worktree-restore` 改磁盘前过载预检（warm 会话不受阻断）  |
 | `packages/cli/src/serve/routes/session-worktree-restore.test.ts`                       | 冷恢复过载 503 与 warm 负向对照测试                          |
 | `packages/cli/src/serve/server.ts`                                                     | 默认 bridge `loadAdmissionMonitor` 所有权与释放              |

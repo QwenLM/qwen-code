@@ -122,6 +122,7 @@ import {
   forwardManagedTerminalUpgrade,
   isManagedTerminalUpgradePath,
   mountManagedLocalWeb,
+  parseManagedLocalJavaUrl,
   type ManagedLocalWebOptions,
 } from './managed-local-web.js';
 import {
@@ -1472,7 +1473,7 @@ export function createServeApp(
     }
   }
   const managedLocalJava = deps.managedLocalWeb
-    ? new URL(deps.managedLocalWeb.javaUrl)
+    ? parseManagedLocalJavaUrl(deps.managedLocalWeb.javaUrl)
     : undefined;
   const loadAdmissionMonitor =
     !deps.bridge && !injectedWorkspaceRegistry && opts.loadAdmission !== false
@@ -2438,8 +2439,8 @@ export function createServeApp(
   // request gets the same 403 envelope the `denyBrowserOriginCors` wall
   // returned, so the no-`--allow-origin` posture is unchanged, and there is
   // one middleware to reason about instead of two interchangeable ones.
-  // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
-  // The tokenless embedded-caller restrictions run before bridge construction.
+  // Pattern parsing and tokenless embedded-caller restrictions run before
+  // bridge construction so invalid origins reject before allocating a monitor.
   // One CORS middleware for both deployments, over a set that can change.
   // With no `--allow-origin` the behavior is byte-for-byte the
   // `denyBrowserOriginCors` wall this replaces — every Origin-bearing request

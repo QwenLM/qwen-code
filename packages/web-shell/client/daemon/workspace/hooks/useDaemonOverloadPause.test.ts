@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { renderHook } from '@testing-library/react';
+import { cleanup, renderHook } from '@testing-library/react';
 import type { DaemonStatusReport } from '@qwen-code/sdk/daemon';
 import {
   OVERLOAD_POLL_INTERVAL_MS,
@@ -58,6 +58,7 @@ describe('useDaemonOverloadPause', () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     Object.defineProperty(document, 'hidden', {
       value: false,

@@ -88,12 +88,13 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // that PR's component code reaches the document entry and the forbidden-input
 // guard still passes. Re-track against the 2,157,683-byte measurement with the
 // same margins: 2,158,396 / 2,159,396.
-// Merging the overload-indicator slice (#18054) adds two catalog entries to
-// EN and ZH-CN (`sidebar.overloadPaused` and `sidebar.overloadDetail`; zh-TW
-// and RU are transcript-stubbed), bringing the rebuilt document-export
-// renderer on the merged tree to 2,158,115 bytes (+432 bytes, component CSS
-// 1,907,030 bytes). Re-track with the same margins: 2,158,828 / 2,159,828.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_828;
+// Merging the overload-indicator slice (#18054) onto main 099ce50da2 adds two
+// catalog entries to EN and ZH-CN (`sidebar.overloadPaused` and
+// `sidebar.overloadDetail`; zh-TW and RU are transcript-stubbed), bringing
+// the rebuilt document-export renderer on the merged tree to 2,158,161 bytes
+// (component CSS 1,907,921 bytes). Re-track with the same margins:
+// 2,158,874 / 2,159,874.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_874;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -226,8 +227,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_828;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// With the merged 2,158,115-byte measurement, the same coupled expression
-// yields 2,159,828 (1,713 above it), retaining 713 bytes to the warning.
+// With the merged 2,158,161-byte measurement, the same coupled expression
+// yields 2,159,874 (1,713 above it), retaining 713 bytes to the warning.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against

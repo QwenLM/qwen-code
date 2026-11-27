@@ -718,4 +718,34 @@ describe('POST /session/:id/worktree-restore', () => {
     expect(restoreMocks.restore).toHaveBeenCalledTimes(1);
     expect(fixture.loadSession).toHaveBeenCalledTimes(1);
   });
+
+  it('allows a cold worktree restore when load admission is enabled and healthy', async () => {
+    const fixture = makeFixture({
+      primary: true,
+      getLoadAdmissionSnapshot: () => ({
+        enabled: true,
+        overloaded: false,
+        reason: null,
+        loadRatio: 0.4,
+        eventLoopLagP99Ms: 12,
+        sampledAtMs: Date.now(),
+      }),
+    });
+    const id = randomUUID();
+    const binding = await fixture.seed(id, false);
+    await fixture.markOwner(id);
+    restoreMocks.restore.mockResolvedValueOnce({
+      session: binding,
+      branch: '',
+      reconstructed: true,
+    });
+
+    const response = await request(fixture.app)
+      .post(`/session/${id}/worktree-restore`)
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(restoreMocks.restore).toHaveBeenCalledTimes(1);
+    expect(fixture.loadSession).toHaveBeenCalledTimes(1);
+  });
 });

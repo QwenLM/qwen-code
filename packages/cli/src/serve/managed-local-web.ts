@@ -174,11 +174,8 @@ const RESPONSE_HEADERS = [
 const ARTIFACT_CONTENT =
   /^\/v1\/agents\/sessions\/[^/?]+\/artifacts\/[^/?]+\/content$/u;
 
-export function mountManagedLocalWeb(
-  app: Application,
-  options: ManagedLocalWebOptions,
-): void {
-  const java = new URL(options.javaUrl);
+export function parseManagedLocalJavaUrl(javaUrl: string): URL {
+  const java = new URL(javaUrl);
   if (
     java.protocol !== 'http:' ||
     !isLoopbackAddress(java.hostname) ||
@@ -190,6 +187,14 @@ export function mountManagedLocalWeb(
   ) {
     throw new Error('Managed local Java URL must be a loopback HTTP origin.');
   }
+  return java;
+}
+
+export function mountManagedLocalWeb(
+  app: Application,
+  options: ManagedLocalWebOptions,
+): void {
+  const java = parseManagedLocalJavaUrl(options.javaUrl);
   app.get('/managed/boot', (_req, res) => {
     res.set('Cache-Control', 'no-store').json({
       mode: 'managed',
