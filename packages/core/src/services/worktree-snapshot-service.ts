@@ -158,6 +158,13 @@ interface DisposableIgnoredMatcher {
   preservedDirs: ReadonlySet<string>;
   /** Strict ancestors of `preservedDirs`, precomputed for O(1) traversal. */
   preservedAncestors: ReadonlySet<string>;
+  /**
+   * True when verification could not inspect a nested repository's git store
+   * dependencies (e.g. `objects/<2hex>/` became `0111`/unreadable after
+   * capture). Forces `verifyRestoredWorktreeSnapshot` to return `false` so
+   * cleanup preserves the checkout fail-closed.
+   */
+  unverifiableDependency: boolean;
 }
 
 function addStrictAncestors(target: Set<string>, norm: string): void {
@@ -769,13 +776,17 @@ async function readSnapshotExclusions(
       if (relativePath.length > 0) untrackedRepoDirs.push(relativePath);
     }
   }
-  const { neverDirs, preservedDirs, preservedAncestors } =
-    await boundedSnapshotExclusions(
-      worktreePath,
-      ignoredEntries,
-      untrackedRepoDirs,
-      archived,
-    );
+  const {
+    neverDirs,
+    preservedDirs,
+    preservedAncestors,
+    unverifiableDependency,
+  } = await boundedSnapshotExclusions(
+    worktreePath,
+    ignoredEntries,
+    untrackedRepoDirs,
+    archived,
+  );
   const dirs = new Set<string>();
   const files = new Set<string>();
   for (const entry of ignoredEntries) {
@@ -791,6 +802,7 @@ async function readSnapshotExclusions(
     neverDirs,
     preservedDirs,
     preservedAncestors,
+    unverifiableDependency,
   };
   if (checkProtectedCaseVariants) {
     await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
@@ -932,13 +944,92 @@ function unquoteGitPath(line: string): string | undefined {
   }
 }
 
+interface CachedDirEntries {
+  list: string[];
+  set: Set<string>;
+}
+
+/**
+ * Resolve the actual on-disk directory entry spelling for `seg` inside
+ * `parentDir` after `lstat(parentDir/seg)` has succeeded.
+ *
+ * - On case-sensitive volumes, `entries.set.has(seg)` matches in O(1) so
+ *   distinct entries differing only in case (`Foo` vs `foo`) are never
+ *   conflated.
+ * - On case-insensitive or Unicode-normalizing volumes (e.g. APFS, NTFS), an
+ *   alias such as `.QWEN/TMP/git-objects` is mapped to the exact directory
+ *   entry spelling (`.qwen/tmp/git-objects`) that `readdir` / `tar` observe.
+ */
+async function resolveActualEntryName(
+  parentDir: string,
+  seg: string,
+  candidateStat: import('node:fs').Stats,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
+): Promise<string> {
+  let entries = dirEntriesCache.get(parentDir);
+  if (entries === undefined) {
+    const list = await fs.readdir(parentDir).catch(() => null);
+    entries = list === null ? null : { list, set: new Set(list) };
+    dirEntriesCache.set(parentDir, entries);
+  }
+  if (entries === null) {
+    if (!candidateStat.isSymbolicLink()) {
+      const nativePath = await fs
+        .realpath(path.join(parentDir, seg))
+        .catch(() => undefined);
+      if (nativePath !== undefined) {
+        const base = path.basename(nativePath);
+        if (base.length > 0) return base;
+      }
+    }
+    return seg;
+  }
+  if (entries.set.has(seg)) return seg;
+  const targetFolded = seg.normalize('NFC').toLowerCase();
+  const candidates = entries.list.filter(
+    (entry) => entry.normalize('NFC').toLowerCase() === targetFolded,
+  );
+  if (candidates.length === 1) return candidates[0]!;
+  for (const entry of candidates) {
+    const entryStat = await fs
+      .lstat(path.join(parentDir, entry))
+      .catch(() => undefined);
+    if (
+      entryStat !== undefined &&
+      entryStat.dev === candidateStat.dev &&
+      entryStat.ino === candidateStat.ino
+    ) {
+      return entry;
+    }
+  }
+  if (candidateStat.ino !== 0) {
+    let matched: string | undefined;
+    for (const entry of entries.list) {
+      const entryStat = await fs
+        .lstat(path.join(parentDir, entry))
+        .catch(() => undefined);
+      if (
+        entryStat !== undefined &&
+        entryStat.dev === candidateStat.dev &&
+        entryStat.ino === candidateStat.ino
+      ) {
+        if (matched !== undefined) return seg;
+        matched = entry;
+      }
+    }
+    if (matched !== undefined) return matched;
+  }
+  return seg;
+}
+
 /**
  * Resolve `(baseDir, rawTarget)` following POSIX `path_resolution(7)` order:
  * never collapse `..` lexically before following preceding symlinks (so
- * `route/../refs` resolves `route` first and then ascends via `..`). Records
- * every in-tree symlink, resolved target, and in-tree directory anchor stepped
- * through before `..`, plus whether resolution touches top-level `.git/` or
- * the parent worktree's own admin dir.
+ * `route/../refs` resolves `route` first and then ascends via `..`). Each
+ * traversed segment is canonicalized to its actual on-disk directory entry
+ * spelling so case-insensitive aliases (e.g. `.QWEN/TMP/git-objects` on APFS)
+ * match `readdir`/`tar` keys without conflating distinct files on
+ * case-sensitive volumes.
  */
 async function tracePathResolution(
   baseDir: string,
@@ -947,6 +1038,7 @@ async function tracePathResolution(
   resolvedWorktree: string,
   realParentAdminDir: string | undefined,
   optional: boolean,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
 ): Promise<PathResolutionTrace> {
   const inTreePathSet = new Set<string>();
   const inTreeDirAnchorSet = new Set<string>();
@@ -1046,8 +1138,18 @@ async function tracePathResolution(
         unreadable: !(optional && missing),
       };
     }
+    const actualSeg = await resolveActualEntryName(
+      built,
+      seg,
+      stat,
+      dirEntriesCache,
+    );
+    const actualCandidate =
+      built === currentRoot
+        ? `${currentRoot}${actualSeg}`
+        : `${built}${path.sep}${actualSeg}`;
     if (stat.isSymbolicLink()) {
-      recordCandidate(candidate);
+      recordCandidate(actualCandidate);
       hops += 1;
       if (hops > MAX_SYMLINK_HOPS) {
         return {
@@ -1061,7 +1163,7 @@ async function tracePathResolution(
       }
       let linkTarget: string;
       try {
-        linkTarget = await fs.readlink(candidate);
+        linkTarget = await fs.readlink(actualCandidate);
       } catch {
         return {
           resolvedPath: undefined,
@@ -1091,7 +1193,7 @@ async function tracePathResolution(
         unreadable: !optional,
       };
     }
-    built = candidate;
+    built = actualCandidate;
     lastStat = stat;
   }
 
@@ -1137,6 +1239,7 @@ async function traceGitStoreDependencies(
   realWorktree: string,
   resolvedWorktree: string,
   realParentAdminDir: string | undefined,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
 ): Promise<GitStoreDependencyTrace> {
   const inTreePathSet = new Set<string>();
   const inTreeDirAnchorSet = new Set<string>();
@@ -1180,6 +1283,7 @@ async function traceGitStoreDependencies(
           resolvedWorktree,
           realParentAdminDir,
           false,
+          dirEntriesCache,
         );
         absorb(trace);
         if (trace.resolvedPath !== undefined) {
@@ -1209,6 +1313,7 @@ async function traceGitStoreDependencies(
       resolvedWorktree,
       realParentAdminDir,
       optional,
+      dirEntriesCache,
     );
     absorb(trace);
   }
@@ -1220,6 +1325,7 @@ async function traceGitStoreDependencies(
     resolvedWorktree,
     realParentAdminDir,
     false,
+    dirEntriesCache,
   );
   absorb(objectsTrace);
 
@@ -1240,6 +1346,7 @@ async function traceGitStoreDependencies(
       resolvedWorktree,
       realParentAdminDir,
       optional,
+      dirEntriesCache,
     );
     absorb(trace);
     if (scanTree && trace.resolvedPath !== undefined) {
@@ -1262,6 +1369,7 @@ async function traceGitStoreDependencies(
       resolvedWorktree,
       realParentAdminDir,
       true,
+      dirEntriesCache,
     );
     absorb(alternatesTrace);
     if (alternatesTrace.resolvedPath === undefined) return;
@@ -1291,6 +1399,7 @@ async function traceGitStoreDependencies(
         resolvedWorktree,
         realParentAdminDir,
         false,
+        dirEntriesCache,
       );
       absorb(altTrace);
       if (altTrace.resolvedPath !== undefined) {
@@ -1337,6 +1446,7 @@ async function resolveGitFileTargets(
   childPath: string,
   realWorktree: string,
   resolvedWorktree: string,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
   realParentAdminDir?: string,
 ): Promise<ResolvedGitFileTargets | undefined> {
   const marker = await fs
@@ -1355,6 +1465,7 @@ async function resolveGitFileTargets(
     resolvedWorktree,
     realParentAdminDir,
     true,
+    dirEntriesCache,
   );
   const realGitDir = gitDirTrace.resolvedPath;
   if (realGitDir === undefined) {
@@ -1385,6 +1496,7 @@ async function resolveGitFileTargets(
     resolvedWorktree,
     realParentAdminDir,
     true,
+    dirEntriesCache,
   );
   const commonDirRaw =
     commonDirFileTrace.resolvedPath !== undefined
@@ -1423,6 +1535,7 @@ async function resolveGitFileTargets(
       resolvedWorktree,
       realParentAdminDir,
       false,
+      dirEntriesCache,
     );
     realCommonDir = commonDirTargetTrace.resolvedPath;
   } else {
@@ -1470,6 +1583,7 @@ async function resolveGitFileTargets(
       realWorktree,
       resolvedWorktree,
       realParentAdminDir,
+      dirEntriesCache,
     );
     for (const p of storeTrace.deps.paths) inTreePathSet.add(p);
     for (const a of storeTrace.deps.dirAnchors) inTreeDirAnchorSet.add(a);
@@ -1498,17 +1612,22 @@ async function resolveGitFileTargets(
  * Extract any in-tree paths and directory anchors required to resolve
  * `childPath/.git` and its object store (`gitdir` symlinks, `commondir`,
  * `objects/` including symlinked pack/loose files, `refs/`, `alternates`,
- * etc.) that lie inside `worktreePath` (outside top-level `.git/`). Works for
- * both `.git` files and `.git` directories, and is called during verification
- * even when the archive already carries `childPath/` so stores, symlinks, or
- * anchors inside ignored dirs stay unexcluded during final verification.
+ * etc.) that lie inside `worktreePath` (outside top-level `.git/`), AND report
+ * `unverifiable: true` whenever the store could not be enumerated or resolved
+ * (e.g. `objects/<2hex>/` became `0111` after capture) so pre-removal
+ * verification fails closed instead of deleting an unverified checkout.
  */
 async function resolveInTreeGitStorePaths(
   childPath: string,
   realWorktree: string,
   resolvedWorktree: string,
-): Promise<InTreeGitDependencies> {
-  const empty: InTreeGitDependencies = { paths: [], dirAnchors: [] };
+  realParentAdminDir: string | undefined,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
+): Promise<{ deps: InTreeGitDependencies; unverifiable: boolean }> {
+  const empty = {
+    deps: { paths: [], dirAnchors: [] } as InTreeGitDependencies,
+    unverifiable: false,
+  };
   const marker = await fs
     .lstat(path.join(childPath, '.git'))
     .catch(() => undefined);
@@ -1518,21 +1637,42 @@ async function resolveInTreeGitStorePaths(
       .realpath(path.join(childPath, '.git'))
       .catch(() => undefined);
     if (realGitDir === undefined) return empty;
+    const looksLikeGitRepo = await fs.lstat(path.join(realGitDir, 'HEAD')).then(
+      () => true,
+      () => false,
+    );
+    if (!looksLikeGitRepo) return empty;
     const storeTrace = await traceGitStoreDependencies(
       realGitDir,
       realGitDir,
       realWorktree,
       resolvedWorktree,
-      undefined,
+      realParentAdminDir,
+      dirEntriesCache,
     );
-    return storeTrace.deps;
+    return {
+      deps: storeTrace.deps,
+      unverifiable:
+        storeTrace.unreadable ||
+        storeTrace.hitsParentAdminDir ||
+        storeTrace.hitsUnarchivableRoot,
+    };
   }
   const targets = await resolveGitFileTargets(
     childPath,
     realWorktree,
     resolvedWorktree,
+    dirEntriesCache,
+    realParentAdminDir,
   );
-  return targets?.deps ?? empty;
+  if (targets === undefined) return empty;
+  return {
+    deps: targets.deps,
+    unverifiable:
+      targets.unreadableDependency ||
+      targets.hitsParentAdminDir ||
+      (targets.hitsUnarchivableRoot && !targets.gitDirInTopLevelDotGit),
+  };
 }
 
 /**
@@ -1606,6 +1746,7 @@ async function classifyNestedCheckout(
   realWorktree: string,
   resolvedWorktree: string,
   realParentAdminDir: string | undefined,
+  dirEntriesCache: Map<string, CachedDirEntries | null>,
 ): Promise<NestedCheckoutDisposition> {
   const marker = await fs
     .lstat(path.join(childPath, '.git'))
@@ -1636,6 +1777,7 @@ async function classifyNestedCheckout(
       realWorktree,
       resolvedWorktree,
       realParentAdminDir,
+      dirEntriesCache,
     );
     if (
       storeTrace.hitsParentAdminDir ||
@@ -1654,6 +1796,7 @@ async function classifyNestedCheckout(
     childPath,
     realWorktree,
     resolvedWorktree,
+    dirEntriesCache,
     realParentAdminDir,
   );
   if (targets === undefined) {
@@ -1777,16 +1920,19 @@ async function boundedSnapshotExclusions(
   neverDirs: ReadonlySet<string>;
   preservedDirs: ReadonlySet<string>;
   preservedAncestors: ReadonlySet<string>;
+  unverifiableDependency: boolean;
 }> {
   const realWorktree = await fs
     .realpath(worktreePath)
     .catch(() => path.resolve(worktreePath));
   const resolvedWorktree = path.resolve(worktreePath);
   const realParentAdminDir = await resolveWorktreeAdminDir(worktreePath);
+  const dirEntriesCache = new Map<string, CachedDirEntries | null>();
   const neverDirs = new Set<string>();
   const preservedDirs = new Set<string>();
   const preservedAncestors = new Set<string>();
   const handledCheckouts = new Set<string>();
+  let unverifiableDependency = false;
   const preserve = (rel: string): void => {
     const norm = normalizeRel(rel).replace(/\/+$/, '');
     if (norm.length === 0 || preservedDirs.has(norm)) return;
@@ -1802,6 +1948,13 @@ async function boundedSnapshotExclusions(
   const applyDeps = (deps: InTreeGitDependencies): void => {
     for (const p of deps.paths) preserve(p);
     for (const a of deps.dirAnchors) preserveAnchor(a);
+  };
+  const applyVerifiedStorePaths = (resolved: {
+    deps: InTreeGitDependencies;
+    unverifiable: boolean;
+  }): void => {
+    if (resolved.unverifiable) unverifiableDependency = true;
+    applyDeps(resolved.deps);
   };
 
   // Pre-index ignored entries into O(depth)/O(1) sets so `.qwen/tmp/*` with
@@ -1846,11 +1999,13 @@ async function boundedSnapshotExclusions(
       handledCheckouts.add(checkoutRel);
       if (archived?.directories.has(`${checkoutRel}/`)) {
         preserve(checkoutRel);
-        applyDeps(
+        applyVerifiedStorePaths(
           await resolveInTreeGitStorePaths(
             path.join(worktreePath, checkoutRel),
             realWorktree,
             resolvedWorktree,
+            realParentAdminDir,
+            dirEntriesCache,
           ),
         );
         continue;
@@ -1861,6 +2016,7 @@ async function boundedSnapshotExclusions(
         realWorktree,
         resolvedWorktree,
         realParentAdminDir,
+        dirEntriesCache,
       );
       if (disposition.kind === 'archive') {
         preserve(checkoutRel);
@@ -1896,11 +2052,13 @@ async function boundedSnapshotExclusions(
       const relative = `${childRel}/`;
       handledCheckouts.add(childRel);
       if (archived?.directories.has(relative)) {
-        applyDeps(
+        applyVerifiedStorePaths(
           await resolveInTreeGitStorePaths(
             childPath,
             realWorktree,
             resolvedWorktree,
+            realParentAdminDir,
+            dirEntriesCache,
           ),
         );
         continue;
@@ -1911,6 +2069,7 @@ async function boundedSnapshotExclusions(
         realWorktree,
         resolvedWorktree,
         realParentAdminDir,
+        dirEntriesCache,
       );
       if (disposition.kind === 'excludable-external') {
         neverDirs.add(childRel);
@@ -1934,11 +2093,13 @@ async function boundedSnapshotExclusions(
     if (handledCheckouts.has(repoRel)) continue;
     const repoPath = path.join(worktreePath, repoRel);
     if (archived?.directories.has(`${repoRel}/`)) {
-      applyDeps(
+      applyVerifiedStorePaths(
         await resolveInTreeGitStorePaths(
           repoPath,
           realWorktree,
           resolvedWorktree,
+          realParentAdminDir,
+          dirEntriesCache,
         ),
       );
       continue;
@@ -1949,17 +2110,24 @@ async function boundedSnapshotExclusions(
       realWorktree,
       resolvedWorktree,
       realParentAdminDir,
+      dirEntriesCache,
     );
     if (disposition.kind === 'refuse-external') {
       if (archived === undefined) {
         throw new Error(`Worktree snapshot: ${disposition.reason}`);
       }
+      unverifiableDependency = true;
     } else if (disposition.kind === 'archive') {
       applyDeps(disposition.deps);
     }
   }
 
-  return { neverDirs, preservedDirs, preservedAncestors };
+  return {
+    neverDirs,
+    preservedDirs,
+    preservedAncestors,
+    unverifiableDependency,
+  };
 }
 
 export async function verifyRestoredWorktreeSnapshot(options: {
@@ -1975,6 +2143,7 @@ export async function verifyRestoredWorktreeSnapshot(options: {
   const matcher = await readSnapshotExclusions(options.worktreePath, {
     archived: knownPaths,
   });
+  if (matcher.unverifiableDependency) return false;
   return checkoutMatchesCapture(
     options.worktreePath,
     options.snapshotPath,

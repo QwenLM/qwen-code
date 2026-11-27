@@ -57,20 +57,35 @@ const fsProbe = vi.hoisted(() => ({
   active: false,
   lstat: 0,
   readdir: 0,
+  /** When set, simulates a case-insensitive volume mapping `.QWEN`/`TMP` to `.qwen`/`tmp` on `lstat`. */
+  caseAliasRoot: undefined as string | undefined,
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    lstat: (...args: Parameters<typeof actual.lstat>) => {
+    lstat: ((...args: Parameters<typeof actual.lstat>) => {
+      const [rawTarget, ...rest] = args;
+      let target = rawTarget;
+      if (
+        fsProbe.caseAliasRoot !== undefined &&
+        typeof target === 'string' &&
+        target.startsWith(fsProbe.caseAliasRoot)
+      ) {
+        const suffix = target.slice(fsProbe.caseAliasRoot.length);
+        const mapped = suffix
+          .replace(`${path.sep}.QWEN`, `${path.sep}.qwen`)
+          .replace(`${path.sep}TMP`, `${path.sep}tmp`);
+        target = `${fsProbe.caseAliasRoot}${mapped}`;
+      }
       if (
         fsProbe.active &&
-        String(args[0]).includes(`${path.sep}.qwen${path.sep}tmp`)
+        String(target).includes(`${path.sep}.qwen${path.sep}tmp`)
       ) {
         fsProbe.lstat += 1;
       }
-      return actual.lstat(...args);
-    },
+      return actual.lstat(target, ...rest);
+    }) as typeof actual.lstat,
     readdir: ((...args: Parameters<typeof actual.readdir>) => {
       if (
         fsProbe.active &&
@@ -1752,6 +1767,303 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       /nested checkout vendor\/inner depends on unreadable git store state/,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'canonicalizes case-aliased symlink paths (e.g. .QWEN/TMP/git-objects and .QWEN/TMP/*.pack on case-insensitive APFS) to actual on-disk spelling',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      // Shape A (via Part B `.qwen/worktrees/`): external `objects/` symlinked
+      // through uppercase `.QWEN/TMP/git-objects`.
+      const extGitDirA = path.join(root, 'ext-git-case-alias-a');
+      const innerA = path.join(worktree, '.qwen', 'worktrees', 'inner-alias');
+      await fs.mkdir(innerA, { recursive: true });
+      git(
+        innerA,
+        'init',
+        '-q',
+        '-b',
+        'main',
+        `--separate-git-dir=${extGitDirA}`,
+      );
+      git(innerA, 'config', 'user.email', 't@e.com');
+      git(innerA, 'config', 'user.name', 't');
+      git(innerA, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(innerA, 'old.txt'), 'case-alias-a\n');
+      git(innerA, 'add', '.');
+      git(innerA, 'commit', '-qm', 'c1', '--no-verify');
+      const movedObjects = path.join(worktree, '.qwen', 'tmp', 'git-objects');
+      await fs.mkdir(path.dirname(movedObjects), { recursive: true });
+      await fs.rename(path.join(extGitDirA, 'objects'), movedObjects);
+      await fs.symlink(
+        path.join(worktree, '.QWEN', 'TMP', 'git-objects'),
+        path.join(extGitDirA, 'objects'),
+      );
+
+      // Shape B (via Part C `untrackedRepoDirs` `vendor/inner`): single `.pack`
+      // file symlinked through uppercase `.QWEN/TMP/<packName>`.
+      const extGitDirB = path.join(root, 'ext-git-case-alias-b');
+      const innerB = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(innerB, { recursive: true });
+      git(
+        innerB,
+        'init',
+        '-q',
+        '-b',
+        'main',
+        `--separate-git-dir=${extGitDirB}`,
+      );
+      git(innerB, 'config', 'user.email', 't@e.com');
+      git(innerB, 'config', 'user.name', 't');
+      git(innerB, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(innerB, 'old.txt'), 'case-alias-b\n');
+      git(innerB, 'add', '.');
+      git(innerB, 'commit', '-qm', 'c1', '--no-verify');
+      git(innerB, 'repack', '-ad', '-q');
+      const packDirB = path.join(extGitDirB, 'objects', 'pack');
+      const packNameB = (await fs.readdir(packDirB)).find((f) =>
+        f.endsWith('.pack'),
+      )!;
+      const movedPackB = path.join(worktree, '.qwen', 'tmp', packNameB);
+      await fs.rename(path.join(packDirB, packNameB), movedPackB);
+      await fs.symlink(
+        path.join(worktree, '.QWEN', 'TMP', packNameB),
+        path.join(packDirB, packNameB),
+      );
+
+      const blobs = path.join(worktree, '.qwen', 'tmp', 'blobs');
+      await fs.mkdir(blobs, { recursive: true });
+      await fs.writeFile(path.join(blobs, 'scratch.bin'), 'cache\n');
+
+      const realWt = await fs.realpath(worktree);
+      fsProbe.caseAliasRoot = realWt;
+      try {
+        const { snapshotPath, metaPath, checkoutMatchesCapture } =
+          await captureWorktreeSnapshot({
+            worktreePath: worktree,
+            snapshotDir,
+            meta: meta(),
+          });
+        expect(checkoutMatchesCapture).toBe(true);
+
+        const members: string[] = [];
+        await tar.t({
+          file: snapshotPath,
+          onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+        });
+        expect(
+          members.some((m) => m.startsWith('.qwen/tmp/git-objects/')),
+        ).toBe(true);
+        expect(members).toContain(`.qwen/tmp/${packNameB}`);
+        expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(
+          false,
+        );
+
+        const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+        expect(
+          await verifyRestoredWorktreeSnapshot({
+            worktreePath: worktree,
+            snapshotPath,
+            meta: savedMeta,
+          }),
+        ).toBe(true);
+      } finally {
+        fsProbe.caseAliasRoot = undefined;
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves exact case distinction on case-sensitive volumes when sibling entries differ only in case',
+    async (ctx) => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const tmpDir = path.join(worktree, '.qwen', 'tmp');
+      await fs.mkdir(tmpDir, { recursive: true });
+      await fs.writeFile(path.join(tmpDir, 'CaseProbe'), 'upper\n');
+      const isCaseInsensitive = await fs
+        .lstat(path.join(tmpDir, 'caseprobe'))
+        .then(
+          () => true,
+          () => false,
+        );
+      await fs.rm(path.join(tmpDir, 'CaseProbe'));
+      if (isCaseInsensitive) ctx.skip();
+
+      const extGitDir = path.join(root, 'ext-git-case-sensitive');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'cs-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      git(inner, 'repack', '-ad', '-q');
+
+      const packDir = path.join(extGitDir, 'objects', 'pack');
+      const packName = (await fs.readdir(packDir)).find((f) =>
+        f.endsWith('.pack'),
+      )!;
+      const upperTarget = path.join(tmpDir, 'TargetPack.pack');
+      const lowerDecoy = path.join(tmpDir, 'targetpack.pack');
+      await fs.rename(path.join(packDir, packName), upperTarget);
+      await fs.writeFile(lowerDecoy, 'unrelated-cache-decoy\n');
+      await fs.symlink(upperTarget, path.join(packDir, packName));
+
+      const { snapshotPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members).toContain('.qwen/tmp/TargetPack.pack');
+      expect(members).not.toContain('.qwen/tmp/targetpack.pack');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves .QWEN/TMP/git-objects on a real case-insensitive volume so restored git show succeeds',
+    async (ctx) => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const probeDir = path.join(worktree, '.qwen', 'tmp');
+      await fs.mkdir(probeDir, { recursive: true });
+      const isCaseInsensitive = await fs
+        .lstat(path.join(worktree, '.QWEN', 'TMP'))
+        .then(
+          () => true,
+          () => false,
+        );
+      if (!isCaseInsensitive) ctx.skip();
+
+      const extGitDir = path.join(root, 'ext-git-real-apfs-alias');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'real-apfs-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2', '--no-verify');
+
+      const movedObjects = path.join(worktree, '.qwen', 'tmp', 'git-objects');
+      await fs.rename(path.join(extGitDir, 'objects'), movedObjects);
+      await fs.symlink(
+        path.join(worktree, '.QWEN', 'TMP', 'git-objects'),
+        path.join(extGitDir, 'objects'),
+      );
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'vendor'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(git(inner, 'cat-file', '-t', 'HEAD^{commit}')).toBe('commit');
+      expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe('real-apfs-v1');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'returns false from verifyRestoredWorktreeSnapshot when an external objects/<2hex>/ dir becomes 0111 after capture',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extGitDir = path.join(root, 'ext-git-0111-verify');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'secret-history-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      const blobOid = git(inner, 'rev-parse', `${firstCommit}:old.txt`);
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2', '--no-verify');
+
+      const fanoutDir = path.join(extGitDir, 'objects', blobOid.slice(0, 2));
+      const origLoose = path.join(fanoutDir, blobOid.slice(2));
+      const tmpCopy = path.join(worktree, '.qwen', 'tmp', `obj-${blobOid}`);
+      await fs.mkdir(path.dirname(tmpCopy), { recursive: true });
+      await fs.copyFile(origLoose, tmpCopy);
+
+      // Capture while `origLoose` is still a regular file inside `extGitDir`.
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+
+      // After capture, swap `origLoose` to a symlink pointing into ignored
+      // `.qwen/tmp/` and make its fan-out dir execute-only (`0111`): git can
+      // still read `old.txt`, so pre-removal verification MUST fail closed.
+      await fs.rm(origLoose);
+      await fs.symlink(tmpCopy, origLoose);
+      await fs.chmod(fanoutDir, 0o111);
+      try {
+        expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe(
+          'secret-history-v1',
+        );
+        expect(
+          await verifyRestoredWorktreeSnapshot({
+            worktreePath: worktree,
+            snapshotPath,
+            meta: savedMeta,
+          }),
+        ).toBe(false);
+      } finally {
+        await fs.chmod(fanoutDir, 0o700);
+      }
+    },
+  );
 
   it.each(['.qwen/tmp/*\n', ''])(
     'refuses capture when .qwen/tmp itself is a detached external linked worktree under ignore rule %j',

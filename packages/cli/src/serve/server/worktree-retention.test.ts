@@ -3868,6 +3868,105 @@ describe('worktree retention with real repositories', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'preserves the worktree when an external objects/<2hex>/ dir becomes 0111 and links into .qwen/tmp/ after capture',
+    async () => {
+      const primary = makeRetentionRepo(root, 'primary');
+      fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
+      git(primary.repo, primary.home, 'add', '.gitignore');
+      git(
+        primary.repo,
+        primary.home,
+        'commit',
+        '-qm',
+        'ignore-qwen-tmp',
+        '--no-verify',
+      );
+      primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+      configureRetention(primary, 1);
+
+      const oldest = await makeRetainedSession(primary, {
+        slug: 'post-capture-0111-old',
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(primary, {
+        slug: 'post-capture-0111-new',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+
+      const extGitDir = path.join(root, 'ext-git-post-capture-0111');
+      const inner = path.join(oldest.worktreePath, 'vendor', 'inner');
+      fs.mkdirSync(inner, { recursive: true });
+      git(
+        inner,
+        primary.home,
+        'init',
+        '-q',
+        '-b',
+        'main',
+        `--separate-git-dir=${extGitDir}`,
+      );
+      git(inner, primary.home, 'config', 'user.email', 't@e.com');
+      git(inner, primary.home, 'config', 'user.name', 't');
+      git(inner, primary.home, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(inner, 'old.txt'), 'must-not-lose\n');
+      git(inner, primary.home, 'add', '.');
+      git(inner, primary.home, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, primary.home, 'rev-parse', 'HEAD');
+      const blobOid = git(
+        inner,
+        primary.home,
+        'rev-parse',
+        `${firstCommit}:old.txt`,
+      );
+      fs.rmSync(path.join(inner, 'old.txt'));
+      git(inner, primary.home, 'add', '-A');
+      git(inner, primary.home, 'commit', '-qm', 'c2', '--no-verify');
+
+      const fanoutDir = path.join(extGitDir, 'objects', blobOid.slice(0, 2));
+      const origLoose = path.join(fanoutDir, blobOid.slice(2));
+      const tmpCopy = path.join(
+        oldest.worktreePath,
+        '.qwen',
+        'tmp',
+        `obj-${blobOid}`,
+      );
+      fs.mkdirSync(path.dirname(tmpCopy), { recursive: true });
+      fs.copyFileSync(origLoose, tmpCopy);
+
+      const snapshotService = await import(
+        '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+      );
+      const actualSnapshotService = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+      >('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js');
+      const spy = vi
+        .spyOn(snapshotService, 'captureWorktreeSnapshot')
+        .mockImplementation(async (...args) => {
+          const result = await actualSnapshotService.captureWorktreeSnapshot(
+            ...args,
+          );
+          fs.rmSync(origLoose);
+          fs.symlinkSync(tmpCopy, origLoose);
+          fs.chmodSync(fanoutDir, 0o111);
+          return result;
+        });
+
+      try {
+        const report = await sweep(primary);
+        expect(report.removed).toEqual([]);
+        expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+        expect(git(inner, primary.home, 'show', `${firstCommit}:old.txt`)).toBe(
+          'must-not-lose',
+        );
+      } finally {
+        spy.mockRestore();
+        fs.chmodSync(fanoutDir, 0o700);
+      }
+    },
+  );
+
   it.each([false, null, 'off', []] as const)(
     'pauses retention instead of falling back to default when worktree settings is %j',
     async (invalidSection) => {
