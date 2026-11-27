@@ -1055,13 +1055,22 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
     verifyAppImageClosure(extractedRoot);
     // libwayland-client.so.0 is host-baseline, so an image that passes it
     // through shadows the host copy under the AppImage's LD_LIBRARY_PATH,
-    // breaking the host libEGL_mesa.so.0 (issue #18486).
-    writeElf('usr/lib/libwayland-client.so.0');
+    // breaking the host libEGL_mesa.so.0 (issue #18486). The copy is filed
+    // under the Debian multiarch directory rather than usr/lib, so the error
+    // has to name where it sits: the extraction tree is deleted before anyone
+    // reads the message.
+    writeElf('usr/lib/x86_64-linux-gnu/libwayland-client.so.0');
     assert.throws(
       () => verifyAppImageClosure(extractedRoot),
-      /AppImage must not bundle host-baseline libraries: libwayland-client\.so\.0/,
+      /AppImage must not bundle host-baseline libraries: usr\/lib\/x86_64-linux-gnu\/libwayland-client\.so\.0$/,
     );
-    fs.rmSync(path.join(extractedRoot, 'usr', 'lib', 'libwayland-client.so.0'));
+    fs.rmSync(
+      path.join(
+        extractedRoot,
+        'usr/lib/x86_64-linux-gnu/libwayland-client.so.0',
+      ),
+    );
+    fs.rmdirSync(path.join(extractedRoot, 'usr/lib/x86_64-linux-gnu'));
     // The wayland siblings resolve from the host too, so a GTK or WebKitGTK
     // library can depend on them without carrying a copy; that image passes
     // closure only because nothing else is missing.
@@ -1116,7 +1125,7 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       assert.throws(
         () => verifyAppImageClosure(extractedRoot),
         new RegExp(
-          `AppImage must not bundle host-baseline libraries: ${soname.replaceAll('.', '\\.')}$`,
+          `AppImage must not bundle host-baseline libraries: usr/lib/${soname.replaceAll('.', '\\.')}$`,
         ),
       );
       fs.rmSync(library);

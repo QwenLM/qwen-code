@@ -81,6 +81,13 @@ const HOST_PROVIDED_SONAMES = new Set([
   'libwayland-server.so.0',
 ]);
 
+// Both closure rules below read this union: a copy in the image shadows the
+// host library, and a dependency nothing supplies may come from the host.
+const HOST_BASELINE_SONAMES = new Set([
+  ...APPIMAGE_HOST_LIBRARIES,
+  ...HOST_PROVIDED_SONAMES,
+]);
+
 export function findLinuxInstallers(
   bundleRoot,
   required = ['appImage', 'deb'],
@@ -191,15 +198,13 @@ export function verifyAppImageClosure(extractedRoot) {
   // the bundle dir leads LD_LIBRARY_PATH, so it shadows the host's newer copy.
   // An old libwayland-client lacks wl_fixes_interface, which breaks dlopening
   // the host's libEGL_mesa.so.0 and leaves the window gray (mesa#11316).
-  const shadowed = new Set(
-    [...bundled].filter(
-      (name) =>
-        APPIMAGE_HOST_LIBRARIES.has(name) || HOST_PROVIDED_SONAMES.has(name),
-    ),
-  );
-  if (shadowed.size > 0) {
+  const shadowed = files
+    .filter((file) => HOST_BASELINE_SONAMES.has(path.basename(file)))
+    .map((file) => path.relative(extractedRoot, file))
+    .sort();
+  if (shadowed.length > 0) {
     throw new Error(
-      `AppImage must not bundle host-baseline libraries: ${[...shadowed].sort().join(', ')}`,
+      `AppImage must not bundle host-baseline libraries: ${shadowed.join(', ')}`,
     );
   }
   const missing = new Set();
@@ -216,11 +221,7 @@ export function verifyAppImageClosure(extractedRoot) {
     for (const [, soname] of result.stdout.matchAll(
       /\(NEEDED\).*\[([^\]]+)\]/g,
     )) {
-      if (
-        !bundled.has(soname) &&
-        !APPIMAGE_HOST_LIBRARIES.has(soname) &&
-        !HOST_PROVIDED_SONAMES.has(soname)
-      ) {
+      if (!bundled.has(soname) && !HOST_BASELINE_SONAMES.has(soname)) {
         missing.add(soname);
       }
     }
