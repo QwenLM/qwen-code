@@ -26,6 +26,20 @@ import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { MIN_CREDENTIAL_VALUE_LENGTH } from '../utils/credential-names.js';
+import {
+  getLateSettingsCredentialAliases,
+  isSettingsCredentialAlias,
+  liveCredentialAliases,
+  parseRelaunchEnvProvenance,
+  recordCredentialAliasWrite,
+  recordSettingsCredentialSources,
+  resetCredentialAliasesForTesting,
+  restoreCredentialAliases,
+  settingsCredentialSourceEntries,
+  writeRelaunchCredentialAliases,
+} from '../utils/env-provenance.js';
+import { spawnedEnvironmentView } from './storage-paths-lite.js';
 import {
   captureEnvironmentBeforeLoad,
   resetEnvironmentSnapshotForTesting,
@@ -36,6 +50,8 @@ export {
   ENV_WAS_RECOVERED,
 } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
+
+export { registerSettingsCredentialAliases } from '../utils/env-provenance.js';
 
 export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
@@ -82,25 +98,19 @@ const settingsEnvSourcedKeys = new Set<string>();
 const inheritedDotEnvKeys = new Set<string>();
 const inheritedSettingsEnvKeys = new Set<string>();
 
+export function getInstalledSettingsCredentials(): ReadonlyMap<string, string> {
+  return liveCredentialAliases();
+}
+
 // Validate inherited metadata before loading files, then preserve it for child CLIs.
-const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+const encodedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
 delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+const inheritedProvenance = parseRelaunchEnvProvenance(encodedProvenance);
 if (inheritedProvenance) {
-  const sources: unknown = JSON.parse(inheritedProvenance);
-  if (
-    !sources ||
-    typeof sources !== 'object' ||
-    !('dotEnv' in sources) ||
-    !('settingsEnv' in sources) ||
-    !Array.isArray(sources.dotEnv) ||
-    !Array.isArray(sources.settingsEnv) ||
-    !sources.dotEnv.every((key) => typeof key === 'string') ||
-    !sources.settingsEnv.every((key) => typeof key === 'string')
-  ) {
-    throw new Error('Invalid inherited environment provenance.');
-  }
-  for (const key of sources.dotEnv) inheritedDotEnvKeys.add(key);
-  for (const key of sources.settingsEnv) inheritedSettingsEnvKeys.add(key);
+  for (const key of inheritedProvenance.dotEnv) inheritedDotEnvKeys.add(key);
+  for (const key of inheritedProvenance.settingsEnv)
+    inheritedSettingsEnvKeys.add(key);
+  restoreCredentialAliases(inheritedProvenance.credentialAliases ?? []);
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
@@ -164,12 +174,14 @@ export function hasLoadedEnvironmentValues(): boolean {
 }
 
 export function getRelaunchEnvProvenance(): Record<string, string> {
+  const credentialAliases = [...liveCredentialAliases().keys()];
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
       dotEnv: [...new Set([...inheritedDotEnvKeys, ...dotEnvSourcedKeys])],
       settingsEnv: [
         ...new Set([...inheritedSettingsEnvKeys, ...settingsEnvSourcedKeys]),
       ],
+      ...(credentialAliases.length > 0 && { credentialAliases }),
     }),
   };
 }
@@ -275,6 +287,7 @@ export function resetEnvironmentTrackingForTesting(): void {
   settingsEnvSourcedKeys.clear();
   inheritedDotEnvKeys.clear();
   inheritedSettingsEnvKeys.clear();
+  resetCredentialAliasesForTesting();
   requestTimeEnvKeys.clear();
   delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
@@ -755,6 +768,7 @@ export function buildRuntimeEnvironment(
   );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
   const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
+  const credentialAliasValues = new Map<string, string>();
 
   if (baseEnv['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentInEnv(effectiveEnv, parsedEnvFiles.files);
@@ -778,6 +792,7 @@ export function buildRuntimeEnvironment(
     );
   }
 
+  const settingsEnvWrites = new Map<string, string>();
   if (settings.env) {
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
@@ -787,7 +802,10 @@ export function buildRuntimeEnvironment(
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
-      setRuntimeEnvIfUnset(effectiveEnv, key, value);
+      if (!isEffectivelyUnset(effectiveEnv, key)) continue;
+      effectiveEnv[key] = value;
+      if (value.length >= MIN_CREDENTIAL_VALUE_LENGTH)
+        settingsEnvWrites.set(key, value);
     }
     reportRejectedSettingsEnv(settings.env, startDir);
   }
@@ -795,6 +813,38 @@ export function buildRuntimeEnvironment(
   const overlayKeys = Object.keys(effectiveEnv)
     .filter((key) => effectiveEnv[key] !== baseEnv[key])
     .sort();
+  let childEnv: Readonly<Record<string, string>> | undefined;
+  const getChildEnv = () => (childEnv ??= spawnedEnvironmentView(effectiveEnv));
+  const lateAliases = getLateSettingsCredentialAliases(settings, getChildEnv);
+  for (const [key, value] of settingsEnvWrites) {
+    if (isSettingsCredentialAlias(settings, key) || lateAliases?.has(key))
+      credentialAliasValues.set(key, value);
+  }
+  for (const [key, value] of settingsCredentialSourceEntries(
+    settings,
+    effectiveEnv,
+    getChildEnv,
+  )) {
+    credentialAliasValues.set(key, value);
+  }
+  const inheritedAliases = parseRelaunchEnvProvenance(
+    baseEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+  )?.credentialAliases;
+  if (inheritedAliases?.length) {
+    const base = spawnedEnvironmentView(baseEnv);
+    for (const key of inheritedAliases) {
+      const value = base[key];
+      if (value !== undefined && !credentialAliasValues.has(key))
+        credentialAliasValues.set(key, value);
+    }
+  }
+  if (credentialAliasValues.size || inheritedAliases?.length) {
+    const spawnedEnv = getChildEnv();
+    const credentialAliases = [...credentialAliasValues]
+      .filter(([key, value]) => spawnedEnv[key] === value)
+      .map(([key]) => key);
+    writeRelaunchCredentialAliases(effectiveEnv, credentialAliases);
+  }
   return {
     effectiveEnv: Object.freeze({ ...effectiveEnv }),
     overlayKeys: Object.freeze(overlayKeys),
@@ -848,6 +898,7 @@ export function loadEnvironment(
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);
+        recordCredentialAliasWrite(key);
       }
       // Seed snapshot with ALL parsed keys (not just written ones)
       // so child processes can detect deletions on first reload.
@@ -864,6 +915,7 @@ export function loadEnvironment(
   // Step 2: settings.env fallback (lowest priority, no-override).
   // Storage-routing vars must never come from settings.json — a workspace
   // settings.json could otherwise redirect global state after path bootstrap.
+  const installedSettingsKeys: string[] = [];
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) {
@@ -885,6 +937,8 @@ export function loadEnvironment(
       if (isEffectivelyUnset && typeof value === 'string') {
         process.env[key] = value;
         settingsEnvSourcedKeys.add(key);
+        recordCredentialAliasWrite(key, settings);
+        installedSettingsKeys.push(key);
       }
       if (
         !lastReloadSnapshotSeeded &&
@@ -897,6 +951,7 @@ export function loadEnvironment(
     reportRejectedSettingsEnv(settings.env, startDir);
   }
   lastReloadSnapshotSeeded = true;
+  recordSettingsCredentialSources(settings, installedSettingsKeys);
   Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
@@ -1005,6 +1060,7 @@ export function reloadEnvironment(
     for (const key of previouslyKnown) {
       if (!allNewKeys.has(key) && !isReloadExcludedKey(key)) {
         delete process.env[key];
+        recordCredentialAliasWrite(key);
         inheritedDotEnvKeys.delete(key);
         inheritedSettingsEnvKeys.delete(key);
         removedKeys.push(key);
@@ -1022,12 +1078,14 @@ export function reloadEnvironment(
       updatedKeys.push(key);
     }
     process.env[key] = value;
+    recordCredentialAliasWrite(key);
   }
   for (const [key, value] of newSettingsEnvKeys) {
     if (process.env[key] !== value) {
       updatedKeys.push(key);
     }
     process.env[key] = value;
+    recordCredentialAliasWrite(key, settings);
   }
 
   // Frozen values and values retained after an I/O failure keep their provenance.
@@ -1051,6 +1109,7 @@ export function reloadEnvironment(
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
+  recordSettingsCredentialSources(settings, newSettingsEnvKeys.keys());
   Object.assign(process.env, getRelaunchEnvProvenance());
 
   return {

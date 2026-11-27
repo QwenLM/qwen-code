@@ -220,14 +220,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/fast-path-settings.ts',
     {
       reason:
-        'Fast-path settings initialize daemon bootstrap compatibility state.',
+        'Fast-path settings initialize daemon bootstrap compatibility state. ' +
+        'Bootstrap reads the inherited credential provenance marker and passes the process environment to the helper that updates only that marker before the daemon snapshots the environment for ACP children.',
       accesses: {
+        'computed:PRIVATE_RELAUNCH_ENV_PROVENANCE': 1,
         'computed:key': 4,
         'key:CLOUD_SHELL': 1,
         'key:GOOGLE_CLOUD_PROJECT': 2,
         'key:QWEN_CODE_TRUSTED_FOLDERS_PATH': 1,
         'key:QWEN_HOME': 3,
-        whole: 4,
+        whole: 5,
       },
     },
   ],

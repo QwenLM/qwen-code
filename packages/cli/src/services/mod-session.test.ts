@@ -17,6 +17,7 @@ import {
   MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModHostReads,
   type ModModelHost,
   type ModPromptSubmit,
   type ModPromptSubmitted,
@@ -1943,6 +1944,7 @@ describe('Mod session ownership', () => {
           pluginConfigs: { 'hello-mod@inline': { options: { value: 'user' } } },
         },
       },
+      workspace: { settings: {} },
       system: {
         settings: {
           pluginConfigs: { 'hello-mod': { options: { value: 'system' } } },
@@ -1959,6 +1961,9 @@ describe('Mod session ownership', () => {
     expect(mocks.create.mock.calls[0][0][0].options).toEqual({
       value: 'system',
     });
+    // Mods read the session's environment and settings.
+    const reads = mocks.create.mock.calls[0][15] as ModHostReads;
+    expect(reads.env('PATH')).toBe(process.env['PATH']);
   });
 
   it.each([

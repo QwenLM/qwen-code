@@ -38,7 +38,29 @@ import {
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import type { Settings } from '../config/settingsSchema.js';
-import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  resolveEnvVarsInObject,
+  resolveEnvVarsInString,
+} from '@qwen-code/qwen-code-core/envVarResolver';
+import {
+  addConfiguredCredentialVariable,
+  configuredCredentialVariables,
+  credentialFieldReferences,
+  findCredentialAliases,
+  isCredentialName,
+} from '../utils/credential-names.js';
+import {
+  envKeyIdentity,
+  liveCredentialAliases,
+  parseRelaunchEnvProvenance,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  recordCredentialAliasWrite,
+  recordSettingsCredentialSources,
+  registerSettingsCredentialAliases,
+  registerSettingsCredentialReferences,
+  restoreCredentialAliases,
+  writeRelaunchCredentialAliases,
+} from '../utils/env-provenance.js';
 
 type ServeFastPathPolicy = Pick<
   NonNullable<Settings['policy']>,
@@ -77,6 +99,37 @@ type CachedTrustRule = TrustPrecedenceRule<string>;
 let homeEnvBootstrapped = false;
 let cachedTrustedFoldersPath: string | undefined;
 let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
+interface CredentialSettingsReferences {
+  configured: Set<string>;
+  referenced: Set<string>;
+}
+const summaryCredentialVariables = new WeakMap<
+  ServeFastPathSettings,
+  CredentialSettingsReferences
+>();
+const bootstrapCredentialInputs = new WeakMap<
+  ServeFastPathSettings,
+  {
+    sources: CredentialSettingsReferences;
+    initialNames: ReadonlySet<string>;
+    substitutions: ReadonlyMap<string, string>;
+  }
+>();
+
+function resolveCredentialNames(
+  credentials: CredentialSettingsReferences,
+  fallback?: Record<string, string>,
+): Set<string> {
+  const names = new Set(Array.from(credentials.referenced, envKeyIdentity));
+  for (const name of credentials.configured) {
+    addConfiguredCredentialVariable(
+      names,
+      resolveEnvVarsInString(name, fallback),
+      envKeyIdentity,
+    );
+  }
+  return names;
+}
 
 function getTrustedFoldersPathFastPath(): string {
   return (
@@ -300,6 +353,10 @@ export function loadServeFastPathEnvironment(
   startDir: string = process.cwd(),
 ): void {
   captureEnvironmentBeforeLoad();
+  restoreCredentialAliases(
+    parseRelaunchEnvProvenance(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE])
+      ?.credentialAliases ?? [],
+  );
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
   const rejectedLoaderKeys: string[] = [];
@@ -351,12 +408,14 @@ export function loadServeFastPathEnvironment(
     }
   }
 
+  const installedSettingsKeys: string[] = [];
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (isLoaderEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
+        installedSettingsKeys.push(key);
       }
     }
     rejectedLoaderKeys.push(
@@ -366,6 +425,32 @@ export function loadServeFastPathEnvironment(
       ),
     );
   }
+  const credentials = bootstrapCredentialInputs.get(settings);
+  if (credentials) {
+    const names = resolveCredentialNames(credentials.sources);
+    registerSettingsCredentialReferences(settings, [...names]);
+    // A configured source name can become available after settings.env
+    // values have already been expanded with the home fallback.
+    if (settings.env && credentials.substitutions.size) {
+      registerSettingsCredentialAliases(
+        settings,
+        findCredentialAliases(
+          settings.env,
+          credentials.substitutions,
+          (name) =>
+            isCredentialName(name) ||
+            names.has(envKeyIdentity(name)) ||
+            credentials.initialNames.has(envKeyIdentity(name)),
+        ),
+      );
+    }
+  }
+  for (const key of installedSettingsKeys)
+    recordCredentialAliasWrite(key, settings);
+  recordSettingsCredentialSources(settings);
+  writeRelaunchCredentialAliases(process.env, [
+    ...liveCredentialAliases().keys(),
+  ]);
   publishPendingCompileCache();
   serveFastPathRejectedLoaderKeys = [
     ...new Set([...serveFastPathRejectedLoaderKeys, ...rejectedLoaderKeys]),
@@ -494,7 +579,16 @@ function readSettingsSummary(
       ignoredKeys.push('serve.sessionPrWatch');
     }
   }
-  return pickFastPathSettings(parsed, includeServe, includeOperatorServe);
+  const summary = pickFastPathSettings(
+    parsed,
+    includeServe,
+    includeOperatorServe,
+  );
+  summaryCredentialVariables.set(summary, {
+    configured: configuredCredentialVariables(parsed),
+    referenced: credentialFieldReferences(parsed),
+  });
+  return summary;
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -930,10 +1024,26 @@ export function loadServeFastPathSettings(
       channels: workspaceFromDisk.serve.channels,
     };
   }
-  const resolved = resolveEnvVarsInObject(
-    merged as Settings,
-    getHomeEnvFallbackVarsFastPath(),
-  ) as ServeFastPathSettings;
+  const fallback = getHomeEnvFallbackVarsFastPath();
+  const substitutions = new Map<string, string>();
+  const resolved = resolveEnvVarsInObject(merged, fallback, {
+    onSubstitution: (name, value) => substitutions.set(name, value),
+  });
+  const sources: CredentialSettingsReferences = {
+    configured: new Set(),
+    referenced: new Set(),
+  };
+  for (const scope of [systemDefaults, user, workspace, system]) {
+    const credentials = summaryCredentialVariables.get(scope);
+    if (!credentials) continue;
+    for (const name of credentials.configured) sources.configured.add(name);
+    for (const name of credentials.referenced) sources.referenced.add(name);
+  }
+  bootstrapCredentialInputs.set(resolved, {
+    sources,
+    initialNames: resolveCredentialNames(sources, fallback),
+    substitutions,
+  });
   if (ignoredWorkspaceKeys.length > 0) {
     resolved.ignoredWorkspaceKeys = ignoredWorkspaceKeys;
   }

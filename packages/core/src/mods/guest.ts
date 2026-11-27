@@ -231,6 +231,22 @@ export const MOD_GUEST_FACTORY = String.raw`
           }
         }
       },
+      env: { get: async name => invoke('env.get', { name }) },
+      // A read of one key is the read of the object, projected.
+      settings: {
+        read: async (args = {}) => {
+          if (!object(args)) throw new Error('Mod settings.read takes { source?, key? }.');
+          const { key, ...rest } = args;
+          if (key !== undefined && typeof key !== 'string') throw new Error('Mod settings.read takes key as a string.');
+          const settings = await invoke('settings.read', rest);
+          return key === undefined ? settings : hasOwn(settings, key) ? settings[key] : undefined;
+        }
+      },
+      telemetry: {
+        // A row left without a destination is a first-party row.
+        log: async entry => invoke('telemetry.log', object(entry) && entry.to === undefined ? { ...entry, to: 'anthropic' } : entry),
+        mark: async entry => invoke('telemetry.mark', entry)
+      },
       // Async, so an input too large for the bridge rejects like a wrong shape.
       prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },

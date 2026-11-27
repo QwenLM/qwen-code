@@ -43,6 +43,7 @@ import {
   vi,
   beforeEach,
   afterEach,
+  onTestFinished,
   type Mocked,
   type Mock,
 } from 'vitest';
@@ -50,9 +51,11 @@ import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
+import { modHostReads } from '../services/mod-host-reads.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
+  getSettingsEnvSubstitutions,
   getSettingsWarnings,
   loadSettings,
   getUserSettingsPath,
@@ -5435,6 +5438,59 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it('keeps installed credential aliases hidden across settings-only reloads', () => {
+      const homeEnv = path.join(path.dirname(USER_SETTINGS_PATH), '.env');
+      const workspaceEnv = path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env');
+      let userContent = JSON.stringify({
+        security: { auth: { apiKey: 'prefix ${REVIEW_AUTH_INPUT}' } },
+        env: {
+          REVIEW_ALIAS: '${REVIEW_AUTH_INPUT}',
+          REVIEW_LABEL: 'public',
+        },
+      });
+      vi.stubEnv('REVIEW_AUTH_INPUT', undefined);
+      vi.stubEnv('REVIEW_ALIAS', undefined);
+      vi.stubEnv('REVIEW_LABEL', undefined);
+      onTestFinished(() => vi.unstubAllEnvs());
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === homeEnv || p === workspaceEnv,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return userContent;
+          if (p === homeEnv) return 'REVIEW_AUTH_INPUT=synthetic-home';
+          if (p === workspaceEnv) return 'REVIEW_AUTH_INPUT=synthetic-project';
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const reads = modHostReads(settings);
+      expect(process.env['REVIEW_ALIAS']).toBe('synthetic-home');
+      expect(reads.env('REVIEW_AUTH_INPUT')).toBeUndefined();
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      expect(reads.env('REVIEW_LABEL')).toBe('public');
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(settings.user.settings.env?.['REVIEW_ALIAS']).toBe(
+        'synthetic-project',
+      );
+      expect(process.env['REVIEW_ALIAS']).toBe('synthetic-home');
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      expect(modHostReads(settings).env('REVIEW_ALIAS')).toBeUndefined();
+
+      userContent = JSON.stringify({ env: { REVIEW_ALIAS: 'ordinary-label' } });
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      reloadEnvironment(settings.merged, MOCK_WORKSPACE_DIR, true);
+      expect(reads.env('REVIEW_ALIAS')).toBe('ordinary-label');
+    });
+
     it.each([
       SettingScope.User,
       SettingScope.System,
@@ -5508,6 +5564,9 @@ describe('Settings Loading and Merging', () => {
       expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
 
       expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(getSettingsEnvSubstitutions(settings.user.settings)).toEqual(
+        new Map([['RELOADED_THEME', 'light']]),
+      );
       expect(settings.user.originalSettings.ui?.theme).toBe(
         '${RELOADED_THEME}',
       );
@@ -5622,8 +5681,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('rolls back every scope when an atomic reload partially fails', () => {
+      vi.stubEnv('ROLLBACK_OLD_MODEL', 'old-user');
+      vi.stubEnv('ROLLBACK_NEW_MODEL', 'new-user');
+      onTestFinished(() => vi.unstubAllEnvs());
       let userContent = JSON.stringify({
-        modelProviders: { openai: [{ id: 'old-user' }] },
+        modelProviders: { openai: [{ id: '${ROLLBACK_OLD_MODEL}' }] },
       });
       let workspaceContent = JSON.stringify({
         modelProviders: { gemini: [{ id: 'old-workspace' }] },
@@ -5641,7 +5703,7 @@ describe('Settings Loading and Merging', () => {
       );
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       userContent = JSON.stringify({
-        modelProviders: { openai: [{ id: 'new-user' }] },
+        modelProviders: { openai: [{ id: '${ROLLBACK_NEW_MODEL}' }] },
       });
       workspaceContent = '{bad json';
 
@@ -5655,6 +5717,9 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings.modelProviders).toEqual({
         openai: [{ id: 'old-user' }],
       });
+      expect(getSettingsEnvSubstitutions(settings.user.settings)).toEqual(
+        new Map([['ROLLBACK_OLD_MODEL', 'old-user']]),
+      );
       expect(settings.workspace.settings.modelProviders).toEqual({
         gemini: [{ id: 'old-workspace' }],
       });

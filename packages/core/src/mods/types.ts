@@ -62,6 +62,8 @@ export interface ModCommand {
 export interface ModCommandPresentation {
   isFullscreen: boolean;
   columns: number;
+  /** Present where the terminal shows no color. */
+  isColorless?: true;
 }
 
 export interface ModPlugin {
@@ -220,6 +222,34 @@ export interface ModTurnComplete {
   isAnswerTruncated?: true;
 }
 
+export type ModSettingsSource =
+  | 'user'
+  | 'project'
+  | 'local'
+  | 'flag'
+  | 'policy';
+
+/** One layer of a settings read: what one source holds, as it loaded. */
+export interface ModSettingsLayer {
+  source: ModSettingsSource;
+  settings: Record<string, unknown>;
+}
+
+/** What a Mod may read of the host's environment and settings. */
+export interface ModHostReads {
+  /** A variable's value, or undefined when it is unset or kept from Mods. */
+  env(name: string): string | undefined;
+  /** Each source's settings, lowest precedence first, and their merge. */
+  settings(): {
+    layers: ModSettingsLayer[];
+    merged: Record<string, unknown>;
+  };
+}
+
+export type ModHostRead =
+  | { method: 'env.get'; name: string }
+  | { method: 'settings.read'; source?: ModSettingsSource };
+
 /** A `$.store` call the host answers for the plugin that made it. */
 export type ModStoreOperation =
   | { method: 'store.get' | 'store.delete'; plugin: string; key: string }
@@ -245,6 +275,8 @@ export type ModRequest =
       models?: boolean;
       /** Whether the host keeps each plugin's `$.store`. */
       stores?: boolean;
+      /** Whether the host answers `$.env.get` and `$.settings.read`. */
+      reads?: boolean;
     }
   | {
       type: 'command';
@@ -275,7 +307,8 @@ export type ModRequest =
       result?: ModModelCompleteResult;
       error?: string;
     }
-  | { type: 'store-result'; id: number; value?: unknown; error?: string };
+  | { type: 'store-result'; id: number; value?: unknown; error?: string }
+  | { type: 'read-result'; id: number; value?: unknown; error?: string };
 
 export type ModReply =
   | { type: 'result'; json: string }
@@ -304,6 +337,7 @@ export type ModReply =
       operation: ModStoreOperation;
       deadline: number;
     }
+  | { type: 'read'; id: number; read: ModHostRead }
   | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 

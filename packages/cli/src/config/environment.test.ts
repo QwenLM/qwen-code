@@ -16,6 +16,7 @@ import {
   loadEnvironment,
   preResolveHomeEnvOverrides,
   readProjectEnvFiles,
+  registerSettingsCredentialAliases,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   resetHomeEnvBootstrapForTesting,
@@ -29,6 +30,7 @@ import {
 import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from './shared-env-keys.js';
 import {
   NPM_RUNTIME_CONTEXT,
+  parseRelaunchEnvProvenance,
   RELAUNCH_SUPERVISED_ENV,
 } from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
@@ -426,6 +428,165 @@ describe('operator container requirement across environment reload', () => {
 });
 
 describe('relaunch environment provenance', () => {
+  it('classifies sources selected by the final workspace environment', async () => {
+    vi.resetModules();
+    const environment = await import('./environment.js');
+    const { loadSettings } = await import('./settings.js');
+    const workspace = makeWorkspace();
+    const workspaceSettings = path.join(workspace, '.qwen');
+    const source = 'RUNTIME_DOTENV';
+    const selector = 'RUNTIME_SETTINGS_ONLY';
+    const alias = 'RUNTIME_SETTINGS';
+    fs.mkdirSync(workspaceSettings, { recursive: true });
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `${source}=fixture-home\n`,
+    );
+    fs.writeFileSync(
+      path.join(workspaceSettings, 'settings.json'),
+      JSON.stringify({
+        modelProviders: { openai: [{ id: 'example', envKey: '$' + selector }] },
+        env: { [alias]: '$' + source },
+      }),
+    );
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      `${selector}=${source}\n${source}=fixture-workspace\nDEMO_VAR=public\n`,
+    );
+
+    const skipLoad = loadSettings(workspace, {
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+    const overlay = environment.buildRuntimeEnvironment(
+      skipLoad.merged,
+      workspace,
+      {},
+      true,
+    );
+    const aliases = (env: NodeJS.ProcessEnv) =>
+      parseRelaunchEnvProvenance(env[PRIVATE_RELAUNCH_ENV_PROVENANCE])
+        ?.credentialAliases;
+    expect(aliases(overlay.effectiveEnv)).toEqual([alias, source]);
+    expect(overlay.effectiveEnv['DEMO_VAR']).toBe('public');
+
+    try {
+      loadSettings(workspace, { workspaceTrusted: true });
+      expect(process.env[alias] === 'fixture-home').toBe(true);
+      expect(aliases(process.env)).toEqual([alias, source]);
+      expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).not.toContain(
+        'fixture-',
+      );
+
+      const secondary = environment.buildRuntimeEnvironment(
+        testSettings({}),
+        makeWorkspace(),
+        { ...process.env },
+        true,
+      );
+      expect(aliases(secondary.effectiveEnv)).toEqual([alias, source]);
+
+      const rotated = 'QWEN_TEST_PROVIDER_KEY';
+      fs.writeFileSync(
+        envPath,
+        `${selector}=${rotated}\n${rotated}=fixture-rotated\n`,
+      );
+      environment.reloadEnvironment(skipLoad.merged, workspace, true);
+      expect(aliases(process.env)).toContain(rotated);
+      expect(aliases(process.env)).toContain(alias);
+    } finally {
+      environment.resetEnvironmentTrackingForTesting();
+    }
+  });
+
+  it('carries the alias name across relaunch and clears it when overwritten', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: { RUNTIME_SETTINGS: 'synthetic-alias' },
+    });
+    parent.registerSettingsCredentialAliases(
+      settings,
+      new Set(['RUNTIME_SETTINGS']),
+    );
+    parent.loadEnvironment(settings, workspace);
+    expect([...parent.getInstalledSettingsCredentials().values()]).toEqual([
+      'synthetic-alias',
+    ]);
+    const provenance =
+      parent.getRelaunchEnvProvenance()[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+    expect(JSON.parse(provenance!)).toMatchObject({
+      credentialAliases: ['RUNTIME_SETTINGS'],
+    });
+    expect(provenance).not.toContain('synthetic-alias');
+
+    vi.resetModules();
+    const child = await import('./environment.js');
+    expect([...child.getInstalledSettingsCredentials().values()]).toEqual([
+      'synthetic-alias',
+    ]);
+    child.reloadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'ordinary-label' } }),
+      workspace,
+    );
+    expect(child.getInstalledSettingsCredentials().size).toBe(0);
+    child.resetEnvironmentTrackingForTesting();
+    parent.resetEnvironmentTrackingForTesting();
+  });
+
+  it.each([
+    {
+      source: 'a provider variable name',
+      settings: {
+        modelProviders: {
+          openai: [{ id: 'fixture', envKey: 'RUNTIME_DOTENV' }],
+        },
+      },
+    },
+    {
+      source: 'a credential field reference',
+      settings: { security: { auth: { apiKey: '$RUNTIME_DOTENV' } } },
+    },
+  ])(
+    'protects credentials from $source when a Mod still has older settings',
+    async ({ settings }) => {
+      vi.resetModules();
+      const environment = await import('./environment.js');
+      const { loadSettings } = await import('./settings.js');
+      const { modHostReads } = await import('../services/mod-host-reads.js');
+      const workspace = makeWorkspace();
+      const settingsDir = path.join(os.homedir(), '.qwen');
+      fs.mkdirSync(settingsDir, { recursive: true });
+      const settingsPath = path.join(settingsDir, 'settings.json');
+      const envPath = path.join(workspace, '.env');
+      const reads = modHostReads(
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+      );
+
+      fs.writeFileSync(settingsPath, JSON.stringify(settings));
+      fs.writeFileSync(envPath, 'RUNTIME_DOTENV=abc\nDEMO_VAR=label-abc\n');
+      const next = loadSettings(workspace, { skipLoadEnvironment: true });
+      environment.reloadEnvironment(next.merged, workspace, true);
+
+      expect(
+        environment.getInstalledSettingsCredentials().has('RUNTIME_DOTENV'),
+      ).toBe(true);
+      expect(reads.env('RUNTIME_DOTENV') === undefined).toBe(true);
+      expect(reads.env('DEMO_VAR')).toBe('label-abc');
+
+      fs.writeFileSync(settingsPath, '{}');
+      fs.writeFileSync(envPath, 'RUNTIME_DOTENV=replaced\n');
+      const replaced = loadSettings(workspace, { skipLoadEnvironment: true });
+      environment.reloadEnvironment(replaced.merged, workspace, true);
+      expect(reads.env('RUNTIME_DOTENV')).toBe('replaced');
+      expect(
+        environment.getInstalledSettingsCredentials().has('RUNTIME_DOTENV'),
+      ).toBe(false);
+    },
+  );
+
   it('preserves ancestor-only values and provenance across child reloads', async () => {
     vi.resetModules();
     const parent = await import('./environment.js');
@@ -945,6 +1106,88 @@ describe('Conversations root environment', () => {
 });
 
 describe('buildRuntimeEnvironment', () => {
+  it('passes installed credential aliases to the child without marking a launch override', async () => {
+    const workspace = makeWorkspace();
+    const workspaceSource = 'QWEN_TEST_PROVIDER_KEY';
+    fs.writeFileSync(path.join(workspace, '.env'), `${workspaceSource}=abc\n`);
+    const settings = testSettings({
+      modelProviders: { openai: [{ id: 'fixture', envKey: workspaceSource }] },
+      env: {
+        RUNTIME_SETTINGS: 'synthetic-overlay',
+        RUNTIME_PARENT: 'synthetic-shadowed',
+        RUNTIME_SETTINGS_ONLY: 'ordinary',
+      },
+    });
+    registerSettingsCredentialAliases(
+      settings,
+      new Set(['RUNTIME_SETTINGS', 'RUNTIME_PARENT']),
+    );
+    const base = {
+      RUNTIME_DOTENV: 'synthetic-parent',
+      RUNTIME_PARENT: 'launch-value',
+      RUNTIME_SOURCE_TOKEN: 'synthetic-current-value',
+      [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
+        dotEnv: [],
+        settingsEnv: ['RUNTIME_DOTENV'],
+        credentialAliases: ['RUNTIME_DOTENV'],
+      }),
+    };
+    const before = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+    const { effectiveEnv, overlayKeys } = buildRuntimeEnvironment(
+      settings,
+      workspace,
+      base,
+      true,
+    );
+    expect(effectiveEnv['RUNTIME_SETTINGS'] === 'synthetic-overlay').toBe(true);
+    expect(effectiveEnv['RUNTIME_PARENT']).toBe('launch-value');
+    expect(effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe('ordinary');
+    const provenance = parseRelaunchEnvProvenance(
+      effectiveEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+    );
+    expect(provenance).toEqual({
+      dotEnv: [],
+      settingsEnv: ['RUNTIME_DOTENV'],
+      credentialAliases: expect.arrayContaining([
+        'RUNTIME_SETTINGS',
+        'RUNTIME_DOTENV',
+        workspaceSource,
+      ]),
+    });
+    expect(provenance?.credentialAliases).toHaveLength(3);
+    expect(
+      effectiveEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE]?.includes('synthetic-'),
+    ).toBe(false);
+    expect(overlayKeys).not.toContain(PRIVATE_RELAUNCH_ENV_PROVENANCE);
+    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBe(before);
+
+    for (const key of [
+      'RUNTIME_SETTINGS',
+      'RUNTIME_SOURCE_TOKEN',
+      'RUNTIME_SETTINGS_ONLY',
+      workspaceSource,
+      PRIVATE_RELAUNCH_ENV_PROVENANCE,
+    ])
+      vi.stubEnv(key, effectiveEnv[key]);
+    vi.resetModules();
+    const childEnvironment = await import('./environment.js');
+    try {
+      const { loadSettings } = await import('./settings.js');
+      const { modHostReads } = await import('../services/mod-host-reads.js');
+      const reads = modHostReads(
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+      );
+      expect(reads.env('RUNTIME_SETTINGS') === undefined).toBe(true);
+      expect(reads.env('RUNTIME_SOURCE_TOKEN') === undefined).toBe(true);
+      expect(reads.env(workspaceSource) === undefined).toBe(true);
+      expect(reads.env('RUNTIME_SETTINGS_ONLY')).toBe('ordinary');
+      expect(reads.env(PRIVATE_RELAUNCH_ENV_PROVENANCE)).toBeUndefined();
+    } finally {
+      childEnvironment.resetEnvironmentTrackingForTesting();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([false, true])(
     'stops at a symlinked home (home env: %s)',
     (hasHomeEnv) => {

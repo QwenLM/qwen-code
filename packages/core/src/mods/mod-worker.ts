@@ -20,6 +20,7 @@ import {
   MOD_TIMEOUT_MS,
   MOD_END_TIMEOUT_MS,
   type ModCommand,
+  type ModHostRead,
   type ModPlugin,
   type ModQueuedPrompt,
   type ModModelCompleteInput,
@@ -38,6 +39,7 @@ import {
 import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
+  MOD_HOST_READ_EVENTS,
   MOD_STORE_EVENTS,
   MOD_TOOL_EVENTS,
   MOD_METHODS,
@@ -51,6 +53,7 @@ import {
   modelCompleteCall,
   promptSubmitCall,
   record,
+  settingsReadSource,
   validateInput,
   validateResult,
   validModelResult,
@@ -88,6 +91,11 @@ const turnAborts = new Map<
 const promptQueues = new Map<
   number,
   { resolve: (refused?: string) => void; reject: (error: Error) => void }
+>();
+// $.env.get and $.settings.read calls waiting for the host's answer.
+const hostReads = new Map<
+  number,
+  { resolve: (value: unknown) => void; reject: (error: Error) => void }
 >();
 // $.model.complete calls the host is running, by host operation id.
 const modelOperations = new Map<
@@ -139,6 +147,8 @@ let submitsPrompts = false;
 let runsModels = false;
 // Whether the host keeps each plugin's `$.store`.
 let keepsStore = false;
+// Whether the host answers `$.env.get` and `$.settings.read`.
+let readsHost = false;
 // The events this host runs: those it raises only where it draws need a site.
 let supported: readonly ModEvent[] = MOD_EVENTS;
 // A render hook that keeps failing the same way is said once per load.
@@ -778,6 +788,19 @@ async function hostCall(
     throw new Error('Mod model.complete: this host runs no model calls.');
   const store = MOD_STORE_EVENTS.includes(method);
   if (store && !keepsStore) throw new Error('This host keeps no Mod store.');
+  if (MOD_HOST_READ_EVENTS.includes(method) && !readsHost)
+    throw new Error('This host gives Mods no environment or settings.');
+  // A settings read carries the layers the host read, and answers their
+  // merge beneath every hook.
+  const source =
+    method === 'settings.read' ? settingsReadSource(value) : undefined;
+  const settings =
+    method === 'settings.read'
+      ? ((await hostRead({ method, source })) as {
+          layers: ModInput[];
+          merged?: ModInput;
+        })
+      : undefined;
   // A submitted prompt raises prompt.submit as a typed one does, through
   // every hook but the caller's. What arrives beneath them last is queued once
   // they have all answered. Its hooks do not run beneath the caller's, so a
@@ -787,7 +810,13 @@ async function hostCall(
     ? promptSubmitCall(value, plugin.name)
     : model
       ? modelCompleteCall(value)
-      : value;
+      : settings
+        ? {
+            ...(source !== undefined && { source }),
+            // Pin the JSON the guest receives, which omits unset properties.
+            layers: JSON.parse(JSON.stringify(settings.layers)) as ModInput[],
+          }
+        : value;
   if (!submits) validateInput(method, input, {});
   // No hook hears a prompt the host would not run, or one with no words.
   else if (!submitsPrompts)
@@ -879,6 +908,11 @@ async function hostCall(
                       keepsStore ||
                       !MOD_STORE_EVENTS.includes(name as ModEvent),
                   )
+                  .filter(
+                    (name) =>
+                      readsHost ||
+                      !MOD_HOST_READ_EVENTS.includes(name as ModEvent),
+                  )
                   .sort(),
               },
             },
@@ -898,6 +932,27 @@ async function hostCall(
         }
         if (method === 'turn.abort') {
           await abortTurn(String(e['turnId']));
+          return { value: undefined };
+        }
+        if (method === 'env.get')
+          return {
+            value: await hostRead({ method, name: String(e['name']) }),
+          };
+        if (settings)
+          return {
+            value:
+              e['source'] === undefined
+                ? settings.merged
+                : ((e['layers'] as ModInput[])[0]?.['settings'] ?? {}),
+          };
+        // Rows and marks go nowhere; the debug log shows what was asked.
+        if (method === 'telemetry.log' || method === 'telemetry.mark') {
+          const text = `${method} (not sent): ${JSON.stringify(e).slice(0, 2000)}`;
+          const cost = text.length + 1;
+          if (logChars + cost <= 100_000) {
+            logChars += cost;
+            send({ type: 'log', plugin: plugin.name, text, to: 'debug' });
+          }
           return { value: undefined };
         }
         if (model && modelScope)
@@ -1054,6 +1109,14 @@ function storeCall(
       deadline: parent?.modelScope?.deadline ?? Infinity,
     });
   }).finally(() => storeCalls.delete(id));
+}
+
+function hostRead(read: ModHostRead): Promise<unknown> {
+  const id = ++serial;
+  return new Promise<unknown>((resolve, reject) => {
+    hostReads.set(id, { resolve, reject });
+    send({ type: 'read', id, read });
+  }).finally(() => hostReads.delete(id));
 }
 
 function queuePrompt(prompt: ModQueuedPrompt): Promise<string | undefined> {
@@ -1216,6 +1279,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     promptQueues.get(request.id)?.resolve(request.refused);
     return;
   }
+  if (request.type === 'read-result') {
+    if (!busy || request.root !== rootId) return;
+    const pending = hostReads.get(request.id);
+    if (request.error !== undefined) pending?.reject(new Error(request.error));
+    else pending?.resolve(request.value);
+    return;
+  }
   if (request.type === 'store-result') {
     if (!busy || request.root !== rootId) return;
     const pending = storeCalls.get(request.id);
@@ -1297,6 +1367,7 @@ port.on('message', async (request: ModWorkerRequest) => {
       submitsPrompts = request.submits === true;
       runsModels = request.models === true;
       keepsStore = request.stores === true;
+      readsHost = request.reads === true;
       supported = MOD_EVENTS.filter(
         (event) =>
           !MOD_HOST_EVENTS.includes(event) ||
@@ -1306,7 +1377,9 @@ port.on('message', async (request: ModWorkerRequest) => {
               ? request.tools === true
               : MOD_STORE_EVENTS.includes(event)
                 ? keepsStore
-                : sites.length > 0),
+                : MOD_HOST_READ_EVENTS.includes(event)
+                  ? readsHost
+                  : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -1513,6 +1586,7 @@ port.on('message', async (request: ModWorkerRequest) => {
       ...turnAborts.values(),
       ...promptQueues.values(),
       ...storeCalls.values(),
+      ...hostReads.values(),
     ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
@@ -1522,6 +1596,7 @@ port.on('message', async (request: ModWorkerRequest) => {
     turnAborts.clear();
     promptQueues.clear();
     storeCalls.clear();
+    hostReads.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;

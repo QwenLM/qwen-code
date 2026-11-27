@@ -17,6 +17,7 @@ import { ModStore } from './store.js';
 import {
   MOD_MAX_BYTES,
   MOD_TIMEOUT_MS,
+  type ModHostReads,
   type ModLog,
   type ModModelCompleteInput,
   type ModModelCompleteResult,
@@ -552,6 +553,8 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.turns',
             'session.usage',
             'session.version',
+            'telemetry.log',
+            'telemetry.mark',
             'tool.call',
             'tool.check',
             'turn.abort',
@@ -573,6 +576,8 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.turns',
             'session.usage',
             'session.version',
+            'telemetry.log',
+            'telemetry.mark',
             'turn.abort',
             'ui.invalidate',
             'ui.log',
@@ -3008,6 +3013,269 @@ describe('ModRuntime with the real QuickJS worker', () => {
         'store.get',
         'store.keys',
         'store.set',
+      ]);
+    });
+  });
+
+  describe('$.env, $.settings and $.telemetry', () => {
+    const command = (body: string) => `export function register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({name: 'go', description: 'Go'});
+        return next(e);
+      });
+      on('command.run', {command: 'go'}, async ($) => {
+        try { return {text: JSON.stringify(await (async () => { ${body} })())}; }
+        catch (error) { return {text: JSON.stringify('rejected: ' + String(error))}; }
+      });
+    }`;
+    const reads: ModHostReads = {
+      env: (name) => ({ HOME: '/home/someone' })[name],
+      settings: () => ({
+        layers: [
+          { source: 'user', settings: { a: 1, ui: { theme: 'dark' } } },
+          { source: 'policy', settings: { a: 2 } },
+        ],
+        merged: { a: 2, ui: { theme: 'dark' } },
+      }),
+    };
+    const create = async (sources: string[], host?: ModHostReads) => {
+      const runtime = await ModRuntime.createGroup(
+        sources.map((source, index) => ({
+          id: `mod-${index}`,
+          name: `mod-${index}`,
+          source: { root: '/fixture', entry: '/fixture/mod.js', source },
+          options: {},
+        })),
+        '/workspace',
+        (log) => logs.push(log),
+        signal(),
+        undefined,
+        null,
+        '1.2.3',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        host,
+      );
+      runtimes.push(runtime);
+      return runtime;
+    };
+    const go = async (runtime: ModRuntime) =>
+      JSON.parse(await runtime.runCommand('go', '', signal()));
+
+    it("reads the host's environment and settings through the other plugins' hooks", async () => {
+      const runtime = await create(
+        [
+          command(`return [
+            await $.env.get('HOME'),
+            await $.env.get('UNSET') === undefined,
+            await $.settings.read(),
+            await $.settings.read({ source: 'user' }),
+            await $.settings.read({ source: 'local' }),
+            await $.settings.read({ key: 'a' }),
+            await $.settings.read({ key: 'missing' }) === undefined,
+            await $.settings.read({ source: 'user', key: 'ui' }),
+          ];`),
+          `export function register(on) {
+            on('env.get', { name: 'HOME' }, async ($, e, next) => ({ value: (await next(e)).value + '/seen' }));
+            on('settings.read', async ($, e, next) => {
+              const { value } = await next(e);
+              return { value: { ...value, layers: e.layers.map((layer) => layer.source) } };
+            });
+          }`,
+        ],
+        reads,
+      );
+      expect(await go(runtime)).toEqual([
+        '/home/someone/seen',
+        true,
+        { a: 2, ui: { theme: 'dark' }, layers: ['user', 'policy'] },
+        { a: 1, ui: { theme: 'dark' }, layers: ['user'] },
+        { layers: [] },
+        2,
+        true,
+        { theme: 'dark' },
+      ]);
+    });
+
+    it('passes unchanged settings layers through hooks after a setting is unset', async () => {
+      const settings = { ui: { theme: 'dark', accent: undefined } };
+      const runtime = await create(
+        [
+          command(`return $.settings.read({ source: 'user' });`),
+          `export function register(on) {
+            on('settings.read', async ($, e, next) => {
+              const { value } = await next(e);
+              return { value: { ...value, observed: true } };
+            });
+          }`,
+        ],
+        {
+          env: reads.env,
+          settings: () => ({
+            layers: [{ source: 'user', settings }],
+            merged: settings,
+          }),
+        },
+      );
+      expect(await go(runtime)).toEqual({
+        ui: { theme: 'dark' },
+        observed: true,
+      });
+    });
+
+    it('skips a hook that asks for another variable or other layers', async () => {
+      const runtime = await create(
+        [
+          command(
+            `return [await $.env.get('HOME'), await $.settings.read({ source: 'policy' })];`,
+          ),
+          `export function register(on) {
+            on('env.get', ($, e, next) => next({ name: 'PATH' }));
+            on('settings.read', ($, e, next) => next({ ...e, layers: [] }));
+          }`,
+        ],
+        reads,
+      );
+      expect(await go(runtime)).toEqual(['/home/someone', { a: 2 }]);
+    });
+
+    it('reads small or empty sources without sending an unrelated large layer', async () => {
+      const project = {
+        permissions: {
+          allow: Array.from(
+            { length: 4000 },
+            (_, index) => `Read(fixture/project/path-${index}.md)`,
+          ),
+        },
+      };
+      const runtime = await create(
+        [
+          command(`return [
+            await $.settings.read({ source: 'user', key: 'ui' }),
+            await $.settings.read({ source: 'policy' }),
+            await $.settings.read({ source: 'local' }),
+          ];`),
+        ],
+        {
+          env: reads.env,
+          settings: () => {
+            const settings = reads.settings();
+            return {
+              layers: [
+                ...settings.layers,
+                { source: 'project', settings: project },
+              ],
+              merged: { ...settings.merged, ...project },
+            };
+          },
+        },
+      );
+
+      expect(await go(runtime)).toEqual([{ theme: 'dark' }, { a: 2 }, {}]);
+    });
+
+    it('refuses a source or key it does not know', async () => {
+      const runtime = await create(
+        [
+          command(`
+            const results = [];
+            for (const read of [() => $.settings.read({ source: 'managed' }), () => $.settings.read({ key: 1 }), () => $.env.get(1)])
+              try { await read(); results.push('read'); } catch (error) { results.push(String(error)); }
+            return results;
+          `),
+        ],
+        reads,
+      );
+      expect(await go(runtime)).toEqual([
+        expect.stringContaining(
+          'source one of user, project, local, flag, policy',
+        ),
+        expect.stringContaining('key as a string'),
+        expect.stringContaining('the name of a variable'),
+      ]);
+    });
+
+    it('logs telemetry for debugging only, after the hooks have answered', async () => {
+      const runtime = await create([
+        command(`
+          await $.telemetry.log({ event: 'survey_answered', props: { answer: 2, page: { value: 'ready', of: ['ready', 'later'] } } });
+          const results = [];
+          for (const call of [
+            () => $.telemetry.mark({ feature: 'learn_page', kind: 'sad', reason: 'blocked' }),
+            () => $.telemetry.log({ to: 'collector', event: 'run' }),
+            () => $.telemetry.log({ event: 'free_text', props: { note: 'hello' } }),
+          ])
+            try { results.push(await call()); } catch (error) { results.push(String(error)); }
+          return results;
+        `),
+        `export function register(on) {
+          on('telemetry.log', { to: 'anthropic' }, ($, e, next) => { $.ui.log('heard ' + e.event); return next(e); });
+          on('telemetry.mark', () => ({ deny: 'no marks here' }));
+        }`,
+      ]);
+      const [denied, collector, freeText] = await go(runtime);
+      expect(denied).toContain('no marks here');
+      expect(collector).toContain('Mod telemetry.log takes');
+      expect(freeText).toContain('Mod telemetry.log takes');
+      expect(logs).toEqual([
+        { text: 'heard survey_answered', to: 'transcript' },
+        {
+          text: 'telemetry.log (not sent): {"event":"survey_answered","props":{"answer":2,"page":{"value":"ready","of":["ready","later"]}},"to":"anthropic"}',
+          to: 'debug',
+        },
+      ]);
+    });
+
+    it('rejects environment and settings reads where the host gives none', async () => {
+      const probe = command(`
+        const { methods, events } = (await $.session.version()).qwen;
+        const wanted = (name) => /^(env|settings|telemetry)\\./.test(name);
+        const results = [methods.filter(wanted), events.filter(wanted)];
+        for (const read of [() => $.env.get('HOME'), () => $.settings.read()])
+          try { await read(); results.push('read'); } catch (error) { results.push(String(error)); }
+        return results;
+      `);
+      expect(await go(await create([probe]))).toEqual([
+        ['telemetry.log', 'telemetry.mark'],
+        ['telemetry.log', 'telemetry.mark'],
+        expect.stringContaining(
+          'This host gives Mods no environment or settings.',
+        ),
+        expect.stringContaining(
+          'This host gives Mods no environment or settings.',
+        ),
+      ]);
+      const [methods, events] = await go(await create([probe], reads));
+      expect(methods).toEqual([
+        'env.get',
+        'settings.read',
+        'telemetry.log',
+        'telemetry.mark',
+      ]);
+      expect(events).toEqual(methods);
+    });
+
+    it('keeps room for a transcript line after dropping a telemetry entry', async () => {
+      const runtime = await create([
+        command(`
+          for (let i = 0; i < 50; i++)
+            await $.telemetry.log({ event: 'x'.repeat(2050) });
+          $.ui.log('still fits');
+          await $.clock.now();
+          return 'complete';
+        `),
+      ]);
+
+      expect(await go(runtime)).toBe('complete');
+      expect(logs.filter((log) => log.to === 'debug')).toHaveLength(49);
+      expect(logs.filter((log) => log.to === 'transcript')).toEqual([
+        { text: 'still fits', to: 'transcript' },
       ]);
     });
   });

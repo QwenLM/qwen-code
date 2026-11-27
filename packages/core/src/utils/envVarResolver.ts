@@ -6,12 +6,22 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+const ENV_VAR_REFERENCE = /\$(?:(\w+)|{([^}]+)})/g;
+
+export function getEnvVarReferences(value: string): string[] {
+  return Array.from(
+    value.matchAll(ENV_VAR_REFERENCE),
+    (match) => match[1] ?? match[2]!,
+  );
+}
+
 export interface ResolveEnvVarsOptions {
   /**
    * Whether a variable that `customEnv` does not define is taken from
    * `process.env`. Defaults to true.
    */
   readonly processEnvFallback?: boolean;
+  readonly onSubstitution?: (name: string, value: string) => void;
 }
 
 /**
@@ -43,8 +53,7 @@ export function resolveEnvVarsInString(
   customEnv?: Record<string, string>,
   options: ResolveEnvVarsOptions = {},
 ): string {
-  const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
-  return value.replace(envVarRegex, (match, varName1, varName2) => {
+  return value.replace(ENV_VAR_REFERENCE, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
     const normalizedVarName = varName.toUpperCase();
     if (
@@ -54,8 +63,10 @@ export function resolveEnvVarsInString(
     ) {
       return match;
     }
-    if (customEnv && typeof customEnv[varName] === 'string') {
-      return customEnv[varName];
+    const customValue = customEnv?.[varName];
+    if (typeof customValue === 'string') {
+      options.onSubstitution?.(varName, customValue);
+      return customValue;
     }
     if (
       options.processEnvFallback !== false &&
@@ -63,7 +74,9 @@ export function resolveEnvVarsInString(
       process.env &&
       typeof process.env[varName] === 'string'
     ) {
-      return process.env[varName]!;
+      const resolved = process.env[varName]!;
+      options.onSubstitution?.(varName, resolved);
+      return resolved;
     }
     return match;
   });

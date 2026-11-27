@@ -41,6 +41,17 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  configuredCredentialVariables,
+  credentialFieldReferences,
+  credentialNameFilter,
+  findCredentialAliases,
+} from '../utils/credential-names.js';
+import {
+  envKeyIdentity,
+  registerSettingsCredentialReferences,
+  registerSettingsCredentialSelectors,
+} from '../utils/env-provenance.js';
+import {
   deleteNestedPropertySafe,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
@@ -62,6 +73,7 @@ import {
   getHomeEnvFallbackVars,
   loadEnvironment,
   preResolveHomeEnvOverrides,
+  registerSettingsCredentialAliases,
 } from './environment.js';
 import {
   DEFAULT_DARK_THEME_NAME,
@@ -257,6 +269,78 @@ export interface SettingsFile {
   originalSettings: Settings;
   path: string;
   rawJson?: string;
+}
+
+// Keep expansion values out of the settings objects that callers serialize.
+const settingsEnvProvenance = new WeakMap<
+  Settings,
+  {
+    substitutions: ReadonlyMap<string, string>;
+    credentialReferences: ReadonlySet<string>;
+    credentialSelectors: readonly string[];
+  }
+>();
+
+export function getSettingsEnvSubstitutions(
+  settings: Settings,
+): ReadonlyMap<string, string> | undefined {
+  return settingsEnvProvenance.get(settings)?.substitutions;
+}
+
+export function getSettingsCredentialReferences(scopes: Settings[]): string[] {
+  return scopes.flatMap((scope) => [
+    ...(settingsEnvProvenance.get(scope)?.credentialReferences ?? []),
+  ]);
+}
+
+function resolveSettingsEnvironment(
+  settings: Settings,
+  fallback: Record<string, string>,
+  processEnvFallback = true,
+): Settings {
+  const substitutions = new Map<string, string>();
+  const resolved = resolveEnvVarsInObject(settings, fallback, {
+    processEnvFallback,
+    onSubstitution: (name, value) => substitutions.set(name, value),
+  });
+  const credentialReferences = credentialFieldReferences(settings);
+  const credentialSelectors = [
+    ...configuredCredentialVariables(settings),
+  ].filter((name) => name.includes('$'));
+  if (
+    substitutions.size ||
+    credentialReferences.size ||
+    credentialSelectors.length
+  )
+    settingsEnvProvenance.set(resolved, {
+      substitutions,
+      credentialReferences,
+      credentialSelectors,
+    });
+  return resolved;
+}
+
+function registerEnvironmentAliases(
+  merged: Settings,
+  scopes: Settings[],
+): void {
+  if (!merged.env) return;
+  const substitutions = scopes.flatMap((scope) => [
+    ...(getSettingsEnvSubstitutions(scope) ?? []),
+  ]);
+  if (!substitutions.length) return;
+  registerSettingsCredentialAliases(
+    merged,
+    findCredentialAliases(
+      merged.env,
+      substitutions,
+      credentialNameFilter(
+        [merged, ...scopes],
+        getSettingsCredentialReferences(scopes),
+        envKeyIdentity,
+      ),
+    ),
+  );
 }
 
 const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
@@ -783,6 +867,30 @@ function mergeSettings(
       catalogRefresh: operatorCatalogRefresh,
     } as Settings['model'];
   }
+  const activeScopes = [
+    systemDefaults,
+    user,
+    ...(isTrusted ? [workspace] : []),
+    system,
+  ];
+  registerSettingsCredentialReferences(
+    merged,
+    getSettingsCredentialReferences(activeScopes),
+  );
+  const selectors = activeScopes.flatMap(
+    (scope) => settingsEnvProvenance.get(scope)?.credentialSelectors ?? [],
+  );
+  if (selectors.length) {
+    registerSettingsCredentialSelectors(
+      merged,
+      selectors,
+      merged.env,
+      activeScopes.flatMap((scope) => [
+        ...(getSettingsEnvSubstitutions(scope) ?? []),
+      ]),
+    );
+  }
+  registerEnvironmentAliases(merged, [systemDefaults, user, workspace, system]);
   return merged;
 }
 
@@ -970,7 +1078,7 @@ export class LoadedSettings {
         if (scope !== SettingScope.Workspace) {
           parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
         }
-        const resolved = resolveEnvVarsInObject(
+        const resolved = resolveSettingsEnvironment(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
         );
@@ -998,6 +1106,7 @@ export class LoadedSettings {
       return {
         file,
         settings: structuredClone(file.settings),
+        envProvenance: settingsEnvProvenance.get(file.settings),
         originalSettings: structuredClone(file.originalSettings),
         rawJson: file.rawJson,
       };
@@ -1007,6 +1116,8 @@ export class LoadedSettings {
 
     for (const snapshot of snapshots) {
       snapshot.file.settings = snapshot.settings;
+      if (snapshot.envProvenance)
+        settingsEnvProvenance.set(snapshot.settings, snapshot.envProvenance);
       snapshot.file.originalSettings = snapshot.originalSettings;
       snapshot.file.rawJson = snapshot.rawJson;
     }
@@ -1596,26 +1707,25 @@ function readSettingsLayers(
   const homeEnvFallback = snapshotOf
     ? spawnedEnvironmentView(snapshotOf.environment)
     : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
-  const resolveOptions = { processEnvFallback: !snapshot };
-  systemSettings = resolveEnvVarsInObject(
+  systemSettings = resolveSettingsEnvironment(
     systemResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  systemDefaultSettings = resolveEnvVarsInObject(
+  systemDefaultSettings = resolveSettingsEnvironment(
     systemDefaultsResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  userSettings = resolveEnvVarsInObject(
+  userSettings = resolveSettingsEnvironment(
     userResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  workspaceSettings = resolveEnvVarsInObject(
+  workspaceSettings = resolveSettingsEnvironment(
     workspaceResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
 
   // Support legacy theme names
