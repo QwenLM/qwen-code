@@ -213,10 +213,18 @@ export default {
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'Configuration not available. Cannot show memory.':
     'Konfiguration nicht verfügbar. Speicher kann nicht angezeigt werden.',
-  'Loaded memory from {{count}} {{name}} file{{plural}}.':
-    'Speicher aus {{count}} {{name}}-Datei(en) geladen.',
-  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
-    'Aktueller kombinierter Speicherinhalt:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Loaded memory from {{count}} context file.':
+    'Speicher aus {{count}} Kontextdatei geladen.',
+  'Loaded memory from {{count}} context files.':
+    'Speicher aus {{count}} Kontextdateien geladen.',
+  'Loaded memory from {{count}} file named {{name}}.':
+    'Speicher aus {{count}} Datei namens {{name}} geladen.',
+  'Loaded memory from {{count}} files named {{name}}.':
+    'Speicher aus {{count}} Dateien namens {{name}} geladen.',
+  'Usage: /memory [show|migrate-team]':
+    'Verwendung: /memory [show|migrate-team]',
+  'Current combined memory content:\n```markdown\n{{content}}\n```':
+    'Aktueller kombinierter Speicherinhalt:\n```markdown\n{{content}}\n```',
   'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
     'Hierarchischer Speicher (QWEN.md oder andere Kontextdateien) wurde geladen, ist aber leer.',
   'No hierarchical memory (QWEN.md or other context files) is currently loaded.':

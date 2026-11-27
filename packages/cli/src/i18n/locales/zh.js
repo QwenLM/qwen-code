@@ -490,10 +490,17 @@ export default {
   'Configuration not available.': '配置不可用',
   'Configuration not available. Cannot show memory.':
     '配置不可用，无法显示记忆。',
-  'Loaded memory from {{count}} {{name}} file{{plural}}.':
-    '已从 {{count}} 个 {{name}} 文件加载记忆。',
-  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
-    '当前合并的记忆内容：\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Loaded memory from {{count}} context file.':
+    '已从 {{count}} 个上下文文件加载记忆。',
+  'Loaded memory from {{count}} context files.':
+    '已从 {{count}} 个上下文文件加载记忆。',
+  'Loaded memory from {{count}} file named {{name}}.':
+    '已从 {{count}} 个名为 {{name}} 的文件加载记忆。',
+  'Loaded memory from {{count}} files named {{name}}.':
+    '已从 {{count}} 个名为 {{name}} 的文件加载记忆。',
+  'Usage: /memory [show|migrate-team]': '用法：/memory [show|migrate-team]',
+  'Current combined memory content:\n```markdown\n{{content}}\n```':
+    '当前合并的记忆内容：\n```markdown\n{{content}}\n```',
   'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
     '层级记忆（QWEN.md 或其他上下文文件）已加载，但内容为空。',
   'No hierarchical memory (QWEN.md or other context files) is currently loaded.':

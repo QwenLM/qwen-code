@@ -153,8 +153,19 @@ describe('createShowMemoryAction', () => {
       addMessage,
     )();
 
-    expect(messages.some((m) => m.content.includes(' context file'))).toBe(true);
-    expect(messages.every((m) => !m.content.includes('undefined'))).toBe(true);
+    expect(
+      messages.some(
+        (m) =>
+          m.type === MessageType.INFO &&
+          m.content.includes(' context file'),
+      ),
+    ).toBe(true);
+    expect(
+      messages.every(
+        (m) =>
+          m.type !== MessageType.INFO || !m.content.includes('undefined'),
+      ),
+    ).toBe(true);
   });
 
   it('reports a clear error when configuration is unavailable', async () => {

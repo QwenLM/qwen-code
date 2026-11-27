@@ -236,10 +236,17 @@ export default {
   'Configuration not available.': 'Configuració no disponible.',
   'Configuration not available. Cannot show memory.':
     'La configuració no està disponible. No es pot mostrar la memòria.',
-  'Loaded memory from {{count}} {{name}} file{{plural}}.':
-    'Memòria carregada de {{count}} fitxer(s) {{name}}.',
-  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
-    'Contingut de memòria combinat actual:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Loaded memory from {{count}} context file.':
+    'Memòria carregada de {{count}} fitxer de context.',
+  'Loaded memory from {{count}} context files.':
+    'Memòria carregada de {{count}} fitxers de context.',
+  'Loaded memory from {{count}} file named {{name}}.':
+    'Memòria carregada de {{count}} fitxer anomenat {{name}}.',
+  'Loaded memory from {{count}} files named {{name}}.':
+    'Memòria carregada de {{count}} fitxers anomenats {{name}}.',
+  'Usage: /memory [show|migrate-team]': 'Ús: /memory [show|migrate-team]',
+  'Current combined memory content:\n```markdown\n{{content}}\n```':
+    'Contingut de memòria combinat actual:\n```markdown\n{{content}}\n```',
   'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
     'La memòria jeràrquica (QWEN.md o altres fitxers de context) s’ha carregat però és buida.',
   'No hierarchical memory (QWEN.md or other context files) is currently loaded.':

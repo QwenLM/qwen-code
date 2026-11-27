@@ -189,10 +189,17 @@ export default {
   'Configuration not available.': '設定が利用できません',
   'Configuration not available. Cannot show memory.':
     '設定を利用できないため、メモリを表示できません。',
-  'Loaded memory from {{count}} {{name}} file{{plural}}.':
-    '{{count}} 個の {{name}} ファイルからメモリを読み込みました。',
-  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
-    '現在の統合メモリ内容：\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Loaded memory from {{count}} context file.':
+    '{{count}} 個のコンテキストファイルからメモリを読み込みました。',
+  'Loaded memory from {{count}} context files.':
+    '{{count}} 個のコンテキストファイルからメモリを読み込みました。',
+  'Loaded memory from {{count}} file named {{name}}.':
+    '{{name}} というファイル {{count}} 個からメモリを読み込みました。',
+  'Loaded memory from {{count}} files named {{name}}.':
+    '{{name}} というファイル {{count}} 個からメモリを読み込みました。',
+  'Usage: /memory [show|migrate-team]': '使い方: /memory [show|migrate-team]',
+  'Current combined memory content:\n```markdown\n{{content}}\n```':
+    '現在の統合メモリ内容：\n```markdown\n{{content}}\n```',
   'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
     '階層メモリ（QWEN.md または他のコンテキストファイル）は読み込まれましたが、内容が空です。',
   'No hierarchical memory (QWEN.md or other context files) is currently loaded.':

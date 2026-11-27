@@ -240,6 +240,7 @@ Opens the Memory panel. From here you can:
 - Open your personal QWEN.md (`~/.qwen/QWEN.md`)
 - Open the project QWEN.md
 - Browse the auto-memory folder
+- Show the combined contents of loaded memory with `/memory show`
 
 ### `/memory migrate-team`
 

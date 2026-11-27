@@ -54,17 +54,25 @@ export function createShowMemoryAction(
     debugLogger.debug(`[DEBUG] Number of context files loaded: ${fileCount}`);
 
     if (fileCount > 0) {
-      const allNamesTheSame = new Set(contextFileNames).size < 2;
-      const name = allNamesTheSame
-        ? (contextFileNames[0] ?? 'context')
-        : 'context';
+      const name = contextFileNames[0];
+      const hasSpecificName =
+        new Set(contextFileNames).size < 2 && name !== undefined;
+      const messageKey = hasSpecificName
+        ? fileCount === 1
+          ? 'Loaded memory from {{count}} file named {{name}}.'
+          : 'Loaded memory from {{count}} files named {{name}}.'
+        : fileCount === 1
+          ? 'Loaded memory from {{count}} context file.'
+          : 'Loaded memory from {{count}} context files.';
+      const messageParams: Record<string, string> = {
+        count: String(fileCount),
+      };
+      if (hasSpecificName && name !== undefined) {
+        messageParams['name'] = name;
+      }
       addMessage({
         type: MessageType.INFO,
-        content: t('Loaded memory from {{count}} {{name}} file{{plural}}.', {
-          count: fileCount,
-          name,
-          plural: fileCount > 1 ? 's' : '',
-        }),
+        content: t(messageKey, messageParams),
         timestamp: new Date(),
       });
     }
@@ -73,7 +81,7 @@ export function createShowMemoryAction(
       addMessage({
         type: MessageType.INFO,
         content: t(
-          'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+          'Current combined memory content:\n```markdown\n{{content}}\n```',
           { content: currentMemory },
         ),
         timestamp: new Date(),
