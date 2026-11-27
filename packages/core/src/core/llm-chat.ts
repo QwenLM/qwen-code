@@ -1021,6 +1021,19 @@ interface OpenAIChatPromptSource {
   schemaCompliance?: ContentGeneratorConfig['schemaCompliance'];
 }
 
+function normalizeRenderOptions(options: unknown): unknown {
+  // Empty override maps leave the renderer's defaults in effect.
+  if (
+    options !== null &&
+    typeof options === 'object' &&
+    !Array.isArray(options) &&
+    Object.keys(options).length === 0
+  ) {
+    return undefined;
+  }
+  return options ?? undefined;
+}
+
 function openAIChatPromptSource(
   config: ContentGeneratorConfig | undefined,
   model: string | undefined,
@@ -1045,13 +1058,6 @@ function openAIChatPromptSource(
     add_special_tokens: addSpecialTokens = false,
   } = body;
   const rawMessages = Array.isArray(messages) ? messages : undefined;
-  const templateKwargs = body['chat_template_kwargs'] ?? undefined;
-  // Empty template arguments contribute no variables to the renderer.
-  const emptyTemplateKwargs =
-    templateKwargs !== undefined &&
-    typeof templateKwargs === 'object' &&
-    !Array.isArray(templateKwargs) &&
-    Object.keys(templateKwargs).length === 0;
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
   const generatedTools =
@@ -1065,12 +1071,15 @@ function openAIChatPromptSource(
     // These overrides can change the tokens rendered from the same messages and tools.
     rendering: {
       chat_template: body['chat_template'] ?? undefined,
-      chat_template_kwargs: emptyTemplateKwargs ? undefined : templateKwargs,
+      chat_template_kwargs: normalizeRenderOptions(
+        body['chat_template_kwargs'],
+      ),
       documents: body['documents'] ?? undefined,
+      response_format: body['response_format'] ?? undefined,
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,
-      mm_processor_kwargs: body['mm_processor_kwargs'] ?? undefined,
+      mm_processor_kwargs: normalizeRenderOptions(body['mm_processor_kwargs']),
       truncate_prompt_tokens: body['truncate_prompt_tokens'] ?? undefined,
     },
     systemInstruction: rawMessages ? undefined : generation?.systemInstruction,

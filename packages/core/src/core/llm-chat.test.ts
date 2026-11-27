@@ -8643,7 +8643,33 @@ describe('LlmChat', async () => {
     );
 
     const reportTemplateArgs = { report_context: 'The same report context' };
-    it.each([
+    const miniMaxRoute = {
+      wireModel: digitalOceanModel,
+      primaryWindow: 32_000,
+      warmPromptTokens: 20_045,
+      primaryOutput: 4_000,
+    };
+    const kimiRoute = {
+      wireModel: 'moonshotai/Kimi-K3:fireworks',
+      primaryWindow: 38_000,
+      warmPromptTokens: 12_458,
+      primaryOutput: 15_542,
+    };
+    const reportResponseFormat = {
+      type: 'json_schema',
+      json_schema: {
+        name: 'report',
+        schema: { type: 'object' },
+      },
+    };
+    it.each<{
+      name: string;
+      primary?: typeof miniMaxRoute;
+      primaryBody?: Record<string, unknown>;
+      body?: Record<string, unknown>;
+      sampling?: Record<string, unknown>;
+      output: number;
+    }>([
       {
         name: 'extra body template arguments',
         body: { chat_template_kwargs: reportTemplateArgs },
@@ -8746,11 +8772,89 @@ describe('LlmChat', async () => {
         body: { truncate_prompt_tokens: 20_000 },
         output: 4_000,
       },
+      {
+        name: 'empty multimodal processor arguments',
+        body: { mm_processor_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'empty multimodal arguments clearing sampling arguments',
+        sampling: { mm_processor_kwargs: { num_crops: 8 } },
+        body: { mm_processor_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'nonempty multimodal processor arguments',
+        body: { mm_processor_kwargs: { num_crops: 8 } },
+        output: 4_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi response schema in the body',
+        body: { response_format: reportResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi response schema in sampling',
+        sampling: { response_format: reportResponseFormat },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a different Kimi response schema',
+        primaryBody: { response_format: reportResponseFormat },
+        body: {
+          response_format: {
+            ...reportResponseFormat,
+            json_schema: {
+              ...reportResponseFormat.json_schema,
+              schema: { type: 'object', additionalProperties: false },
+            },
+          },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a matching Kimi response schema after the body override',
+        primaryBody: { response_format: reportResponseFormat },
+        sampling: { response_format: { type: 'json_object' } },
+        body: { response_format: reportResponseFormat },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a null response format clearing the sampling schema',
+        sampling: { response_format: reportResponseFormat },
+        body: { response_format: null },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a text format overriding the template response schema',
+        primaryBody: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+        },
+        body: {
+          chat_template_kwargs: { response_format: reportResponseFormat },
+          response_format: { type: 'text' },
+        },
+        output: kimiRoute.primaryOutput,
+      },
     ])(
       'matches warmed fallback usage against $name',
-      async ({ primaryBody, body, sampling, output }) => {
+      async ({
+        primary = miniMaxRoute,
+        primaryBody,
+        body,
+        sampling,
+        output,
+      }) => {
+        const { wireModel, primaryWindow, warmPromptTokens, primaryOutput } =
+          primary;
         const messages = [{ role: 'user', content: 'Summarize the report.' }];
-        const fallbackModel = 'compatible-minimax';
+        const fallbackModel = 'compatible-backup';
         const fallback = vi.fn().mockResolvedValue(textStream('completed'));
         wireFallbacks(
           [fallbackModel],
@@ -8760,25 +8864,26 @@ describe('LlmChat', async () => {
               model: fallbackModel,
               baseUrl: 'https://compatible.example/v1',
               samplingParams: sampling,
-              extra_body: { model: digitalOceanModel, messages, ...body },
+              extra_body: { model: wireModel, messages, ...body },
             }),
           ),
           {
             ...narrowPrimary,
-            contextWindowSize: 32_000,
+            model: wireModel,
+            contextWindowSize: primaryWindow,
             extra_body: { messages, ...primaryBody },
           },
         );
         mockCompress(noop());
         streamMock().mockResolvedValueOnce(
           textStream('ready', {
-            promptTokenCount: 20_045,
-            totalTokenCount: 20_051,
+            promptTokenCount: warmPromptTokens,
+            totalTokenCount: warmPromptTokens + 6,
           }),
         );
         await drain(
           await chat.sendMessageStream(
-            digitalOceanModel,
+            wireModel,
             { message: 'Read the report.', config: { maxOutputTokens: 1_000 } },
             'warm-template-first',
           ),
@@ -8786,13 +8891,13 @@ describe('LlmChat', async () => {
         streamMock().mockRejectedValueOnce(tpmCapacityError());
         await drain(
           await chat.sendMessageStream(
-            digitalOceanModel,
+            wireModel,
             { message: 'Answer from the report.' },
             'warm-template-second',
           ),
         );
         expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
-          4_000,
+          primaryOutput,
         );
         expect(fallback.mock.calls[0][0].config.maxOutputTokens).toBe(output);
       },
