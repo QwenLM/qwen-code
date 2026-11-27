@@ -4138,6 +4138,19 @@ describe('ContentGenerationPipeline', () => {
         .map((part) => part.text ?? '')
         .join('');
 
+    it('releases a buffered content-only leading block when the stream errors', async () =>
+      withRealChunkConverter(async () => {
+        const streamError = new Error('connection reset');
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(chunkOf({ content: '<thinking>\nsecret' }), streamError),
+          ),
+        );
+
+        expect(error).toBe(streamError);
+        expect(visibleText(items)).toBe('<thinking>\nsecret');
+      }));
+
     it.each(['leak verdict', 'transport error'] as const)(
       'keeps a stranded filter tail out of a tagged-thinking turn (%s)',
       async (termination) =>

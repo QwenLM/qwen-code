@@ -495,11 +495,20 @@ function flushTrailingThinkingTag(
   if (filter) {
     filter.sanitizedTagName = undefined;
   }
-  if (!trailingText) return { sanitizedTagName };
+  const demoter = context.leadingThinkingBlockDemoter;
+  const demotedLeadingText = demoter?.release() ?? '';
+  context.leadingThinkingBlockDemoter = undefined;
+  if (!trailingText && !demotedLeadingText) return { sanitizedTagName };
   const response = new GenerateContentResponse();
   response.candidates = [
     {
-      content: { parts: [{ text: trailingText }], role: 'model' },
+      content: {
+        parts: [
+          ...(demotedLeadingText ? [{ text: demotedLeadingText }] : []),
+          ...(trailingText ? [{ text: trailingText }] : []),
+        ],
+        role: 'model',
+      },
       index: 0,
     },
   ];
