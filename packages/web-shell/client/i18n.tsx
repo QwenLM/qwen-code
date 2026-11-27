@@ -3234,6 +3234,31 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'auth.modelSelection.thQuant': 'Quant',
   'auth.modelSelection.thInPrice': 'In $/Mt',
   'auth.modelSelection.thOutPrice': 'Out $/Mt',
+  'auth.modelSelection.filterByType': 'Filter by type',
+  'auth.modelSelection.filterByQuant': 'Filter by quantization',
+  'auth.modelSelection.filterByContext': 'Filter by context window',
+  'auth.modelSelection.minContextTokens': (v) => `≥ ${v?.tokens ?? ''} tokens`,
+  'auth.modelSelection.filterFeaturedTitle': 'Filter featured models',
+  'auth.modelSelection.filterDiscountTitle': 'Filter discounted models',
+  'auth.modelSelection.filterPriorityTitle':
+    'Filter models supporting priority service tier',
+  'auth.modelSelection.filterFlexTitle':
+    'Filter models supporting flex service tier',
+  'auth.modelSelection.sortInPriceTitle':
+    'Sort by input price per million tokens',
+  'auth.modelSelection.sortOutPriceTitle':
+    'Sort by output price per million tokens',
+  'auth.modelSelection.selectModel': (v) => `Select ${v?.name ?? ''}`,
+  'auth.modelSelection.removeModel': (v) => `Remove ${v?.id ?? ''}`,
+  'auth.modelSelection.featuredBadge': 'Featured model',
+  'auth.modelSelection.discountAvailable': 'Discount available',
+  'auth.modelSelection.discountedPercentTitle': (v) =>
+    `Discounted (${v?.percent ?? ''}% off)`,
+  'auth.modelSelection.discountedPricingTitle': 'Discounted pricing available',
+  'auth.modelSelection.priorityBadge': 'Priority tier',
+  'auth.modelSelection.priorityTitle': 'Supports Priority Service Tier',
+  'auth.modelSelection.flexBadge': 'Flex tier',
+  'auth.modelSelection.flexTitle': 'Supports Flex Service Tier',
   'local.btw':
     'Ask a quick side question without affecting the main conversation. Usage: /btw <your question>',
   'btw.empty': 'Please provide a question. Usage: /btw <your question>',
