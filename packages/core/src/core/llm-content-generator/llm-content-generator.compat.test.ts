@@ -8,7 +8,35 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Content, Part } from '@google/genai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LlmContentGenerator } from './llm-content-generator.js';
+
+const { runtimeFetchState } = vi.hoisted(() => ({
+  runtimeFetchState: {
+    overrideFetch: undefined as typeof fetch | undefined,
+  },
+}));
+
+vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/runtimeFetchOptions.js')>();
+  return {
+    ...actual,
+    buildRuntimeFetchOptions: (
+      sdkType: 'openai' | 'anthropic' | 'gemini',
+      proxyUrl?: string,
+    ) => {
+      if (runtimeFetchState.overrideFetch) {
+        return { fetch: runtimeFetchState.overrideFetch };
+      }
+      return actual.buildRuntimeFetchOptions(sdkType as 'gemini', proxyUrl);
+    },
+  };
+});
+
+import {
+  GeminiConnectTimeoutError,
+  LlmContentGenerator,
+} from './llm-content-generator.js';
+import { StreamInactivityTimeoutError } from '../stream-guards.js';
 import { slimCompactionInput } from '../../services/compactionInputSlimming.js';
 import { applyOssMediaReplacements } from '../../omni/reactive-degrade.js';
 
@@ -26,6 +54,7 @@ type GeneratorOptions = {
 };
 
 afterEach(() => {
+  runtimeFetchState.overrideFetch = undefined;
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
@@ -68,7 +97,7 @@ async function captureRequestHeaders(
       candidates: [{ content: { parts: [{ text: 'answer' }], role: 'model' } }],
     }),
   );
-  vi.stubGlobal('fetch', fetchMock);
+  runtimeFetchState.overrideFetch = fetchMock;
   await makeGenerator(options).generateContent(
     {
       model: 'gemini-test',
@@ -187,7 +216,9 @@ async function readStreamText(
   response: Response,
   options: GeneratorOptions = {},
 ): Promise<string> {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+  runtimeFetchState.overrideFetch = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(response);
   const stream = await makeGenerator(options).generateContentStream(
     {
       model: 'gemini-test',
@@ -582,5 +613,145 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
         output: 'ok\n[Image degraded to lower resolution]',
       });
     });
+  });
+
+  async function withRawServer<T>(
+    handler: (
+      req: http.IncomingMessage,
+      res: http.ServerResponse,
+      timers: Array<ReturnType<typeof setTimeout>>,
+    ) => void,
+    run: (baseUrl: string) => Promise<T>,
+  ): Promise<T> {
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    const server = http.createServer((req, res) => handler(req, res, timers));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    try {
+      return await run(`http://127.0.0.1:${port}`);
+    } finally {
+      timers.forEach(clearTimeout);
+      server.closeAllConnections?.();
+      await new Promise<void>((res, rej) =>
+        server.close((err) => (err ? rej(err) : res())),
+      );
+    }
+  }
+
+  const localGen = (baseUrl: string, cg: Record<string, unknown> = {}) =>
+    new LlmContentGenerator(
+      { apiKey: 'local-test-key', vertexai: false, httpOptions: { baseUrl } },
+      { model: 'gemini-test', ...cg },
+    );
+
+  it('enforces connect-phase timeout (ETIMEDOUT) without synthesizing X-Server-Timeout over real bundled undici', async () => {
+    const seenServerTimeouts: Array<string | string[] | undefined> = [];
+    await withRawServer(
+      (req, res, timers) => {
+        seenServerTimeouts.push(req.headers['x-server-timeout']);
+        timers.push(
+          setTimeout(() => {
+            if (!res.writableEnded) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(candidate);
+            }
+          }, 500),
+        );
+      },
+      async (baseUrl) => {
+        await expect(
+          localGen(baseUrl, { timeout: 80 }).generateContent(
+            { model: 'gemini-test', contents: 'hello' },
+            'timeout-wire-test',
+          ),
+        ).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof GeminiConnectTimeoutError &&
+            err.code === 'ETIMEDOUT' &&
+            err.connectTimeoutMs === 80,
+        );
+        expect(seenServerTimeouts).toEqual([undefined]);
+      },
+    );
+  });
+
+  it('does not abort a healthy stream that runs longer than connect timeout once headers arrive', async () => {
+    await withRawServer(
+      (_req, res, timers) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(`data: ${candidate}\n\n`);
+        timers.push(
+          setTimeout(() => {
+            if (!res.writableEnded) {
+              res.write(`data: ${candidate}\n\n`);
+              res.end();
+            }
+          }, 140),
+        );
+      },
+      async (baseUrl) => {
+        const stream = await localGen(baseUrl, {
+          timeout: 60,
+          streamIdleTimeoutMs: 500,
+        }).generateContentStream(
+          { model: 'gemini-test', contents: 'hello' },
+          'long-stream-wire-test',
+        );
+        const chunks: string[] = [];
+        for await (const chunk of stream) {
+          if (chunk.text) chunks.push(chunk.text);
+        }
+        expect(chunks).toEqual(['answer', 'answer']);
+      },
+    );
+  });
+
+  it('enforces shared stream-guards inactivity timeout and aborts socket on early consumer break', async () => {
+    let closedCount = 0;
+    await withRawServer(
+      (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(`data: ${candidate}\n\n`);
+        res.on('close', () => {
+          closedCount += 1;
+        });
+      },
+      async (baseUrl) => {
+        const gen = localGen(baseUrl, {
+          timeout: 5_000,
+          streamIdleTimeoutMs: 80,
+        });
+        const stream1 = await gen.generateContentStream(
+          { model: 'gemini-test', contents: 'hello' },
+          'idle-wire-test',
+        );
+        const chunks1: string[] = [];
+        let caught: unknown;
+        try {
+          for await (const chunk of stream1) {
+            if (chunk.text) chunks1.push(chunk.text);
+          }
+        } catch (err) {
+          caught = err;
+        }
+        expect(chunks1).toEqual(['answer']);
+        expect(caught).toBeInstanceOf(StreamInactivityTimeoutError);
+        expect((caught as StreamInactivityTimeoutError).code).toBe('ETIMEDOUT');
+        expect((caught as StreamInactivityTimeoutError).chunksReceived).toBe(1);
+
+        const stream2 = await gen.generateContentStream(
+          { model: 'gemini-test', contents: 'hello' },
+          'break-wire-test',
+        );
+        const chunks2: string[] = [];
+        for await (const chunk of stream2) {
+          if (chunk.text) chunks2.push(chunk.text);
+          break;
+        }
+        expect(chunks2).toEqual(['answer']);
+        await new Promise((r) => setTimeout(r, 40));
+        expect(closedCount).toBe(2);
+      },
+    );
   });
 });

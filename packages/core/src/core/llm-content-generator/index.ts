@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LlmContentGenerator } from './llm-content-generator.js';
+import {
+  LlmContentGenerator,
+  normalizeGeminiBaseUrl,
+} from './llm-content-generator.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
   ContentGenerator,
@@ -13,7 +16,10 @@ import type {
 import type { Config } from '../../config/config.js';
 import { InstallationManager } from '../../config/installationManager.js';
 
-export { LlmContentGenerator } from './llm-content-generator.js';
+export {
+  LlmContentGenerator,
+  normalizeGeminiBaseUrl,
+} from './llm-content-generator.js';
 
 /**
  * Create the Google GenAI-backed LLM content generator.
@@ -42,7 +48,7 @@ export function createLlmContentGenerator(
   const httpOptions = config.baseUrl
     ? {
         headers,
-        baseUrl: config.baseUrl,
+        baseUrl: normalizeGeminiBaseUrl(config.baseUrl),
       }
     : { headers };
   const useVertex = config.authType === AuthType.USE_VERTEX_AI;

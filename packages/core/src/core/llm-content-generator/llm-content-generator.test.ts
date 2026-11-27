@@ -7,6 +7,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
+import {
+  StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
+} from '../stream-guards.js';
 import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { GoogleGenAI } from '@google/genai';
 import type { GenerateContentConfig, Part } from '@google/genai';
@@ -1034,6 +1038,88 @@ describe('LlmContentGenerator', () => {
       // The garbage is forwarded unchanged (base behavior): the recognizer
       // only drops the Responses replay payload shape, never crashes.
       await sendThought(nonStringSignature, nonStringSignature);
+    });
+  });
+
+  describe('stream-guards integration', () => {
+    function setupHangingStream(
+      cg: Record<string, unknown>,
+      firstChunk?: { responseId: string },
+    ) {
+      const { gen, models } = build({}, { model: 'gemini-2.5-flash', ...cg });
+      let signal: AbortSignal | undefined;
+      const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
+      models.generateContentStream.mockImplementation(
+        async (req: { config?: { abortSignal?: AbortSignal } }) => {
+          signal = req.config?.abortSignal;
+          let count = 0;
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () =>
+                firstChunk && count++ === 0
+                  ? { done: false, value: firstChunk }
+                  : new Promise(() => {}),
+              return: close,
+            }),
+          };
+        },
+      );
+      return { gen, close, getSignal: () => signal };
+    }
+
+    it.each([
+      [
+        'streamIdleTimeoutMs',
+        { streamIdleTimeoutMs: 500 },
+        undefined,
+        500,
+        StreamInactivityTimeoutError,
+      ],
+      [
+        'QWEN_STREAM_IDLE_TIMEOUT_MS + streamMaxLifetimeMs',
+        { streamMaxLifetimeMs: 250 },
+        '300',
+        250,
+        StreamLifetimeExceededError,
+      ],
+    ] as const)(
+      'aborts stalled stream via %s and trips per-request signal',
+      async (_label, cg, envIdle, advanceMs, ErrorClass) => {
+        vi.useFakeTimers();
+        if (envIdle) vi.stubEnv('QWEN_STREAM_IDLE_TIMEOUT_MS', envIdle);
+        try {
+          const { gen, getSignal } = setupHangingStream(cg);
+          const stream = await gen.generateContentStream(
+            flashReq(),
+            'prompt-id',
+          );
+          const settled = stream.next().catch((err: unknown) => err);
+          await vi.advanceTimersByTimeAsync(advanceMs);
+          const caught = await settled;
+          expect(caught).toBeInstanceOf(ErrorClass);
+          expect((caught as { code?: string }).code).toBe('ETIMEDOUT');
+          expect(getSignal()?.aborted).toBe(true);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('aborts the per-request signal on early consumer return', async () => {
+      const { gen, close, getSignal } = setupHangingStream(
+        {},
+        { responseId: '1' },
+      );
+      const stream = await gen.generateContentStream(flashReq(), 'prompt-id');
+      expect(await stream.next()).toEqual({
+        done: false,
+        value: { responseId: '1' },
+      });
+      expect(getSignal()?.aborted).toBe(false);
+      await stream.return(undefined);
+      expect(getSignal()?.aborted).toBe(true);
+      expect(close).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -145,6 +145,12 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(fetchOf(result)).toBe(mockUndiciFetch);
   });
 
+  it('returns Agent with disabled timeouts for Gemini when no proxy is set', () => {
+    const result = buildRuntimeFetchOptions('gemini');
+    expect(dispatcherOptionsOf(result)).toMatchObject(noProxyTimeouts);
+    expect(fetchOf(result)).toBe(mockUndiciFetch);
+  });
+
   it('uses EnvHttpProxyAgent with disabled timeouts when proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
     expect(dispatcherOptionsOf(result)).toMatchObject(proxiedTimeouts);
@@ -152,6 +158,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
 
   it('returns fetchOptions with EnvHttpProxyAgent for Anthropic with proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
+    expect(dispatcherOptionsOf(result)).toMatchObject(proxiedTimeouts);
+  });
+
+  it('returns fetchOptions with EnvHttpProxyAgent for Gemini with proxy', () => {
+    const result = buildRuntimeFetchOptions('gemini', 'http://proxy.local');
     expect(dispatcherOptionsOf(result)).toMatchObject(proxiedTimeouts);
   });
 
@@ -165,6 +176,8 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(fetchOf(openaiResult)).toBe(mockUndiciFetch);
     const anthropicResult = buildRuntimeFetchOptions('anthropic', proxy);
     expect(fetchOf(anthropicResult)).toBe(mockUndiciFetch);
+    const geminiResult = buildRuntimeFetchOptions('gemini', proxy);
+    expect(fetchOf(geminiResult)).toBe(mockUndiciFetch);
   });
 
   it('injects undiciFetch when no proxy is set', () => {
@@ -175,6 +188,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(fetchOf(buildRuntimeFetchOptions('anthropic'))).toBe(
       mockUndiciFetch,
     );
+    expect(fetchOf(buildRuntimeFetchOptions('gemini'))).toBe(mockUndiciFetch);
   });
 
   it('returns undefined for OpenAI when dispatcher creation fails', () => {
@@ -189,6 +203,13 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(
       buildRuntimeFetchOptions('anthropic', 'http://invalid-proxy'),
     ).toEqual({});
+    expectFailureLoggedOnce();
+  });
+
+  it('returns empty object for Gemini when dispatcher creation fails', () => {
+    expect(buildRuntimeFetchOptions('gemini', 'http://invalid-proxy')).toEqual(
+      {},
+    );
     expectFailureLoggedOnce();
   });
 
@@ -597,6 +618,71 @@ describe('redactProxyError', () => {
     );
     expect(redactedNestedError).toBe(nestedError);
     expect(redactedNestedError.message).toBe(REDACTED_TOKEN_MSG);
+  });
+
+  it('preserves DOMException brand when redacting AbortError with or without credentials', () => {
+    const cleanAbort = new DOMException(
+      'This operation was aborted',
+      'AbortError',
+    );
+    const cleanResult = redactProxyError(cleanAbort) as DOMException;
+    expect(cleanResult).toBe(cleanAbort);
+    expect(cleanResult.name).toBe('AbortError');
+    expect(cleanResult.message).toBe('This operation was aborted');
+
+    const credentialAbort = new DOMException(
+      'aborted via http://user:secret@proxy.local:8080',
+      'AbortError',
+    );
+    const redactedResult = redactProxyError(credentialAbort) as DOMException;
+    expect(redactedResult).toBeInstanceOf(DOMException);
+    expect(redactedResult.name).toBe('AbortError');
+    expect(redactedResult.message).toBe(
+      'aborted via http://<redacted>@proxy.local:8080',
+    );
+  });
+
+  it('returns clean read-only errors untouched without unnecessary cloning', () => {
+    const cleanReadOnly: { message?: string; status?: number } = {};
+    makeReadOnly(cleanReadOnly, 'message', 'Network timeout occurred');
+    Object.defineProperty(cleanReadOnly, 'status', {
+      value: 504,
+      enumerable: true,
+    });
+
+    expect(redactProxyError(cleanReadOnly)).toBe(cleanReadOnly);
+  });
+
+  it('redacts message on fallback-cloned [object DOMException] when global DOMException is unavailable', () => {
+    const proto = {
+      [Symbol.toStringTag]: 'DOMException',
+      get name() {
+        return 'AbortError';
+      },
+      get message() {
+        return 'aborted via http://user:secret@proxy.local:8080';
+      },
+    };
+    const crossRealmLike = Object.create(proto) as {
+      name: string;
+      message: string;
+    };
+
+    vi.stubGlobal('DOMException', undefined);
+    try {
+      const redacted = redactProxyError(crossRealmLike) as {
+        name: string;
+        message: string;
+      };
+      expect(redacted).not.toBe(crossRealmLike);
+      expect(redacted.name).toBe('AbortError');
+      expect(redacted.message).toBe(
+        'aborted via http://<redacted>@proxy.local:8080',
+      );
+      expect(redacted.message).not.toContain('secret');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

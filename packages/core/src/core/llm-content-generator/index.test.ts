@@ -5,14 +5,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createLlmContentGenerator } from './index.js';
+import { createLlmContentGenerator, normalizeGeminiBaseUrl } from './index.js';
 import { LlmContentGenerator } from './llm-content-generator.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
 
-vi.mock('./llm-content-generator.js', () => ({
-  LlmContentGenerator: vi.fn().mockImplementation(() => ({})),
-}));
+vi.mock('./llm-content-generator.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./llm-content-generator.js')>();
+  return {
+    ...actual,
+    LlmContentGenerator: vi.fn().mockImplementation(() => ({})),
+  };
+});
 
 describe('createLlmContentGenerator', () => {
   let mockConfig: Config;
@@ -85,6 +90,36 @@ describe('createLlmContentGenerator', () => {
       config,
       mockConfig,
     );
+  });
+
+  it('strips trailing /v1beta from Gemini baseUrl and omits SDK httpOptions.timeout', () => {
+    expect(
+      normalizeGeminiBaseUrl('  https://proxy.example.com/gateway/V1BETA///  '),
+    ).toBe('https://proxy.example.com/gateway');
+    expect(
+      normalizeGeminiBaseUrl(
+        'https://proxy.example.com/gateway/v1beta/V1BETA///',
+      ),
+    ).toBe('https://proxy.example.com/gateway');
+    expect(
+      normalizeGeminiBaseUrl('https://proxy.example.com/gateway/v1beta1/'),
+    ).toBe('https://proxy.example.com/gateway/v1beta1');
+
+    const config = {
+      model: 'gemini-2.5-flash',
+      apiKey: 'test-key',
+      authType: AuthType.USE_GEMINI,
+      baseUrl: 'https://proxy.example.com/gateway/v1beta',
+      timeout: 600_000,
+    };
+    createLlmContentGenerator(config, mockConfig);
+
+    const passedHttpOptions =
+      vi.mocked(LlmContentGenerator).mock.calls[0]?.[0]?.httpOptions;
+    expect(passedHttpOptions?.baseUrl).toBe(
+      'https://proxy.example.com/gateway',
+    );
+    expect(passedHttpOptions).not.toHaveProperty('timeout');
   });
 
   it('should keep httpOptions unchanged when baseUrl is missing', () => {

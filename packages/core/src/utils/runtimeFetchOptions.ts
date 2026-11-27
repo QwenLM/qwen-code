@@ -118,9 +118,9 @@ export type OpenAIRuntimeFetchOptions =
   | undefined;
 
 /**
- * Runtime fetch options for Anthropic SDK
+ * Runtime fetch options backed by a shared undici dispatcher.
  */
-export type AnthropicRuntimeFetchOptions = {
+export type DispatcherFetchOptions = {
   fetchOptions?: {
     dispatcher?: Dispatcher;
   };
@@ -129,9 +129,19 @@ export type AnthropicRuntimeFetchOptions = {
 };
 
 /**
+ * Runtime fetch options for Anthropic SDK
+ */
+export type AnthropicRuntimeFetchOptions = DispatcherFetchOptions;
+
+/**
+ * Runtime fetch options for Google GenAI (Gemini / Vertex) SDK
+ */
+export type GeminiRuntimeFetchOptions = DispatcherFetchOptions;
+
+/**
  * SDK type identifier
  */
-export type SDKType = 'openai' | 'anthropic';
+export type SDKType = 'openai' | 'anthropic' | 'gemini';
 
 /**
  * Build runtime-specific fetch options for OpenAI SDK
@@ -148,17 +158,27 @@ export function buildRuntimeFetchOptions(
   proxyUrl?: string,
 ): AnthropicRuntimeFetchOptions;
 /**
+ * Build runtime-specific fetch options for Google GenAI (Gemini / Vertex) SDK
+ */
+export function buildRuntimeFetchOptions(
+  sdkType: 'gemini',
+  proxyUrl?: string,
+): GeminiRuntimeFetchOptions;
+/**
  * Build runtime-specific fetch options based on the detected runtime and SDK type
  * This function applies runtime-specific configurations to handle timeout differences
  * across Node.js and Bun, ensuring user-configured timeout works as expected.
  *
- * @param sdkType - The SDK type ('openai' or 'anthropic') to determine return type
+ * @param sdkType - The SDK type ('openai', 'anthropic', or 'gemini') to determine return type
  * @returns Runtime-specific options compatible with the specified SDK
  */
 export function buildRuntimeFetchOptions(
   sdkType: SDKType,
   proxyUrl?: string,
-): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+):
+  | OpenAIRuntimeFetchOptions
+  | AnthropicRuntimeFetchOptions
+  | GeminiRuntimeFetchOptions {
   const runtime = detectRuntime();
 
   // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
@@ -179,10 +199,13 @@ export function buildRuntimeFetchOptions(
           },
         };
       } else {
-        // Bun: Use custom fetch to disable built-in 300s timeout
-        // This allows Anthropic SDK timeout to control the request
-        // Note: Bun's fetch automatically uses proxy settings from environment variables
-        // (HTTP_PROXY, HTTPS_PROXY, NO_PROXY), so proxy behavior is preserved
+        // Bun: Use custom fetch to disable built-in 300s timeout so the
+        // Anthropic SDK timeout and Gemini (Google GenAI) connect and
+        // stream-guard timeouts control request lifecycle instead of Bun's
+        // default timeout.
+        // Note: Bun's fetch automatically uses proxy settings from environment
+        // variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY), so proxy behavior is
+        // preserved.
         const bunFetch: typeof fetch = async (
           input: RequestInfo | URL,
           init?: RequestInit,
@@ -228,11 +251,13 @@ const proxyFailureCounts = new Map<string, number>();
 /**
  * Fallback return value when no custom dispatcher is used.
  * OpenAI SDK accepts `undefined` for fetchOptions to use runtime built-in fetch;
- * Anthropic SDK requires an empty object `{}`.
+ * Anthropic SDK and Google GenAI (Gemini) transport callers read properties from
+ * the returned options object directly and require an empty object `{}`.
  */
 const NO_DISPATCHER_FALLBACK = {
   openai: undefined,
   anthropic: {},
+  gemini: {},
 } as const;
 
 /**
@@ -510,7 +535,6 @@ function redactProxyErrorValue(
     cause?: unknown;
     errors?: unknown;
   };
-  const needsClone = shouldCloneForRedaction(error, errorRecord);
   const redactedMessage =
     typeof errorRecord.message === 'string'
       ? redactProxyCredentials(errorRecord.message)
@@ -522,8 +546,28 @@ function redactProxyErrorValue(
   let redactedCause: unknown = errorRecord.cause;
   let redactedErrors: unknown = errorRecord.errors;
 
+  const messageUnchanged =
+    redactedMessage === undefined || redactedMessage === errorRecord.message;
+  const stackUnchanged =
+    redactedStack === undefined || redactedStack === errorRecord.stack;
+
+  if (
+    messageUnchanged &&
+    stackUnchanged &&
+    errorRecord.cause === undefined &&
+    errorRecord.errors === undefined
+  ) {
+    seen.set(error, error);
+    return error;
+  }
+
+  const needsClone = shouldCloneForRedaction(error, errorRecord);
+
   if (needsClone) {
-    const clone = Object.create(Object.getPrototypeOf(error));
+    const { clone, messageApplied } = createRedactedClone(
+      error,
+      redactedMessage,
+    );
     seen.set(error, clone);
 
     if (errorRecord.cause !== undefined) {
@@ -536,6 +580,7 @@ function redactProxyErrorValue(
     cloneErrorWithRedactedFields(
       error,
       clone,
+      messageApplied,
       redactedMessage,
       redactedStack,
       redactedCause,
@@ -563,7 +608,10 @@ function redactProxyErrorValue(
     }
     return error;
   } catch {
-    const clone = Object.create(Object.getPrototypeOf(error));
+    const { clone, messageApplied } = createRedactedClone(
+      error,
+      redactedMessage,
+    );
     seen.set(error, clone);
     if (errorRecord.cause !== undefined) {
       redactedCause = redactProxyErrorValue(errorRecord.cause, seen);
@@ -574,6 +622,7 @@ function redactProxyErrorValue(
     cloneErrorWithRedactedFields(
       error,
       clone,
+      messageApplied,
       redactedMessage,
       redactedStack,
       redactedCause,
@@ -581,6 +630,34 @@ function redactProxyErrorValue(
     );
     return clone;
   }
+}
+
+function isDomException(
+  value: object,
+): value is { name: string; message: string } {
+  return (
+    (typeof DOMException === 'function' && value instanceof DOMException) ||
+    Object.prototype.toString.call(value) === '[object DOMException]'
+  );
+}
+
+function createRedactedClone(
+  error: object,
+  redactedMessage: string | undefined,
+): { clone: object; messageApplied: boolean } {
+  // DOMException prototype accessors (.name, .message, .code) enforce an
+  // internal WebIDL brand check in Node.js; Object.create(DOMException.prototype)
+  // produces an unbranded object whose .name getter throws ERR_INVALID_THIS.
+  if (isDomException(error) && typeof DOMException === 'function') {
+    return {
+      clone: new DOMException(redactedMessage ?? error.message, error.name),
+      messageApplied: true,
+    };
+  }
+  return {
+    clone: Object.create(Object.getPrototypeOf(error)),
+    messageApplied: false,
+  };
 }
 
 function redactProxyErrorCollection(
@@ -642,6 +719,7 @@ function canAssignProperty(target: object, key: PropertyKey): boolean {
 function cloneErrorWithRedactedFields(
   error: object,
   clone: object,
+  messageApplied: boolean,
   redactedMessage: string | undefined,
   redactedStack: string | undefined,
   redactedCause: unknown,
@@ -671,7 +749,9 @@ function cloneErrorWithRedactedFields(
     }
   }
 
-  defineMissingRedactedValue(clone, copiedKeys, 'message', redactedMessage);
+  if (!messageApplied) {
+    defineMissingRedactedValue(clone, copiedKeys, 'message', redactedMessage);
+  }
   defineMissingRedactedValue(clone, copiedKeys, 'stack', redactedStack);
   defineMissingRedactedValue(clone, copiedKeys, 'cause', redactedCause);
   defineMissingRedactedValue(clone, copiedKeys, 'errors', redactedErrors);
@@ -743,7 +823,10 @@ function recordProxyFailure(hostname: string): number {
 function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
-): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+):
+  | OpenAIRuntimeFetchOptions
+  | AnthropicRuntimeFetchOptions
+  | GeminiRuntimeFetchOptions {
   const insecure = isTlsVerificationDisabled();
   const { Agent, fetch: undiciFetch } = requireUndici();
   // When no proxy is configured, use a cached plain undici Agent with disabled
