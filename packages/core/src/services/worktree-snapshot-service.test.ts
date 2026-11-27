@@ -379,12 +379,20 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     let ticks = 0;
     let maxGapMs = 0;
     let last = Date.now();
-    const timer = setInterval(() => {
-      ticks += 1;
-      const now = Date.now();
-      maxGapMs = Math.max(maxGapMs, now - last);
-      last = now;
-    }, 20);
+    // Arm the timer from `afterCreate`, i.e. once the archive is written: the
+    // window then covers only the hashing plus the membership loop. Running it
+    // across the whole capture let the tar step and its disk I/O set the bound,
+    // which is a load-sensitive number that has nothing to do with the scan.
+    let timer: ReturnType<typeof setInterval> | undefined;
+    captureTiming.afterCreate = async () => {
+      last = Date.now();
+      timer = setInterval(() => {
+        ticks += 1;
+        const now = Date.now();
+        maxGapMs = Math.max(maxGapMs, now - last);
+        last = now;
+      }, 20);
+    };
     try {
       const result = await captureWorktreeSnapshot({
         worktreePath: worktree,
@@ -393,16 +401,23 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       });
       expect(result.checkoutMatchesCapture).toBe(true);
     } finally {
-      clearInterval(timer);
+      if (timer) clearInterval(timer);
+      captureTiming.afterCreate = undefined;
       vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
         genuineImpl,
       );
     }
     expect(ticks).toBeGreaterThan(0);
-    // Measured on this fixture (3000 files x 100 repeats = 3e5 identities):
-    // Set membership ~34ms against ~645ms with `regularFiles.includes`. The
-    // bound sits between them with room for a loaded runner and still fails a
-    // linear scan by more than 3x.
+    // Longest synchronous gap on this fixture (3000 files x 100 repeats = 3e5
+    // identities), with the window armed after the archive is written:
+    //
+    //                        idle        6 busy loops / 10 cores
+    //   Set membership        54ms        53ms
+    //   regularFiles.includes 1529ms      1901ms
+    //
+    // The green arm does not move under load because tar and its disk I/O are
+    // outside the window. 200ms leaves more than 3x on the green arm while the
+    // linear scan misses it by more than 7x.
     expect(maxGapMs).toBeLessThan(200);
   });
 
