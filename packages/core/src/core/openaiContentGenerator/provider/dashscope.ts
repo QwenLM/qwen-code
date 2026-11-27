@@ -58,6 +58,15 @@ const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
   ['minimax-m2.5', 32_768],
 ]);
 
+// These families switched from buffered to incremental arguments in the
+// Model Studio streaming tests. Support for the extension varies by backend.
+const TOOL_STREAM_MODEL_FAMILIES = [
+  'qwen4-max',
+  'qwen3.8-max',
+  'qwen3.8-flash',
+  'qwen3.7-plus',
+] as const;
+
 /** DashScope cache breakpoint marker; qwen4 accepts an explicit `ttl`. */
 type DashScopeCacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
 
@@ -192,6 +201,7 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope.aliyuncs.com',
   'dashscope-intl.aliyuncs.com',
   'dashscope-us.aliyuncs.com',
+  'cn-hongkong.dashscope.aliyuncs.com',
 ];
 
 export { QWENCLOUD_MAAS_HOSTS };
@@ -476,13 +486,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         )
       : undefined;
 
-    // Without it, Qwen models on DashScope hold an object or array tool
-    // argument back until it is complete and send nothing meanwhile, which can
-    // outlast the stream idle timeout. Models that already stream their
-    // arguments accept it unchanged. User extra_body still wins.
-    const toolStream =
-      request.stream && tools?.length ? { tool_stream: true } : {};
-
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
       // through a loose record so they don't trip excess-property checks.
@@ -491,7 +494,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       const dashscopeExtras: Record<string, unknown> = {
         vl_high_resolution_images: true,
         preserve_thinking: true,
-        ...toolStream,
         ...qwenEffortConfig,
       };
       const visionResult: Record<string, unknown> = {
@@ -521,7 +523,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // extra_body wins (merged last).
     const dashscopeExtras: Record<string, unknown> = {
       preserve_thinking: true,
-      ...toolStream,
       ...qwenEffortConfig,
     };
     const result: Record<string, unknown> = {
@@ -563,6 +564,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    const { tool_stream: toolStream, stream, tools, model: wireModel } = merged;
+    if (
+      toolStream === undefined &&
+      stream === true &&
+      Array.isArray(tools) &&
+      tools.length > 0 &&
+      typeof wireModel === 'string' &&
+      this.supportsToolStreaming(wireModel)
+    ) {
+      merged['tool_stream'] = true;
+    }
     this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
@@ -595,6 +607,31 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     return this.flattenDeepSeekReasoningEffort(
       merged,
     ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+
+  private supportsToolStreaming(model: string): boolean {
+    const modelId = this.resolveWireModel(model);
+    if (
+      this.contentGeneratorConfig.authType === AuthType.QWEN_OAUTH ||
+      !TOOL_STREAM_MODEL_FAMILIES.some(
+        (family) => modelId === family || modelId.startsWith(`${family}-`),
+      )
+    ) {
+      return false;
+    }
+    try {
+      const url = new URL(
+        this.contentGeneratorConfig.baseUrl ?? DEFAULT_DASHSCOPE_BASE_URL,
+      );
+      return (
+        url.protocol === 'https:' &&
+        url.pathname.replace(/\/$/, '') === '/compatible-mode/v1' &&
+        (DASHSCOPE_REGIONAL_HOSTS.includes(url.hostname) ||
+          url.hostname.endsWith('.maas.aliyuncs.com'))
+      );
+    } catch {
+      return false;
+    }
   }
 
   private getConfiguredReasoning(model: string | undefined) {

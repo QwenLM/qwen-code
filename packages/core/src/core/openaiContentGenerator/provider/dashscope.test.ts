@@ -2367,32 +2367,99 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           function: { name: 'submit', parameters: { type: 'object' } },
         },
       ];
+      const streaming = { stream: true, tools };
+      const direct = (config: Partial<ContentGeneratorConfig> = {}) =>
+        gen({ authType: AuthType.USE_OPENAI, ...config });
 
-      it.each(['qwen3.8-max', 'qwen3.7-plus'])(
-        'asks %s to stream tool arguments on a streaming request with tools',
-        (model) => {
-          expect(hello(model, { stream: true, tools })['tool_stream']).toBe(
-            true,
-          );
+      it.each([
+        ['qwen4-max', undefined],
+        ['qwen3.8-max', 'https://dashscope.aliyuncs.com/compatible-mode/v1'],
+        [
+          'qwen3.8-max-0902',
+          'https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+        ],
+        [
+          'qwen3.8-flash',
+          'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        ],
+        [
+          'qwen3.7-plus',
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/',
+        ],
+      ] as const)(
+        'asks %s to stream tool arguments at %s',
+        (model, baseUrl) => {
+          expect(
+            hello(model, streaming, direct({ baseUrl }))['tool_stream'],
+          ).toBe(true);
         },
       );
 
-      it('leaves it out without streaming or without tools', () => {
-        expect(hello('qwen3.8-max', { tools })).not.toHaveProperty(
+      it.each([
+        [
+          'vanchin/deepseek-v4-pro',
+          'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        ],
+        [
+          'qwen3-coder-plus',
+          'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        ],
+        ['qwen3.7-plus', 'https://coding.dashscope.aliyuncs.com/v1'],
+        ['qwen3.8-max', 'https://gateway.example.com/compatible-mode/v1'],
+      ])('omits the default for %s at %s', (model, baseUrl) => {
+        expect(hello(model, streaming, direct({ baseUrl }))).not.toHaveProperty(
           'tool_stream',
         );
-        expect(hello('qwen3.8-max', { stream: true })).not.toHaveProperty(
+      });
+
+      it('omits the default for Qwen OAuth', () => {
+        expect(hello('qwen3.8-max', streaming)).not.toHaveProperty(
+          'tool_stream',
+        );
+      });
+
+      it('lets a custom gateway opt in explicitly', () => {
+        const gateway = direct({
+          baseUrl: 'https://gateway.example.com/v1',
+          extra_body: { tool_stream: true },
+        });
+        expect(hello('qwen3.8-max', streaming, gateway)['tool_stream']).toBe(
+          true,
+        );
+      });
+
+      it('checks the effective model and tools after merging extra_body', () => {
+        const overrideModel = direct({
+          extra_body: { model: 'vanchin/deepseek-v4-pro' },
+        });
+        expect(
+          hello('qwen3.8-max', streaming, overrideModel),
+        ).not.toHaveProperty('tool_stream');
+        const dropTools = direct({ extra_body: { tools: [] } });
+        expect(hello('qwen3.8-max', streaming, dropTools)).not.toHaveProperty(
+          'tool_stream',
+        );
+      });
+
+      it('leaves it out without streaming or without tools', () => {
+        const api = direct();
+        expect(hello('qwen3.8-max', { tools }, api)).not.toHaveProperty(
+          'tool_stream',
+        );
+        expect(hello('qwen3.8-max', { stream: true }, api)).not.toHaveProperty(
           'tool_stream',
         );
         expect(
-          hello('qwen3.8-max', { stream: true, tools: [] }),
+          hello('qwen3.8-max', { stream: true, tools: [] }, api),
         ).not.toHaveProperty('tool_stream');
       });
 
       it('lets user extra_body.tool_stream override it', () => {
-        const optOut = gen({ extra_body: { tool_stream: false } });
+        const optOut = direct({ extra_body: { tool_stream: false } });
         expect(
-          hello('qwen3.8-max', { stream: true, tools }, optOut)['tool_stream'],
+          hello('qwen3.8-max', { ...streaming, tool_stream: true }, optOut)[
+            'tool_stream'
+          ],
         ).toBe(false);
       });
     });
