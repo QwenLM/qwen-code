@@ -5690,7 +5690,9 @@ export class Config {
 
   /**
    * Returns the names of configured (non-disabled) MCP servers whose
-   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * discovery did not settle as CONNECTED — that is, whose status is
+   * DISCONNECTED when {@link waitForMcpReady} resolves. Intended to be
+   * called by
    * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
    * so they can surface a single user-visible warning summarizing which
    * servers failed.
@@ -5722,7 +5724,11 @@ export class Config {
       if (this.isMcpServerPendingApproval(name)) {
         continue;
       }
-      if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
+      // A server still CONNECTING is not a failure: under the shared
+      // transport pool a slow stdio server can still be spawning when
+      // `waitForMcpReady()` resolves, and reporting it as failed makes the
+      // caller warn about a server that connects moments later.
+      if (getMCPServerStatus(name) === MCPServerStatus.DISCONNECTED) {
         failed.push(name);
       }
     }

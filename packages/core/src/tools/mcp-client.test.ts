@@ -1398,7 +1398,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     });
 
     it('flips status to DISCONNECTED when discover() throws', async () => {
-      // `Config.getFailedMcpServerNames()` filters by `status !== CONNECTED`,
+      // `Config.getFailedMcpServerNames()` filters by `status === DISCONNECTED`,
       // so a server that connects but whose `discover()` then crashes (e.g.
       // tools/list rejects, or the "no prompts or tools found" guard fires)
       // must be marked DISCONNECTED before the error propagates. Otherwise it
@@ -3433,7 +3433,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       // (designed to block stale `connect()` catch updates) silently
       // swallowed the write. The global registry stayed CONNECTED forever,
       // so `Config.getFailedMcpServerNames()` (which filters
-      // `status !== CONNECTED`) omitted timeout-disconnected servers from
+      // `status === DISCONNECTED`) omitted timeout-disconnected servers from
       // the non-interactive failure banner and the Footer's MCP health
       // pill kept counting them as healthy.
       closableClient({ close: vi.fn().mockResolvedValue(undefined) });

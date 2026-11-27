@@ -691,7 +691,7 @@ export class McpClient {
    * but then crashes (or returns no tools, or whose `tools/list` call
    * rejects) would remain `CONNECTED` in the global status registry, and
    * `Config.getFailedMcpServerNames()` — which filters by
-   * `status !== CONNECTED` — would silently omit it from the
+   * `status === DISCONNECTED` — would silently omit it from the
    * non-interactive failure banner. The caller (manager) still catches
    * and logs; we just need the status registry to reflect reality.
    *
@@ -852,7 +852,7 @@ export class McpClient {
    * Disconnects from the MCP server.
    *
    * The intentional DISCONNECTED status update must reach the global
-   * registry — `getFailedMcpServerNames()` filters on `status !== CONNECTED`
+   * registry — `getFailedMcpServerNames()` filters on `status === DISCONNECTED`
    * and the Footer's MCP health pill subscribes to the registry. Going
    * through `updateStatus()` would have it swallowed by the
    * `isDisconnecting` guard whose only purpose is to suppress LATE writes
