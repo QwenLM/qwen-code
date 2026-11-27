@@ -2740,13 +2740,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
         sessionId: 'session-1',
         message: 'stopped',
         errorKind: 'loop_detected',
-        loopType: 'invalid_tool_params_stagnation',
+        loopType: 'global_tool_call_duplicate',
         toolCallCount: 'many',
       },
     });
 
     expect(event).toMatchObject({
-      loop: { loopType: 'invalid_tool_params_stagnation' },
+      loop: { loopType: 'global_tool_call_duplicate' },
     });
     expect(
       event && 'loop' in event ? event.loop : undefined,

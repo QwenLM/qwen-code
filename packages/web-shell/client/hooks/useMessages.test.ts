@@ -153,14 +153,14 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       loopText(
         {
           loopType: 'turn_tool_call_cap',
-          loopReason: 'stuck_repetition',
+          loopReason: 'explicit_cap',
           toolCallCount: 101,
           toolCallLimit: 100,
         },
         'zh-CN',
       ),
     ).toBe(
-      '工具调用超过 100 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+      '本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（100 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。',
     );
     expect(
       loopText({
@@ -168,9 +168,6 @@ describe('transcriptBlocksToLocalizedMessages', () => {
         loopReason: 'provider_duplicate_id',
       }),
     ).toContain('The model service sent a tool call that had already run');
-    expect(loopText({ loopType: 'invalid_tool_params_stagnation' })).toContain(
-      'kept sending invalid arguments to the same tool',
-    );
   });
 
   it('keeps the generic loop text when the cause is missing or unknown', () => {
@@ -185,6 +182,24 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     expect(loopText({ loopType: 'consecutive_identical_tool_calls' })).toBe(
       generic,
     );
+    // Causes an older session recorded before those detectors were removed.
+    for (const loop of [
+      {
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'backstop',
+        toolCallLimit: 1000,
+      },
+      {
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'stuck_repetition',
+        toolCallLimit: 100,
+      },
+      { loopType: 'global_tool_call_duplicate', loopReason: 'repeated_call' },
+      { loopType: 'invalid_tool_params_stagnation' },
+      { loopType: 'repeated_tool_execution_failure' },
+    ]) {
+      expect(loopText(loop)).toBe(generic);
+    }
   });
 
   it.each(['assistant', 'thought'] as const)(

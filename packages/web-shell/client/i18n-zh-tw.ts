@@ -2822,18 +2822,8 @@ export const ZH_TW: Record<string, MessageValue> = {
     '模型在呼叫工具時反覆嘗試或達到了安全上限，因此系統停止了本輪操作。會話並未結束，你可以換一個更明確的指令繼續。',
   'error.loopDetected.explicitCap': (vars) =>
     `本輪工具呼叫達到了 model.maxToolCallsPerTurn 設定的上限（${vars?.limit} 次），因此系統停止了本輪操作。會話並未結束，你可以在設定中調高上限，或傳送新的指令繼續。`,
-  'error.loopDetected.backstop': (vars) =>
-    `本輪工具呼叫達到了 ${vars?.limit} 次的安全上限，因此系統停止了本輪操作。會話並未結束，你可以傳送新的指令繼續，也可以透過 model.maxToolCallsPerTurn 設定其他上限。`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `工具呼叫超過 ${vars?.limit} 次後，模型仍在重複同一個呼叫，因此系統停止了本輪操作。會話並未結束，你可以換一種方式或給出更明確的指令。`,
-  'error.loopDetected.repeatedCall':
-    '模型在本輪中反覆發起同一個工具呼叫，因此系統停止了本輪操作。會話並未結束，你可以換一種方式或給出更明確的指令。',
   'error.loopDetected.providerDuplicateId':
     '模型服務發來了一個已經執行過的工具呼叫，為避免重複執行，系統停止了本輪操作。會話並未結束，你可以傳送新訊息繼續。',
-  'error.loopDetected.invalidToolParams':
-    '模型反覆向同一個工具傳入無效參數，因此系統停止了本輪操作。會話並未結束，你可以換一個更明確的指令繼續。',
-  'error.loopDetected.repeatedToolFailure':
-    '同一個工具在收到提醒後仍因相同原因失敗，因此系統停止了本輪操作。會話並未結束，你可以檢視上面的錯誤，或換一種方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '執行超時',
   'shell.result.notices': '提示',
