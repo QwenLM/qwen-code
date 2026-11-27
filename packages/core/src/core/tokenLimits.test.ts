@@ -25,6 +25,8 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
     'qwen3-8-max': { context: 262_144, output: 131_072 },
+    // Reachable only through the dashed spelling of a stripped dotted version.
+    'twin-model-v2-1': { context: 222_222, output: 33_333 },
   };
   // Only the catalog read is stubbed; versionSpellingAlias is a pure string
   // rewrite, so the twin fallback sees the real rule.
@@ -42,6 +44,38 @@ describe('normalize', () => {
     expect(
       knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
     ).toBeUndefined();
+  });
+
+  it('keeps the model name before a suffix after an org segment', () => {
+    // Hugging Face router `org/model:provider` and routing policies.
+    expect(normalize('zai-org/GLM-5.3-Flash:zai-org')).toBe('glm-5.3-flash');
+    expect(normalize('deepseek-ai/DeepSeek-V4.1-Flash:novita')).toBe(
+      'deepseek-v4.1-flash',
+    );
+    expect(normalize('moonshotai/Kimi-K3:fireworks-ai')).toBe('kimi-k3');
+    expect(normalize('openai/gpt-oss-120b:fastest')).toBe('gpt-oss-120b');
+    expect(normalize('openai:zai-org/GLM-5.3-Flash:zai-org')).toBe(
+      'glm-5.3-flash',
+    );
+    expect(normalize('thinkingmachines/Inkling-2-Mini:peft:262144')).toBe(
+      'inkling-2-mini',
+    );
+  });
+
+  it('resolves an HF router id to the limits of its model', () => {
+    for (const [id, base] of [
+      ['zai-org/GLM-5.3-Flash:zai-org', 'zai-org/GLM-5.3-Flash'],
+      ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 'deepseek-v4.1-flash'],
+      ['deepseek-ai/DeepSeek-V3.1:together', 'deepseek-ai/DeepSeek-V3.1'],
+    ]) {
+      expect(tokenLimit(id, 'input')).toBe(tokenLimit(base, 'input'));
+      expect(tokenLimit(id, 'output')).toBe(tokenLimit(base, 'output'));
+    }
+    expect(tokenLimit('zai-org/GLM-5.3-Flash:zai-org', 'input')).toBe(
+      1_000_000,
+    );
+    expect(tokenLimit('org/Twin-Model-V2.1:together', 'input')).toBe(222_222);
+    expect(tokenLimit('org/Twin-Model-V2.1:together', 'output')).toBe(33_333);
   });
 
   it('should lowercase and trim the model string', () => {

@@ -144,9 +144,20 @@ const LIMITS = {
   '16k': 16_384,
 } as const;
 
+/**
+ * After an `org/` segment a colon can only start a suffix: the Hugging Face
+ * router takes `org/model:provider` (`zai-org/GLM-5.3-Flash:novita`,
+ * `:fastest`), and its provider list is open-ended, so the model ends at the
+ * first colon after the last slash. A provider suffix serves the same model;
+ * a `:batch` route is not one, and stays out of the lookup as before (#11295).
+ */
+function withoutRouteSuffix(model: string): string {
+  return model.replace(/(\/[^/:]*):(?!batch(?::|$))[^/]*$/i, '$1');
+}
+
 /** Robust normalizer: strips provider prefixes, pipes/colons, date/version suffixes, etc. */
 export function normalize(model: string): string {
-  let s = (model ?? '').toLowerCase().trim();
+  let s = withoutRouteSuffix((model ?? '').toLowerCase().trim());
 
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
@@ -419,7 +430,7 @@ function findTokenLimit(
     // A terminal dotted version may be stripped as a suffix (deepseek-v3.1 ->
     // deepseek). Retry its original spelling's alias before normalizing so the
     // catalog's dashed entry remains reachable without changing normalization.
-    const alias = versionSpellingAlias(model);
+    const alias = versionSpellingAlias(withoutRouteSuffix(model));
     const rawNorm = model.toLowerCase().replace(/^.*\//, '');
     if (alias && norm !== rawNorm) {
       catalog = lookupModelCatalog(normalize(alias));

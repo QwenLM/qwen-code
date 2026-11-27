@@ -207,6 +207,11 @@ describe('defaultModalities', () => {
       ['glm-4.6v', IMAGE_NO_PDF],
       ['glm-5v-turbo', IMAGE_NO_PDF],
       ['glm-5.3-flash', IMAGE_NO_PDF],
+      [
+        'zai-org/GLM-5.3-Flash:zai-org (HF router provider suffix)',
+        IMAGE_NO_PDF,
+        'zai-org/GLM-5.3-Flash:zai-org',
+      ],
     ]);
 
     casesFor('returns text-only for', [
