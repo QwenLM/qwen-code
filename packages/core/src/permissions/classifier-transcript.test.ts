@@ -323,6 +323,51 @@ describe('buildClassifierContents', () => {
     expect(args).toEqual({ path: '/a.ts', content });
   });
 
+  it('bounds aliased edit previews when the replacement uses a coercible value', () => {
+    const tool = new EditTool({} as Config);
+    const preview = 'a'.repeat(300);
+    const args = {
+      path: '/a.ts',
+      old_str: preview + 'longer text',
+      new_str: 123,
+    };
+    const prior = firstText(
+      [modelCall(tool.name, args)],
+      read(),
+      makeRegistry({ [tool.name]: tool }),
+    );
+
+    expectText(
+      prior,
+      [
+        '"file_path":"/a.ts"',
+        `"old_string_preview":"${preview}"`,
+        '"new_string_preview":"123"',
+        '"old_string_truncated":true',
+      ],
+      ['"old_str"', '"new_str"', 'longer text'],
+    );
+    expect(args.new_str).toBe(123);
+  });
+
+  it('omits arguments when a registered projector throws', () => {
+    const tool = new StubTool('example_tool');
+    vi.spyOn(tool, 'toAutoClassifierInput').mockImplementation(() => {
+      throw new Error('fixture projection error');
+    });
+    const registry = makeRegistry({ [tool.name]: tool });
+    const args = { content: 'fixture without a projection' };
+    const result = build(
+      [modelCall(tool.name, args)],
+      { toolName: tool.name, toolParams: args },
+      registry,
+    );
+
+    expect(textOf(result[0])).toBe('Prior action: example_tool({})');
+    expect(textOf(result[1])).toContain('{}');
+    expect(JSON.stringify(result)).not.toContain(args.content);
+  });
+
   it('projects an aliased historical replace through the registered edit tool', () => {
     const tool = new EditTool({} as Config);
     const args = { path: '/a.ts', old_str: 'before', new_str: 'after' };

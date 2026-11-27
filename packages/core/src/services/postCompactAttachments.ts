@@ -23,7 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { applyToolArgAliases } from '../tools/tool-arg-aliases.js';
+import { getToolOutputRecovery } from '../tools/tool-output-recovery.js';
 import {
   RESUME_TRAILER,
   stripCompactionTranscriptHint,
@@ -64,104 +64,28 @@ export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000;
 export const POST_COMPACT_TOKEN_BUDGET = 50_000;
 export const POST_COMPACT_MAX_IMAGES_TO_RESTORE = 3;
 
-/** Tool names that signal "this turn touched a file at args.file_path". */
-const FILE_TOUCHING_TOOLS = new Set<string>([
-  'read_file',
-  'write_file',
-  'edit',
-  'replace', // legacy alias for 'edit' — may appear in old sessions (see ToolNamesMigration)
-]);
-
-/**
- * Collect the ids of tool calls whose `functionResponse` reported an error
- * (`response.error` present) — denied, cancelled, or otherwise failed. A
- * successful call carries `response.output` and no `error`, so it is not
- * collected. Used to keep denied/failed file reads out of restoration.
- */
-function collectFailedCallIds(history: Content[]): Set<string> {
-  const failed = new Set<string>();
-  for (const content of history) {
-    for (const part of content.parts ?? []) {
-      const fr = part.functionResponse as
-        | { id?: string; response?: Record<string, unknown> }
-        | undefined;
-      if (fr?.id && fr.response && 'error' in fr.response) {
-        failed.add(fr.id);
-      }
-    }
-  }
-  return failed;
-}
-
-/**
- * Walk the history newest-first, collect the most recently touched file
- * paths, deduplicated. Older mentions of the same path are dropped in
- * favor of the most recent one.
- */
+/** Return the newest confirmed native file accesses, deduplicated. */
 export function extractRecentFilePaths(
   history: Content[],
   maxFiles: number,
 ): string[] {
   if (maxFiles <= 0) return [];
 
-  // A denied / errored tool call still leaves its `functionCall` in history,
-  // paired with an error `functionResponse` (`response.error`). Restoring
-  // such a path would read the file straight off disk during compaction —
-  // bypassing the very permission the call was denied. Collect those failed
-  // call ids so we can skip them: never re-read a file the agent didn't
-  // successfully read.
-  const failedCallIds = collectFailedCallIds(history);
-  const successfulBridgeCallIds = new Set<string>();
-  for (const content of history) {
-    for (const part of content.parts ?? []) {
-      const response = part.functionResponse;
-      if (
-        response?.name === ToolNames.TOOL_CALL &&
-        response.id &&
-        response.response &&
-        'output' in response.response &&
-        !('error' in response.response)
-      ) {
-        successfulBridgeCallIds.add(response.id);
-      }
-    }
-  }
-
   const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
     const content = history[i];
-    if (content.role !== 'model') continue;
-    // Iterate parts in REVERSE within a single content so parallel tool
-    // calls (multiple functionCall parts in one model turn) are treated
-    // as "the last call is the most recent". Forward iteration here would
-    // pick the FIRST 5 of a 6-parallel batch, dropping the actually-most-
-    // recent call — discovered via real-session E2E.
+    if (content.role !== 'user') continue;
+
     const parts = content.parts ?? [];
     for (let j = parts.length - 1; j >= 0; j--) {
       const part = parts[j];
-      const call = part.functionCall;
-      if (!call) continue;
-      // Always pair responses with the outer call id before unwrapping.
-      if (call.id && failedCallIds.has(call.id)) continue;
-      const bridged = call.name === ToolNames.TOOL_CALL;
-      if (bridged && (!call.id || !successfulBridgeCallIds.has(call.id))) {
-        continue;
-      }
-      const callName = bridged ? call.args?.['name'] : call.name;
-      if (typeof callName !== 'string') continue;
-      const name = bridged ? callName.toLowerCase() : callName;
-      if (!FILE_TOUCHING_TOOLS.has(name)) continue;
-      // A copy with the canonical names the tool ran with; history keeps
-      // the model's own (`path` for `file_path`).
-      const args = {
-        ...((bridged ? call.args?.['arguments'] : call.args) as
-          | Record<string, unknown>
-          | undefined),
-      };
-      applyToolArgAliases(name, args);
-      const filePath =
-        typeof args['file_path'] === 'string' ? args['file_path'] : undefined;
-      if (!filePath || seen.has(filePath)) continue;
+      const response = part.functionResponse?.response;
+      if (!response || 'error' in response || !('output' in response)) continue;
+
+      // A call's name and arguments do not prove the builtin ran or that
+      // access was allowed. Only the native producer records this path.
+      const filePath = getToolOutputRecovery(part)?.nativeFilePath;
+      if (!filePath) continue;
       seen.add(filePath);
       if (seen.size >= maxFiles) return [...seen];
     }

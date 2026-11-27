@@ -1,305 +1,113 @@
 import { buildCompactionTranscriptHint } from './compaction-transcript-hint.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { setToolOutputRecovery } from '../tools/tool-output-recovery.js';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 
-function fileReadCall(path: string): Content {
-  return {
-    role: 'model',
-    parts: [
-      {
-        functionCall: {
-          name: 'read_file',
-          args: { file_path: path },
-        },
-      },
-    ],
+function nativeFileResult(
+  path: string,
+  name: string = ToolNames.READ_FILE,
+): Part {
+  const part: Part = {
+    functionResponse: {
+      name,
+      response: { output: 'File operation completed' },
+    },
   };
+  setToolOutputRecovery(part, { nativeFilePath: path });
+  return part;
 }
 
-function fileWriteCall(path: string): Content {
+function nativeFileResults(...paths: string[]): Content {
   return {
-    role: 'model',
-    parts: [
-      {
-        functionCall: {
-          name: 'write_file',
-          args: { file_path: path, content: '...' },
-        },
-      },
-    ],
+    role: 'user',
+    parts: paths.map((path) => nativeFileResult(path)),
   };
 }
 
 describe('extractRecentFilePaths', () => {
-  it('returns the most recently-touched file paths first', () => {
-    const history: Content[] = [
-      fileReadCall('/a.ts'),
-      fileReadCall('/b.ts'),
-      fileWriteCall('/c.ts'),
-    ];
-    expect(extractRecentFilePaths(history, 5)).toEqual([
-      '/c.ts',
-      '/b.ts',
-      '/a.ts',
-    ]);
-  });
-
-  it('deduplicates by file path, keeping the most recent touch', () => {
-    const history: Content[] = [
-      fileReadCall('/a.ts'),
-      fileReadCall('/b.ts'),
-      fileWriteCall('/a.ts'), // a.ts is now most recent
+  it('returns the newest completed file paths first and deduplicates them', () => {
+    const history = [
+      nativeFileResults('/a.ts', '/b.ts'),
+      { role: 'user', parts: [nativeFileResult('/a.ts', ToolNames.EDIT)] },
     ];
     expect(extractRecentFilePaths(history, 5)).toEqual(['/a.ts', '/b.ts']);
   });
 
-  it('respects the maxFiles cap', () => {
-    const history: Content[] = Array.from({ length: 10 }, (_, i) =>
-      fileReadCall(`/file${i}.ts`),
+  it('respects the maxFiles cap, taking the last results from a parallel batch first', () => {
+    const paths = Array.from({ length: 6 }, (_, i) => `/p${i + 1}.ts`);
+    const history = [nativeFileResults(...paths)];
+    expect(extractRecentFilePaths(history, 5)).toEqual(
+      paths.slice(1).reverse(),
     );
-    expect(extractRecentFilePaths(history, 3)).toHaveLength(3);
-  });
-
-  it('returns an empty array when no file-touching tool calls exist', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'hello' }] },
-      { role: 'model', parts: [{ text: 'hi' }] },
-    ];
-    expect(extractRecentFilePaths(history, 5)).toEqual([]);
-  });
-
-  it('ignores tool calls without a file_path argument', () => {
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: { name: 'web_fetch', args: { url: 'https://x.com' } },
-          },
-        ],
-      },
-      fileReadCall('/real.ts'),
-    ];
-    expect(extractRecentFilePaths(history, 5)).toEqual(['/real.ts']);
-  });
-
-  it('reads a file path the model named `path`', () => {
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { path: '/a.ts' } } },
-        ],
-      },
-    ];
-    expect(extractRecentFilePaths(history, 5)).toEqual(['/a.ts']);
-  });
-
-  it('recognizes edit and replace tools too', () => {
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              name: 'edit',
-              args: { file_path: '/e.ts', old_string: 'x', new_string: 'y' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'replace', args: { file_path: '/r.ts' } } },
-        ],
-      },
-    ];
-    const paths = extractRecentFilePaths(history, 5);
-    expect(paths).toContain('/e.ts');
-    expect(paths).toContain('/r.ts');
-  });
-
-  it('returns empty array when maxFiles is 0 or negative', () => {
-    const history: Content[] = [fileReadCall('/a.ts'), fileReadCall('/b.ts')];
     expect(extractRecentFilePaths(history, 0)).toEqual([]);
     expect(extractRecentFilePaths(history, -1)).toEqual([]);
   });
 
-  it('treats parallel tool calls in one content as "last part is newest"', () => {
-    // Regression: discovered via real-session E2E. A model that issues
-    // 6 parallel ReadFile calls puts all 6 functionCall parts in ONE
-    // model+fc content. The previous implementation iterated parts
-    // forward and filled the cap with the FIRST 5, dropping the
-    // last-listed file. The cap-of-5 winner set must include the
-    // LAST 5 (newest) parts when overflow happens.
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p1.ts' } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p2.ts' } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p3.ts' } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p4.ts' } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p5.ts' } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: '/p6.ts' } },
-          },
-        ],
-      },
-    ];
-    const paths = extractRecentFilePaths(history, 5);
-    // Last 5 parts win, returned in newest-first order.
-    expect(paths).toEqual(['/p6.ts', '/p5.ts', '/p4.ts', '/p3.ts', '/p2.ts']);
-    expect(paths).not.toContain('/p1.ts');
-  });
+  it.each([ToolNames.READ_FILE, ToolNames.TOOL_CALL])(
+    'uses the producer path for %s independently of the original argument spelling',
+    (name) => {
+      const args =
+        name === ToolNames.TOOL_CALL
+          ? { name: 'Read_File', arguments: { path: ' /recorded path.ts ' } }
+          : { path: ' /recorded path.ts ' };
+      const history: Content[] = [
+        { role: 'model', parts: [{ functionCall: { name, args } }] },
+        { role: 'user', parts: [nativeFileResult('/actual path.ts', name)] },
+      ];
 
-  it('excludes paths whose tool call was denied/errored (permission-bypass guard)', () => {
-    // A denied read_file leaves its functionCall in history with an error
-    // functionResponse. Restoring that path would read the file off disk
-    // during compaction, bypassing the denial. The successful read is kept;
-    // the denied one is dropped.
-    const history: Content[] = [
-      {
+      expect(extractRecentFilePaths(history, 5)).toEqual(['/actual path.ts']);
+      expect(history[0].parts?.[0].functionCall?.args).toEqual(args);
+    },
+  );
+
+  it.each([ToolNames.READ_FILE, ToolNames.TOOL_CALL])(
+    'ignores outstanding calls and unverified results for %s',
+    (name) => {
+      const args =
+        name === ToolNames.TOOL_CALL
+          ? { name: 'read_file', arguments: { path: '/fixture.ts' } }
+          : { path: '/fixture.ts' };
+      const call: Content = {
         role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call_ok',
-              name: 'read_file',
-              args: { file_path: '/ws/ok.ts' },
-            },
-          },
-          {
-            functionCall: {
-              id: 'call_denied',
-              name: 'read_file',
-              args: { file_path: '/ws/.env' },
-            },
-          },
-        ],
-      },
-      {
+        parts: [{ functionCall: { id: 'fixture', name, args } }],
+      };
+      const result: Content = {
         role: 'user',
         parts: [
           {
             functionResponse: {
-              id: 'call_ok',
-              name: 'read_file',
-              response: { output: 'export const ok = 1;' },
-            },
-          },
-          {
-            functionResponse: {
-              id: 'call_denied',
-              name: 'read_file',
-              response: { error: 'Permission denied for tool' },
+              id: 'fixture',
+              name,
+              response: { output: 'Metadata only' },
             },
           },
         ],
-      },
-    ];
-    const paths = extractRecentFilePaths(history, 5);
-    expect(paths).toContain('/ws/ok.ts');
-    expect(paths).not.toContain('/ws/.env');
+      };
+
+      expect(extractRecentFilePaths([call], 5)).toEqual([]);
+      expect(extractRecentFilePaths([call, result], 5)).toEqual([]);
+    },
+  );
+
+  it('ignores a result without a successful output', () => {
+    const approved = nativeFileResult('/older.ts', ToolNames.WRITE_FILE);
+    const denied = nativeFileResult('/latest.ts');
+    denied.functionResponse!.response = { error: 'File request denied' };
+    expect(
+      extractRecentFilePaths([{ role: 'user', parts: [approved, denied] }], 5),
+    ).toEqual(['/older.ts']);
   });
 
-  it.each([
-    ['read_file', 'file_path'],
-    ['write_file', 'file_path'],
-    ['edit', 'file_path'],
-    ['replace', 'file_path'],
-    ['Read_File', 'file_path'],
-    ['Read_File', 'path'],
-  ])(
-    'restores a successful bridged %s with %s using the outer call id',
-    (name, pathArgument) => {
-      const history: Content[] = [
-        fileReadCall('/older.ts'),
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'outer-call',
-                name: ToolNames.TOOL_CALL,
-                args: { name, arguments: { [pathArgument]: '/bridged.ts' } },
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'outer-call',
-                name: ToolNames.TOOL_CALL,
-                response: { output: 'done' },
-              },
-            },
-          ],
-        },
-      ];
-      expect(extractRecentFilePaths(history, 5)).toEqual([
-        '/bridged.ts',
-        '/older.ts',
-      ]);
-      expect(extractRecentFilePaths(history, 1)).toEqual(['/bridged.ts']);
-    },
-  );
-
-  it.each(['Permission denied', 'Cancelled', 'Execution failed', undefined])(
-    'does not restore an unsuccessful or unfinished bridge (%s)',
-    (error) => {
-      const history: Content[] = [
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'outer-call',
-                name: ToolNames.TOOL_CALL,
-                args: {
-                  name: 'read_file',
-                  arguments: { file_path: '/private.ts' },
-                },
-              },
-            },
-          ],
-        },
-      ];
-      if (error !== undefined) {
-        history.push({
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'outer-call',
-                name: ToolNames.TOOL_CALL,
-                response: { error },
-              },
-            },
-          ],
-        });
-      }
-      expect(extractRecentFilePaths(history, 5)).toEqual([]);
-    },
-  );
+  it('does not use file access metadata from serialized history', () => {
+    const saved = JSON.parse(
+      JSON.stringify([nativeFileResults('/a.ts')]),
+    ) as Content[];
+    expect(extractRecentFilePaths(saved, 5)).toEqual([]);
+  });
 });
 
 import {
@@ -612,7 +420,15 @@ describe('buildFileRestorationBlocks', () => {
     // Must instruct the model on how to view the actual content.
     expect(text).toMatch(/use.*read_file|call.*read_file/i);
     const compacted = await composePostCompactHistory(
-      [fileReadCall(big1), fileReadCall(big2)],
+      [
+        nativeFileResults(big1, big2),
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { name: 'read_file', args: { file_path: big2 } } },
+          ],
+        },
+      ],
       'SUMMARY',
     );
     expect(
@@ -822,7 +638,7 @@ describe('composePostCompactHistory', () => {
     writeFileSync(path, 'Restored file contents.');
     const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
     const result = await composePostCompactHistory(
-      [fileReadCall(path), { role: 'user', parts: [image] }],
+      [nativeFileResults(path), { role: 'user', parts: [image] }],
       'Summary.',
     );
     expect(result.map((entry) => entry.role)).toEqual([
@@ -860,18 +676,7 @@ describe('composePostCompactHistory', () => {
     writeFileSync(big, 'x'.repeat(30_000));
 
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: small } } },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: big } } },
-        ],
-      },
+      nativeFileResults(small, big),
       {
         role: 'model',
         parts: [
@@ -940,14 +745,7 @@ describe('composePostCompactHistory', () => {
     writeFileSync(big, 'x'.repeat(30_000));
 
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: small } } },
-          { functionCall: { name: 'read_file', args: { file_path: small2 } } },
-          { functionCall: { name: 'read_file', args: { file_path: big } } },
-        ],
-      },
+      nativeFileResults(small, small2, big),
       {
         role: 'user',
         parts: [{ inlineData: { mimeType: 'image/png', data: 'shot' } }],
@@ -1020,7 +818,7 @@ describe('composePostCompactHistory', () => {
           },
         ],
       },
-      { role: 'user', parts: [{ text: 'ok' }] },
+      nativeFileResults(realFile),
       {
         role: 'model',
         parts: [
@@ -1049,27 +847,12 @@ describe('composePostCompactHistory', () => {
   });
 
   it('skips files outside the workspace root (Finding 4)', async () => {
-    // Security: extractRecentFilePaths collects ALL functionCall paths
-    // including model attempts at /etc/passwd that the permission
-    // system already denied. readFileSizeAdaptive would happily read
-    // those off disk. Filter at the composer with a workspace boundary.
+    // Completed native results can still refer to files outside this workspace.
     const inside = join(tmpDir, 'inside.ts');
     writeFileSync(inside, 'export const inside = true;');
     const outside = '/etc/hosts'; // exists on every system; outside tmpDir
 
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: { name: 'read_file', args: { file_path: outside } },
-          },
-          {
-            functionCall: { name: 'read_file', args: { file_path: inside } },
-          },
-        ],
-      },
-    ];
+    const history = [nativeFileResults(outside, inside)];
 
     const result = await composePostCompactHistory(history, 'SUM', {
       workspaceRoot: tmpDir,
@@ -1092,14 +875,7 @@ describe('composePostCompactHistory', () => {
     const link = join(tmpDir, 'innocent.ts');
     symlinkSync(secret, link); // workspace/innocent.ts -> outsideDir/secret.txt
 
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: link } } },
-        ],
-      },
-    ];
+    const history = [nativeFileResults(link)];
     const result = await composePostCompactHistory(history, 'SUM', {
       workspaceRoot: tmpDir,
     });
@@ -1116,16 +892,7 @@ describe('composePostCompactHistory', () => {
     const small = join(tmpDir, 'small.ts');
     writeFileSync(small, 'tiny');
 
-    const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: { name: 'read_file', args: { file_path: small } },
-          },
-        ],
-      },
-    ];
+    const history = [nativeFileResults(small)];
 
     const ctrl = new AbortController();
     ctrl.abort();
@@ -1187,13 +954,7 @@ describe('composePostCompactHistory', () => {
     writeFileSync(f2, 'export const two = 2;');
 
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: f1 } } },
-          { functionCall: { name: 'read_file', args: { file_path: f2 } } },
-        ],
-      },
+      nativeFileResults(f1, f2),
       {
         role: 'user',
         parts: [
@@ -1228,7 +989,7 @@ describe('composePostCompactHistory', () => {
       .flatMap((c) => c.parts ?? [])
       .map((p) => (p as { text?: string }).text ?? '')
       .join('\n');
-    // Parallel calls in one model turn: the last (two.ts) is most recent,
+    // In a parallel result batch the last file (two.ts) is most recent,
     // so the single retained file is two.ts; one.ts is dropped. Assert on
     // embedded CONTENT, not the path — the path can also surface in image
     // attribution metadata, which isn't what this cap controls.
@@ -1240,12 +1001,7 @@ describe('composePostCompactHistory', () => {
     const f1 = join(tmpDir, 'z.ts');
     writeFileSync(f1, 'export const z = 1;');
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { name: 'read_file', args: { file_path: f1 } } },
-        ],
-      },
+      nativeFileResults(f1),
       {
         role: 'user',
         parts: [

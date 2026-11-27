@@ -151,6 +151,8 @@ export interface TextFileIo {
 }
 
 export interface FileSystemService {
+  /** Paths handled by this service belong to the current process's filesystem. */
+  readonly usesHostFilesystem?: true;
   readonly textFileIo?: TextFileIo;
   withReadFile?<T>(
     request: FileReadRequest,
@@ -394,6 +396,7 @@ export async function encodeTextFileContentAsync(
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
+  readonly usesHostFilesystem = true;
   async withReadFile<T>(
     request: FileReadRequest,
     operation: (source: FileReadSource) => Promise<T>,

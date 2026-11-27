@@ -12,7 +12,10 @@ import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
 import { applyToolArgAliases } from '../../tools/tool-arg-aliases.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
-import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../../tools/tool-output-recovery.js';
 import { unescapePath } from '../../utils/paths.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
@@ -1095,12 +1098,16 @@ export function microcompactHistory(
               }
             }
           }
-          return {
+          const cleared: Part = {
             functionResponse: {
               ...stripNestedMedia(part.functionResponse),
               response: { output: MICROCOMPACT_CLEARED_MESSAGE },
             },
           };
+          const nativeFilePath = getToolOutputRecovery(part)?.nativeFilePath;
+          if (nativeFilePath)
+            setToolOutputRecovery(cleared, { nativeFilePath });
+          return cleared;
         }
 
         if (

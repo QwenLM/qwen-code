@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { NATIVE_FILE_RESULT_PATH } from './tool-output-recovery.js';
 import type { ToolOutputSize } from './tool-output-size.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
@@ -654,6 +655,9 @@ export interface ToolArtifact {
 }
 
 export interface ToolResult {
+  /** Actual path accessed by a successful native file operation. */
+  [NATIVE_FILE_RESULT_PATH]?: string;
+
   /** Numeric size before a producer reduces its semantic result. */
   rawOutputSize?: ToolOutputSize | null;
   /**

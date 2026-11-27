@@ -6,6 +6,7 @@
 
 import {
   attachToolOutputRecovery,
+  NATIVE_FILE_RESULT_PATH,
   getToolOutputRecovery,
   type ToolOutputRecovery,
 } from '../tools/tool-output-recovery.js';
@@ -1097,6 +1098,7 @@ export function convertToFunctionResponse(
     | 'truncatedByProducer'
     | 'recoveryText'
     | 'persistedOutputFiles'
+    | typeof NATIVE_FILE_RESULT_PATH
   >,
   config?: Pick<Config, 'getChatCompression'>,
 ): Part[] {
@@ -1115,6 +1117,7 @@ export function convertToFunctionResponse(
       recovery = {
         text: producerResult.recoveryText,
         persistedOutputFiles: producerResult.persistedOutputFiles,
+        nativeFilePath: producerResult[NATIVE_FILE_RESULT_PATH],
       };
     }
   } catch {
@@ -6931,6 +6934,9 @@ export class CoreToolScheduler {
           {
             text: replacement ? undefined : producerToolResult?.recoveryText,
             persistedOutputFiles: response.persistedOutputFiles,
+            nativeFilePath: replacement
+              ? undefined
+              : producerToolResult?.[NATIVE_FILE_RESULT_PATH],
           },
         );
         try {

@@ -341,8 +341,8 @@ function formatPendingActionPrompt(
  * Look up the tool in the registry, apply aliases to an argument copy, and
  * project it through `toAutoClassifierInput`. Falls back to the raw args when
  * the tool is unknown or declares no projection. Returns `{}` for the
- * empty-string sentinel (tool encoded as "no security relevance"), and for an
- * `mcp__*` name the registry cannot resolve — see below. A bridged call whose
+ * empty-string sentinel (tool encoded as "no security relevance"), failed
+ * projections, and an `mcp__*` name the registry cannot resolve. A bridged call whose
  * `tool_call` wrapper is unavailable is projected through its target instead
  * of falling back to the raw bridge envelope.
  */
@@ -365,7 +365,7 @@ function projectFunctionArgs(
       applyRegisteredToolArgAliases(tool, projectionArgs);
       projected = tool.toAutoClassifierInput(projectionArgs as never);
     } catch {
-      projected = undefined;
+      return {};
     }
   }
 
@@ -419,9 +419,7 @@ function projectFunctionArgs(
   // call the registry cannot resolve — its server was removed from settings,
   // or the session was resumed without it — has nothing left to express it,
   // and its raw arguments are third-party payload that may carry secrets.
-  // Fail closed to the same `{}` an opted-out MCP tool projects to rather
-  // than forwarding them unbounded. Applies equally when a resolved MCP
-  // tool's projection threw: the fallback must not be the unbounded one.
+  // Fail closed to the same `{}` an opted-out MCP tool projects to.
   if (name.startsWith(MCP_TOOL_NAME_PREFIX)) return {};
   return rawArgs;
 }

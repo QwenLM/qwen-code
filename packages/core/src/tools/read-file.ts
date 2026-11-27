@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { withNativeFileResultPath } from './tool-output-recovery.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
@@ -272,7 +273,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
             entry.lastReadRange.limit === (this.params.limit ?? undefined);
         if (hit) {
           debugLogger.debug('hit', { path: absPath });
-          return this.unchangedResult(absPath);
+          return withNativeFileResultPath(
+            this.unchangedResult(absPath),
+            this.config.getFileSystemService(),
+            absPath,
+          );
         }
       }
       debugLogger.debug('miss', { path: absPath, state: status.state });
@@ -469,7 +474,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         };
       }
     }
-    return toolResult;
+    return withNativeFileResultPath(
+      toolResult,
+      this.config.getFileSystemService(),
+      contentPath,
+    );
   }
 
   private async transcribePdfCandidate(

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { withNativeFileResultPath } from './tool-output-recovery.js';
 import fs, { type Stats } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -744,11 +745,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         diffStat,
       };
 
-      return {
-        llmContent: llmSuccessMessageParts.join(' '),
-        returnDisplay: displayResult,
-        ...(artifact ? { artifacts: [artifact] } : {}),
-      };
+      return withNativeFileResultPath(
+        {
+          llmContent: llmSuccessMessageParts.join(' '),
+          returnDisplay: displayResult,
+          ...(artifact ? { artifacts: [artifact] } : {}),
+        },
+        this.config.getFileSystemService(),
+        file_path,
+      );
     } catch (error) {
       return this.writeFailure(error);
     }
@@ -903,7 +908,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
   override toAutoClassifierInput(
     params: WriteFileToolParams,
   ): Record<string, unknown> {
-    const content = params.content ?? '';
+    const content = String(params.content ?? '');
     // 300-char window for the same reason as EditTool's projection —
     // out-of-workspace writes need enough headroom for the classifier
     // to spot a malicious registry / shell / env line hidden behind

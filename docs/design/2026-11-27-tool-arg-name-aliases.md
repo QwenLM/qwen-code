@@ -80,17 +80,21 @@ back gets today's schema error.
 
 ### History readers
 
-The read-residency check in the chat, microcompaction's evicted read paths and
-post-compaction file restoration apply the same table to copies of the call
-arguments. Microcompaction trims and unescapes the path as the file tool does,
-so it invalidates the cache entry for the file whose result it cleared.
-Post-compaction restoration normalizes bridged tool names before looking up
-aliases. Session export counts writes and edits by the tool result's resolved
-path, with the recorded `file_path` and the basename as fallbacks for older
-records. This keeps same-named files in different directories distinct.
+The read-residency check in the chat and microcompaction's evicted read paths
+apply the same alias table to copies of the call arguments. Microcompaction
+trims and unescapes the path as the file tool does, so it invalidates the
+cache entry for the file whose result it cleared. Post-compaction restoration
+uses the actual path recorded by a successful native file tool that used the
+host filesystem. Results without this in-process metadata, such as delegated
+ACP operations and records loaded from a transcript, do not trigger a fresh
+disk read. Session export
+counts writes and edits by the tool result's resolved path, with the recorded
+`file_path` and the basename as fallbacks for older records. This keeps
+same-named files in different directories distinct.
 AUTO mode's prior-action projection, resumed tool descriptions and exported
-tool metadata also apply aliases to a copy for the resolved tool. Transcripts
-and exported raw arguments retain the original names.
+tool metadata also apply aliases to a copy for the resolved tool. AUTO omits
+arguments when a registered tool's projection fails. Transcripts and exported
+raw arguments retain the original names.
 
 ### Unknown arguments in schema errors
 

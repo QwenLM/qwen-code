@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { withNativeFileResultPath } from './tool-output-recovery.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -1077,11 +1078,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         }
       }
 
-      return {
-        llmContent: llmSuccessMessageParts.join(' '),
-        returnDisplay: displayResult,
-        ...(artifact ? { artifacts: [artifact] } : {}),
-      };
+      return withNativeFileResultPath(
+        {
+          llmContent: llmSuccessMessageParts.join(' '),
+          returnDisplay: displayResult,
+          ...(artifact ? { artifacts: [artifact] } : {}),
+        },
+        this.config.getFileSystemService(),
+        this.params.file_path,
+      );
     } catch (error) {
       return this.writeFailure(error);
     }
@@ -1223,8 +1228,8 @@ Expectation for required parameters:
   override toAutoClassifierInput(
     params: EditToolParams,
   ): Record<string, unknown> {
-    const oldStr = params.old_string ?? '';
-    const newStr = params.new_string ?? '';
+    const oldStr = String(params.old_string ?? '');
+    const newStr = String(params.new_string ?? '');
     // 300 chars is enough headroom for the classifier to spot a malicious
     // registry / shell / env line that hides behind a benign-looking
     // prefix (~80 chars). In-workspace edits take the acceptEdits fast-

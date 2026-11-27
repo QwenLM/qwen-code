@@ -47,6 +47,7 @@ import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { markApiHistoryPrompt } from '../utils/api-history-metadata.js';
+import { setToolOutputRecovery } from '../tools/tool-output-recovery.js';
 import {
   content,
   fnCall,
@@ -3146,13 +3147,16 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     const file = join(dir, 'context.txt');
     writeFileSync(file, 'x'.repeat(17_600));
     try {
+      const response = fnResponse(
+        'read_file',
+        { output: 'Earlier content.' },
+        'read',
+      );
+      setToolOutputRecovery(response, { nativeFilePath: file });
       const history = [
         userText('Read the file.'),
         content('model', fnCall('read_file', { file_path: file }, 'read')),
-        content(
-          'user',
-          fnResponse('read_file', { output: 'Earlier content.' }, 'read'),
-        ),
+        content('user', response),
         modelText('Done.'),
       ];
       spySideQuery('Summary.', usage(3000, 100));
@@ -3262,17 +3266,14 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     const fileBody = 'W3_FILE_RESTORATION_MARKER ' + 'x'.repeat(2_000);
     writeFileSync(filePath, fileBody, 'utf8');
     try {
+      const response = fnResponse('read_file', {
+        output: 'file content read ok',
+      });
+      setToolOutputRecovery(response, { nativeFilePath: filePath });
       const history: Content[] = [
         userText('inspect the notes file'),
         content('model', fnCall('read_file', { file_path: filePath })),
-        content('user', {
-          functionResponse: {
-            name: 'read_file',
-            response: { output: 'file content read ok' },
-          } as unknown as NonNullable<
-            Content['parts']
-          >[number]['functionResponse'],
-        }),
+        content('user', response),
         modelText('I read the notes.'),
         ...turns('final fresh user message', 'final model reply'),
       ];

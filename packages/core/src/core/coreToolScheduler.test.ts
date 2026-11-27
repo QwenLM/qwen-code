@@ -9,6 +9,10 @@ import {
   measureToolOutput,
 } from '../tools/tool-output-size.js';
 import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import {
+  getToolOutputRecovery,
+  NATIVE_FILE_RESULT_PATH,
+} from '../tools/tool-output-recovery.js';
 import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
 import * as outputTruncation from '../tools/truncation.js';
 import * as sizeLoggers from '../telemetry/loggers.js';
@@ -5573,7 +5577,10 @@ describe('CoreToolScheduler', () => {
 
   describe('tool argument aliases', () => {
     it('runs a read_file call that names its path `path`', async () => {
-      const execute = vi.fn().mockResolvedValue(textResult('hello'));
+      const execute = vi.fn().mockResolvedValue({
+        ...textResult('hello'),
+        [NATIVE_FILE_RESULT_PATH]: '/repo/a.txt',
+      });
       const tool = new MockTool({
         name: ToolNames.READ_FILE,
         params: {
@@ -5610,6 +5617,9 @@ describe('CoreToolScheduler', () => {
       expectStatus(completed, 'success');
       expect(execute.mock.calls[0][0]).toEqual({ file_path: '/repo/a.txt' });
       expect(completed.request.args).toEqual({ file_path: '/repo/a.txt' });
+      const result = completed.response.responseParts[0];
+      expect(getToolOutputRecovery(result)?.nativeFilePath).toBe('/repo/a.txt');
+      expect(JSON.stringify(result)).not.toContain('/repo/a.txt');
       const preToolUse = messageBus.request.mock.calls
         .map(([request]) => request as HookRequest)
         .find((request) => request.eventName === 'PreToolUse');
@@ -5655,6 +5665,10 @@ describe('CoreToolScheduler', () => {
       const completed = firstBatch(onAllToolCallsComplete)[0];
       expectStatus(completed, 'success');
       expect(completed.request.args).toEqual(args);
+      expect(
+        getToolOutputRecovery(completed.response.responseParts[0])
+          ?.nativeFilePath,
+      ).toBeUndefined();
     });
   });
 

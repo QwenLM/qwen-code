@@ -82,6 +82,24 @@ describe('AcpFileSystemService', () => {
     vi.mocked(fsRealpath).mockClear();
   });
 
+  it.each([
+    [false, false, true],
+    [true, false, undefined],
+    [false, true, undefined],
+    [true, true, undefined],
+  ])(
+    'derives host ownership from client read=%s and write=%s',
+    (readTextFile, writeTextFile, expected) => {
+      const service = new AcpFileSystemService(
+        {} as AgentSideConnection,
+        'session-1',
+        { readTextFile, writeTextFile },
+        { ...createFallback(), usesHostFilesystem: true },
+      );
+      expect(service.usesHostFilesystem).toBe(expected);
+    },
+  );
+
   describe('readTextFile', () => {
     it('reads through ACP and returns response', async () => {
       const mockResponse = {
