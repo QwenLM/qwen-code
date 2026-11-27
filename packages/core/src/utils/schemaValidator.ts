@@ -491,20 +491,22 @@ function describeBrokenJsonStrings(
   errors: ErrorObject[],
   data: Record<string, unknown>,
 ): string {
-  let notes = '';
-  const seen = new Set<string>();
+  const expectedByPath = new Map<string, Set<string>>();
   for (const error of errors) {
-    const expected = String(error.params['type']);
-    if (
-      error.keyword !== 'type' ||
-      (!expected.includes('array') && !expected.includes('object')) ||
-      seen.has(error.instancePath)
-    ) {
-      continue;
+    if (error.keyword !== 'type') continue;
+    const expected: unknown = error.params['type'];
+    for (const type of Array.isArray(expected) ? expected : [expected]) {
+      if (type !== 'array' && type !== 'object') continue;
+      const types = expectedByPath.get(error.instancePath) ?? new Set<string>();
+      types.add(type);
+      expectedByPath.set(error.instancePath, types);
     }
-    seen.add(error.instancePath);
+  }
+
+  let notes = '';
+  for (const [instancePath, types] of expectedByPath) {
     let value: unknown = data;
-    for (const part of error.instancePath.split('/').slice(1)) {
+    for (const part of instancePath.split('/').slice(1)) {
       if (typeof value !== 'object' || value === null) break;
       value = (value as Record<string, unknown>)[
         part.replace(/~1/g, '/').replace(/~0/g, '~')
@@ -518,24 +520,27 @@ function describeBrokenJsonStrings(
     } catch (parseError) {
       const reason =
         parseError instanceof Error ? parseError.message : String(parseError);
-      const position = Number(/position (\d+)/.exec(reason)?.[1]);
-      // Marking the exact spot lets the model fix that bracket; given only
-      // the surrounding text, it mostly rewrote the same mistake.
+      // V8 can quote input containing "position N" in errors with no offset.
+      const position = Number(
+        / at position (\d+) \(line \d+ column \d+\)$/.exec(reason)?.[1],
+      );
       // Drop half a surrogate pair at either edge rather than quote it.
-      const near = Number.isInteger(position)
-        ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
-            text
-              .slice(Math.max(0, position - 80), position)
-              .replace(/^[\udc00-\udfff]/, '') +
-              '<<HERE>>' +
+      const near =
+        Number.isInteger(position) && position <= text.length
+          ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
               text
-                .slice(position, position + 20)
-                .replace(/[\ud800-\udbff]$/, ''),
-          )}.`
-        : '';
+                .slice(Math.max(0, position - 80), position)
+                .replace(/^[\udc00-\udfff]/, '') +
+                '<<HERE>>' +
+                text
+                  .slice(position, position + 20)
+                  .replace(/[\ud800-\udbff]$/, ''),
+            )}. Fix the text there`
+          : ' Fix the JSON syntax';
+      const expected = types.size === 2 ? 'array or object' : [...types][0];
       notes +=
-        `; params${error.instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
-        `${near} Fix the text there and send it as a JSON ${expected.includes('array') ? 'array' : 'object'}, not as a string`;
+        `; params${instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
+        `${near} and send it as a JSON ${expected}, not as a string`;
     }
   }
   return notes;

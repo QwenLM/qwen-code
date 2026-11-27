@@ -242,6 +242,22 @@ describe('SchemaValidator', () => {
       );
     });
 
+    it.each(['[oops position 9]', '[oops position 999]'])(
+      'does not take the error position from echoed input: %s',
+      (docs) => {
+        const error = SchemaValidator.validate(obj({ docs: strings() }), {
+          docs,
+        });
+        expect(error).toContain(
+          'arrived as a string whose text is not valid JSON',
+        );
+        expect(error).not.toContain('<<HERE>>');
+        expect(error).toContain(
+          'Fix the JSON syntax and send it as a JSON array',
+        );
+      },
+    );
+
     it('names a nested path once, even under anyOf', () => {
       const error = SchemaValidator.validate(
         obj({ outer: obj({ config: orNull(obj({ key: {} })) }) }),
@@ -252,6 +268,33 @@ describe('SchemaValidator', () => {
       );
       expect(error?.split('arrived as a string')).toHaveLength(2);
       expect(error).toContain('send it as a JSON object, not as a string');
+    });
+
+    it('does not pick the first JSON type from a failed anyOf', () => {
+      const schema = {
+        anyOf: [
+          obj({ docs: strings(), mode: { const: 'list' } }, 'docs', 'mode'),
+          obj(
+            { docs: obj({ field: {} }), mode: { const: 'record' } },
+            'docs',
+            'mode',
+          ),
+        ],
+      };
+      const error = SchemaValidator.validate(schema, {
+        docs: '{"field": 1,}',
+        mode: 'record',
+      });
+      expect(error?.split('arrived as a string')).toHaveLength(2);
+      expect(error).toContain('send it as a JSON array or object');
+    });
+
+    it('reports both JSON types when the type keyword allows either', () => {
+      const error = SchemaValidator.validate(
+        obj({ docs: { type: ['object', 'array'] } }),
+        { docs: '{"field": 1,}' },
+      );
+      expect(error).toContain('send it as a JSON array or object');
     });
 
     it('points at the syntax error for a plain object field', () => {
