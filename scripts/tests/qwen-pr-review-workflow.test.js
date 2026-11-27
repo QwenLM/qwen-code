@@ -3362,6 +3362,12 @@ describe('review CLI capability gate (production cutover blocker)', () => {
   const gate = doc.jobs['review-pr'].steps.find(
     (s) => s.name === 'Ensure tiered-capable review CLI',
   );
+  // The gate body lives in a sibling script so the workflow stays under the
+  // size ratchet; replay the script, not the one-line step invocation.
+  const gateScript = readFileSync(
+    '.github/scripts/ensure-tiered-review-cli.sh',
+    'utf8',
+  );
 
   const cliStub = (behavior, version) => {
     const body =
@@ -3446,7 +3452,7 @@ describe('review CLI capability gate (production cutover blocker)', () => {
       writeFileSync(githubSummary, '');
       const res = spawnSync(
         '/bin/bash',
-        ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', gate.run],
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', gateScript],
         {
           cwd: dir,
           encoding: 'utf8',
@@ -3474,7 +3480,7 @@ describe('review CLI capability gate (production cutover blocker)', () => {
     }
   };
 
-  it('sits between the CLI install and the sandbox preflight, before any reviewed command', () => {
+  it('sits after the sandbox preflight and before Run review, delegating to a sibling script', () => {
     const steps = doc.jobs['review-pr'].steps;
     const installIndex = steps.findIndex(
       (s) => s.name === 'Install Qwen CLI if missing',
@@ -3487,17 +3493,25 @@ describe('review CLI capability gate (production cutover blocker)', () => {
     );
     const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
     expect(installIndex).toBeGreaterThan(-1);
-    expect(gateIndex).toBeGreaterThan(installIndex);
-    expect(gateIndex).toBeLessThan(preflightIndex);
-    expect(preflightIndex).toBeLessThan(reviewIndex);
+    expect(preflightIndex).toBeGreaterThan(installIndex);
+    // After the preflight so a review the preflight refuses never pays the
+    // gate's worst case (R1-3).
+    expect(gateIndex).toBeGreaterThan(preflightIndex);
+    expect(gateIndex).toBeLessThan(reviewIndex);
     expect(gate['continue-on-error']).toBeUndefined();
+    // The long body lives in a sibling script to stay under the size ratchet;
+    // the step is a thin invocation with no unused outputs/id.
+    expect(gate.run).toBe('.github/scripts/ensure-tiered-review-cli.sh');
+    expect(gate.id).toBeUndefined();
     // Behaviour, not version: the probe asserts the refused-report shape and
     // the absence of the fixture canary, and never reads `qwen --version`.
-    expect(gate.run).toContain('QWEN_REVIEW_SANDBOX=tiered');
-    expect(gate.run).toContain('QWEN_REVIEW_FORCE_HARDWARE=1');
-    expect(gate.run).toContain('canary-marker');
-    expect(gate.run).toContain('executionBoundary');
-    expect(gate.run).not.toMatch(/qwen --version/);
+    expect(gateScript).toContain('QWEN_REVIEW_SANDBOX=tiered');
+    expect(gateScript).toContain('QWEN_REVIEW_FORCE_HARDWARE=1');
+    expect(gateScript).toContain('canary-marker');
+    expect(gateScript).toContain('executionBoundary');
+    expect(gateScript).not.toMatch(/qwen --version/);
+    // Refusals surface the probe log so a timeout/crash is diagnosable (R1-5).
+    expect(gateScript).toContain('probe log (tail)');
   });
 
   it('accepts a CLI that refuses the tiered probe without executing the canary', () => {

@@ -536,6 +536,23 @@ describe('external content-allowlist downgrade (operator opt-in)', () => {
     expect(res.downgradeReasons).toEqual(['external-content-allowlist']);
   });
 
+  it('downgrades a same-repo non-collaborator (external-author) docs-only diff', () => {
+    // Exercises the `external-author` splice branch, not just cross-repository.
+    const res = classifyReviewTrust(
+      {
+        isCrossRepository: false,
+        authorAssociation: 'NONE',
+        changedFiles: [{ path: 'docs/guide.md' }],
+      },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(res.prTrust).toBe('external');
+    expect(res.executionClass).toBe('trusted-shared-kernel');
+    expect(res.escalationReasons).toEqual([]);
+    expect(res.downgradeReasons).toEqual(['external-content-allowlist']);
+  });
+
   it('ignores a repo file-sourced opt-in', () => {
     const res = classifyReviewTrust(
       externalDocs([{ path: 'docs/guide.md' }]),

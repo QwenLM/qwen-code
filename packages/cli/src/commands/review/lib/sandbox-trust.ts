@@ -172,8 +172,9 @@ const CONTENT_ALLOWLIST_ROOT_FILES = new Set([
  * Narrow content allowlist for the operator opt-in that lets an external PR
  * run in the hardened shared-kernel container: only Markdown under `docs/`
  * and the four root prose files. Deliberately excludes data formats that a
- * toolchain might parse or execute (json/yaml/svg/images) and anything with
- * an executable or special git mode.
+ * toolchain might parse or execute (json/yaml/svg/images). Executable/symlink/
+ * submodule git modes and binary flags are enforced separately by
+ * `detectReviewMandatoryEscalations`, not by this path predicate.
  */
 export function isReviewContentAllowlistedPath(rawPath: string): boolean {
   const p = normalizePath(rawPath).toLowerCase();
@@ -242,7 +243,10 @@ export function detectReviewMandatoryEscalations(
  *
  * Fail-closed by construction: any external/fork PR, unknown association,
  * missing changed-file list on a PR, mandatory high-risk path hit, or operator
- * force switch resolves to `hardware-isolated`.
+ * force switch resolves to `hardware-isolated` — except an external PR whose
+ * complete diff is provably non-executable content and the operator has opted
+ * in via `QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER`, which is downgraded to
+ * `trusted-shared-kernel` and disclosed in `downgradeReasons`.
  */
 export function classifyReviewTrust(
   input: ReviewTrustInput = {},
