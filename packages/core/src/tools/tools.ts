@@ -535,7 +535,7 @@ export abstract class BaseDeclarativeTool<
     );
 
     if (errors) {
-      return errors;
+      return errors + describeUnrecognizedParams(this.parameterSchema, params);
     }
     return this.validateToolParamValues(params);
   }
@@ -548,6 +548,32 @@ export abstract class BaseDeclarativeTool<
   protected abstract createInvocation(
     params: TParams,
   ): ToolInvocation<TParams, TResult>;
+}
+
+/**
+ * Names the top-level arguments a schema does not declare, and the ones it
+ * does: a model that used another harness's name for an argument otherwise
+ * only learns which argument is missing. Empty for a schema that takes
+ * undeclared arguments.
+ */
+function describeUnrecognizedParams(schema: unknown, params: object): string {
+  if (typeof schema !== 'object' || schema === null) return '';
+  const { properties, additionalProperties, patternProperties } =
+    schema as Record<string, unknown>;
+  if (
+    typeof properties !== 'object' ||
+    properties === null ||
+    (additionalProperties !== undefined && additionalProperties !== false) ||
+    patternProperties !== undefined
+  ) {
+    return '';
+  }
+  const accepted = Object.keys(properties);
+  const unrecognized = Object.keys(params).filter(
+    (key) => !Object.hasOwn(properties, key),
+  );
+  if (unrecognized.length === 0) return '';
+  return `. Unrecognized parameters: ${unrecognized.join(', ')}. Accepted parameters: ${accepted.join(', ')}.`;
 }
 
 /**

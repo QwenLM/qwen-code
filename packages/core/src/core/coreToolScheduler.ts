@@ -258,6 +258,7 @@ import {
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
+import { applyToolArgAliases } from '../tools/tool-arg-aliases.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import {
   codeModeToolResultStamp,
@@ -3433,7 +3434,11 @@ export class CoreToolScheduler {
       // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
       // place. Without the clone those rewrites would leak into history and skew
       // the (name, args) fingerprints that duplicate-replay detection
-      // derives from it.
+      // derives from it. Aliased argument names are renamed on the clone, so
+      // everything from here on reads the canonical names.
+      for (const item of requestsToProcess) {
+        applyToolArgAliases(item.name, item.args);
+      }
       const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
         requestsToProcess.map((item) => canonicalToolName(item.name)),
       );

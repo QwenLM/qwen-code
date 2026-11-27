@@ -14,6 +14,7 @@ import {
   Kind,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 
 class TestToolInvocation implements ToolInvocation<object, ToolResult> {
   constructor(
@@ -119,6 +120,54 @@ describe('DeclarativeTool', () => {
       expect(executeFn).toHaveBeenCalled();
       expect(result).toEqual(successResult);
     });
+  });
+});
+
+describe('BaseDeclarativeTool.validateToolParams', () => {
+  const tool = (params: object) =>
+    new MockTool({ name: 'grep_search', params });
+  const schema = {
+    type: 'object',
+    properties: { pattern: { type: 'string' }, path: { type: 'string' } },
+    required: ['pattern'],
+  };
+
+  it('names unrecognized parameters and the accepted ones', () => {
+    expect(tool(schema).validateToolParams({ query: 'x', mode: 1 })).toBe(
+      "params must have required property 'pattern'. Unrecognized parameters: query, mode. Accepted parameters: pattern, path.",
+    );
+  });
+
+  it('adds nothing when every parameter is declared', () => {
+    expect(tool(schema).validateToolParams({ path: '.' })).toBe(
+      "params must have required property 'pattern'",
+    );
+  });
+
+  it('keeps a valid call with an extra parameter valid', () => {
+    expect(
+      tool(schema).validateToolParams({ pattern: 'x', query: 'y' }),
+    ).toBeNull();
+  });
+
+  it('names them for a closed schema', () => {
+    expect(
+      tool({ ...schema, additionalProperties: false }).validateToolParams({
+        pattern: 'x',
+        query: 'y',
+      }),
+    ).toBe(
+      'params must NOT have additional properties. Unrecognized parameters: query. Accepted parameters: pattern, path.',
+    );
+  });
+
+  it.each([
+    ['additionalProperties', { additionalProperties: { type: 'string' } }],
+    ['patternProperties', { patternProperties: { '^x': {} } }],
+  ])('adds nothing for a schema with %s', (_name, extra) => {
+    expect(
+      tool({ ...schema, ...extra }).validateToolParams({ query: 'x' }),
+    ).toBe("params must have required property 'pattern'");
   });
 });
 

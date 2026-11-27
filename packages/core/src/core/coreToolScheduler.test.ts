@@ -5569,6 +5569,56 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  describe('tool argument aliases', () => {
+    it('runs a read_file call that names its path `path`', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('hello'));
+      const tool = new MockTool({
+        name: ToolNames.READ_FILE,
+        params: {
+          type: 'object',
+          properties: { file_path: { type: 'string' } },
+          required: ['file_path'],
+        },
+        execute,
+      });
+      const messageBus = hookBus(async (request) =>
+        hookResponse(request.eventName, {}),
+      );
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(tool),
+          messageBus,
+          disableHooks: false,
+        });
+      Object.assign(
+        (scheduler as unknown as { config: Record<string, unknown> }).config,
+        {
+          getConditionalRulesRegistry: () => undefined,
+          getSkillManager: () => undefined,
+        },
+      );
+      const modelArgs = { path: '/repo/a.txt' };
+      await scheduleBatch(
+        scheduler,
+        toolRequest('alias', tool.name, modelArgs, 'p-alias'),
+      );
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'success');
+      expect(execute.mock.calls[0][0]).toEqual({ file_path: '/repo/a.txt' });
+      expect(completed.request.args).toEqual({ file_path: '/repo/a.txt' });
+      const preToolUse = messageBus.request.mock.calls
+        .map(([request]) => request as HookRequest)
+        .find((request) => request.eventName === 'PreToolUse');
+      expect(preToolUse?.input).toEqual(
+        expect.objectContaining({ tool_input: { file_path: '/repo/a.txt' } }),
+      );
+      // The model's own call, which the chat history holds, is unchanged.
+      expect(modelArgs).toEqual({ path: '/repo/a.txt' });
+    });
+  });
+
   describe('PreToolUse updatedInput', () => {
     /** PreToolUse answers `pre`; PermissionRequest answers `decision`. */
     function rewriteHookBus(
