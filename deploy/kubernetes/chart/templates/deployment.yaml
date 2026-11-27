@@ -1,3 +1,4 @@
+{{- $internalOrigin := "http://127.0.0.1:8081" -}}
 {{- $harnesses := list (dict "name" "harness" "port" "4170") (dict "name" "harness-b" "port" "4172") -}}
 {{- $instances := list -}}
 {{- range $member := $harnesses -}}
@@ -87,7 +88,7 @@ spec:
             - name: QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT
               value: '8081'
             - name: QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL
-              value: 'http://127.0.0.1:8081'
+              value: {{ $internalOrigin | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_ID
               value: {{ "/workspace" | sha256sum | trunc 16 | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_CWD
@@ -203,7 +204,7 @@ spec:
               value: /home/node/.qwen/runtime
             {{- if $.Values.runtime.enabled }}
             - name: QWEN_MANAGED_RUNTIME_BROKER_URL
-              value: 'http://127.0.0.1:4182'
+              value: {{ $internalOrigin | quote }}
             - name: QWEN_MANAGED_RUNTIME_BROKER_TOKEN
               valueFrom:
                 secretKeyRef:

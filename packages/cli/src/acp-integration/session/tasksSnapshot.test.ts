@@ -1012,4 +1012,130 @@ describe('buildSessionTasksStatus workflow graph', () => {
     });
     expect(workflows[0]).not.toHaveProperty('isHistorical');
   });
+
+  it('includes active session-scoped cron jobs and wakeups while excluding durable jobs', () => {
+    const now = Date.parse('2026-06-01T08:00:00Z');
+    const cfg = {
+      ...configWith([]),
+      isCronEnabled: () => true,
+      getCronScheduler: () => ({
+        list: () => [
+          {
+            id: 'durable-1',
+            cronExpr: '*/5 * * * *',
+            prompt: 'durable check',
+            recurring: true,
+            durable: true,
+            createdAt: now - 60_000,
+            expiresAt: Infinity,
+            jitterMs: 0,
+          },
+          {
+            id: 'wakeup-1',
+            cronExpr: '@wakeup',
+            prompt: 'check deploy again',
+            recurring: false,
+            durable: false,
+            createdAt: now - 10_000,
+            expiresAt: Infinity,
+            jitterMs: 0,
+            fireAtMs: now + 90_000,
+          },
+          {
+            id: 'session-cron-1',
+            cronExpr: '*/5 * * * *',
+            prompt: 'poll build status',
+            recurring: true,
+            durable: false,
+            createdAt: now - 30_000,
+            expiresAt: now + 3_600_000,
+            lastFiredAt: now - 15_000,
+            jitterMs: 0,
+            gate: 'git status -s',
+          },
+        ],
+      }),
+    } as unknown as Config;
+
+    const snapshot = buildSessionTasksStatus('session-1', cfg, now);
+    expect(snapshot.scheduledTasks).toHaveLength(2);
+    expect(snapshot.scheduledTasks?.[0]).toMatchObject({
+      id: 'session-cron-1',
+      source: 'cron',
+      cronExpr: '*/5 * * * *',
+      prompt: 'poll build status',
+      recurring: true,
+      expiresAt: now + 3_600_000,
+      lastFiredAt: now - 15_000,
+      gate: 'git status -s',
+    });
+    expect(snapshot.scheduledTasks?.[0]?.nextRunAt).toBe(now);
+    expect(snapshot.scheduledTasks?.[1]).toEqual({
+      id: 'wakeup-1',
+      source: 'wakeup',
+      cronExpr: '@wakeup',
+      prompt: 'check deploy again',
+      recurring: false,
+      createdAt: now - 10_000,
+      expiresAt: null,
+      lastFiredAt: null,
+      nextRunAt: now + 90_000,
+      enabled: true,
+    });
+  });
+
+  it('returns an authoritative empty scheduledTasks snapshot when cron is disabled', () => {
+    const cfg = {
+      ...configWith([]),
+      isCronEnabled: () => false,
+      getCronScheduler: () => ({
+        list: () => [
+          {
+            id: 'session-cron-1',
+            cronExpr: '*/5 * * * *',
+            prompt: 'ignored',
+            recurring: true,
+            durable: false,
+            createdAt: 100,
+            expiresAt: Infinity,
+            jitterMs: 0,
+          },
+        ],
+      }),
+    } as unknown as Config;
+
+    const snapshot = buildSessionTasksStatus('session-1', cfg, 2_000);
+    expect(snapshot.scheduledTasks).toEqual([]);
+  });
+
+  it('marks a scheduler-disabled pending cron as not enabled', () => {
+    const cfg = {
+      ...configWith([]),
+      isCronEnabled: () => true,
+      getCronScheduler: () => ({
+        disabled: true,
+        list: () => [
+          {
+            id: 'stopped-cron',
+            cronExpr: '*/5 * * * *',
+            prompt: 'must not run',
+            recurring: true,
+            durable: false,
+            createdAt: 100,
+            expiresAt: Infinity,
+            jitterMs: 0,
+          },
+        ],
+      }),
+    } as unknown as Config;
+
+    const snapshot = buildSessionTasksStatus('session-1', cfg, 2_000);
+    expect(snapshot.scheduledTasks).toEqual([
+      expect.objectContaining({
+        id: 'stopped-cron',
+        source: 'cron',
+        enabled: false,
+      }),
+    ]);
+  });
 });

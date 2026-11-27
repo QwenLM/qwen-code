@@ -54,6 +54,7 @@ import {
   unarchiveDaemonSessions,
   DaemonDrainingError,
 } from './session-archive.js';
+import { Session } from '../../acp-integration/session/Session.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 import {
@@ -718,6 +719,89 @@ describe('archiveDaemonSessions', () => {
     expect(byId['other']!.enabled).toBeUndefined(); // unrelated — untouched
   });
 
+  it('archives an idle live session whose scheduler lists an enabled bound durable task', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440059';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound-live',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+
+    const liveSessionLike = Object.create(Session.prototype) as Session;
+    Object.assign(liveSessionLike, {
+      sessionId,
+      disposed: false,
+      disposedActiveWorkHolds: [],
+      mcpAppCalls: new Map(),
+      cwdRestorePending: false,
+      historyMutationActive: false,
+      goalProcessing: false,
+      cronProcessing: false,
+      pendingCronChildren: 0,
+      cronAbortController: null,
+      cronCompletion: null,
+      cronQueue: [],
+      notificationQueue: [],
+      activeNotificationAcceptances: new Set(),
+      notificationCompletion: null,
+      currentAgentNotificationTaskId: null,
+      currentWorkflowNotificationTaskId: null,
+      currentShellNotificationActive: false,
+      config: {
+        getBackgroundTaskRegistry: () => ({
+          listUnfinalizedBackgroundAgentIds: () => [],
+        }),
+        getBackgroundShellRegistry: () => ({
+          hasRunningEntries: () => false,
+        }),
+        getWorkflowRunRegistry: () => ({
+          listStartingRunIds: () => [],
+          list: () => [],
+        }),
+        isCronEnabled: () => true,
+        getCronScheduler: () => ({
+          disabled: false,
+          list: () => [{ durable: true, boundSessionId: sessionId }],
+          hasGatesInFlight: () => false,
+        }),
+      },
+    });
+
+    const closeSession = vi.fn(
+      async (id: string, _ctx?: unknown, opts?: { requireIdle?: boolean }) => {
+        if (opts?.requireIdle) {
+          const holds = liveSessionLike.collectActiveWorkHolds({
+            includeScheduledTasks: true,
+          });
+          if (holds.length > 0) {
+            throw new SessionBusyError(id);
+          }
+        }
+      },
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.archived).toEqual([sessionId]);
+    const tasks = await readCronTasks(workspaceDir);
+    expect(tasks[0]?.enabled).toBe(false);
+  });
+
   it('reports task maintenance failure after archiving the transcript', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440051';
     writeSessionFile(workspaceDir, sessionId, 'active');
@@ -931,10 +1015,13 @@ describe('archiveDaemonSessions', () => {
       bridge: {
         closeSession: vi.fn(async (sessionId) => {
           if (sessionId === archivedId) {
+            // Attach before orchestration continues: an awaited pending
+            // promise in finally must not be this rejection's first handler.
             competingMaintenance = coordinator.runExclusiveMany(
               [blockedId],
               () => blocked,
             );
+            competingMaintenance.catch(() => {});
           }
         }),
       },

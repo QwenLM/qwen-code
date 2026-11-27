@@ -453,7 +453,7 @@ class HostedMcpResultDeliveryIT {
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -487,8 +487,6 @@ class HostedMcpResultDeliveryIT {
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port="
-                                + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

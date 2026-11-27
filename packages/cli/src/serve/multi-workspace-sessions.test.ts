@@ -28,6 +28,7 @@ import {
 import { ARCHIVED_EXPORT_MAX_TRANSCRIPT_BYTES } from './server/session-export.js';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
+  SessionTranscriptReader,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
 } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
@@ -5404,6 +5405,110 @@ describe('multi-workspace session dispatch', () => {
         expect(capturedSignal?.aborted).toBe(true);
       } finally {
         spy.mockRestore();
+      }
+    });
+  });
+
+  it('propagates HTTP disconnect AbortSignal to readPage, readTurnIndexPage, readTurnHooksPage, and tool-calls routes (R1-7, R1-8, R2-1)', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440198';
+      const primarySessionId = '550e8400-e29b-41d4-a716-446655440199';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'abort propagation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: primarySessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary abort propagation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const cases = [
+        {
+          url: `/session/${primarySessionId}/transcript?limit=5`,
+          method: 'readPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turn-index`,
+          method: 'readTurnIndexPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turns/u1/hooks`,
+          method: 'readTurnHooksPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/transcript?limit=5`,
+          method: 'readPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/turn-index`,
+          method: 'readTurnIndexPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/turns/u1/hooks`,
+          method: 'readTurnHooksPage' as const,
+        },
+        {
+          url: `/workspaces/secondary-id/session/${sessionId}/tool-calls?turnId=u1`,
+          method: 'readTurnIndexPage' as const,
+        },
+      ];
+      for (const testCase of cases) {
+        let markStarted: (() => void) | undefined;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        let markAborted: (() => void) | undefined;
+        const aborted = new Promise<void>((resolve) => {
+          markAborted = resolve;
+        });
+        let capturedSignal: AbortSignal | undefined;
+        const spy = vi
+          .spyOn(SessionTranscriptReader.prototype, testCase.method)
+          .mockImplementation((async (...args: unknown[]): Promise<unknown> => {
+            const opts = args.at(-1) as { signal?: AbortSignal } | undefined;
+            capturedSignal = opts?.signal;
+            markStarted?.();
+            await new Promise<void>((resolve, reject) => {
+              if (!opts?.signal) {
+                resolve();
+                return;
+              }
+              if (opts.signal.aborted) {
+                markAborted?.();
+                reject(opts.signal.reason);
+                return;
+              }
+              opts.signal.addEventListener(
+                'abort',
+                () => {
+                  markAborted?.();
+                  reject(opts.signal!.reason);
+                },
+                { once: true },
+              );
+            });
+            return undefined;
+          }) as never);
+        try {
+          const { app } = makeHarness();
+          const pending = request(app).get(testCase.url).set('Host', host());
+          const done = pending.then(
+            () => undefined,
+            () => undefined,
+          );
+          await started;
+          pending.abort();
+          await Promise.all([done, aborted]);
+          expect(capturedSignal).toBeDefined();
+          expect(capturedSignal?.aborted).toBe(true);
+        } finally {
+          spy.mockRestore();
+        }
       }
     });
   });

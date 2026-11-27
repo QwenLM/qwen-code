@@ -15,7 +15,10 @@ import {
 import type { DaemonSessionStatsModelMetrics } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { formatDuration } from '../messages/StatsMessage';
+import { isLegacySpeed, tokensPerSecond } from './tokenUsageTotals';
 import styles from './TokenUsageTrend.module.css';
+
+export { isLegacySpeed, tokensPerSecond };
 
 type TimingSample = NonNullable<
   DaemonSessionStatsModelMetrics['timingSamples']
@@ -47,34 +50,11 @@ const MEDIAN_WINDOW = 5;
 const LEGACY_MIN_RATE_WINDOW_MS = 100;
 
 /**
- * Whether these totals come from a daemon before full-request output speed.
- * Its sums and samples only support the rate over the generation window.
- */
-export function isLegacySpeed(
-  generation: DaemonSessionStatsModelMetrics['generation'],
-): boolean {
-  return generation?.totalOutputSpeedDurationMs === undefined;
-}
-
-/**
  * The time a sample's speed divides by: from sending the request to its last
  * visible output, or the generation window alone from an older daemon.
  */
 function sampleDurationMs(sample: TimingSample, legacy: boolean): number {
   return legacy ? sample.generationMs : sample.ttftMs + sample.generationMs;
-}
-
-/**
- * Output tokens per second over `durationMs`; undefined without output tokens
- * (no usage reported) or time.
- */
-export function tokensPerSecond(
-  outputTokens: number,
-  durationMs: number,
-): number | undefined {
-  return outputTokens > 0 && durationMs > 0
-    ? outputTokens / (durationMs / 1000)
-    : undefined;
 }
 
 /**
