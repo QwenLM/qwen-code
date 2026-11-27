@@ -47,12 +47,19 @@ and zero-regression while enforcing an immediate non-regression ratchet.
 
 - Add a TypeScript-AST source-level boundary guard test
   (`packages/web-shell/client/chat-core/boundary.test.ts`) enforcing:
-  - Zero daemon imports (value or type, static or dynamic) anywhere in
-    `packages/web-shell/client/chat-core/**` non-test source files and zero
-    `controller.kind` property accesses in `ChatSurface.tsx`.
-  - A strict bidirectional ratchet on `managed-host.tsx`'s transitive daemon
-    value-import edges (fails on any newly added edge AND fails on stale
-    entries once an edge is cleared).
+  - Zero daemon imports (value or type, static, dynamic, `require()`, or inline
+    `import('...').T` type references, including `@qwen-code/sdk` root and
+    subpaths, `@qwen-code/web-shell` root and `daemon-react-sdk`, unmodeled
+    aliases, and computed dynamic imports) recursively across all non-test
+    source files in `packages/web-shell/client/chat-core/**`, and zero
+    `controller.kind` reads (dot/optional-chaining access, bracket access,
+    destructuring, nested binding, local aliases, or `Reflect.get`) across
+    `chat-core/**`.
+  - Fail-closed module resolution via `tsconfig.json` (`ts.resolveModuleName`)
+    and a strict bidirectional ratchet on `managed-host.tsx`'s transitive
+    daemon value-import edges (`file => module`: fails on any newly added
+    daemon module edge, on any unresolved/unmodeled alias or computed dynamic
+    import, and on stale entries once an edge is cleared).
 - Clear all 16 Cluster-1 daemon value-import edges (47 → 31) via minimal,
   behavior-preserving extractions and slot injection with full backwards
   compatibility for daemon callers.
@@ -113,23 +120,27 @@ ReactNode` slot supplied by `App.tsx` (−4 edges).
 
 ## Key Design Decisions
 
-1. **Use TypeScript AST (`ts.createSourceFile`) rather than regexes for
-   boundary enforcement.**
+1. **Use TypeScript AST (`ts.createSourceFile`) and compiler module resolution
+   (`ts.resolveModuleName`) for fail-closed boundary enforcement.**
    - Regex scanning misses multiline named `import { type A, B }` mixes,
-     re-exports (`export { x } from ...`), and dynamic `import(...)`, and
-     false-positives on prose comments. Walking `ts.ImportDeclaration`,
-     `ts.ExportDeclaration`, and dynamic `ts.CallExpression` nodes produces an
-     exact, compiler-grade value-import graph.
-2. **Make the managed-host ratchet bidirectional.**
+     re-exports (`export { x } from ...`), inline `import('...').T` type
+     references, dynamic `import(...)`, and `require(...)`, and
+     false-positives on prose comments. Walking the AST, flagging computed
+     dynamic imports and unmodeled/unresolved specifiers as violations, and
+     resolving local paths through `tsconfig.json` (including aliases such as
+     `@qwen-code/web-shell/transcript`) prevents silent subtree pruning.
+2. **Make the managed-host ratchet bidirectional at `file => module` edge
+   granularity.**
    - Comparing the discovered set of daemon value-import edges for exact
-     equality against the pinned allowlist catches both regressions (new daemon
-     import introduced) and stale allowlist lines (ensuring Slices 6b and 6c
-     shrink the list cleanly to empty).
+     equality against the pinned allowlist while asserting zero unresolved
+     specifiers catches regressions (new daemon module edges or unmodeled
+     aliases) and stale allowlist lines alike (driving Slices 6b and 6c cleanly
+     to zero).
 3. **Preserve backwards-compatible re-exports on moved utilities.**
    - Re-exporting `withActionTimeout`, `remotePromptSidechannel`,
-     `LocalFilesPanel`, and `artifact-mime` from their prior modules keeps all
-     daemon callers and existing unit tests untouched while severing the
-     managed-host graph's transitive edges.
+     `LocalFilesPanel`, `scheduledTaskRuntimeKey`, and `artifact-mime` from
+     their prior modules keeps all daemon callers and existing unit tests
+     untouched while severing the managed-host graph's transitive edges.
 
 ## Constraints
 
@@ -142,19 +153,24 @@ ReactNode` slot supplied by `App.tsx` (−4 edges).
 ## Validation & Acceptance Criteria
 
 - **Unit & boundary tests:**
-  - `chat-core/boundary.test.ts` (asserting 0 `chat-core` daemon imports, 0
-    `controller.kind` accesses, and exact 31 remaining `managed-host.tsx` edges
-    with all 16 Cluster-1 edges absent), `utils/shell-result-display.test.ts`,
-    `ChatContextHeader.test.tsx`, `LocalFilesPanel.test.tsx`,
+  - `chat-core/boundary.test.ts` (asserting recursive 0 `chat-core/**` daemon
+    imports, 0 `controller.kind` reads, 0 unresolved `managed-host.tsx`
+    specifiers, and exact 31 remaining `managed-host.tsx` edges with all 16
+    Cluster-1 edges absent), `utils/shell-result-display.test.ts` (pinning all
+    field clauses and exact `32`/`33`, `8192`/`8193` boundaries),
+    `ChatContextHeader.test.tsx` (asserting exact shared action class parity
+    against sibling action buttons), `LocalFilesPanel.test.tsx`,
     `LocalFilesControl.test.tsx`, `ManagedLocalFilesControl.test.tsx`,
     `AddWorkspaceDialog.test.tsx`, `use-managed-model-change.test.tsx`,
     `ManagedSessionsPage.test.tsx`, `App.test.tsx` (header/local-control cases),
     and `build-artifact.test.ts` all pass.
-- **Mutation witnesses:** Injecting a synthetic daemon import or
-  `controller.kind` check into `chat-core`, or adding a daemon value import
-  reachable from `managed-host.tsx`, verified to turn `boundary.test.ts` red;
-  mutating `AddWorkspaceDialog`'s 404 check or `ChatContextHeader`'s
-  `renderLeadingAction` slot verified red.
+- **Mutation witnesses:** Injecting a nested `chat-core/**` daemon import
+  (including `@qwen-code/sdk` root or computed `import()`), `const { kind } =
+controller` or other `controller.kind` spellings in `ChatSurface.tsx`, a new
+  daemon module edge or unmodeled alias reachable from `managed-host.tsx`, or
+  mutating `AddWorkspaceDialog`'s 404 check, `ChatContextHeader`'s
+  `styles.action` argument, or `shell-result-display.ts`'s `outputFiles` sum
+  all verified to turn their tests red.
 - **Static gates:** `tsconfig.lib.json`, `tsconfig.json`,
   `eslint --max-warnings=0`, `prettier --check`, `web-shell` + `managed-host`
   builds, and repository `npm run typecheck`.

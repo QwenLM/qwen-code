@@ -219,8 +219,12 @@ describe('ChatContextHeader', () => {
     const actions = Array.from(
       view.querySelectorAll<HTMLButtonElement>('button'),
     );
+    const environmentButton = view.querySelector<HTMLButtonElement>(
+      '[aria-label="Toggle environment information"]',
+    );
 
-    expect(receivedClassName).toBeTruthy();
+    expect(environmentButton?.className).toBeTruthy();
+    expect(receivedClassName).toBe(environmentButton?.className);
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Mobile access',
       'Toggle environment information',

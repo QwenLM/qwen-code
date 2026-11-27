@@ -45,12 +45,16 @@
 
 - 新增基于 TypeScript AST 的源码级边界门禁测试
   （`packages/web-shell/client/chat-core/boundary.test.ts`），强制校验：
-  - `packages/web-shell/client/chat-core/**` 全部非测试源文件对 `daemon/**`、
-    `@qwen-code/sdk/daemon`、`@qwen-code/web-shell/daemon-react-sdk` 保持零导
-    入（含值导入、类型导入与动态导入），且 `ChatSurface.tsx` 不含任何
-    `controller.kind` 属性访问。
-  - 对 `managed-host.tsx` 传递可达的 daemon 值导入边施加双向严格棘轮（新增边
-    即红，已清除的边若不删白名单也即红）。
+  - 递归扫描 `packages/web-shell/client/chat-core/**` 全部非测试源文件，对
+    `daemon/**`、`@qwen-code/sdk`（含包根与子路径）、`@qwen-code/web-shell`
+    （含包根与 `daemon-react-sdk`）保持零导入（含值导入、类型导入、重导
+    出、`require()`、内联 `import('...').T` 类型引用、未建模别名及计算式动态
+    导入），且 `chat-core/**` 全目录不含任何 `controller.kind` 读取（含点访问/
+    可选链、下标访问、解构、嵌套绑定、局部别名与 `Reflect.get`）。
+  - 使用 `tsconfig.json` 真实编译器解析（`ts.resolveModuleName`）实现
+    fail-closed 依赖遍历，并对 `managed-host.tsx` 传递可达的 daemon 值导入
+    边（按 `file => module` 粒度）施加双向严格棘轮（新增 daemon 模块边、未
+    解析/未建模别名、计算式动态导入或遗留陈旧白名单条目均立即转红）。
 - 通过最小、行为不变的纯工具提取与插槽注入清除簇 1 全部 16 条 daemon 值导入边
   （47 → 31），对所有既有 Daemon 调用方保持 100% 向后兼容。
 
@@ -106,19 +110,22 @@
 
 ## 关键设计决策
 
-1. **使用 TypeScript AST（`ts.createSourceFile`）而非正则实现边界门禁。**
-   - 正则会漏判多行混合 `import { type A, B }`、`export { x } from ...` 重导出
-     与动态 `import(...)`，也会在注释上误报。直接遍历 `ts.ImportDeclaration`、
-     `ts.ExportDeclaration` 与动态 `ts.CallExpression` 节点可获得与编译器完全
-     一致的值导入图。
-2. **托管宿主棘轮采用双向精确比对。**
-   - 将扫描得到的 daemon 值导入边集合与固定白名单做精确相等断言，既防止回归
-     （引入新 daemon 导入），也防止遗留陈旧白名单条目（推动切片 6b 与 6c 将白
-     名单干净清零）。
+1. **使用 TypeScript AST（`ts.createSourceFile`）与编译器模块解析
+   （`ts.resolveModuleName`）实现 fail-closed 边界门禁。**
+   - 正则会漏判多行混合 `import { type A, B }`、`export { x } from ...` 重导出、
+     内联 `import('...').T` 类型引用、动态 `import(...)` 与 `require(...)`，也
+     会在注释上误报。直接遍历 AST 并将计算式动态导入与未建模/未解析说明符一律
+     视为违规，配合 `tsconfig.json` 真实 `paths` 解析（如
+     `@qwen-code/web-shell/transcript`）可避免静默剪枝子树。
+2. **托管宿主棘轮采用双向精确比对（按 `file => module` 边粒度）。**
+   - 将扫描得到的 daemon 值导入边集合与固定白名单做精确相等断言，同时断言零未
+     解析说明符，既防止回归（引入新 daemon 模块边或未建模别名），也防止遗留陈
+     旧白名单条目（推动切片 6b 与 6c 将白名单干净清零）。
 3. **被移出的纯工具在原模块保留重导出。**
    - 在 `daemon/timing.ts`、`daemon/remotePromptSidechannel.ts`、
-     `LocalFilesControl.tsx` 与 `artifactUtils.ts` 保留重导出，保证所有既有
-     Daemon 调用方与单测零破坏，同时彻底切断托管宿主图的传递边。
+     `LocalFilesControl.tsx`、`hooks/useSessionScheduledTasks.ts` 与
+     `artifactUtils.ts` 保留重导出，保证所有既有 Daemon 调用方与单测零破坏，
+     同时彻底切断托管宿主图的传递边。
 
 ## 约束
 
@@ -131,20 +138,25 @@
 ## 验证与验收标准
 
 - **单测与边界守卫测试：**
-  - `chat-core/boundary.test.ts`（断言 `chat-core` 0 daemon 导入、0
-    `controller.kind` 访问、`managed-host.tsx` 精确 31 条剩余边且 16 条簇 1
-    边全清）、`utils/shell-result-display.test.ts`、`ChatContextHeader.test.tsx`、
+  - `chat-core/boundary.test.ts`（断言 `chat-core/**` 递归 0 daemon 导入、0
+    `controller.kind` 访问、`managed-host.tsx` 0 未解析说明符、精确 31 条剩
+    余边且 16 条簇 1 边全清）、`utils/shell-result-display.test.ts`（含全部
+    字段子句与 `32`/`33`、`8192`/`8193` 边界对等）、
+    `ChatContextHeader.test.tsx`（含共享操作按钮类名精确断言）、
     `LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、
     `ManagedLocalFilesControl.test.tsx`、`AddWorkspaceDialog.test.tsx`、
     `use-managed-model-change.test.tsx`、`ManagedSessionsPage.test.tsx`、
     `App.test.tsx`（头部与移动访问相关用例）与 `build-artifact.test.ts` 全部通
     过。
-- **变异见证：** 向 `chat-core` 注入合成 daemon 导入或 `controller.kind` 访问、
-  向 `managed-host.tsx` 可达路径注入新 daemon 值导入、以及变异
-  `AddWorkspaceDialog` 的 404 判断或 `ChatContextHeader` 的
-  `renderLeadingAction` 插槽，均验证测试转红。
+- **变异见证：** 向 `chat-core` 子目录注入 daemon 导入（含 `@qwen-code/sdk`
+  根与计算式 `import()`）、向 `ChatSurface.tsx` 注入 `const { kind } =
+controller` 等各类写法、向 `managed-host.tsx` 可达路径注入新 daemon 模块边
+  或未建模别名、以及变异 `AddWorkspaceDialog` 的 404 判断、`ChatContextHeader`
+  的 `styles.action` 传递或 `shell-result-display.ts` 的 `outputFiles` 求和，
+  均验证测试转红。
 - **静态门禁：** `tsconfig.lib.json`、`tsconfig.json`、
   `eslint --max-warnings=0`、`prettier --check`、`web-shell` + `managed-host`
   双构建与全仓 `npm run typecheck`。
 - **本地真实浏览器验证：** 真实 Chromium 验证 `<ManagedAgentWebShell>`（解耦后
-  零报错渲染）及 Playwright `web-shell.split-persist.spec.ts`。
+  零报错渲染）及 Playwright `web-shell.split-persist.spec.ts` / `App` 头部本
+  地控制入口渲染。
