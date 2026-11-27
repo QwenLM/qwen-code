@@ -29,6 +29,7 @@
 
 import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
+import { createElement } from 'react';
 import {
   createDebugLogger,
   logSlashCommand,
@@ -48,6 +49,7 @@ import {
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   MAX_STACKED_SKILLS,
   parseSlashCommand,
@@ -56,6 +58,7 @@ import {
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
+  isPrivateBuiltinSlashCommand,
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
@@ -188,7 +191,7 @@ export type OpenTuiDispatchOutcome =
       /** What the Mods' prompt hooks attached to the `?`-form input. */
       promptContext?: readonly string[];
     }
-  | { kind: 'quit'; messages: HistoryItem[] }
+  | { kind: 'quit'; messages: HistoryItem[]; invocationItemId?: number }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
   /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
   | { kind: 'refused' };
@@ -948,6 +951,15 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            confirmAction: (title) =>
+              this.host.presentActionConfirmation(
+                createElement('text', null, title),
+                {
+                  signal: abortController.signal,
+                  isCurrent: () => this.activeCommand === activeCommand,
+                  allowHistoryScroll: true,
+                },
+              ),
             beginCommit: () => {
               if (
                 this.activeCommand !== activeCommand ||
@@ -1098,7 +1110,15 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'quit':
-                return { kind: 'quit', messages: result.messages };
+                return {
+                  kind: 'quit',
+                  messages: result.messages,
+                  ...(commandToExecute.kind === CommandKind.BUILT_IN &&
+                  commandToExecute.action === quitCommand.action &&
+                  invocationItemId !== undefined
+                    ? { invocationItemId }
+                    : {}),
+                };
               case 'submit_prompt': {
                 const invocation = fullCommandContext.invocation;
                 let content = result.content;
@@ -1279,15 +1299,12 @@ export class OpenTuiSlashDispatcher {
         resolvedCommandPath[0] ||
         trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
         trimmed;
-      // The built-in /advisor is skipped by identity (kind + name) so a
-      // user-defined command shadowing the name is still recorded like
-      // any other custom command (ink parity).
-      const isBuiltInAdvisor =
-        primaryCommand === 'advisor' &&
-        commandToExecute?.kind === CommandKind.BUILT_IN;
+      const privateBuiltin =
+        commandToExecute?.kind === CommandKind.BUILT_IN &&
+        isPrivateBuiltinSlashCommand(trimmed, primaryCommand);
       const shouldRecord =
         !delegatedToRecursiveInvocation &&
-        !isBuiltInAdvisor &&
+        !privateBuiltin &&
         !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
       try {
         if (shouldRecord) {

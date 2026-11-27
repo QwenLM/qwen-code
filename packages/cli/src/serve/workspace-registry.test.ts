@@ -11,6 +11,7 @@ import {
   createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   createSingleWorkspaceRegistry,
+  WorkspaceMemoryPathCollisionError,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 
@@ -30,6 +31,7 @@ function makeRuntime(
   return {
     workspaceId: `id:${workspaceCwd}`,
     workspaceCwd,
+    sessionRuntimeBaseDir: '/runtime',
     primary: false,
     trusted: true,
     env: { mode: 'parent-process', overlayKeys: [] },
@@ -40,6 +42,45 @@ function makeRuntime(
     ...overrides,
   } as WorkspaceRuntime;
 }
+
+describe('workspace project memory path collisions', () => {
+  const primary = () => makeRuntime('/work/apps/api', { primary: true });
+  const secondary = (sessionRuntimeBaseDir = '/runtime') =>
+    makeRuntime('/work/apps-api', { sessionRuntimeBaseDir });
+
+  it('rejects colliding encoded paths at startup and on dynamic registration', () => {
+    expect(() => createWorkspaceRegistry([primary(), secondary()])).toThrow(
+      WorkspaceMemoryPathCollisionError,
+    );
+    const registry = createWorkspaceRegistry([primary()]);
+    expect(() => registry.add(secondary())).toThrow(
+      WorkspaceMemoryPathCollisionError,
+    );
+    expect(registry.list()).toHaveLength(1);
+    registry.add(secondary('/isolated-runtime'));
+    expect(registry.list()).toHaveLength(2);
+  });
+
+  it('rejects runtime replacement that would begin sharing a memory directory', () => {
+    const other = secondary('/isolated-runtime');
+    const registry = createWorkspaceRegistry([primary(), other]);
+    const entry = registry.getEntryByWorkspaceId(other.workspaceId)!;
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    expect(() =>
+      registry.activateReplacement(entry, secondary(), 'policy-2'),
+    ).toThrow(WorkspaceMemoryPathCollisionError);
+  });
+
+  it.runIf(process.platform === 'darwin')(
+    'rejects case aliases that a macOS volume could resolve to the same path',
+    () => {
+      const alias = makeRuntime('/work/apps-API');
+      expect(() => createWorkspaceRegistry([primary(), alias])).toThrow(
+        WorkspaceMemoryPathCollisionError,
+      );
+    },
+  );
+});
 
 describe('createSingleWorkspaceRegistry', () => {
   it('exposes the supplied runtime as the primary and only runtime', () => {

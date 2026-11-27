@@ -4,18 +4,26 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigIns
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.function.Function;
 
 final class JournalLifecycleAuthorization {
     private final JournalFencing fencing;
     private final JournalStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules;
+    private final HarnessRules harnessRules;
     private final JdbcTemplate jdbc;
     private final JdbcManagedExtensionRecordStore extensionRecords;
     private final JdbcWorkspaceExecutionStore lifecycleExecution;
@@ -23,7 +31,7 @@ final class JournalLifecycleAuthorization {
 
     JournalLifecycleAuthorization(JournalFencing fencing,
             JournalStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
+            HarnessRules harnessRules,
             JdbcTemplate jdbc,
             JdbcManagedExtensionRecordStore extensionRecords,
             JdbcWorkspaceExecutionStore lifecycleExecution,
@@ -39,7 +47,7 @@ final class JournalLifecycleAuthorization {
 
     void authorizeLifecycle(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
@@ -64,18 +72,15 @@ final class JournalLifecycleAuthorization {
                             tenantId,
                             sessionId,
                             authority.operationId());
-            if (!kind.toLowerCase(java.util.Locale.ROOT).equals(request.kind())) {
+            if (!kind.toLowerCase(Locale.ROOT).equals(request.kind())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_operation_conflict");
             }
         } else if (!"DRAINING"
                 .equals(
                         jdbc.queryForObject(
-                                "SELECT phase FROM ma_session_head WHERE tenant_key = ? AND"
-                                    + " harness_key = ? AND tenant_id = ? AND harness_session_id ="
-                                    + " ?",
+                                "SELECT phase FROM ma_session_head WHERE tenant_id = ? AND"
+                                    + " harness_session_id = ?",
                                 String.class,
-                                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                                 tenantId,
                                 sessionId))) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
@@ -122,7 +127,7 @@ final class JournalLifecycleAuthorization {
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
     }
 
-    java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+    Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
         if (request.kind() != null) {
             throw JournalStoreRows.invalid("Approval queries do not accept lifecycle authority.");
@@ -136,16 +141,18 @@ final class JournalLifecycleAuthorization {
         }
         var row = rows.getFirst();
         String profile = (String) row.get("tool_profile");
+        int publicChildAgentsVersion = ((Number) row.get("public_child_agents_version")).intValue();
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
-                || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
                         ? "qwen-code".equals(row.get("agent_id")) && row.get("agent_definition_digest") == null
-                                && row.get("parent_session_id") == null && ((Number) row.get("public_child_agents_version")).intValue() == 0
-                        : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
-                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
-                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V4.equals(profile)
-                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
+                                && row.get("parent_session_id") == null
+                                && (publicChildAgentsVersion == 0 || publicChildAgentsVersion == 1)
+                        : WorkspaceToolProfiles.FILES.equals(profile)
+                        || WorkspaceToolProfiles.FILES_V3.equals(profile)
+                        || WorkspaceToolProfiles.FILES_V4.equals(profile)
+                        || WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;
         }
         String mode = (String) row.get("selected_approval_mode");
@@ -153,19 +160,19 @@ final class JournalLifecycleAuthorization {
             mode = (String) row.get("approval_mode");
         }
         long revision = ((Number) row.get("approval_revision")).longValue();
-        if (!com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.supportsApprovalMode(mode)
+        if (!WorkspaceToolProfiles.supportsApprovalMode(mode)
                 || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw JournalStoreRows.conflict("approval_selection_conflict", "The approval selection is invalid.");
         }
-        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>(java.util.Map.of("mode", mode, "revision", revision));
+        Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision));
         if (row.get("permission_rules_json") != null) {
             try {
                 var rules = harnessRules.nonEmptyPermissionRules(harnessRules.permissionRules(
-                        JournalStoreRows.JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
+                        JournalStoreRows.JSON.readValue((String) row.get("permission_rules_json"), Map.class)));
                 if (rules != null) {
                     result.put("permissionRules", rules);
                 }
-            } catch (java.io.IOException | IllegalArgumentException invalid) {
+            } catch (IOException | IllegalArgumentException invalid) {
                 throw JournalStoreRows.conflict("approval_selection_conflict", "The permission rules are invalid.");
             }
         }
@@ -173,8 +180,8 @@ final class JournalLifecycleAuthorization {
     }
 
     void authorizeNewLifecycleDispatch(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
-            byte[] recordBytes, java.util.function.Function<String, StoredResource> reader) {
+            RuntimeLifecycleAuthority authority,
+            byte[] recordBytes, Function<String, StoredResource> reader) {
         boolean v2 = authority != null && jdbc.queryForObject(
                                         "SELECT lifecycle_protocol_version FROM ma_operation WHERE"
                                             + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')"
@@ -189,7 +196,7 @@ final class JournalLifecycleAuthorization {
             }
             try {
                 lifecycleExecution.authorizeLifecycle(lifecycleSessions.requireSession(tenantId, sessionId), authority);
-            } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException refusal) {
+            } catch (RuntimeBrokerException refusal) {
                 if (refusal.getStatusCode() == 409 && "workspace_unavailable".equals(refusal.getCode())) {
                     throw WorkspaceLifecycleStore.blocked(
                             "workspace_lifecycle_authorization_revoked");

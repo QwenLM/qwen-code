@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -25,6 +27,7 @@ import org.apache.catalina.Context;
 import org.apache.catalina.startup.Tomcat;
 import org.apache.tomcat.websocket.server.WsServerContainer;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketMessage;
@@ -34,7 +37,6 @@ import java.io.File;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.ByteBuffer;
-import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -394,7 +396,8 @@ class TerminalRelayRealScenarioTest {
             // Tomcat's 8 KiB default would close a larger frame with 1009.
             com.alibaba.qwen.code.managedagent.config.TerminalWebSocketConfig config =
                     new com.alibaba.qwen.code.managedagent.config.TerminalWebSocketConfig(
-                            mock(RuntimeBrokerService.class), Clock.systemUTC());
+                            mock(RuntimeBrokerService.class), mock(ManagedAgentService.class),
+                            mock(ManagedAgentSettings.class), mock(JdbcTemplate.class));
             org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean container =
                     config.terminalWebSocketContainer();
             container.setServletContext(ctx.getServletContext());

@@ -30,6 +30,7 @@ export const RU_PART6: Record<
   'workflow.graph.omitted': (v) =>
     `Граф ограничен ради производительности: пропущены ${v?.lanes ?? 0} ${ruPlural(v?.lanes, 'фаза', 'фазы', 'фаз')}, ${v?.nodes ?? 0} ${ruPlural(v?.nodes, 'агент', 'агента', 'агентов')} и ${v?.edges ?? 0} ${ruPlural(v?.edges, 'связь', 'связи', 'связей')}.`,
   'workflow.noPhase': 'Без фазы',
+  'workflow.phase.notStarted': 'Не начата',
   'workflow.dispatchCount': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'запуск', 'запуска', 'запусков')}`,
   'workflow.selectedDispatch': 'Выбранный запуск',
@@ -92,6 +93,15 @@ export const RU_PART6: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
   'tasks.pill.agents': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
+  'tasks.pill.session': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
+  'tasks.pill.sessions': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
+  'tasks.pill.sessionWaiting': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'сеанс ждёт', 'сеанса ждут', 'сеансов ждут')} вашего ответа`,
+  'tasks.waitingForInput': 'Ждёт вашего ответа',
+  'user.sentFrom': (v) => `Из ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
+  'user.sentTo': (v) => `В ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
   'tasks.pill.monitor': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'монитор', 'монитора', 'мониторов')}`,
   'tasks.pill.monitors': (v) =>
@@ -252,6 +262,11 @@ export const RU_PART6: Record<
   'sessionsOverview.popupBlocked':
     'Всплывающие окна заблокированы. Разрешите их для этого сайта, чтобы открывать сессии в новых вкладках.',
   'sessionsOverview.refresh': 'Обновить',
+  'sessionsOverview.restoreWorktree': 'Восстановить снимок',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Снимок недоступен для этого рабочего пространства',
+  'sessionsOverview.restoringWorktree': 'Восстановление…',
+  'sessionsOverview.restoreWorktreeFailed': 'Не удалось восстановить снимок',
   'sessionsOverview.selectAll': 'Выбрать все',
   'sessionsOverview.titleColumn': 'Название',
   'sessionsOverview.actions': 'Действия',
@@ -377,6 +392,7 @@ export const RU_PART6: Record<
   'channels.platform.name.dingtalk': 'DingTalk',
   'channels.platform.name.feishu': 'Feishu',
   'channels.platform.name.wecom': 'WeCom',
+  'channels.platform.name.generic-webhook': 'Generic Webhook',
   'channels.method.title': (v) =>
     `Выберите подключение ${v?.platform ?? 'канала'}`,
   'channels.method.description': (v) =>
@@ -504,6 +520,18 @@ export const RU_PART6: Record<
   'channels.editor.field.webhook.signingSecret': 'Секрет подписи',
   'channels.editor.field.webhook.signingSecret.description':
     'Нужен, если для пользовательского бота включена проверка подписи.',
+  'channels.editor.field.genericWebhook.webhookUrl': 'URL webhook',
+  'channels.editor.field.genericWebhook.webhookUrl.description':
+    'HTTPS-адрес принимающего сервиса. Для локальных или частных адресов включите расширенную настройку ниже.',
+  'channels.editor.field.genericWebhook.bearerToken': 'Токен Bearer',
+  'channels.editor.field.genericWebhook.bearerToken.description':
+    'Необязательный токен в заголовке Authorization. Оставьте пустым, если получателю не нужна аутентификация.',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork':
+    'Разрешить локальные и частные адреса',
+  'channels.editor.field.genericWebhook.networkDescription':
+    'Сетевой доступ к этой конечной точке.',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork.description':
+    'Разрешить обращения к локальным и частным адресам, в том числе по HTTP. localhost — хост или контейнер, где работает демон Qwen Code. Для публичных адресов по-прежнему требуется HTTPS.',
   'channels.editor.field.weixin.groupPolicy': 'Политика групп',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot поддерживает только личные сообщения, поэтому группы остаются отключёнными.',

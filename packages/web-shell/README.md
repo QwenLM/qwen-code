@@ -115,8 +115,8 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 
 新建会话页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
 Local Control，以及多主机位置。面板开关遵循 `header.items`，并在工作区确定后
-才显示；`rightPanel.items` 此时仅保留 `files`、`terminal` 和 `webPreview`，
-`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
+才显示；`rightPanel.items` 此时仅保留 `files`、`terminal`、`webPreview` 和
+`changeOverview`，`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
 自定义 `renderChatHeader` 的宿主在新建会话页仍不调用该渲染器。
 输入框没有显示工作区选择器时，精简 header 保留只读工作区图标。
 面板跟随输入框选择的工作区；各工作区草稿独立保存，刷新和会话切换后可恢复，
@@ -727,7 +727,7 @@ daemon 参数的完整含义和配置方式见
 | `theme`                        | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
 | `onThemeChange`                | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |
 | `onThemeResolved`              | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                                                           |
-| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'ru' \| 'ru-ru'`                                                                               | UI 语言；`ru` 目前只覆盖 `goal.*`/`goals.*`（部分目录），未覆盖的键按键回退英文                                                                                              |
+| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'zh-TW' \| 'zh-tw' \| 'zh-HK' \| 'zh-Hant' \| 'zh-MO' \| 'ru' \| 'ru-ru'`                      | UI 语言；`zh-HK`/`zh-Hant`/`zh-MO` 及大小写变体共用 `zh-TW` 繁体目录；`ru` 只覆盖 `goal.*`/`goals.*`。未覆盖的键回退英文                                                     |
 | `onLanguageChange`             | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                                                            |
 | `onLanguageResolved`           | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                                                     |
 | `brand`                        | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                                                    |
@@ -738,6 +738,7 @@ daemon 参数的完整含义和配置方式见
 | `onAssistantTurnSettled`       | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
 | `settings`                     | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |
 | `composerVariant`              | `'default' \| 'simple'`                                                                                                               | 输入框展示模式；默认 `default`，`simple` 使用胶囊形简洁输入框，适用于主聊天、分屏和侧任务。                                                                                  |
+| `composerGlowEnabled`          | `boolean`                                                                                                                             | 输入框的聚焦光晕和按键动画。默认开启，传入 `false` 时关闭。                                                                                                                  |
 | `showToolCalls`                | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                                                      |
 | `modelManagement`              | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                                                      |
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`                                                                                                 | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                                               |
@@ -814,6 +815,16 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+### 方向键历史寻回
+
+用户可在 **设置 → 界面** 中关闭**用上下键寻回历史消息**。浏览器会保存选择，默认开启。
+按 Ctrl+R 可搜索历史消息。
+
+嵌入宿主可向 `WebShell`、`WebShellWithProviders` 或独立的 `ManagedAgentWebShell`
+传入 `disableArrowKeyHistory={true}`，关闭对应实例的方向键寻回。设置面板显示该开关时，
+开关会显示为关闭且不可编辑，并注明由宿主控制。省略该属性或传入 `false` 时，使用浏览器
+已保存的偏好。属性变化立即生效，已保存的偏好会保留。
 
 ### 简洁输入框
 
@@ -1024,7 +1035,7 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 
 `WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件（界面语言），`setting:output-language` 对应模型输出语言（用户作用域，仅用户标签页显示），`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:arrow-key-history`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
 
 归档会话管理位于 **设置 → 归档会话**，直接展示现有归档列表及工作区分组；侧边栏不再常驻“已归档”区块。只有进入该分类时才加载归档，离开后停止相关订阅。该分类沿用原有侧边栏归档功能的能力限制，禁用侧边栏的嵌入宿主不展示此分类；可通过 `builtin:archived-sessions` 控制其设置入口。嵌入宿主需在 `sidebar.footer.items` 中提供 `settings`，使用设置白名单时需加入 `builtin:archived-sessions`；既有白名单升级后不会自动加入该入口，隐藏设置入口或排除此分类会隐藏归档管理界面，底层归档 API 不受影响。支持来源元数据时，归档页内可独立切换任务／频道，不改变侧边栏活跃会话的筛选。
 

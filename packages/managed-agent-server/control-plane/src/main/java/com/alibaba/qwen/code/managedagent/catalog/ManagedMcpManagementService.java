@@ -9,10 +9,12 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -70,7 +72,7 @@ public class ManagedMcpManagementService {
         try {
             request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
                     List.of("managed-mcp-command", tenantId, actorId, sessionId, idempotencyKey))).toString());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
         SessionRecord session = store.requireMcpManagement(tenantId, actorId, sessionId, (String) request.get("operationId"));
@@ -113,7 +115,7 @@ public class ManagedMcpManagementService {
             requireSnapshot(result);
             return result;
         } catch (HarnessHttpFailure refusal) {
-            org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(refusal.getStatusCode());
+            HttpStatus status = HttpStatus.resolve(refusal.getStatusCode());
             String code = refusal.getErrorCode();
             if (status == null || !status.is4xxClientError() || code == null || !code.matches("[a-z][a-z0-9_]{0,127}")) {
                 throw new ManagedAgentException(503, "managed_mcp_management_unavailable",

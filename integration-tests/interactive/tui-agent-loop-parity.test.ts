@@ -27,7 +27,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
   fakeToolCall,
@@ -152,9 +152,35 @@ interface Run {
 
 /**
  * The root config's `retry: 2` would rerun both TUI sessions after a stall,
- * tripling its cost in the required gate.
+ * tripling its cost in the required gate. A starved shared host stretches
+ * every mocked turn several-fold — the teammate case measured ~395s under
+ * contention (#18119) — so the ceiling leaves room for three arms of the
+ * later-turns chain below.
  */
-const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
+const PARITY_CASE_OPTIONS = { retry: 0, timeout: 600_000 };
+
+/**
+ * The helper gate's ceiling: hardening for a slow-but-live leader, not a fix
+ * for #18027. Past it the fake server answers 500 and the CLI's retry adds a
+ * request the strict parity count rejects — but a resend inflates that count
+ * with no expiry at all, since the server counts a request before it awaits
+ * the handler and writes any header. The enclosing waits (TURN_BUDGET) must
+ * stay strictly above this ceiling so a leader slow to record its waiting
+ * answer reaches the gate, not the harness, first; a leader stalled before
+ * that answer is sent never enters the gate.
+ */
+const HELPER_GATE_BUDGET = 90_000;
+
+/** Above the gate, under the SDK's 120 s request timeout (DEFAULT_TIMEOUT). */
+const TURN_BUDGET = HELPER_GATE_BUDGET + 15_000;
+
+/**
+ * A session's own later turns — a teammate report reaching the leader, a
+ * notification, a cron fire — start after the prompt's turn settled, so this
+ * wait carries their whole chain on a starved host (#18119). It runs once per
+ * arm; the case ceiling above covers three of them.
+ */
+const LATER_TURN_BUDGET = 150_000;
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -463,8 +489,8 @@ describe('normalize', () => {
     const shellText = (pid: number, output = 'queue-now') =>
       `Command: echo ${output} && node -e "setTimeout(() => {}, 5000)"\n` +
       'Directory: (root)\n' +
-      `Output: ${output}\n` +
-      'Error: (none)\n' +
+      `Output (stdout and stderr combined): ${output}\n` +
+      'Execution Error: (none)\n' +
       'Exit Code: 0\n' +
       'Signal: (none)\n' +
       `Process Group PGID: ${pid}`;
@@ -508,21 +534,21 @@ describe('normalize', () => {
       output?: string,
     ) =>
       normalize(shellRecord(pid, output), '/workspace', '/scratch', volatile);
-    expect(shellText(99).length % 4).toBe(0);
+    expect(shellText(999).length % 4).toBe(0);
     // Without the scenario's keys the counts follow the pid's width; with
     // them the records compare, while the PGID text is scrubbed either way.
-    expect(normalizedShell(99)).not.toEqual(normalizedShell(100));
-    expect(JSON.stringify(normalizedShell(99))).toContain(
+    expect(normalizedShell(999)).not.toEqual(normalizedShell(1000));
+    expect(JSON.stringify(normalizedShell(999))).toContain(
       'Process Group PGID: <PGID>',
     );
-    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).toEqual(
-      normalizedShell(100, FOREGROUND_SHELL_VOLATILE),
+    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).toEqual(
+      normalizedShell(1000, FOREGROUND_SHELL_VOLATILE),
     );
     // A real output difference still compares unequal, so widening the keys
     // to 'output' cannot quietly retire what the scenario detects. The
     // replacement keeps the length, leaving the text as the only difference.
-    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
-      normalizedShell(99, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
+    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
+      normalizedShell(999, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
     );
   });
 });
@@ -796,7 +822,7 @@ describeTui(SUITE, () => {
             (request) => request.transport.closedAt !== undefined,
           ),
         'model requests complete',
-        90_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await session!.idle(2_000, 90_000);
@@ -806,7 +832,7 @@ describeTui(SUITE, () => {
             (request) => request.transport.closedAt !== undefined,
           ),
         'model requests settle',
-        30_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await session!.idle(1_000, 30_000);
@@ -895,7 +921,7 @@ describeTui(SUITE, () => {
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        90_000,
+        LATER_TURN_BUDGET,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
@@ -1416,6 +1442,7 @@ describeTui(SUITE, () => {
                     ),
                   ),
               'the leader records its waiting answer',
+              HELPER_GATE_BUDGET,
             );
             return { content: 'HELPER REPORT: it is sunny.' };
           });
@@ -1510,6 +1537,69 @@ describeTui(SUITE, () => {
       (candidate) => candidate.name === 'input queued while a tool runs',
     );
     expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
+  });
+
+  // Both edges of the ceiling: a trim lets a stalled leader expire the gate
+  // into the 500-and-retry the parity count rejects, and no ceiling at all
+  // lets a wedged leader hang the case to its timeout. The literal pin keeps
+  // a mutation of the constant from moving the gate and this test together.
+  it('gives the helper gate the cross-turn budget', async () => {
+    expect(HELPER_GATE_BUDGET).toBe(90_000);
+    expect(TURN_BUDGET).toBeGreaterThan(HELPER_GATE_BUDGET);
+    // The later-turns wait runs once per arm, and the case ceiling has to
+    // cover all three arms plus the rest of the case.
+    expect(LATER_TURN_BUDGET).toBe(150_000);
+    expect(PARITY_CASE_OPTIONS.timeout).toBe(600_000);
+    expect(PARITY_CASE_OPTIONS.timeout).toBeGreaterThanOrEqual(
+      3 * LATER_TURN_BUDGET,
+    );
+    const scenario = allScenarios.find(
+      (candidate) =>
+        candidate.name === 'a teammate report that starts a teammate turn',
+    )!;
+    const gateScratch = mkdtempSync(join(tmpdir(), 'qwen-helper-gate-'));
+    const transcript = join(gateScratch, 'runtime', 'chats', 'session.jsonl');
+    mkdirSync(join(gateScratch, 'runtime', 'chats'), { recursive: true });
+    writeFileSync(transcript, '{}\n');
+    const previousWaiting = leaderWaiting;
+    leaderWaiting = deferred();
+    leaderWaiting.resolve();
+    const helperReply = () =>
+      Promise.resolve(
+        scenario.reply(
+          [{ role: 'user', content: `${HELPER_TASK} Check the weather.` }],
+          join(gateScratch, 'workspace'),
+          0,
+        ),
+      );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const gateStart = Date.now();
+      const reply = helperReply();
+      let settledAt = 0;
+      void reply.then(
+        () => (settledAt = Date.now()),
+        () => (settledAt = Date.now()),
+      );
+      await vi.advanceTimersByTimeAsync(HELPER_GATE_BUDGET - 1_000);
+      expect(settledAt).toBe(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settledAt - gateStart).toBeGreaterThanOrEqual(HELPER_GATE_BUDGET);
+      await expect(reply).rejects.toThrow(
+        'the leader records its waiting answer',
+      );
+      writeFileSync(
+        transcript,
+        '{"message":{"content":[{"text":"Waiting for the helper."}]}}\n',
+      );
+      await expect(helperReply()).resolves.toEqual({
+        content: 'HELPER REPORT: it is sunny.',
+      });
+    } finally {
+      vi.useRealTimers();
+      leaderWaiting = previousWaiting;
+      rmSync(gateScratch, { recursive: true, force: true });
+    }
   });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {

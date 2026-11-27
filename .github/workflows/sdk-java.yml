@@ -10,14 +10,16 @@ on:
         description: 'Immutable source commit selected by the caller.'
         required: true
         type: 'string'
-      # 'fast' keeps the flyway guard, the real-daemon E2E and the Linux
-      # Java 21 leg for managed-agent-gate.yml's push-time tier; anything
-      # else, including no value on the nightly, runs every lane.
       tier:
-        description: 'fast for the push-time subset; full otherwise.'
+        description: 'fast for the selected checks; full for the background suite.'
         required: false
         type: 'string'
         default: 'full'
+      coverage:
+        description: 'Fast checks selected by the caller (java, daemon, or both).'
+        required: false
+        type: 'string'
+        default: 'both'
 
 permissions:
   contents: 'read'
@@ -35,6 +37,7 @@ concurrency:
 
 jobs:
   test:
+    if: "${{ inputs.tier != 'fast' || inputs.coverage == 'java' || inputs.coverage == 'both' }}"
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
     runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     # One per-host lock wait plus the bounded write-back it guards, and the
@@ -234,29 +237,11 @@ jobs:
       # Self-hosted keeps relying on the runner's own Node, matching the
       # daemon-e2e job's stance.
       - name: 'Set up Node.js 22 (hosted)'
-        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
+        if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' && inputs.tier != 'fast' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22'
           package-manager-cache: false
-
-      # The fast tier runs the full module suite below, which loads the built
-      # Core and CLI JavaScript, as mysql-integration's suite does.
-      - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
-        if: "${{ inputs.tier == 'fast' }}"
-        run: |-
-          for attempt in 1 2 3; do
-            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
-              if [[ "${attempt}" != "1" ]]; then
-                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
-              fi
-              break
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
 
       - name: 'Point Maven at the pool mirror'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -307,29 +292,26 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Seed from the host-shared repo so a warm host still starts warm.
-          # The seed only reads the host cache and is best-effort, so it takes
-          # no lock and cannot delay the lane.
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Shared helper rebuilds the disposable job-local repo before
+          # Maven. Current callers fail closed if it is unexpectedly absent.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Isolate warning output so a
+            # closed log pipe cannot replace the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || (echo "::warning::Maven cache seed helper cleanup failed; leaving ${seed_helper} in place") || true; exit "${seed_helper_status}"' EXIT
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
           # The suite resolves from the job-local copy above, so it does not
           # touch host-shared state and must not hold the per-host lock.
           # On 2026-10-22 run 39771949573's fast tier failed at its
@@ -353,10 +335,9 @@ jobs:
               # Server suites inside the SDK module.
               cd ../../managed-agent-server || mvn_status=$?
               if [ "${mvn_status}" -eq 0 ]; then
-                # The fast tier skips mysql-integration, which owns the full H2 unit suite.
                 if [ "${TIER}" = "fast" ]; then
-                  mvn_stage='runtime-broker H2 suite'
-                  mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+                  mvn_stage='managed-agent compile and class-size ratchet'
+                  mvn --batch-mode --no-transfer-progress -pl verification -am -Dtest=ClassSizeRatchetTest -Dsurefire.failIfNoSpecifiedTests=false clean test || mvn_status=$?
                 else
                   mvn_stage='runtime-broker suite'
                   mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
@@ -376,7 +357,7 @@ jobs:
           # lane's queue budget delaying a failure that is already decided: it
           # waits no longer than the copy itself is allowed to run.
           lock_wait=9600
-          if [ "${mvn_status:-0}" -ne 0 ]; then
+          if [ "${TIER}" = "fast" ] || [ "${mvn_status:-0}" -ne 0 ]; then
             lock_wait=300
           fi
           # Name the deferred failure at every exit that can end a red step:
@@ -387,6 +368,16 @@ jobs:
               echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
             fi
           }
+          writeback_host_root="${HOME}"
+          if [ -d "${HOME}/.m2/repository" ]; then
+            writeback_host_root="${HOME}/.m2/repository"
+          elif [ -d "${HOME}/.m2" ]; then
+            writeback_host_root="${HOME}/.m2"
+          fi
+          writeback_device_host="$(stat -Lc '%d' "${writeback_host_root}" || true)"
+          writeback_device_job="$(stat -Lc '%d' "${RUNNER_TEMP}/m2-repo" || true)"
+          # Publication needs a hardlink-compatible host, but host-local
+          # cleanup still belongs in the locked stanza below.
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
             mvn_report_failed_suite
@@ -468,9 +459,15 @@ jobs:
           # already decided.
           write_back=0
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          find "${HOME}/.m2/repository" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 9>&- || write_back=$?
+          find -P "${HOME}/.m2/repository" -xdev -depth \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \) \
+            -delete 9>&- || write_back=$?
+          if [ -z "${writeback_device_host}" ] || [ "${writeback_device_host}" != "${writeback_device_job}" ]; then
+            [ "${write_back}" -eq 0 ] || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            echo "::warning::Maven cache write-back skipped: hard links are unavailable between the job and host filesystems"
+            mvn_report_failed_suite
+            exit "${mvn_status}"
+          fi
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
@@ -500,7 +497,7 @@ jobs:
         run: |-
           mvn --batch-mode --no-transfer-progress -f ../sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           if [ "${TIER}" = "fast" ]; then
-            mvn --batch-mode --no-transfer-progress clean test
+            mvn --batch-mode --no-transfer-progress -pl verification -am -Dtest=ClassSizeRatchetTest -Dsurefire.failIfNoSpecifiedTests=false clean test
           else
             mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
           fi
@@ -519,7 +516,7 @@ jobs:
           retention-days: 7
 
       - name: 'Run Java SDK Checkstyle'
-        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
+        if: "${{ matrix.os == 'ubuntu-latest' && (matrix.java == '11' || inputs.tier == 'fast') }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -554,6 +551,7 @@ jobs:
   # minutes in the hosted queue. Untrusted fork PRs stay hosted, and the
   # default merge-ref checkout is kept on both — the merge result is the point.
   flyway-migrations:
+    if: "${{ inputs.tier != 'fast' || inputs.coverage == 'java' || inputs.coverage == 'both' }}"
     name: 'Flyway migration version uniqueness'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
@@ -987,28 +985,30 @@ jobs:
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
-          # The seed only reads the host cache and is best-effort, so it takes
-          # no lock and cannot delay the lane.
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # The host-copy attempt is best-effort, but reconstructing a safe
+          # local directory must succeed before Maven uses it. It takes no lock.
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Isolate warning output so a
+            # closed log pipe cannot replace the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || (echo "::warning::Maven cache seed helper cleanup failed; leaving ${seed_helper} in place") || true; exit "${seed_helper_status}"' EXIT
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -1059,6 +1059,16 @@ jobs:
               echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
             fi
           }
+          writeback_host_root="${HOME}"
+          if [ -d "${HOME}/.m2/repository" ]; then
+            writeback_host_root="${HOME}/.m2/repository"
+          elif [ -d "${HOME}/.m2" ]; then
+            writeback_host_root="${HOME}/.m2"
+          fi
+          writeback_device_host="$(stat -Lc '%d' "${writeback_host_root}" || true)"
+          writeback_device_job="$(stat -Lc '%d' "${RUNNER_TEMP}/m2-repo" || true)"
+          # Publication needs a hardlink-compatible host, but host-local
+          # cleanup still belongs in the locked stanza below.
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
             mvn_report_failed_suite
@@ -1146,9 +1156,15 @@ jobs:
           # already decided.
           write_back=0
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          find "${HOME}/.m2/repository" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 9>&- || write_back=$?
+          find -P "${HOME}/.m2/repository" -xdev -depth \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \) \
+            -delete 9>&- || write_back=$?
+          if [ -z "${writeback_device_host}" ] || [ "${writeback_device_host}" != "${writeback_device_job}" ]; then
+            [ "${write_back}" -eq 0 ] || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            echo "::warning::Maven cache write-back skipped: hard links are unavailable between the job and host filesystems"
+            mvn_report_failed_suite
+            exit "${mvn_status}"
+          fi
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
@@ -1206,7 +1222,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (209 + 20 + 50 + 20 = 299 — the FG8 letters
+    # The step ceilings today (216 + 20 + 50 + 20 = 306 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -1292,18 +1308,19 @@ jobs:
     # left); the client-files relay joint fixture adds 204 s (2x its measured
     # 101.6 s), so the fork moves to 11862 s and Verify to 209 minutes,
     # wrapping fork + 600 s plus margin (12462 s of fork plus wrap, 78 s
-    # left);
+    # left); the Action parking slice cases reserve 420 s pending the
+    # first Linux timing, moving the fork to 12282 s and Verify to 216 minutes;
     # the Broker fault gates use 20,
     # and admission plus O4 keep per-fork ceilings) plus a 33-minute
     # allowance for the uncapped setup steps (Checkout.. cgroup delegation,
     # the report checks), which took under 10 minutes on every nightly from
-    # 10-14 to 10-30: 299 + 33. A Verify that timed out used to skip
+    # 10-14 to 10-30: 306 + 33. A Verify that timed out used to skip
     # admission, leaving that path 50 minutes spare; admission now runs
     # after it, so that path too can fill all four capped ceilings. The
     # allowance sits above the ~13-minute floor so that a slow setup (the
     # CLI install makes up to three attempts) still leaves the O4 gates
     # time to run. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 332
+    timeout-minutes: 339
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -1403,10 +1420,10 @@ jobs:
         # fork leaves no per-test failure lines, so the main-CI failure
         # analyzer can only file an undiagnosable per-commit issue (#13503).
         # hosted-process-ci.test.js pins this ordering; the fork budget is
-        # 11862 s, so the step wraps to fork + 600 s plus margin (209 min,
-        # 78 s left before the step must move), including the provisional
-        # 180 s pool-fixture reservation pending CI measurement.
-        timeout-minutes: 209
+        # 12282 s, so the step wraps to fork + 600 s plus margin (216 min,
+        # 78 s left before the step must move), including provisional
+        # reservations for the pool fixture and Action parking slice cases.
+        timeout-minutes: 216
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
@@ -1527,14 +1544,15 @@ jobs:
     name: 'Hosted failover E2E / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The packaged-stack failover arms, apart from the Hosted MySQL job so
-    # that a failing integration test there no longer skips them: they need
-    # only the bundled CLI, the server jar and a runner-private mysqld, not
-    # its MySQL service. The rewritten-command arm delegates its own cgroup
-    # root below. Each arm also runs when an earlier one failed. Ceilings:
-    # 28 arms × 10 + the capped cgroup delegation × 10 = 290 plus ~13 minutes
-    # for the uncapped setup steps (Checkout.. Install MySQL binaries): 303 + 2.
-    timeout-minutes: 305
+    # The packaged-stack deterministic E2E arms, apart from the Hosted MySQL
+    # job so that a failing integration test there no longer skips them: they
+    # need only the bundled CLI, the server jar and a runner-private mysqld,
+    # not its MySQL service. The rewritten-command arm delegates its own
+    # cgroup root below. Each arm also runs when an earlier one failed.
+    # Ceilings: 30 arms × 10 + the capped cgroup delegation × 10 + the
+    # PR-watch bound-session rig × 10 = 320 plus ~13 minutes for the uncapped
+    # setup steps (Checkout.. Install MySQL binaries): 333 + 2.
+    timeout-minutes: 335
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1591,6 +1609,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run managed PR-watch bound-session E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-pr-watch
       - name: 'Run session owner failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1611,6 +1634,24 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-big-output
+      # The /loop skill model-turn arm: a creator-bearing files/4 definition
+      # receives the Managed cron variant at admission, and a scripted model
+      # drives cron_create/list/delete through the same packaged stack. Not a
+      # failover arm, but it needs the identical jar/bundle/mysqld prerequisites.
+      - name: 'Run /loop skill model-turn E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-loop-skill
+      # The /loop scheduled-fire arm: the same stack, but the schedule is
+      # left armed at the cron minimum cadence so the Java scanner fires the
+      # next minute slot on its own and the wake turn's framing is tied to the
+      # ledger's fired occurrence. Needs the identical prerequisites.
+      - name: 'Run /loop scheduled-fire E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-loop-fire
       - name: 'Run Harness-restart session failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1989,26 +2030,28 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Isolate warning output so a
+            # closed log pipe cannot replace the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || (echo "::warning::Maven cache seed helper cleanup failed; leaving ${seed_helper} in place") || true; exit "${seed_helper_status}"' EXIT
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -2297,26 +2340,28 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Isolate warning output so a
+            # closed log pipe cannot replace the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || (echo "::warning::Maven cache seed helper cleanup failed; leaving ${seed_helper} in place") || true; exit "${seed_helper_status}"' EXIT
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
@@ -2439,6 +2484,7 @@ jobs:
           fi
 
   daemon-e2e:
+    if: "${{ inputs.tier != 'fast' || inputs.coverage == 'daemon' || inputs.coverage == 'both' }}"
     name: 'Real daemon E2E / Java 11'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
@@ -2456,7 +2502,7 @@ jobs:
     # of the 8 sdk-java.yml runs before it). #14396 has since suppressed that
     # save on self-hosted runners, so the save is no longer the reason. What
     # still justifies the headroom is frequency: the fast tier runs this leg on
-    # every touched PR push instead of nightly only, so it meets the ~44 min
+    # daemon-related PR pushes as well as nightly, so it meets the ~44 min
     # stretched-setup tail above far more often than a 45 ceiling leaves room
     # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"

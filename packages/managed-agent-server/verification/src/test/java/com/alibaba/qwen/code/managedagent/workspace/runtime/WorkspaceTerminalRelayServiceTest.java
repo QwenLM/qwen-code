@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -82,6 +83,29 @@ class WorkspaceTerminalRelayServiceTest {
                         WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST,
                         RuntimeBindingRecord.State.READY, false));
         assertThatThrownBy(() -> relay.admit(TENANT, ACTOR, SESSION))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(409));
+    }
+
+    @Test
+    void upgradeReReadsTheBindingWithoutSessionAdmission() {
+        RuntimeBindingRecord ready = binding(
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST,
+                RuntimeBindingRecord.State.READY, false);
+        when(broker.findLatestBindingByHarnessSession(TENANT, SESSION))
+                .thenReturn(ready);
+        assertThat(relay.terminalBinding(TENANT, SESSION)).isSameAs(ready);
+        verifyNoInteractions(sessions);
+    }
+
+    @Test
+    void upgradeRefusesOnceTheOptInIsOff() {
+        when(brokerSettings.isWebTerminal()).thenReturn(false);
+        when(broker.findLatestBindingByHarnessSession(TENANT, SESSION))
+                .thenReturn(binding(
+                        WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST,
+                        RuntimeBindingRecord.State.READY, false));
+        assertThatThrownBy(() -> relay.terminalBinding(TENANT, SESSION))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getStatus()).isEqualTo(409));
     }

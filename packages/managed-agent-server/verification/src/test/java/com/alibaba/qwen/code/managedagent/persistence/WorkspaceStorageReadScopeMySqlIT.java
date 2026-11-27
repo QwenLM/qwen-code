@@ -5,11 +5,9 @@ import com.alibaba.qwen.code.managedagent.adapters.workspace.SessionWorktreeGit;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -71,8 +69,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
     @Timeout(30)
     void readsDoNotWaitForAnotherStorageReader(String route, String storageRow, String lockMode) throws Exception {
         var binding = files.readScope("tenant", "actor", new WorkspaceFileStore.Locator(null, workspace, ".")).binding();
-        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", binding.getStorageId());
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class, alias);
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?", String.class, "tenant", binding.getStorageId());
         Path root = Path.of(guard.fileRoot(binding).get("root"));
         String cwd = ".qwen-managed-worktrees/owned/src";
         Files.createDirectories(root.resolve(cwd));
@@ -83,14 +80,19 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
                         + " SELECT tenant_id, 'session', 'agent', 0, 0, workspace_id, workspace_generation, storage_id,"
                         + " ?, ?, 7, config_ref, policy_ref, ? FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                 cwd, binding.getContextConfigRef(),
-                ManagedWorkspaceRegistry.actorKey("tenant", "actor"),
+                "actor",
                 "tenant", workspace);
         try (var holder = database.source().getConnection(); var pool = Executors.newSingleThreadExecutor()) {
             holder.setAutoCommit(false);
-            String sql = ("alias".equals(storageRow) ? "SELECT alias_key FROM ma_storage WHERE alias_key = ?"
-                    : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?") + " FOR " + lockMode;
+            String sql = ("alias".equals(storageRow) ? "SELECT tenant_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?"
+                    : "SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?") + " FOR " + lockMode;
             try (var statement = holder.prepareStatement(sql)) {
-                statement.setString(1, "alias".equals(storageRow) ? alias : physical);
+                if ("alias".equals(storageRow)) {
+                    statement.setString(1, "tenant");
+                    statement.setString(2, binding.getStorageId());
+                } else {
+                    statement.setString(1, physical);
+                }
                 try (var rows = statement.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                     assertThat(rows.next()).isFalse();
@@ -131,7 +133,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
                         + " SELECT tenant_id, 'session', 'agent', 0, 0, workspace_id, workspace_generation, storage_id,"
                         + " ?, ?, 7, config_ref, policy_ref, ? FROM ma_workspace WHERE workspace_id = ?",
                 plan.cwdRelative(), binding.getContextConfigRef(),
-                ManagedWorkspaceRegistry.actorKey("tenant", "actor"), workspace);
+                "actor", workspace);
         new TransactionTemplate(new DataSourceTransactionManager(database.source())).executeWithoutResult(status ->
                 store.admit("tenant", "actor", "session", plan, location.resolved()));
         try (var git = new SessionWorktreeGit(new ChildWorktreeGit("git", Duration.ofSeconds(10)))) {

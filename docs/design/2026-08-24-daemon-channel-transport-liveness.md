@@ -1,5 +1,7 @@
 # Daemon ACP channel transport liveness
 
+[English](2026-08-24-daemon-channel-transport-liveness.md) | [简体中文](2026-08-24-daemon-channel-transport-liveness.zh-CN.md)
+
 ## Problem
 
 The daemon knows when an ACP child exits or its bounded NDJSON transport rejects a frame, but it cannot detect a child that remains alive while its event loop or transport stops answering. Session active-work snapshots cannot fill this gap: silence from one Session is not proof that the shared channel is dead, and using that signal to recycle the child would destroy every multiplexed Session.
@@ -44,7 +46,9 @@ The fixed internal policy is:
 
 This bounds detection to 35 seconds when a child wedges just after a healthy probe, while requiring two independent unanswered requests before taking down multiplexed Sessions. A successful response resets the consecutive-timeout count. These values are implementation policy, not public configuration, matching #8586's non-goal.
 
-At most two requests can remain unresolved: the first timed-out request and its retry. ACP request ids keep a late first response separate from the retry. Once the channel is condemned, the existing transport teardown closes both.
+> **Superseded in part (2026-11-21):** the two-strike escalation above now applies only to timeouts with no observed CPU progress. A CPU-advancing agent receives bounded busy extensions (at most six) before condemnation, and every failure and every busy extension carries process evidence (pid, state, wchan, CPU delta, RSS, counters). The 35-second bound therefore holds for zero-CPU wedges only. See [channel liveness busy grace and failure evidence](2026-11-21-channel-liveness-busy-grace.md) ([简体中文](2026-11-21-channel-liveness-busy-grace.zh-CN.md)).
+
+A zero-CPU episode leaves at most two requests unresolved: the first timed-out request and its retry. A busy-grace episode leaves up to `1 + CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT` probe requests unresolved — one per window, plus one more when a zero-CPU strike precedes the extensions (seven with the current limit of six) — because each extension issues a fresh `channelPing` with a new nonce and cancels nothing. It is the nonce echo, not the request count, that keeps a late response from being mistaken for the current probe, and the 256-message pipe limit (`ndJsonStream.ts` `maxQueuedMessages`) keeps the extra outstanding pings well inside the queue budget. Once the channel is condemned, the existing transport teardown closes all of them.
 
 ## Host suspend and parent stalls
 

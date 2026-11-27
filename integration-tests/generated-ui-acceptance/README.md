@@ -17,7 +17,7 @@ The issue states results without inputs. `fixtures.ts` chooses inputs so that th
 
 The cases also check behavior across edits and follow-ups.
 
-- **Checklist.** The empty-state message is visible before adding the first item. Undo restores the original list after a rename. The harness then reapplies the rename and exercises persistence of item text, checked state and undo history after reload and reopen, plus isolation from a new conversation.
+- **Checklist.** The empty-state message is visible before adding the first item. The harness blurs the draft field before observing the first Add, then requires a fresh, visible save outcome and checks that a new tab restores the added item before any further edits. It reapplies a rename, deletes an item, checks another, and reloads. Undo must clear the checkmark, and a new tab must restore that state and still be able to undo the deletion. A branched conversation must inherit state for the same card ID. After editing the branch, both sessions must independently restore their own values.
 - **Activity form.** Edits start no model request. One explicit submission starts exactly one user turn and sends every field. The first reply starts with `Participants: <count>` and uses the activity, date, per-person budget and notes in its recommendation. The harness holds the submit button for 150 ms to let the host finish applying the field that loses focus.
 - **Comparator.** The harness joins each follow-up's new Generated UI calls to their transcript cards. An in-place update reuses the original view frame. Before downloading, the harness changes the seat count again and checks the selected plan's new payment in the `plan,payment` columns. The download timeout starts after the export button has stopped moving.
 
@@ -27,7 +27,7 @@ The amount nodes contain one visible money value each. A share row may also hold
 
 The bill reset check verifies all input values, allocations and the chart against their defaults. Chart comparison uses normalized markup and canvas pixels so regenerated element IDs (including ARIA references and `<style>` selectors) and iframe scrolling do not count as a changed chart, while a chart drawn only on a canvas still counts as changing.
 
-Checks observe behavior; none assumes a capability is missing. When a precondition fails, dependent checks report `not-applicable` with the reason, so every run reports the same check IDs. For example, isolation cannot be judged when nothing was persisted, and nothing can be checked or deleted when adding items failed. `checklist.save-acknowledged` is `not-applicable` until the host offers a save acknowledgement to observe.
+Checks observe behavior; none assumes a capability is missing. When a precondition fails, dependent checks report `not-applicable` with the reason, so every run reports the same check IDs. For example, isolation cannot be judged when nothing was persisted, and nothing can be checked or deleted when adding items failed.
 
 ## Harness contract
 

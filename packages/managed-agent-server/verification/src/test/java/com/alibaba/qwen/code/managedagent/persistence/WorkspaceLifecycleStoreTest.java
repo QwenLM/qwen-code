@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
 import com.alibaba.qwen.code.managedagent.ManagedHookRecordContractTest;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
@@ -12,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -29,8 +27,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -65,6 +61,10 @@ class WorkspaceLifecycleStoreTest {
     void lifecycleHookTransitionsRecheckNewEffectsAndKeepOriginalSettlement(boolean authority, boolean granted,
             String before, String after, boolean replacement, boolean accepted, boolean batch, boolean draining) throws Exception {
         var fixture = fixture();
+        // D3: this witnesses the v1 single-phase hook settlement mechanics
+        // (null-authority extension commits stay admissible), so it rides
+        // external-files on protocol 1.
+        fixture.externalFiles();
         var executionStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(fixture.jdbc,
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
@@ -95,7 +95,7 @@ class WorkspaceLifecycleStoreTest {
             fixture.transactions.executeWithoutResult(ignored -> journal.commit(request));
             journal.committed(request);
         }
-        var operation = fixture.admit(OperationKind.DELETE);
+        var operation = fixture.admit(OperationKind.DELETE, 1);
         if (draining) {
             fixture.jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING'");
         }
@@ -224,14 +224,10 @@ class WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         String storage = fixture.jdbc.queryForObject(
                 "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
-                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
-                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
-                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
-                RuntimeAdmissionFences.storageFenceKey("tenant"),
-                RuntimeAdmissionFences.storageFenceKey(storage), storage);
+                (row, index) -> row.getString(1),
+                "tenant", "workspace");
+        fixture.jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES ('tenant', ?, 'EXTERNAL')",
+                storage);
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
@@ -246,6 +242,26 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
+    }
+
+    /**
+     * A content-only extension child is a real Session in the same Workspace, generation and
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
+     */
+    @Test
+    void externalFilesParentCannotAdmitAChildSession() {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
+
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
     }
 
     @Test
@@ -271,8 +287,10 @@ class WorkspaceLifecycleStoreTest {
         fixture.transactions.execute(ignored -> fixture.store.completeOperation("tenant", fixture.session, close.operationId(),
                 close.leaseOwner(), close.claimGeneration(), true));
         assertThat(fixture.store.requireSession("tenant", fixture.session).status()).isEqualTo("CLOSED");
+        // D3: files admits on v2; the CLOSED-session DELETE still reclassifies
+        // to protocol 0 under the session lock.
         var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
-                OperationKind.DELETE, "owner", "a".repeat(64), "stale-active-delete", "digest", true, 1));
+                OperationKind.DELETE, "owner", "a".repeat(64), "stale-active-delete", "digest", true, 2));
         assertThat(admission.operation().lifecycleProtocolVersion()).isZero();
         assertThat(admission.operation().sessionStatusBefore()).isEqualTo("CLOSED");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head", Integer.class)).isEqualTo(1);
@@ -283,10 +301,14 @@ class WorkspaceLifecycleStoreTest {
     @MethodSource("invalidJournalRecords")
     void lifecycleJournalValidationRejectsInvalidRecordsAndRollsBack(String line, String mode) throws Exception {
         var fixture = fixture();
+        // D3: the settlement mode commits without authority during a v1
+        // lifecycle and must still reach record validation (400), so the
+        // witness rides external-files on protocol 1.
+        fixture.externalFiles();
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
                 "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
-        var operation = "ordinary".equals(mode) ? null : fixture.admit(OperationKind.DELETE);
+        var operation = "ordinary".equals(mode) ? null : fixture.admit(OperationKind.DELETE, 1);
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
         var resource = new ManagedSessionStoreModels.CommitResource("candidate", "managed-message", 1, body.length,
                 HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body)), Base64.getEncoder().encodeToString(body));
@@ -332,7 +354,8 @@ class WorkspaceLifecycleStoreTest {
                         definition.length, digest, Base64.getEncoder().encodeToString(definition))));
         fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
         var operation = fixture.admit(kind);
-        var receipt = fixture.json.createObjectNode().put("protocolVersion", 1).put("operationId", operation.operationId())
+        // D3: the files Session closes on v2, so the receipt carries protocol 2.
+        var receipt = fixture.json.createObjectNode().put("protocolVersion", 2).put("operationId", operation.operationId())
                 .put("kind", kind.name().toLowerCase(java.util.Locale.ROOT));
         receipt.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", fixture.session);
         receipt.set("definitionRef", header.path("managedSession").path("definitionRef"));
@@ -359,11 +382,9 @@ class WorkspaceLifecycleStoreTest {
             }
             ManagedHookRecords.requireExecution(record);
             var ref = fixture.resource(event + "-record", "hook-execution", record);
-            fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                    + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                    + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                    ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
-                    ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", id),
+            fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                    + " session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                    + " VALUES ('tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                     fixture.session, id, "a".repeat(64), ref.path("resourceId").asText());
             effects.addObject().put("event", event).set("recordRef", ref);
         }
@@ -437,11 +458,9 @@ class WorkspaceLifecycleStoreTest {
         }
         ManagedHookRecords.requireExecution(record);
         var ref = fixture.resource("SessionEnd-record", "hook-execution", record);
-        fixture.jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id,"
-                + " session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
-                + " VALUES (?, ?, 'tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", fixture.session),
-                ManagedExtensionProjection.recordKey(fixture.session, "hook_execution", occurrence),
+        fixture.jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id,"
+                + " session_id, domain, record_id, operation_id, revision, record_resource_id, task_kind, task_state, gmt_create, first_sequence)"
+                + " VALUES ('tenant', 'workspace', ?, 'hook_execution', ?, ?, 1, ?, 'hook', 'settled', 1, 1)",
                 fixture.session, occurrence, "a".repeat(64), ref.path("resourceId").asText());
         // The first close persists its effects — the fence moves to
         // DRAINING — and only then fails terminally; the writer is sealed
@@ -478,10 +497,14 @@ class WorkspaceLifecycleStoreTest {
     @Test
     void detachOnlyAuthorizationAcceptsOriginalExpiredOrSealedWriterAfterEffects() throws Exception {
         var fixture = fixture();
+        // D3: the detach-only writer mechanics (lease cleared after effects,
+        // expired/sealed writer cleanup) are v1 single-phase behavior, so the
+        // witness rides external-files on protocol 1.
+        fixture.externalFiles();
         var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
                 "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
-        byte[] definition = "{\"toolProfile\":\"hosted-workspace-files/1\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] definition = "{\"toolProfile\":\"hosted-workspace-external-files/1\"}".getBytes(StandardCharsets.UTF_8);
         String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(definition));
         var header = new ObjectMapper().createObjectNode().put("subtype", "managed_session_header_v1");
         header.putObject("managedSession").putObject("definitionRef").put("resourceId", "definition")
@@ -493,7 +516,7 @@ class WorkspaceLifecycleStoreTest {
                 List.of(new ManagedSessionStoreModels.CommitResource("definition", "managed-session-definition", 1,
                         definition.length, digest, Base64.getEncoder().encodeToString(definition))));
         fixture.transactions.execute(ignored -> journal.commit("tenant", fixture.session, "w".repeat(32), commit));
-        var operation = fixture.admit(OperationKind.DELETE);
+        var operation = fixture.admit(OperationKind.DELETE, 1);
         var authority = WorkspaceLifecycleStore.authority(operation);
         var cleanup = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration());
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeLifecycle(
@@ -564,8 +587,12 @@ class WorkspaceLifecycleStoreTest {
                 "w".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
         fixture.admit(OperationKind.CLOSE);
         var legacy = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "original", writer.writerGeneration(), "legacy-close");
+        // D3: a v2 claim names the fence (workspace_lifecycle_claim_fenced)
+        // before the legacy admission-closed message; the legacy-close
+        // exception still cannot admit ordinary work.
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> journal.authorizeOrdinary("tenant", fixture.session,
-                "w".repeat(32), legacy))).hasMessageContaining("admission is closed");
+                "w".repeat(32), legacy))).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         assertThatThrownBy(() -> fixture.bindings.requireHookAdmission(fixture.scope(), fixture.session, null)).hasMessageContaining("closed");
         fixture.bindings.requestHarnessDrain("tenant", fixture.session);
         assertThatThrownBy(() -> fixture.bindings.requireHookAdmission(fixture.scope(), fixture.session, null)).hasMessageContaining("closed");
@@ -677,9 +704,13 @@ class WorkspaceLifecycleStoreTest {
     @Test
     void releasedBindingWithoutOriginalStopProofCannotComplete() {
         var fixture = fixture();
+        // D3: the stop-proof witness needs the v1 neverInitialized receipt
+        // (v2 refuses it while a binding row exists), so it rides
+        // external-files on protocol 1.
+        fixture.externalFiles();
         var binding = fixture.bindings.findOrCreate(new RuntimeProvisionRequest(fixture.scope(), fixture.session));
         fixture.jdbc.update("UPDATE ma_runtime_binding SET binding_state = 'RELEASED' WHERE binding_id = ?", binding.getBindingId());
-        OperationRecord operation = fixture.admit(OperationKind.DELETE);
+        OperationRecord operation = fixture.admit(OperationKind.DELETE, 1);
         fixture.transactions.execute(ignored -> fixture.lifecycle.recoverEffects(operation));
         assertThatThrownBy(() -> fixture.transactions.execute(ignored -> fixture.store.completeOperation(
                 "tenant", fixture.session, operation.operationId(), "worker", operation.claimGeneration(), true)))
@@ -720,26 +751,71 @@ class WorkspaceLifecycleStoreTest {
         var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-failed-turn", "digest", fixture.session, turn, "owner"));
         assertThat(cancel.commandEffect()).isFalse();
-        var operations = fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class);
+        var operations = fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class);
         assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> {
             try {
                 fixture.store.beginWorkspaceLifecycle("tenant", fixture.session, OperationKind.CLOSE, "owner",
-                        "a".repeat(64), "close-failed-turn", "digest", true, 1);
+                        "a".repeat(64), "close-failed-turn", "digest", true, 2);
             } catch (ManagedAgentException refusal) {
-                assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+                assertThat(fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class))
                         .containsExactlyInAnyOrderElementsOf(operations);
                 throw refusal;
             }
         })).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
-        assertThat(fixture.jdbc.queryForList("SELECT operation_key FROM ma_operation", String.class))
+        assertThat(fixture.jdbc.queryForList("SELECT operation_ref FROM ma_operation", String.class))
                 .containsExactlyInAnyOrderElementsOf(operations);
         assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
+    }
+
+    @Test
+    void prEventInputBlocksCloseAndDeleteUntilItsTurnSettles() throws Exception {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        var journal = new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc),
+                "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        var accepted = fixture.promptCommit("pr-event-turn", false, "pr_event");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", accepted));
+        // pr_event is deliberately absent from the non-blocking source list:
+        // an injected PR-event turn is real work, so close and delete must
+        // wait for its settlement instead of handing back or deleting the
+        // mount under a running turn.
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-pr-event", "digest", true, 2)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.DELETE, "owner", "a".repeat(64), "delete-pr-event", "digest", true, 2)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        var settled = fixture.turnSettledCommit("pr-event-turn");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", settled));
+        var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-pr-event-settled", "digest", true, 2));
+        assertThat(admission).isNotNull();
+    }
+
+    @Test
+    void channelInputDoesNotBlockClose() throws Exception {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        var journal = new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc),
+                "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        var accepted = fixture.promptCommit("channel-turn", false, "channel");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", accepted));
+        // channel stays a fire-and-forget source: its unsettled input must
+        // not block the lifecycle.
+        var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-channel", "digest", true, 2));
+        assertThat(admission).isNotNull();
     }
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"expired-idle", "sealed-idle", "live-idle",
             "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted",
-            "expired-monitor-v1", "expired-monitor-v2"})
+            "expired-monitor-v1", "expired-monitor-v2", "sealed-other-settled-cleanup", "sealed-accepted-settled-cleanup"})
     void unacknowledgedCancellationRequiresFencedWriterAndIdleJournal(String cut) throws Exception {
         var fixture = fixture();
         var journal = new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc), "tenant", "workspace", fixture.session);
@@ -752,22 +828,32 @@ class WorkspaceLifecycleStoreTest {
                 "dispatch-owner", Duration.ofMinutes(1)));
         fixture.transactions.executeWithoutResult(ignored -> fixture.store.markSubmissionAttempted("tenant", fixture.session,
                 turn, "dispatch-owner"));
-        fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
+        var cancel = fixture.transactions.execute(ignored -> fixture.store.insertCancelCommand("tenant", "CANCEL_TURN",
                 "cancel-ambiguous", "digest", fixture.session, turn, "owner"));
+        boolean cleanupOwed = cut.endsWith("-cleanup");
         switch (cut) {
             case "sealed-idle" -> fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
-            case "expired-pending", "expired-settled", "expired-other-settled", "expired-monitor-v1", "expired-monitor-v2" -> {
+            case "expired-pending", "expired-settled", "expired-other-settled", "expired-monitor-v1", "expired-monitor-v2",
+                    "sealed-other-settled-cleanup", "sealed-accepted-settled-cleanup" -> {
                 boolean monitor = cut.startsWith("expired-monitor");
                 if ("expired-monitor-v2".equals(cut)) {
                     fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+                } else if ("expired-monitor-v1".equals(cut)) {
+                    // D3: the v1 monitor-blocking witness rides external-files
+                    // (ordinary files is v2 now, where monitor is non-blocking).
+                    // The turn was already admitted on files before the switch.
+                    fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.EXTERNAL_FILES);
                 }
-                String prompt = "expired-other-settled".equals(cut) || monitor ? "other-prompt"
+                String prompt = cut.contains("other-settled") || monitor ? "other-prompt"
                         : fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().promptId();
                 var request = fixture.promptCommit(prompt, !"expired-pending".equals(cut) && !monitor,
-                        monitor ? "monitor" : "user");
+                        monitor ? "monitor" : "user", cleanupOwed);
                 fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc).commit(
                         "tenant", fixture.session, "extension-writer-token-0123456789", request));
                 assertThat(fixture.jdbc.queryForObject("SELECT journal_revision FROM ma_session_head", Long.class)).isEqualTo(2L);
+                if (cleanupOwed) {
+                    fixture.jdbc.update("UPDATE ma_session_head SET state = 'SEALED'");
+                }
             }
             case "expired-compacted" -> fixture.jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
             case "missing-head" -> fixture.jdbc.update("DELETE FROM ma_session_head");
@@ -780,7 +866,8 @@ class WorkspaceLifecycleStoreTest {
         }
         assertThat(fixture.jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE journal_revision = 1", byte[].class)).isEqualTo(genesis);
-        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled", "expired-monitor-v2").contains(cut);
+        boolean expected = List.of("expired-idle", "sealed-idle", "expired-other-settled", "expired-monitor-v2",
+                "sealed-other-settled-cleanup").contains(cut);
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.cancelUnadmittedTurn("tenant",
                 fixture.session, turn, "dispatch-owner"))).isEqualTo(expected);
         var result = fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow();
@@ -788,6 +875,15 @@ class WorkspaceLifecycleStoreTest {
         assertThat(result.submissionAttempted()).isEqualTo(!expected);
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE event_type = 'turn.cancelled'",
                 Integer.class)).isEqualTo(expected ? 1 : 0);
+        assertThat(fixture.store.findOperation("tenant", fixture.session, cancel.operationId()).orElseThrow().state())
+                .isEqualTo(expected ? "COMPLETED" : "PENDING");
+        if (cleanupOwed) {
+            assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'HOSTED_CLEANUP'",
+                    Integer.class)).isEqualTo(1);
+            assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored ->
+                    JdbcWorkspaceLifecycleStore.requireIdleJournal(fixture.jdbc, fixture.json, "tenant", fixture.session)))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        }
     }
 
     static final class Fixture {
@@ -843,6 +939,11 @@ class WorkspaceLifecycleStoreTest {
         }
 
         ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled, String source) throws Exception {
+            return promptCommit(turn, settled, source, false);
+        }
+
+        ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled, String source,
+                boolean cleanupOwed) {
             ObjectNode accepted = json.createObjectNode().put("v", 1).put("sequence", 1)
                     .put("eventId", "late-accepted").put("kind", "input.accepted").put("occurredAt", 1_000);
             accepted.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace")
@@ -853,26 +954,67 @@ class WorkspaceLifecycleStoreTest {
                     .put("schemaVersion", 1).put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
             payload.set("contentRef", ref);
             payload.set("admissionRef", ref.deepCopy());
-            ObjectNode terminal = accepted.deepCopy();
-            terminal.put("sequence", 2).put("eventId", "late-settled").put("kind", "turn.settled");
-            terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
-            String records = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + accepted + "}\n"
-                    + (settled ? "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + terminal + "}\n" : "")
-                    + "{\"subtype\":\"managed_session_commit_v1\"}\n";
-            int events = settled ? 2 : 1;
+            var resources = new java.util.ArrayList<ManagedSessionStoreModels.CommitResource>();
+            resources.add(new ManagedSessionStoreModels.CommitResource("late-input", "managed-session-input", 1, 2,
+                    DigestUtils.sha256Hex("{}"), "e30="));
+            String eventPrefix = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":";
+            StringBuilder records = new StringBuilder().append(eventPrefix).append(accepted).append("}\n");
+            int events = 1;
+            if (cleanupOwed) {
+                var binding = bindings.findOrCreate(new RuntimeProvisionRequest(scope(), session));
+                ObjectNode descriptor = json.createObjectNode().put("v", 1).put("promptId", turn)
+                        .put("runtimeSessionId", turn).put("bindingId", binding.getBindingId())
+                        .put("generation", Long.toString(binding.getGeneration())).put("workspaceGeneration", "1")
+                        .put("fileHistoryTurnId", turn);
+                descriptor.set("sessionKey", accepted.path("sessionKey").deepCopy());
+                byte[] bytes = descriptor.toString().getBytes(StandardCharsets.UTF_8);
+                String id = ExtensionRecordJournal.resourceId(bytes);
+                String digest = DigestUtils.sha256Hex(bytes);
+                resources.add(new ManagedSessionStoreModels.CommitResource(id, "hosted-turn-cleanup", 1, bytes.length,
+                        digest, Base64.getEncoder().encodeToString(bytes)));
+                ObjectNode cleanup = accepted.deepCopy().put("sequence", ++events).put("eventId", "late-cleanup")
+                        .put("kind", "hosted.cleanup");
+                cleanup.putObject("payload").put("cleanupId", "hosted-cleanup:" + turn + ":" + turn).put("state", "owed")
+                        .putObject("descriptorRef").put("resourceId", id).put("kind", "hosted-turn-cleanup")
+                        .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
+                records.append(eventPrefix).append(cleanup).append("}\n");
+            }
+            if (settled) {
+                ObjectNode terminal = accepted.deepCopy().put("sequence", ++events).put("eventId", "late-settled")
+                        .put("kind", "turn.settled");
+                terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
+                records.append(eventPrefix).append(terminal).append("}\n");
+            }
+            byte[] recordBytes = records.append("{\"subtype\":\"managed_session_commit_v1\"}\n").toString()
+                    .getBytes(StandardCharsets.UTF_8);
             return new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer-extension", 1,
                     1, 0, "late-transaction", "completeTurn", "late-command", DigestUtils.sha256Hex("late-command"), 1, events,
                     events, DigestUtils.sha256Hex("late-events"), null, DigestUtils.sha256Hex("late-commit"), 0, null, events + 1,
+                    Base64.getEncoder().encodeToString(recordBytes), DigestUtils.sha256Hex(recordBytes), resources);
+        }
+
+        /** The settlement revision chained after an unsettled promptCommit. */
+        ManagedSessionStoreModels.CommitTransactionRequest turnSettledCommit(String turn) {
+            ObjectNode terminal = json.createObjectNode().put("v", 1).put("sequence", 2)
+                    .put("eventId", "late-settled").put("kind", "turn.settled").put("occurredAt", 1_000);
+            terminal.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace")
+                    .put("sessionId", session);
+            terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
+            String records = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + terminal + "}\n"
+                    + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+            return new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer-extension", 1,
+                    2, 1, "late-transaction-settled", "completeTurn", "late-command-settled",
+                    DigestUtils.sha256Hex("late-command-settled"), 2, 2, 1, DigestUtils.sha256Hex("late-events-settled"),
+                    DigestUtils.sha256Hex("late-commit"), DigestUtils.sha256Hex("late-commit-settled"), 0, null, 2,
                     Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), DigestUtils.sha256Hex(records),
-                    List.of(new ManagedSessionStoreModels.CommitResource("late-input", "managed-session-input", 1, 2,
-                            DigestUtils.sha256Hex("{}"), "e30=")));
+                    List.of());
         }
 
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(ManagedSessionStore.sessionScopeKey("tenant", session), id), ManagedSessionStore.sessionScopeKey("tenant", session), session, id, kind, bytes.length, digest, bytes);
+            jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES ('tenant', 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'committed-hooks', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                    session, id, kind, bytes.length, digest, bytes);
             return json.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         }
 
@@ -881,9 +1023,20 @@ class WorkspaceLifecycleStoreTest {
         }
 
         OperationRecord admit(OperationKind kind) {
+            // D3: the fixture's files Session closes on lifecycle v2 now.
+            return admit(kind, 2);
+        }
+
+        OperationRecord admit(OperationKind kind, int protocol) {
             String id = transactions.execute(ignored -> store.beginWorkspaceLifecycle("tenant", session, kind, "owner", "a".repeat(64),
-                    "operation", "digest", true, 1).operation().operationId());
+                    "operation", "digest", true, protocol).operation().operationId());
             return transactions.execute(ignored -> store.claimOperation("tenant", session, id, "worker", Duration.ofSeconds(30)).orElseThrow());
+        }
+
+        // D3: ordinary files moved to v2; the v1 single-phase witnesses ride
+        // external-files, whose Runtime still closes on protocol 1.
+        void externalFiles() {
+            jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.EXTERNAL_FILES);
         }
     }
 }

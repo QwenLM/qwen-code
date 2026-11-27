@@ -58,6 +58,10 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -78,12 +82,28 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// The storage-boundary fence is exercised against disk in
+// session-archive-write-fence.test.ts, not this mocked filesystem.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  advanceSessionArchiveGeneration: vi.fn(),
+}));
 // The archive-transition move runs real filesystem locks this mocked-fs suite
 // cannot host; its semantics (rename, split-pair merge, lock coverage) are
 // pinned in session-pr-service.test.ts.
 vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
+}));
+// Same rationale: the goal move does real fs/promises I/O this mocked-fs
+// suite cannot host; its semantics are pinned in session-goal-sidecar.test.ts.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
 
 type Line = Record<string, unknown>;
@@ -1634,7 +1654,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(8);
+      // One fence check per cleanup step: main's goal + artifact-summary
+      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1754,6 +1776,10 @@ describe('SessionService', () => {
       [
         'should remove pr sidecars in both states when removing a session',
         '.pr.json',
+      ],
+      [
+        'should remove goal sidecars in both states when removing a session',
+        '.goal.json',
       ],
       [
         'should remove prompt ledger sidecars in both archive states',
@@ -1884,13 +1910,19 @@ describe('SessionService', () => {
       existsFor(
         `${sessionIdA}.worktree.json`,
         `${sessionIdA}.pr.json`,
+        `${sessionIdA}.goal.json`,
         `${sessionIdA}.ledger.jsonl`,
       );
       const removeOrganizationSpy = spyOrganizationRemove().mockResolvedValue();
 
       await sessionService.cleanupRemovedSessionState(sessionIdA);
 
-      for (const sidecar of ['.worktree.json', '.pr.json', '.ledger.jsonl']) {
+      for (const sidecar of [
+        '.worktree.json',
+        '.pr.json',
+        '.goal.json',
+        '.ledger.jsonl',
+      ]) {
         expect(unlinkSyncSpy).toHaveBeenCalledWith(
           expect.stringContaining(`${sessionIdA}${sidecar}`),
         );
@@ -2030,6 +2062,78 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    movesGoalSidecar: async (kind: MoveKind) => {
+      const m = seeded(kind);
+
+      const result = await m.run();
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        m.from('.goal.json'),
+        m.to('.goal.json'),
+      );
+    },
+    warnsOnGoalSidecarFailure: async (kind: MoveKind) => {
+      const m = seeded(kind);
+      vi.mocked(moveSessionGoalSidecar).mockRejectedValueOnce(
+        new Error('goal move failed'),
+      );
+      const { service, warnings } = withWarnings();
+
+      const result = await m.run(undefined, service);
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move goal sidecar'),
+        ),
+      ).toBe(true);
+    },
+    reconcilesGoalSidecarOnConflict: async (kind: MoveKind) => {
+      const toArchive = kind === 'archive';
+      const keptGoal = toArchive
+        ? `/chats/archive/${sessionIdA}.goal.json`
+        : `/chats/${sessionIdA}.goal.json`;
+      const droppedGoal = toArchive
+        ? `/chats/${sessionIdA}.goal.json`
+        : `/chats/archive/${sessionIdA}.goal.json`;
+
+      // Kept projection present: the dropped lineage is deleted, never
+      // renamed over the survivor (which would show the deleted transcript's
+      // Goal).
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsFor(keptGoal);
+
+      const keptResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(keptResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+
+      // Kept projection absent: the dropped projection is discarded too, NOT
+      // adopted. Absence is a value here (the survivor's goal may be cleared),
+      // so adopting the dropped lineage would resurrect a goal the kept
+      // transcript no longer records — and an archived survivor never
+      // re-projects to repair it.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsSyncSpy.mockReturnValue(false);
+
+      const absentResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2086,7 +2190,9 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
+      // The goal sidecar move added one fence check to the conflict path (5);
+      // this PR's separate branch-sidecar reconcile try adds one more → 6.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -2232,6 +2338,15 @@ describe('SessionService', () => {
 
     it('should warn but still archive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('archive'));
+
+    it('should move the goal sidecar into the archive directory', () =>
+      mirrored.movesGoalSidecar('archive'));
+
+    it('should warn but still archive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('archive'));
+
+    it('should let the kept goal sidecar win on an archive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('archive'));
 
     const bothPrSidecarsExist = () => {
       archive.seed();
@@ -2435,6 +2550,15 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('unarchive'));
+
+    it('should move the goal sidecar back to the active directory', () =>
+      mirrored.movesGoalSidecar('unarchive'));
+
+    it('should warn but still unarchive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('unarchive'));
+
+    it('should let the kept goal sidecar win on an unarchive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));
@@ -3543,6 +3667,65 @@ describe('SessionService', () => {
     });
   });
 
+  describe('readGeneratedUiStates', () => {
+    const [sessionId] = realDiskIds;
+    const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+    const prompt = msgLine(sessionId, 'prompt', null, 'user', 0, 'hello');
+    const answer = (uuid: string, parentUuid: string) =>
+      msgLine(sessionId, uuid, parentUuid, 'assistant', 2, 'answer');
+    const save = (parentUuid: string, revision: number, value: string) =>
+      sysLine(
+        sessionId,
+        `save-${revision}`,
+        parentUuid,
+        'generated_ui_state',
+        1,
+        { version: 1, cardId, revision, value },
+      );
+
+    it.each([
+      ['missing parent', [answer('answer', 'missing')]],
+      ['parent cycle', [answer('answer', 'answer')]],
+      [
+        'conflicting parents',
+        [answer('answer', 'prompt'), answer('answer', 'missing')],
+      ],
+    ])(
+      'reports an active transcript with %s as unavailable',
+      async (_, tail) => {
+        vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+          prompt,
+          save('prompt', 1, 'retained'),
+          ...tail,
+        ]);
+
+        await expect(
+          sessionService.readGeneratedUiStates(sessionId),
+        ).resolves.toEqual({ unavailable: true });
+      },
+    );
+
+    it('restores state after a rewind despite broken abandoned ancestry', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValueOnce([
+        prompt,
+        save('prompt', 1, 'retained'),
+        answer('abandoned', 'missing'),
+        answer('abandoned', 'another-missing'),
+        save('abandoned', 2, 'abandoned'),
+        sysLine(sessionId, 'rewind', 'prompt', 'rewind', 3, {
+          truncatedCount: 1,
+        }),
+      ]);
+
+      await expect(
+        sessionService.readGeneratedUiStates(sessionId),
+      ).resolves.toEqual({
+        states: new Map([[cardId, { revision: 1, value: 'retained' }]]),
+        maxRevision: 2,
+      });
+    });
+  });
+
   describe('forkSession', () => {
     // forkSession does real disk I/O through `jsonl.read` and `fs.*`, so the
     // fork reads and writes tmp files with the real implementations restored.
@@ -3682,6 +3865,70 @@ describe('SessionService', () => {
       const srcLines = readJsonl(srcPath);
       expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('carries Generated UI view state saved on the copied branch', async () => {
+      const card = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const state = (revision: number, value: string) => ({
+        version: 1,
+        cardId: card,
+        revision,
+        value,
+      });
+      const file = transcriptPath(oldId);
+      fs.mkdirSync(chatsDir(), { recursive: true });
+      writeJsonl(file, [
+        msg('u1', null, 'user', 0, 'hello', {
+          provenance: 'real_user',
+          cwd,
+        }),
+        msg('abandoned', 'u1', 'assistant', 1, 'old answer', { cwd }),
+        sys(
+          'state-abandoned',
+          'abandoned',
+          'generated_ui_state',
+          2,
+          state(2, 'abandoned'),
+        ),
+        msg('u2', 'u1', 'assistant', 3, 'hi', {
+          provenance: 'assistant_output',
+          cwd,
+        }),
+        sys('state-kept', 'u2', 'generated_ui_state', 4, state(1, 'kept')),
+      ]);
+      expect(await service.readGeneratedUiStates(oldId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 2,
+      });
+
+      const result = await fork();
+      const written = readJsonl(result.filePath);
+      expect(written.map((record) => record['uuid'])).toEqual([
+        'u1',
+        'u2',
+        'state-kept',
+      ]);
+      expect(written[2]).toMatchObject({ parentUuid: 'u2', sessionId: newId });
+      expect(await service.readGeneratedUiStates(newId)).toEqual({
+        states: new Map([[card, { revision: 1, value: 'kept' }]]),
+        maxRevision: 1,
+      });
+
+      expect(await service.readGeneratedUiStates(nestedId)).toEqual({
+        states: new Map(),
+        maxRevision: 0,
+      });
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+      vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+        actualJsonl.readLinesWithIntegrity,
+      );
+      fs.unlinkSync(file);
+      fs.mkdirSync(file);
+      await expect(service.readGeneratedUiStates(oldId)).resolves.toEqual({
+        unavailable: true,
+      });
     });
 
     it('copies the selected branch approval state into a fork', async () => {

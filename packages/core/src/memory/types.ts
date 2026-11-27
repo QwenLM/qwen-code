@@ -95,5 +95,7 @@ export interface UserAutoMemoryMetadata {
 export interface AutoMemoryExtractCursor {
   sessionId?: string;
   processedOffset?: number;
+  projectIndexRebuildPending?: true;
+  sessions?: Record<string, { processedOffset?: number; updatedAt: string }>;
   updatedAt: string;
 }

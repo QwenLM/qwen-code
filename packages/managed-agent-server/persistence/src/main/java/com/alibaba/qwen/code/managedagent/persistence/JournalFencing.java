@@ -3,16 +3,21 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -42,7 +47,7 @@ final class JournalFencing {
                     + ManagedSessionStoreModels.MAX_WRITER_TOKEN_LENGTH + "}$");
 
     void checkLifecycleWriter(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+            RuntimeLifecycleAuthority authority) {
         // Ordinary traffic fences per Session (head row, drain admission);
         // taking the two tenant-wide rows here would let any long holder of
         // them wedge every Session of the tenant (#13800). No v2 probe may
@@ -77,8 +82,8 @@ final class JournalFencing {
      * instead of aborting the sweep; any other failure propagates unchanged.
      */
     static <T> T skipContended(
-            org.springframework.transaction.support.TransactionTemplate transactions,
-            org.springframework.transaction.support.TransactionCallback<T> body) {
+            TransactionTemplate transactions,
+            TransactionCallback<T> body) {
         try {
             return transactions.execute(body);
         } catch (ManagedAgentException refusal) {
@@ -128,7 +133,7 @@ final class JournalFencing {
 
     static boolean deadlockVictim(Throwable error) {
         for (Throwable cause = error; cause != null; cause = cause.getCause()) {
-            if (cause instanceof java.sql.SQLException sql && sql.getErrorCode() == 1213) {
+            if (cause instanceof SQLException sql && sql.getErrorCode() == 1213) {
                 return true;
             }
         }
@@ -171,9 +176,9 @@ final class JournalFencing {
     }
 
     private boolean transactional() {
-        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
-            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
-            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+        Boolean transactional = jdbc.execute((ConnectionCallback<Boolean>) connection -> {
+            var target = DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && DataSourceUtils
                     .isConnectionTransactional(target, jdbc.getDataSource());
         });
         return Boolean.TRUE.equals(transactional);
@@ -191,9 +196,9 @@ final class JournalFencing {
     // established and the classification costs one lock-free session-scoped
     // range scan on the caller's own connection.
     void requireNoLifecycleClaim(String tenantId, String sessionId) {
-        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key = ?"
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ?"
                 + " AND operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND tenant_id = ? AND session_id = ?"
-                + " AND lifecycle_protocol_version = 2", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId).isEmpty()) {
+                + " AND lifecycle_protocol_version = 2", ManagedSchemaKeys.identity(sessionId), tenantId, sessionId).isEmpty()) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }
     }
@@ -208,11 +213,9 @@ final class JournalFencing {
 
     boolean lifecycleFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND tenant_key = ?"
-                            + " AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                        "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND"
+                            + " tenant_id = ? AND harness_session_id = ?"
                             + " FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
@@ -220,11 +223,9 @@ final class JournalFencing {
 
     boolean lifecycleProtocolFenced(String tenantId, String sessionId) {
         return !jdbc.queryForList(
-                        "SELECT operation_id FROM ma_session_head WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
+                        "SELECT operation_id FROM ma_session_head WHERE"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id IS NOT NULL FOR UPDATE",
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();

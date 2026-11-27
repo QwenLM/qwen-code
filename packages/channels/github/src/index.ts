@@ -74,6 +74,27 @@ const BOUND_ACTION_KEY_OPTIONS = [
 
 export { GithubChannel };
 
+export {
+  ManagedGithubAdapter,
+  githubSettings,
+} from './managed-github-adapter.js';
+export type {
+  GithubCiObservation,
+  GithubPrWatchBinding,
+  GithubPrWatchControlPlane,
+  GithubPullObservation,
+  GithubReplyContext,
+  GithubSettings,
+  ManagedGithubAdapterDeps,
+  ManagedGithubAdapterOptions,
+  ManagedGithubClient,
+} from './managed-github-adapter.js';
+export type {
+  ManagedGithubCiAggregate,
+  ManagedGithubPrTransition,
+} from './managed-state.js';
+export { createManagedGithubDeps } from './managed-github-deps.js';
+
 export const plugin: ChannelPlugin = {
   channelType: 'github',
   displayName: 'GitHub',

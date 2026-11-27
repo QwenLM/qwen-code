@@ -6,6 +6,7 @@
 
 import { createServer, type Server } from 'node:http';
 import { connect as netConnect, type AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
@@ -18,9 +19,35 @@ import {
   WebTerminalRegistry,
   WEB_TERMINAL_FAILURE_EXIT_CODE,
 } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 const IDENTITY = { token: 'test-token', leaseId: 'lease-1', epoch: 7 };
 const WORKSPACE_CWD = process.cwd();
+// Sampled once: the watchdogs, the ceiling and the self-test's arm must all
+// agree, and the load-average predicate can cross its threshold between
+// module load and a test body running minutes later.
+const SLOW_HOST = isSlowTestHost();
+// The ecs-qwen pool runs several jobs at once; a slow-but-healthy PTY spawn or
+// replay can outlast a flat 15s watchdog even though that pool's suite ceiling
+// is 60s. Keep the fast arm for idle hosts.
+const WAIT_TIMEOUT_MS = SLOW_HOST ? 45_000 : 15_000;
+// The heaviest case chains MAX_MANAGED_SESSION_TERMINALS attaches for one
+// Session, one attach for another Session, and one replacement after release
+// (a connect wait and an echo wait each), plus the refused extra attach and
+// the close wait after a release.
+const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 2;
+// One extra window absorbs setup outside those waits. The ceiling is
+// file-wide on a slow host so no test is decided by the pool ceiling before
+// one of its own watchdogs reports. The fast arm stays undefined so it
+// inherits the lane's grant (the config's 15s, macOS's 60s, or the autofix
+// gate's --testTimeout=60000) instead of outranking it.
+const TEST_CEILING = SLOW_HOST
+  ? WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1)
+  : undefined;
+
+// Counts the watchdog timers a test starts, so the heaviest body can prove it
+// fits inside the declared chain.
+let watchdogCount = 0;
 
 const AUTH_HEADERS = {
   Authorization: 'Bearer test-token',
@@ -32,6 +59,10 @@ const AUTH_HEADERS = {
 let server: Server | undefined;
 let terminals: ManagedRuntimeTerminals | undefined;
 const sockets: WebSocket[] = [];
+// A socket handed to an 'upgrade' listener is not destroyed by
+// closeAllConnections() and survives the client's FIN, so it keeps close()
+// from ever completing. Held here so teardown can release it after close().
+let unansweredUpgrade: Duplex | undefined;
 
 afterEach(async () => {
   for (const ws of sockets.splice(0)) {
@@ -46,11 +77,16 @@ afterEach(async () => {
   if (server) {
     const closing = server;
     server = undefined;
-    await new Promise<void>((resolve) => {
-      closing.close(() => resolve());
-      closing.closeAllConnections();
-    });
+    // An unanswered upgrade counts against close() but is not destroyed by
+    // closeAllConnections(), so awaiting the callback would burn another
+    // full timeout after the test already reported.
+    closing.close();
+    closing.closeAllConnections();
   }
+  // Released only after close() was issued: destroying it earlier would let
+  // an awaited close() complete and unpin the teardown regression above.
+  unansweredUpgrade?.destroy();
+  unansweredUpgrade = undefined;
 });
 
 async function start(): Promise<number> {
@@ -86,10 +122,11 @@ function open(
   });
   sockets.push(ws);
   const opened = new Promise<WebSocket>((resolve, reject) => {
+    watchdogCount += 1;
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error('terminal attach timed out'));
-    }, 15_000);
+    }, WAIT_TIMEOUT_MS);
     ws.once('open', () => {
       clearTimeout(timer);
       resolve(ws);
@@ -120,11 +157,12 @@ function connect(
 /** Waits until the terminal echoed the marker text. */
 function waitForOutput(ws: WebSocket, marker: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    watchdogCount += 1;
     let buffer = '';
     const timer = setTimeout(() => {
       ws.off('message', onMessage);
       reject(new Error(`output marker ${marker} timed out`));
-    }, 15_000);
+    }, WAIT_TIMEOUT_MS);
     const onMessage = (data: Buffer | string) => {
       // Terminal output arrives as binary UTF-8 frames; control frames are
       // NUL-prefixed text and never contain the marker.
@@ -136,6 +174,22 @@ function waitForOutput(ws: WebSocket, marker: string): Promise<string> {
       }
     };
     ws.on('message', onMessage);
+  });
+}
+
+/** Waits for the server to close the socket after a release control frame. */
+function waitForClose(ws: WebSocket): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    watchdogCount += 1;
+    const timer = setTimeout(() => {
+      ws.off('close', onClose);
+      reject(new Error('terminal release close timed out'));
+    }, WAIT_TIMEOUT_MS);
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    ws.once('close', onClose);
   });
 }
 
@@ -151,7 +205,91 @@ async function attachAndEcho(
   return ws;
 }
 
-describe('ManagedRuntimeTerminals', () => {
+describe('ManagedRuntimeTerminals', { timeout: TEST_CEILING }, () => {
+  it('applies a per-test ceiling above the heaviest wait chain', (ctx) => {
+    if (SLOW_HOST) {
+      // On a slow host vitest must not decide before a watchdog can report.
+      expect(ctx.task.timeout).toBe(TEST_CEILING);
+      // Strictly above the chain, not merely equal to it: the extra window is
+      // the setup slack, so dropping it must red here rather than survive an
+      // assertion that only restates the constant's own definition.
+      expect(TEST_CEILING).toBeGreaterThan(WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS);
+    } else {
+      // The fast arm inherits the lane's grant; a file-owned figure here
+      // would outrank the autofix gate's --testTimeout and hide a hang.
+      expect(ctx.task.timeout).toBeLessThanOrEqual(60_000);
+    }
+  });
+
+  it('does not hold teardown on an upgrade the server never answers', async () => {
+    // The hook must not await close(): Node counts a socket handed to an
+    // 'upgrade' listener against close() but closeAllConnections() does not
+    // destroy it, so this upgrade never lets the callback fire. With an
+    // awaited close this test fails as a hook timeout; without it the suite
+    // moves on and this body completes.
+    server = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    const upgraded = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('upgrade was not delivered')),
+        WAIT_TIMEOUT_MS,
+      );
+      server!.on('upgrade', (_req, socket) => {
+        clearTimeout(timer);
+        unansweredUpgrade = socket;
+        resolve();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server!.listen(0, '127.0.0.1', resolve),
+    );
+    const socket = netConnect(
+      (server!.address() as AddressInfo).port,
+      '127.0.0.1',
+      () => {
+        socket.write(
+          'GET /unknown HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+        );
+      },
+    );
+    socket.on('error', () => {});
+    await upgraded;
+    socket.destroy();
+  });
+
+  it('bounds the output watchdog by the host budget, not a flat figure', async () => {
+    const port = await start();
+    const ws = await connect(port, 'budget-watchdog', 'session-a');
+    const marker = 'mwt-budget-never-delivered';
+    // The clock is driven rather than waited: a real delivery between the two
+    // budgets would tax every slow-host run by 15s+, and the property under
+    // test is which budget the watchdog owns, not how long a host can stall.
+    vi.useFakeTimers();
+    try {
+      const pending = waitForOutput(ws, marker);
+      let timedOut = false;
+      const observed = pending.catch(() => {
+        timedOut = true;
+      });
+      // Just past the fast budget. Only the slow arm may still be waiting, so
+      // a flat 15s watchdog reds here on the pool — that is the raise's point.
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(timedOut).toBe(!SLOW_HOST);
+      await vi.advanceTimersByTimeAsync(WAIT_TIMEOUT_MS);
+      await observed;
+      expect(timedOut).toBe(true);
+      // Output that never arrives still fails, and with the watchdog's own
+      // message rather than an opaque runner timeout.
+      await expect(pending).rejects.toThrow(
+        `output marker ${marker} timed out`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refuses upgrades without the worker bearer/lease identity', async () => {
     const port = await start();
     await expect(
@@ -189,15 +327,26 @@ describe('ManagedRuntimeTerminals', () => {
     sockets.push(ws);
     await new Promise<void>((resolve, reject) => {
       let refused = false;
+      // Bounded like the other watchdogs so the file-wide ceiling is never
+      // the first report for this wait.
+      const timer = setTimeout(
+        () => reject(new Error('unknown upgrade path timed out')),
+        WAIT_TIMEOUT_MS,
+      );
       ws.once('unexpected-response', (_req, res) => {
+        clearTimeout(timer);
         expect(res.statusCode).toBe(404);
         refused = true;
         resolve();
       });
-      ws.once('open', () => reject(new Error('unknown path upgraded')));
+      ws.once('open', () => {
+        clearTimeout(timer);
+        reject(new Error('unknown path upgraded'));
+      });
       // A client error only settles the test once the 404 refusal was asserted;
       // an error alone would otherwise pass without verifying the refusal.
       ws.once('error', () => {
+        clearTimeout(timer);
         if (refused) resolve();
         else reject(new Error('upgrade failed without a 404 refusal'));
       });
@@ -238,6 +387,7 @@ describe('ManagedRuntimeTerminals', () => {
   });
 
   it('caps live terminals per Session and frees the slot on release', async () => {
+    watchdogCount = 0;
     const port = await start();
     const attached: WebSocket[] = [];
     for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
@@ -251,11 +401,11 @@ describe('ManagedRuntimeTerminals', () => {
     expect(other.readyState).toBe(WebSocket.OPEN);
     // Releasing one terminal frees the Session's slot.
     attached[0].send('\x00{"type":"release"}');
-    await new Promise<void>((resolve) =>
-      attached[0].once('close', () => resolve()),
-    );
+    await waitForClose(attached[0]);
     const replacement = await attachAndEcho(port, 'cap-new', 'session-a');
     expect(replacement.readyState).toBe(WebSocket.OPEN);
+    // Every watchdog this body starts must fit inside the declared chain.
+    expect(watchdogCount).toBe(MAX_CHAIN_WINDOWS);
   });
 
   it("refuses attaching to another Session's terminal", async () => {
@@ -271,7 +421,7 @@ describe('ManagedRuntimeTerminals', () => {
     const first = await attachAndEcho(port, 'retained', 'session-a');
     // Release removes the snapshot but retains the owner record.
     first.send('\x00{"type":"release"}');
-    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+    await waitForClose(first);
     // A second Session must not claim the released id even though no live
     // snapshot exists.
     await expect(connect(port, 'retained', 'session-b')).rejects.toMatchObject({
@@ -341,7 +491,7 @@ describe('ManagedRuntimeTerminals', () => {
   });
 });
 
-describe('ManagedRuntimeTerminals control', () => {
+describe('ManagedRuntimeTerminals control', { timeout: TEST_CEILING }, () => {
   const op = (kind: string, terminalId: string, sessionId: string) => ({
     kind,
     operationId: `terminal-attach:${terminalId}:process`,

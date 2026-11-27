@@ -41,17 +41,20 @@ public final class ManagedSchemaContract {
                     "ma_runtime_binding",
                     "ma_runtime_session",
                     "ma_tool_execution",
+                    "ma_runtime_stage",
                     "ma_tenant_guard",
                     "ma_storage_owner",
                     "ma_read_lease",
                     "ma_channel_instance",
                     "ma_channel_binding",
+                    "ma_pr_watch_binding",
                     "ma_delivery",
                     "ma_channel_segment",
                     "ma_schedule",
                     "ma_schedule_occurrence",
                     "ma_client_files_binding",
-                    "ma_client_files_request");
+                    "ma_client_files_request",
+                    "ma_terminal_ticket");
 
     private ManagedSchemaContract() {}
 
@@ -82,6 +85,7 @@ public final class ManagedSchemaContract {
         WORKSPACE_RETIREMENT,
         WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         SUBMIT_INPUT,
         CANCEL
     }
@@ -93,6 +97,7 @@ public final class ManagedSchemaContract {
         AGENT_DEFINITION,
         AUTOMATION,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         ACTION_DECISION,
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,
@@ -129,7 +134,8 @@ public final class ManagedSchemaContract {
         OPERATION_WORK,
         RECOVERY,
         HOSTED_CLEANUP,
-        SIDE_QUERY
+        SIDE_QUERY,
+        RUNTIME_STAGE
     }
 
     public enum DeliveryKind {
