@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as tar from 'tar';
 import {
   GitWorktreeService,
   SessionService,
@@ -26,6 +27,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import { worktreeHasPopulatedGitlink } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
+  restoreWorktreeSnapshot,
   selectWorktreeSnapshot,
   verifyRestoredWorktreeSnapshot,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
@@ -2981,6 +2983,244 @@ describe('worktree retention with real repositories', () => {
     expect(report.skipped).toContain('retention disabled during sweep');
     expect(fs.existsSync(oldest.worktreePath)).toBe(true);
     expect(fs.existsSync(middle.worktreePath)).toBe(true);
+  });
+
+  it('sweeps a checkout with a clean linked worktree and sibling cache in .qwen/tmp once without leaving extra archives', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
+    git(primary.repo, primary.home, 'add', '.gitignore');
+    git(
+      primary.repo,
+      primary.home,
+      'commit',
+      '-qm',
+      'ignore-qwen-tmp',
+      '--no-verify',
+    );
+    primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+    configureRetention(primary, 1);
+
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'clean-cache-wt-old',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'clean-cache-wt-new',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const externalOrigin = path.join(root, 'external-origin-clean');
+    fs.mkdirSync(externalOrigin, { recursive: true });
+    git(externalOrigin, primary.home, 'init', '-q', '-b', 'main');
+    git(externalOrigin, primary.home, 'config', 'user.email', 't@e.com');
+    git(externalOrigin, primary.home, 'config', 'user.name', 't');
+    git(externalOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(externalOrigin, 'seed.txt'), 'seed\n');
+    git(externalOrigin, primary.home, 'add', '.');
+    git(externalOrigin, primary.home, 'commit', '-qm', 'seed', '--no-verify');
+
+    const nestedClean = path.join(
+      oldest.worktreePath,
+      '.qwen',
+      'tmp',
+      'review-pr-123',
+    );
+    git(
+      externalOrigin,
+      primary.home,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'review-pr-123',
+      nestedClean,
+      'HEAD',
+    );
+    const blobsDir = path.join(oldest.worktreePath, '.qwen', 'tmp', 'blobs');
+    fs.mkdirSync(blobsDir, { recursive: true });
+    for (let i = 0; i < 512; i++) {
+      fs.writeFileSync(path.join(blobsDir, `cache-${i}.bin`), `c${i}\n`);
+    }
+
+    const chatsDir = path.dirname(oldest.sidecarPath);
+    const archives = () =>
+      fs
+        .readdirSync(chatsDir)
+        .filter((f) => f.endsWith('.worktree-snapshot.tar.gz'));
+
+    const first = await sweep(primary);
+    expect(first.removed).toEqual([oldest.id]);
+    expect(first.skipped).toEqual([]);
+    expect(first.issues).toEqual([]);
+    expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+    expect(archives()).toHaveLength(1);
+
+    const members: string[] = [];
+    await tar.t({
+      file: path.join(chatsDir, archives()[0]!),
+      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    });
+    expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
+    expect(members.some((m) => m.startsWith('.qwen/tmp/review-pr-123/'))).toBe(
+      false,
+    );
+
+    const second = await sweep(primary);
+    expect(second.removed).toEqual([]);
+    expect(second.skipped).toEqual([]);
+    expect(second.issues).toEqual([]);
+    expect(archives()).toHaveLength(1);
+  });
+
+  it.each(['self', 'deep'] as const)(
+    'preserves the parent checkout when a detached worktree with a draft sits at .qwen/tmp (%s)',
+    async (position) => {
+      const primary = makeRetentionRepo(root, 'primary');
+      fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
+      git(primary.repo, primary.home, 'add', '.gitignore');
+      git(
+        primary.repo,
+        primary.home,
+        'commit',
+        '-qm',
+        'ignore-qwen-tmp',
+        '--no-verify',
+      );
+      primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+      configureRetention(primary, 1);
+
+      const oldest = await makeRetainedSession(primary, {
+        slug: `cache-detached-${position}-old`,
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(primary, {
+        slug: `cache-detached-${position}-new`,
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+
+      const externalOrigin = path.join(root, `external-origin-${position}`);
+      fs.mkdirSync(externalOrigin, { recursive: true });
+      git(externalOrigin, primary.home, 'init', '-q', '-b', 'main');
+      git(externalOrigin, primary.home, 'config', 'user.email', 't@e.com');
+      git(externalOrigin, primary.home, 'config', 'user.name', 't');
+      git(externalOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(externalOrigin, 'seed.txt'), 'seed\n');
+      git(externalOrigin, primary.home, 'add', '.');
+      git(externalOrigin, primary.home, 'commit', '-qm', 'seed', '--no-verify');
+
+      const target =
+        position === 'self'
+          ? path.join(oldest.worktreePath, '.qwen', 'tmp')
+          : path.join(oldest.worktreePath, '.qwen', 'tmp', 'runs', 'inner');
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      git(
+        externalOrigin,
+        primary.home,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        target,
+        'HEAD',
+      );
+      fs.writeFileSync(path.join(target, 'draft.md'), 'keep-me\n');
+
+      const report = await sweep(primary);
+      expect(report.removed).toEqual([]);
+      expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+      expect(fs.readFileSync(path.join(target, 'draft.md'), 'utf8')).toBe(
+        'keep-me\n',
+      );
+    },
+  );
+
+  it('retains full git history when a nested repo uses --separate-git-dir inside ignored .qwen/tmp', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
+    git(primary.repo, primary.home, 'add', '.gitignore');
+    git(
+      primary.repo,
+      primary.home,
+      'commit',
+      '-qm',
+      'ignore-qwen-tmp',
+      '--no-verify',
+    );
+    primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+    configureRetention(primary, 1);
+
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'sep-gitdir-old',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'sep-gitdir-new',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const inner = path.join(oldest.worktreePath, '.qwen', 'worktrees', 'inner');
+    const store = path.join(oldest.worktreePath, '.qwen', 'tmp', 'inner-git');
+    fs.mkdirSync(inner, { recursive: true });
+    fs.mkdirSync(path.dirname(store), { recursive: true });
+    git(
+      inner,
+      primary.home,
+      'init',
+      '-q',
+      '-b',
+      'inner-main',
+      `--separate-git-dir=${store}`,
+    );
+    git(inner, primary.home, 'config', 'user.email', 't@e.com');
+    git(inner, primary.home, 'config', 'user.name', 't');
+    git(inner, primary.home, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(inner, 'previous.txt'), 'first-version\n');
+    git(inner, primary.home, 'add', '.');
+    git(inner, primary.home, 'commit', '-qm', 'first', '--no-verify');
+    const firstCommit = git(inner, primary.home, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(inner, 'previous.txt'), 'second-version\n');
+    git(inner, primary.home, 'add', '.');
+    git(inner, primary.home, 'commit', '-qm', 'second', '--no-verify');
+
+    const report = await sweep(primary);
+    expect(report.removed).toEqual([oldest.id]);
+    expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+
+    const selected = await selectWorktreeSnapshot({
+      directory: path.dirname(oldest.sidecarPath),
+      sessionId: oldest.id,
+      slug: oldest.sidecar.slug,
+    });
+    expect(selected).toBeDefined();
+    const meta = await readWorktreeSnapshotMeta(selected!.metaPath);
+    git(
+      primary.repo,
+      primary.home,
+      'worktree',
+      'add',
+      '-q',
+      '--detach',
+      oldest.worktreePath,
+      meta.headCommit,
+    );
+    await restoreWorktreeSnapshot(
+      selected!.snapshotPath,
+      oldest.worktreePath,
+      meta,
+    );
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: oldest.worktreePath,
+        snapshotPath: selected!.snapshotPath,
+        meta,
+      }),
+    ).toBe(true);
+    expect(
+      git(inner, primary.home, 'show', `${firstCommit}:previous.txt`),
+    ).toBe('first-version');
   });
 
   it.each([false, null, 'off', []] as const)(

@@ -54,6 +54,12 @@ const archiveVerificationGate = vi.hoisted(() => ({
       }
     | undefined,
 }));
+const waivableProbe = vi.hoisted(() => ({
+  active: false,
+  calls: 0,
+  caches: new Set<unknown>(),
+  lastCacheSize: 0,
+}));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/git-branches.js',
   async (importOriginal) => {
@@ -105,6 +111,17 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       const gate = carriedSourceVerification.active;
       if (gate && args[0] === gate.source) gate.afterCheck();
       return held;
+    },
+    isWaivableIgnoredEntry: async (
+      ...args: Parameters<typeof actual.isWaivableIgnoredEntry>
+    ) => {
+      const result = await actual.isWaivableIgnoredEntry(...args);
+      if (waivableProbe.active) {
+        waivableProbe.calls += 1;
+        waivableProbe.caches.add(args[2]);
+        waivableProbe.lastCacheSize = args[2]?.size ?? 0;
+      }
+      return result;
     },
     computeCarriedIdentities: async (
       worktreePath: string,
@@ -1808,5 +1825,35 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
     expect(fs.existsSync(plan.lockKey)).toBe(false);
     expect(archives(sessionId).length).toBeGreaterThan(0);
+  });
+
+  it('inspects .qwen/tmp once per checkoutChangeDigest call under .qwen/tmp/* instead of quadratically', async () => {
+    fs.appendFileSync(path.join(repoRoot, '.gitignore'), '.qwen/tmp/*\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore-tmp-glob', '--no-verify');
+
+    const plan = await planFor('digest-linear-cache-scan');
+    const subdirs = 48;
+    const tmpRoot = path.join(plan.lockKey, '.qwen', 'tmp');
+    for (let i = 0; i < subdirs; i++) {
+      const dir = path.join(tmpRoot, `cache-${i}`);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'item.bin'), 'x\n');
+    }
+
+    waivableProbe.calls = 0;
+    waivableProbe.caches.clear();
+    waivableProbe.lastCacheSize = 0;
+    waivableProbe.active = true;
+    try {
+      const digest = await checkoutChangeDigestForTesting(plan.lockKey);
+      expect(digest).toBe('');
+      expect(waivableProbe.calls).toBe(subdirs);
+      expect(waivableProbe.caches.size).toBe(1);
+      expect(waivableProbe.caches.has(undefined)).toBe(false);
+      expect(waivableProbe.lastCacheSize).toBe(1);
+    } finally {
+      waivableProbe.active = false;
+    }
   });
 });

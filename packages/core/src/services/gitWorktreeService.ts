@@ -861,6 +861,10 @@ export async function worktreeHasWork(
       );
       return true;
     }
+    const cacheInspections = new Map<
+      string,
+      Promise<CacheContainerInspection>
+    >();
     for (const line of stdout.split('\n')) {
       if (line.trim().length === 0) continue;
       const entry = line.slice(3);
@@ -874,7 +878,7 @@ export async function worktreeHasWork(
         waived = 'session-marker';
       } else if (
         status === '!!' &&
-        (await isWaivableIgnoredEntry(worktreePath, entry))
+        (await isWaivableIgnoredEntry(worktreePath, entry, cacheInspections))
       ) {
         waived = 'disposable-output';
       } else if (
@@ -1008,6 +1012,10 @@ async function hasNonCarriedWork(
       );
       return true;
     }
+    const cacheInspections = new Map<
+      string,
+      Promise<CacheContainerInspection>
+    >();
     for (const record of stdout.split('\0')) {
       if (record.length === 0) continue;
       const status = record.slice(0, 2);
@@ -1031,7 +1039,7 @@ async function hasNonCarriedWork(
         waived = 'session-marker';
       } else if (
         status === '!!' &&
-        (await isWaivableIgnoredEntry(worktreePath, entry))
+        (await isWaivableIgnoredEntry(worktreePath, entry, cacheInspections))
       ) {
         waived = 'disposable-output';
       } else if (
@@ -1080,49 +1088,135 @@ export function regenerableCacheContainerOf(entry: string): string | undefined {
     : undefined;
 }
 
+export interface CacheContainerInspection {
+  /** Worktree-relative POSIX paths (no trailing slash) of nested checkouts. */
+  checkouts: string[];
+  /** Bare / `--separate-git-dir` object stores under the container. */
+  gitDirs: string[];
+  /** Subtrees that could not be inspected (treated fail-closed). */
+  unreadableDirs: string[];
+}
+
 /**
- * Checkouts sitting inside a regenerable cache container. A `.git` **file** is
- * a linked worktree (its git dir lives elsewhere); a `.git` **directory** is an
- * independent repository whose only object database is right there. Either way
- * the container is no longer disposable: its bytes would go with the parent.
+ * Recursively inspect a regenerable cache container (`.qwen/tmp`,
+ * `.qwen/logs`) without following symlinks. Finds:
+ * - nested checkouts at any depth — including the container itself if it has
+ *   a `.git` entry (stopping descent at each checkout root so its internal
+ *   tree is not scanned);
+ * - bare / `--separate-git-dir` object stores (`HEAD` file plus `objects/`,
+ *   `refs/`, or `commondir`), stopping descent at the store root;
+ * - unreadable directories, recorded so callers fail closed rather than
+ *   dropping unverified content.
  */
-export async function cacheContainerCheckouts(
+export async function inspectCacheContainer(
   worktreePath: string,
   container: string,
-): Promise<Array<{ name: string; kind: 'file' | 'dir' }>> {
-  const dir = path.join(worktreePath, container);
-  const entries = await fs
-    .readdir(dir, { withFileTypes: true })
-    .catch(() => [] as Array<import('node:fs').Dirent>);
-  const checkouts: Array<{ name: string; kind: 'file' | 'dir' }> = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const gitEntry = await fs
-      .lstat(path.join(dir, entry.name, '.git'))
-      .catch(() => undefined);
-    if (gitEntry === undefined) continue;
-    checkouts.push({
-      name: entry.name,
-      kind: gitEntry.isDirectory() ? 'dir' : 'file',
-    });
+): Promise<CacheContainerInspection> {
+  const checkouts: string[] = [];
+  const gitDirs: string[] = [];
+  const unreadableDirs: string[] = [];
+  const containerPath = path.join(worktreePath, container);
+  let containerStat;
+  try {
+    containerStat = await fs.lstat(containerPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      return { checkouts, gitDirs, unreadableDirs };
+    }
+    return { checkouts, gitDirs, unreadableDirs: [container] };
   }
-  return checkouts;
+  if (!containerStat.isDirectory()) {
+    return { checkouts, gitDirs, unreadableDirs };
+  }
+
+  const visit = async (rel: string): Promise<void> => {
+    let entries: Array<import('node:fs').Dirent>;
+    try {
+      entries = await fs.readdir(path.join(worktreePath, rel), {
+        withFileTypes: true,
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      unreadableDirs.push(rel);
+      return;
+    }
+    let hasGitEntry = false;
+    let hasHeadFile = false;
+    let hasObjectsDir = false;
+    let hasRefsDir = false;
+    let hasCommondirFile = false;
+    for (const entry of entries) {
+      if (entry.name === '.git') {
+        hasGitEntry = true;
+      } else if (entry.name === 'HEAD' && entry.isFile()) {
+        hasHeadFile = true;
+      } else if (entry.name === 'objects' && entry.isDirectory()) {
+        hasObjectsDir = true;
+      } else if (entry.name === 'refs' && entry.isDirectory()) {
+        hasRefsDir = true;
+      } else if (entry.name === 'commondir' && entry.isFile()) {
+        hasCommondirFile = true;
+      }
+    }
+    if (hasGitEntry) {
+      checkouts.push(rel);
+      return;
+    }
+    if (hasHeadFile && (hasObjectsDir || hasRefsDir || hasCommondirFile)) {
+      gitDirs.push(rel);
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        await visit(`${rel}/${entry.name}`);
+      }
+    }
+  };
+
+  await visit(container);
+  return { checkouts, gitDirs, unreadableDirs };
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
 /**
  * Whether an ignored entry may still be waived as disposable. The pure
- * predicate above answers for build output, but a regenerable cache container
- * that holds a checkout is NOT disposable — waiving it would let the gate read
- * a checkout with uncommitted work as clean and delete it without a snapshot.
+ * predicate below answers for build output, while a regenerable cache entry
+ * that contains (or sits inside) a nested checkout, git object store, or
+ * unreadable directory is NOT disposable — waiving it would let the gate read
+ * nested work or commits as clean and delete them without a snapshot. Callers
+ * walking a whole status listing pass a per-call `cache` map so each container
+ * is scanned once instead of once per entry.
  */
 export async function isWaivableIgnoredEntry(
   worktreePath: string,
   entry: string,
+  cache?: Map<string, Promise<CacheContainerInspection>>,
 ): Promise<boolean> {
   if (!isDisposableIgnoredEntry(entry)) return false;
   const container = regenerableCacheContainerOf(entry);
   if (container === undefined) return true;
-  return (await cacheContainerCheckouts(worktreePath, container)).length === 0;
+  let inspectionPromise = cache?.get(container);
+  if (inspectionPromise === undefined) {
+    inspectionPromise = inspectCacheContainer(worktreePath, container);
+    cache?.set(container, inspectionPromise);
+  }
+  const inspection = await inspectionPromise;
+  const norm = entry.replace(/\/$/, '');
+  for (const checkout of inspection.checkouts) {
+    if (pathsOverlap(norm, checkout)) return false;
+  }
+  for (const gitDir of inspection.gitDirs) {
+    if (pathsOverlap(norm, gitDir)) return false;
+  }
+  for (const unreadable of inspection.unreadableDirs) {
+    if (pathsOverlap(norm, unreadable)) return false;
+  }
+  return true;
 }
 
 export function isDisposableIgnoredEntry(entry: string): boolean {

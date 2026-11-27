@@ -23,12 +23,11 @@ import { createHash } from 'node:crypto';
 import * as tar from 'tar';
 import {
   WORKTREE_SESSION_FILE,
-  cacheContainerCheckouts,
   computeCarriedIdentities,
   hasHiddenIndexBit,
+  inspectCacheContainer,
   REGENERABLE_QWEN_CACHE_DIRS,
   isDisposableIgnoredEntry,
-  regenerableCacheContainerOf,
   worktreeHasPendingGitOperation,
   worktreeHasWork,
 } from './gitWorktreeService.js';
@@ -140,39 +139,59 @@ interface DisposableIgnoredMatcher {
   dirs: string[];
   files: ReadonlySet<string>;
   /**
-   * Subtrees excluded beyond the ignore listing, each one rebuildable or
-   * preserved outside this checkout: an ignored Qwen cache that holds no
-   * checkout of its own, and a nested checkout under `.qwen/worktrees/` whose
-   * git dir lives outside this checkout and whose HEAD is a branch. A nested
-   * checkout that holds work and would be excluded here refuses the capture
-   * instead; one that cannot be rebuilt is archived. Everything else this
-   * matcher excludes is derived from the ignore listing — the same geometry the
-   * has-work gate waives.
+   * Subtrees excluded beyond the `!!` listing, each one rebuildable or
+   * preserved outside this checkout: an ignored Qwen cache container
+   * (`.qwen/tmp/`, `.qwen/logs/`), and a nested checkout under
+   * `.qwen/worktrees/` whose git dir lives outside this checkout and whose
+   * HEAD is a verified branch with no uncommitted work. A nested checkout that
+   * cannot survive cleanup refuses capture instead; independent repos and
+   * in-tree git object stores stay in the archive via `preservedDirs`.
    */
   neverDirs: readonly string[];
+  /**
+   * Worktree-relative POSIX paths (without trailing slash) that must stay in
+   * the archive even when a broader cache exclusion covers their container
+   * (e.g., independent repos, `--separate-git-dir` object stores, unreadable
+   * subtrees, or archived legacy checkouts during verification). Strict
+   * ancestors are also left unexcluded so tar and verification can reach them
+   * while sibling plain cache entries remain excluded.
+   */
+  preservedDirs: readonly string[];
+}
+
+function isPathPreserved(
+  norm: string,
+  preservedDirs: readonly string[],
+): boolean {
+  for (const kept of preservedDirs) {
+    if (
+      norm === kept ||
+      norm.startsWith(`${kept}/`) ||
+      kept.startsWith(`${norm}/`)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
  * Whether a worktree-relative path is excluded from the snapshot. `.git`
  * (the worktree link file or a real dir) and the session marker are always
- * excluded. A path is excluded as regenerable output only when it is an
- * ignored disposable file or sits under an ignored disposable directory —
- * the same geometry the has-work gate waives — so a tracked or non-ignored
- * file under `dist/`, `node_modules/`, `coverage/`, `.qwen/tmp/` or
- * `.qwen/logs/` is archived rather than silently dropped, while ignored cache
- * and build output is excluded exactly as the gate waives it. The only
- * non-ignore-derived exclusions are nested checkouts with no work of their own
- * (`neverDirs`); one that holds work is refused outright in
- * {@link boundedSnapshotExclusions}.
+ * excluded. Paths in `preservedDirs` (and their strict ancestors so tar can
+ * traverse to them) are never excluded. Everything else is excluded only when
+ * it matches `neverDirs` or an ignored disposable file/directory from the same
+ * `!!` listing the has-work gate waives.
  */
 function isExcludedFromSnapshot(
   relativePath: string,
   matcher: DisposableIgnoredMatcher,
 ): boolean {
-  const norm = relativePath.replace(/^\.\//, '').replace(/\/$/, '');
+  const norm = normalizeRel(relativePath).replace(/\/+$/, '');
   if (norm.length === 0) return false;
   if (norm === '.git' || norm.startsWith('.git/')) return true;
   if (norm === WORKTREE_SESSION_FILE) return true;
+  if (isPathPreserved(norm, matcher.preservedDirs)) return false;
   if (
     matcher.neverDirs.some(
       (dir) => norm === dir.replace(/\/$/, '') || norm.startsWith(dir),
@@ -674,8 +693,14 @@ async function checkoutMatchesCapture(
  */
 async function readSnapshotExclusions(
   worktreePath: string,
-  archived?: SnapshotPathKinds,
+  options?: {
+    archived?: SnapshotPathKinds;
+    checkProtectedCaseVariants?: boolean;
+  },
 ): Promise<DisposableIgnoredMatcher> {
+  const archived = options?.archived;
+  const checkProtectedCaseVariants =
+    options?.checkProtectedCaseVariants ?? true;
   // The ignored disposable output the exclusion geometry consults, taken
   // from the SAME listing the has-work gate waives (`status --porcelain
   // --ignored=matching -z`, the `!!` records) so the two geometries cannot
@@ -713,6 +738,7 @@ async function readSnapshotExclusions(
     // An absent case-variant deletion is safe: it is absent from the tar and
     // buildWorktreeSnapshotMeta already omits it from the deletion header.
     if (
+      checkProtectedCaseVariants &&
       !xy.includes('D') &&
       relativePath !== '.git' &&
       !relativePath.startsWith('.git/') &&
@@ -731,177 +757,326 @@ async function readSnapshotExclusions(
     }
     if (xy === '!!') ignoredEntries.push(record.slice(3));
   }
-  // A regenerable cache that holds a checkout is not disposable: the same
-  // listing that waives `.qwen/tmp/` for the archive is the one the gate reads,
-  // so excluding it here would certify a snapshot that carries none of the
-  // nested work. Those containers keep their entries (except a clean linked
-  // worktree, which `boundedSnapshotExclusions` excludes by its own path).
-  const cacheHolders = new Set<string>();
-  for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
-    const checkouts = await cacheContainerCheckouts(
-      worktreePath,
-      `.qwen/${cacheDir}`,
-    );
-    if (checkouts.length > 0) cacheHolders.add(`.qwen/${cacheDir}`);
-  }
-  const insideCacheHolder = (entry: string): boolean => {
-    const container = regenerableCacheContainerOf(entry);
-    return container !== undefined && cacheHolders.has(container);
-  };
+  const { neverDirs, preservedDirs } = await boundedSnapshotExclusions(
+    worktreePath,
+    ignoredEntries,
+    archived,
+  );
   const matcher: DisposableIgnoredMatcher = {
     dirs: ignoredEntries.filter(
-      (e) =>
-        e.endsWith('/') && isDisposableIgnoredEntry(e) && !insideCacheHolder(e),
+      (e) => e.endsWith('/') && isDisposableIgnoredEntry(e),
     ),
     files: new Set(
       ignoredEntries.filter(
-        (e) =>
-          !e.endsWith('/') &&
-          isDisposableIgnoredEntry(e) &&
-          !insideCacheHolder(e),
+        (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
       ),
     ),
-    neverDirs: await boundedSnapshotExclusions(
-      worktreePath,
-      ignoredEntries,
-      archived,
-    ),
+    neverDirs,
+    preservedDirs,
   };
-  await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
+  if (checkProtectedCaseVariants) {
+    await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
+  }
   return matcher;
 }
 
+function relativePosixIfInside(
+  root: string,
+  target: string,
+): string | undefined {
+  const rel = path.relative(root, target);
+  if (rel.length === 0) return '';
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    return undefined;
+  }
+  return rel.split(path.sep).join('/');
+}
+
+function isCoveredByIgnored(
+  relNoSlash: string,
+  ignoredEntries: readonly string[],
+): boolean {
+  const withSlash = `${relNoSlash}/`;
+  return ignoredEntries.some((entry) =>
+    entry.endsWith('/') ? withSlash.startsWith(entry) : entry === relNoSlash,
+  );
+}
+
+type NestedCheckoutDisposition =
+  | { kind: 'not-checkout' }
+  | { kind: 'archive'; preserveRelPaths: string[] }
+  | { kind: 'excludable-external' }
+  | { kind: 'refuse-external'; reason: string };
+
+async function resolveWorktreeAdminDir(
+  worktreePath: string,
+): Promise<string | undefined> {
+  const marker = await fs
+    .lstat(path.join(worktreePath, '.git'))
+    .catch(() => undefined);
+  if (marker === undefined || !marker.isFile()) return undefined;
+  const gitFile = await fs
+    .readFile(path.join(worktreePath, '.git'), 'utf8')
+    .catch(() => '');
+  const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1]?.trim();
+  if (!declared) return undefined;
+  return fs
+    .realpath(path.resolve(worktreePath, declared))
+    .catch(() => undefined);
+}
+
 /**
- * The `neverDirs` half of the matcher: subtrees this checkout owns but the
- * archive can leave out because something outside it can rebuild them.
+ * Decide whether a nested checkout under `worktreePath` can be safely excluded,
+ * must be archived (along with any in-tree `--separate-git-dir` store), or must
+ * refuse capture so cleanup preserves the parent checkout.
  *
- * Two shapes qualify:
- * - A regenerable Qwen cache under `.qwen/` that git ignores and that holds no
- *   checkout of its own. A cache containing a checkout is not regenerable — the
- *   review tooling keeps its worktrees under `.qwen/tmp` — so it stays in the
- *   archive.
- * - A nested checkout under `.qwen/worktrees/` whose commits survive the parent
- *   deletion: its `.git` is a file naming a git dir OUTSIDE this checkout, and
- *   its HEAD is a branch. A `.git` directory, a git dir inside the tree being
- *   deleted, or a detached HEAD all mean the only copy dies with the parent, so
- *   those are archived instead of excluded.
+ * A checkout is excludable only when deleting the parent leaves both its object
+ * store and a verified local branch ref intact (surviving `git worktree prune`)
+ * and it holds no uncommitted work. An external linked worktree with work, a
+ * detached HEAD, or a missing branch ref cannot survive parent deletion plus
+ * `git worktree prune`, even if its working files were archived, so capture
+ * refuses it fail-closed.
+ */
+async function classifyNestedCheckout(
+  childPath: string,
+  childRel: string,
+  realWorktree: string,
+  resolvedWorktree: string,
+  realParentAdminDir: string | undefined,
+): Promise<NestedCheckoutDisposition> {
+  const marker = await fs
+    .lstat(path.join(childPath, '.git'))
+    .catch(() => undefined);
+  if (marker === undefined) return { kind: 'not-checkout' };
+  // `lstat`, never a followed probe: `.git` as a DIRECTORY is an independent
+  // repository whose entire object database lives inside this directory and is
+  // archived intact when the child stays unexcluded.
+  if (!marker.isFile()) return { kind: 'archive', preserveRelPaths: [] };
+  const gitFile = await fs
+    .readFile(path.join(childPath, '.git'), 'utf8')
+    .catch(() => '');
+  const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1]?.trim();
+  if (!declared) return { kind: 'archive', preserveRelPaths: [] };
+  const rawGitDir = path.resolve(childPath, declared);
+  const realGitDir = await fs.realpath(rawGitDir).catch(() => undefined);
+  if (realGitDir === undefined) {
+    return { kind: 'archive', preserveRelPaths: [] };
+  }
+  const commonDirRaw = await fs
+    .readFile(path.join(realGitDir, 'commondir'), 'utf8')
+    .catch(() => undefined);
+  const hasCommonDir =
+    commonDirRaw !== undefined && commonDirRaw.trim().length > 0;
+  const realCommonDir = hasCommonDir
+    ? await fs
+        .realpath(path.resolve(realGitDir, commonDirRaw.trim()))
+        .catch(() => undefined)
+    : realGitDir;
+
+  const gitDirInside = relativePosixIfInside(realWorktree, realGitDir);
+  const rawGitDirInside = relativePosixIfInside(resolvedWorktree, rawGitDir);
+  const commonDirInside =
+    realCommonDir !== undefined
+      ? relativePosixIfInside(realWorktree, realCommonDir)
+      : undefined;
+  if (gitDirInside !== undefined || commonDirInside !== undefined) {
+    const preserveRelPaths: string[] = [];
+    for (const candidate of [gitDirInside, rawGitDirInside, commonDirInside]) {
+      if (
+        candidate !== undefined &&
+        candidate.length > 0 &&
+        candidate !== '.git' &&
+        !candidate.startsWith('.git/')
+      ) {
+        preserveRelPaths.push(candidate);
+      }
+    }
+    return { kind: 'archive', preserveRelPaths };
+  }
+
+  if (
+    realParentAdminDir !== undefined &&
+    (relativePosixIfInside(realParentAdminDir, realGitDir) !== undefined ||
+      (realCommonDir !== undefined &&
+        relativePosixIfInside(realParentAdminDir, realCommonDir) !== undefined))
+  ) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} stores git metadata inside this worktree's admin dir; refusing to capture a parent that would delete it`,
+    };
+  }
+
+  if (realCommonDir === undefined) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} has an unreadable external git common dir; refusing to capture a parent that would delete it`,
+    };
+  }
+  const head = (
+    await fs.readFile(path.join(realGitDir, 'HEAD'), 'utf8').catch(() => '')
+  ).trim();
+  if (!head.startsWith('ref: refs/heads/')) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} has a detached or non-branch HEAD; refusing to capture a parent that would delete it`,
+    };
+  }
+  const branchRef = head.slice('ref: '.length);
+  const refExists = await runGit(childPath, [
+    ...NO_EXEC_CONFIG,
+    '--no-optional-locks',
+    'show-ref',
+    '--verify',
+    '--quiet',
+    branchRef,
+  ]).then(
+    () => true,
+    () => false,
+  );
+  if (!refExists) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} points to a missing or unborn branch ref (${branchRef}); refusing to capture a parent that would delete it`,
+    };
+  }
+  if (await worktreeHasWork(childPath)) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} holds work; refusing to capture a parent that would delete it`,
+    };
+  }
+  return { kind: 'excludable-external' };
+}
+
+/**
+ * The `neverDirs` and `preservedDirs` halves of the matcher: subtrees this
+ * checkout owns that can be left out because something outside it can rebuild
+ * them, paired with the exact subtrees inside ignored caches (independent
+ * repos, bare/`--separate-git-dir` object stores, unreadable dirs, archived
+ * legacy checkouts) that must remain in the archive while sibling caches stay
+ * excluded.
  *
- * A nested checkout that holds work and would otherwise be excluded refuses the
- * capture: `captureWorktreeSnapshot` throwing makes every caller preserve the
- * checkout, which is the fail-closed direction.
- *
- * `archived` is the member set of an archive being verified. Verification must
- * compare against what the archive actually carries: a path present there was
- * not excluded when it was written, so it must not be excluded now either.
+ * `archived` is the member set of an archive being verified. Verification
+ * checks membership at each checkout's own path (never bailing out on the
+ * parent cache container) so an archive carrying a sibling object store or a
+ * tracked file under `.qwen/tmp/` still verifies an excluded clean worktree
+ * beside it, and a legacy archive carrying a nested checkout verifies it
+ * instead of tripping capture-time refusals.
  */
 async function boundedSnapshotExclusions(
   worktreePath: string,
   ignoredEntries: readonly string[],
   archived?: SnapshotPathKinds,
-): Promise<readonly string[]> {
-  const exclusions: string[] = [];
-  // A regenerable cache is skipped only where git ignores it. Git collapses a
-  // broad rule (`.qwen/`) to one `!! .qwen/` entry, so an ignored ANCESTOR
-  // counts as covering the cache too; without that, a common `.qwen/` rule
-  // would put the whole scratch tree back into the archive.
-  //
-  // The container is a cache only while nothing inside it is a checkout.
-  // `.qwen/tmp/review-pr-<n>` is a linked worktree in this repository's own
-  // workflow, and a nested checkout's bytes live nowhere else: a dirty one
-  // refuses the capture, a clean one is excluded by its own path, and an
-  // independent repository (`.git` is a DIRECTORY) is never excluded at all.
-  // Only when the container holds no checkout may the prefix go, which is what
-  // keeps the multi-GB cache out of the archive.
+): Promise<{
+  neverDirs: readonly string[];
+  preservedDirs: readonly string[];
+}> {
+  const realWorktree = await fs
+    .realpath(worktreePath)
+    .catch(() => path.resolve(worktreePath));
+  const resolvedWorktree = path.resolve(worktreePath);
+  const realParentAdminDir = await resolveWorktreeAdminDir(worktreePath);
+  const neverDirs: string[] = [];
+  const preservedDirSet = new Set<string>();
+  const preserve = (rel: string): void => {
+    const norm = normalizeRel(rel).replace(/\/+$/, '');
+    if (norm.length > 0) preservedDirSet.add(norm);
+  };
+
   for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
-    const trailing = `.qwen/${cacheDir}/`;
-    const covered = ignoredEntries.some(
+    const container = `.qwen/${cacheDir}`;
+    const trailing = `${container}/`;
+    const containerCollapsed = ignoredEntries.some(
       (entry) => entry.endsWith('/') && trailing.startsWith(entry),
     );
-    // An archive written before this exclusion proves what it carried; do not
-    // exclude the same subtree from the comparison.
-    if (!covered || archived?.directories.has(trailing)) continue;
-    const checkouts = await cacheContainerCheckouts(
-      worktreePath,
-      `.qwen/${cacheDir}`,
+    const hasIgnoredInside = ignoredEntries.some(
+      (entry) => entry === container || entry.startsWith(trailing),
     );
-    if (checkouts.length === 0) {
-      exclusions.push(trailing);
-      continue;
+    if (!containerCollapsed && !hasIgnoredInside) continue;
+
+    const inspection = await inspectCacheContainer(worktreePath, container);
+    for (const unreadable of inspection.unreadableDirs) {
+      preserve(unreadable);
     }
-    for (const child of checkouts) {
-      if (child.kind === 'dir') continue;
-      const childPath = path.join(worktreePath, '.qwen', cacheDir, child.name);
-      // Exclude a linked worktree only when deleting this checkout leaves its
-      // commits reachable; otherwise the archive has to carry it.
-      if (!(await isRecoverableLinkedWorktree(childPath, worktreePath))) {
+    for (const gitDir of inspection.gitDirs) {
+      preserve(gitDir);
+    }
+    for (const checkoutRel of inspection.checkouts) {
+      const covered = isCoveredByIgnored(checkoutRel, ignoredEntries);
+      if (!covered) {
+        if (ignoredEntries.some((e) => e.startsWith(`${checkoutRel}/`))) {
+          preserve(checkoutRel);
+        }
         continue;
       }
-      if (await worktreeHasWork(childPath)) {
-        throw new Error(
-          `Worktree snapshot: nested checkout .qwen/${cacheDir}/${child.name} holds work; refusing to capture a parent that would delete it`,
-        );
+      if (archived?.directories.has(`${checkoutRel}/`)) {
+        preserve(checkoutRel);
+        continue;
       }
-      exclusions.push(`${trailing}${child.name}/`);
+      const disposition = await classifyNestedCheckout(
+        path.join(worktreePath, checkoutRel),
+        checkoutRel,
+        realWorktree,
+        resolvedWorktree,
+        realParentAdminDir,
+      );
+      if (disposition.kind === 'archive') {
+        preserve(checkoutRel);
+        for (const p of disposition.preserveRelPaths) {
+          preserve(p);
+        }
+      } else if (disposition.kind === 'refuse-external') {
+        if (archived === undefined) {
+          throw new Error(`Worktree snapshot: ${disposition.reason}`);
+        }
+        preserve(checkoutRel);
+      }
+    }
+    if (containerCollapsed) {
+      neverDirs.push(trailing);
     }
   }
+
   const managedRelative = '.qwen/worktrees/';
   const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
-  let entries;
-  try {
-    entries = await fs.readdir(managedDir, { withFileTypes: true });
-  } catch (error) {
+  const managedStat = await fs.lstat(managedDir).catch((error) => {
     const code = (error as NodeJS.ErrnoException).code;
-    // Anything but a directory — a regular file, a dangling link — is content
-    // of the checkout, not a set of checkouts: leave it to the archive.
-    if (code === 'ENOENT' || code === 'ENOTDIR') return exclusions;
+    // Anything but a real directory — missing, regular file, or symlink to an
+    // external directory — is content of the checkout, not a container of
+    // nested worktrees: leave it to the archive without following symlinks.
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
     throw error;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const child = path.join(managedDir, entry.name);
-    const relative = `${managedRelative}${entry.name}/`;
-    // `includeParents` records every archived directory, so one lookup
-    // answers "did this archive carry anything under the prefix".
-    if (archived?.directories.has(relative)) continue;
-    if (!(await isRecoverableLinkedWorktree(child, worktreePath))) continue;
-    if (await worktreeHasWork(child)) {
-      throw new Error(
-        `Worktree snapshot: nested checkout ${relative.slice(0, -1)} holds work; refusing to capture a parent that would delete it`,
+  });
+  if (managedStat !== undefined && managedStat.isDirectory()) {
+    const entries = await fs.readdir(managedDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const childPath = path.join(managedDir, entry.name);
+      const childRel = `${managedRelative}${entry.name}`;
+      const relative = `${childRel}/`;
+      if (archived?.directories.has(relative)) continue;
+      const disposition = await classifyNestedCheckout(
+        childPath,
+        childRel,
+        realWorktree,
+        resolvedWorktree,
+        realParentAdminDir,
       );
+      if (disposition.kind === 'excludable-external') {
+        neverDirs.push(relative);
+      } else if (disposition.kind === 'refuse-external') {
+        if (archived === undefined) {
+          throw new Error(`Worktree snapshot: ${disposition.reason}`);
+        }
+      } else if (disposition.kind === 'archive') {
+        for (const p of disposition.preserveRelPaths) {
+          preserve(p);
+        }
+      }
     }
-    exclusions.push(relative);
   }
-  return exclusions;
-}
 
-/**
- * Whether deleting `child` leaves its commits reachable: the `.git` file must
- * name a git dir outside `worktreePath`, and HEAD must name a branch. A
- * `.git` directory, a git dir under the checkout being deleted, or a detached
- * HEAD each mean the only copy of the objects or of the ref goes with it.
- */
-async function isRecoverableLinkedWorktree(
-  child: string,
-  worktreePath: string,
-): Promise<boolean> {
-  const marker = await fs
-    .lstat(path.join(child, '.git'))
-    .catch(() => undefined);
-  // `lstat`, never a followed probe: `.git` as a DIRECTORY is a repository
-  // whose only object database lives inside this directory.
-  if (marker === undefined || !marker.isFile()) return false;
-  const gitFile = await fs
-    .readFile(path.join(child, '.git'), 'utf8')
-    .catch(() => '');
-  const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1];
-  if (!declared) return false;
-  const gitDir = path.resolve(child, declared);
-  const toGitDir = path.relative(path.resolve(worktreePath), gitDir);
-  if (toGitDir.length === 0 || !toGitDir.startsWith('..')) return false;
-  const head = await fs
-    .readFile(path.join(gitDir, 'HEAD'), 'utf8')
-    .catch(() => '');
-  return head.startsWith('ref: ');
+  return { neverDirs, preservedDirs: [...preservedDirSet] };
 }
 
 export async function verifyRestoredWorktreeSnapshot(options: {
@@ -914,10 +1089,9 @@ export async function verifyRestoredWorktreeSnapshot(options: {
   // checkout that holds work today. Verification answers "does this archive
   // represent the checkout", so it must not re-run the capture-time refusal:
   // the members the archive holds decide what was excluded when it was written.
-  const matcher = await readSnapshotExclusions(
-    options.worktreePath,
-    knownPaths,
-  );
+  const matcher = await readSnapshotExclusions(options.worktreePath, {
+    archived: knownPaths,
+  });
   return checkoutMatchesCapture(
     options.worktreePath,
     options.snapshotPath,
@@ -997,9 +1171,12 @@ export async function captureWorktreeSnapshot(
     matchesCheckout = await checkoutMatchesCapture(
       worktreePath,
       tmp,
-      // A nested checkout that was clean when it was excluded and gained a
-      // draft while tar ran must not be skipped and reported as a match.
-      await readSnapshotExclusions(worktreePath),
+      // Re-read exclusions after tar so a nested checkout that was clean when
+      // excluded and gained work mid-capture is caught, while letting
+      // checkoutMatchesCapture report a late protected path as a non-match.
+      await readSnapshotExclusions(worktreePath, {
+        checkProtectedCaseVariants: false,
+      }),
       meta,
     );
   });

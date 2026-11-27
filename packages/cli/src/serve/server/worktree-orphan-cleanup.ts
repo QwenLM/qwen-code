@@ -559,6 +559,9 @@ async function checkoutChangeDigest(
       }
     }
     const originalStatusCount = pending.length;
+    const cacheInspections: NonNullable<
+      Parameters<typeof isWaivableIgnoredEntry>[2]
+    > = new Map();
     for (let i = 0; i < pending.length; i++) {
       const { xy, rel } = pending[i];
       // Disposable ignored output and daemon bookkeeping are waived by the
@@ -577,7 +580,7 @@ async function checkoutChangeDigest(
       if (
         i < originalStatusCount &&
         xy === '!!' &&
-        (await isWaivableIgnoredEntry(worktreePath, rel))
+        (await isWaivableIgnoredEntry(worktreePath, rel, cacheInspections))
       ) {
         continue;
       }
