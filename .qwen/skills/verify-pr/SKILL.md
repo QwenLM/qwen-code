@@ -1484,12 +1484,17 @@ convention fails whenever a busy round forgets the re-check or posts after a
 mid-round push: on PR #18494, Round 4 published 8 minutes after a new
 top-level P1 review on the same head, and Round 5 published `merge-ready` 23
 minutes after two new P1s and 18 minutes after the head had already moved. On
-every local `--publish` path, write the guard's structured verdict into
-host-held storage outside the PR clone and run `verify-pr-check.mjs` with
-`--require-guard` before posting the PR comment:
+every local `--publish` path, clear stale guard files, refresh `guard-now.json`
+in the same publish step (failing closed immediately if the refresh errors),
+write the structured verdict into host-held storage outside the PR clone, and
+run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment:
 
 ```bash
-rm -f ~/.cache/qwen-verify/pr<n>/guard.log ~/.cache/qwen-verify/pr<n>/guard.sha256
+rm -f ~/.cache/qwen-verify/pr<n>/guard-now.json ~/.cache/qwen-verify/pr<n>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/guard.log ~/.cache/qwen-verify/pr<n>/guard.sha256
+node <trusted-clone>/scripts/verify-pr-guard.mjs \
+  --pr <n> --repo <owner>/<repo> \
+  --snapshot ~/.cache/qwen-verify/pr<n>/guard-now.json \
+  > ~/.cache/qwen-verify/pr<n>/guard.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/guard.log >&2; exit 1; }
 node <trusted-clone>/scripts/verify-pr-guard.mjs --compare \
   --start ~/.cache/qwen-verify/pr<n>/guard-start.json \
   --now ~/.cache/qwen-verify/pr<n>/guard-now.json \
@@ -1507,13 +1512,33 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   "$rd"
 ```
 
-`--compare --out` overwrites the verdict on dirty runs too (so a stale
+For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker,
+vfkit, or provider VM), run the same refresh, compare, and `guard.sha256`
+extraction above, then keep the runner's host execution record, digest, and
+vault artifact directory in the same final check together with the guard flags:
+
+```bash
+node <trusted-clone>/scripts/verify-pr-check.mjs \
+  --context ~/.cache/qwen-verify/pr<n>/pr.json \
+  --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \
+  --execution-record <execution-record> \
+  --execution-record-sha256 <execution-record-sha256> \
+  --require-guard \
+  --guard ~/.cache/qwen-verify/pr<n>/guard-verdict.json \
+  --guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/guard.sha256)" \
+  <artifact-dir>
+```
+
+A failed `--snapshot` refresh also removes any stale regular snapshot already
+at that path (while refusing to touch symlinks, hardlinks, or non-regular
+files), `--compare --out` overwrites the verdict on dirty runs too (so a stale
 `clean: true` file from an earlier attempt cannot survive), and
 `verify-pr-check.mjs` with `--require-guard` refuses a missing verdict, missing
-`--guard-sha256`, mismatched PR coordinates or verified head, non-`OPEN` PR
-state, dirty verdict, stale capture timestamp (default `--guard-max-age-sec
-600`), symlink/hardlink/in-tree verdict path, or a `guard-verdict.json` planted
-inside the PR-writable artifact directory. Only exit 0 permits posting.
+`--guard-sha256`, missing host `--context`, mismatched PR coordinates or
+verified head, non-`OPEN` PR state, dirty verdict, stale capture timestamp
+(default `--guard-max-age-sec 600`), symlink/hardlink/in-tree verdict path, or
+a `guard-verdict.json` planted inside the PR-writable artifact directory. Only
+exit 0 permits posting.
 
 **Local rounds start from CI.** Before building any harness, pull the
 failing test names from every red job and reproduce them on both arms: a

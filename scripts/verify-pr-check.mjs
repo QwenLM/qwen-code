@@ -2981,9 +2981,12 @@ function main(argv) {
   result.errors.push(
     ...containerNonceErrors(files.boundary, files.boundaryGate, canonicalDir),
   );
-  if (requireGuard && (!contextPath || !coordinates || !expectedHead)) {
+  if (
+    requireGuard &&
+    (!contextPath || !contextDigestVerified || !coordinates || !expectedHead)
+  ) {
     guardErrors.push(
-      '--require-guard requires a valid host --context snapshot (with repo, pr, and headRefOid) so the guard verdict cannot be replayed from another PR or head',
+      '--require-guard requires a digest-bound host --context snapshot (--context and --context-sha256 with repo, pr, and headRefOid) so the guard verdict cannot be replayed from another PR or head',
     );
   }
   if (guardText !== null) {

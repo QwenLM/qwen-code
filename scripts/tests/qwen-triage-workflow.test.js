@@ -2033,45 +2033,162 @@ describe('qwen-triage verify workflow', () => {
 
         // A failed fetch, or pages that are not this query's answer, leave no
         // file: the skill reads its absence as "unknown", and a partial file
-        // would read as "nothing open".
+        // would read as "nothing open". Both the workflow jq filter and local
+        // reviewState() must reject the exact same malformed shapes, including
+        // arrays masquerading as objects (`[[]]`) and null comment entries.
         const pull0 = pages[0].data.repository.pullRequest;
-        for (const [input, env] of [
-          [pages, { GH_STUB_FAIL_LIST: '1' }],
-          // gh exits 0 with nothing on stdout, and jq then exits 0 too.
-          [pages, { GH_STUB_EMPTY_LIST: '1' }],
-          [[{ data: null }], {}],
-          [[], {}],
+        const malformedPages = [
+          [{ data: null }],
+          [],
+          [{ data: { repository: { pullRequest: [] } } }],
           [
-            [
-              {
-                data: {
-                  repository: { pullRequest: { ...pull0, comments: null } },
-                },
+            {
+              data: {
+                repository: { pullRequest: { ...pull0, comments: null } },
               },
-            ],
-            {},
+            },
           ],
           [
-            [
-              {
-                data: {
-                  repository: {
-                    pullRequest: {
-                      ...pull0,
-                      comments: { totalCount: 1, nodes: [null] },
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [null] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: { totalCount: 1, nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-1',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'COLLABORATOR',
+                          isMinimized: false,
+                        },
+                      ],
                     },
                   },
                 },
               },
-            ],
-            {},
+            },
           ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          createdAt: '2026-11-01T01:15:00Z',
+                          updatedAt: '2026-11-01T01:15:00Z',
+                          url: 'https://github.com/QwenLM/qwen-code/pull/7999#issuecomment-2',
+                          body: 'x',
+                          author: [],
+                          authorAssociation: 'NONE',
+                          isMinimized: false,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    latestOpinionatedReviews: { nodes: [[]] },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [null] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+          [
+            {
+              data: {
+                repository: {
+                  pullRequest: {
+                    ...pull0,
+                    reviewThreads: {
+                      ...pull0.reviewThreads,
+                      nodes: [
+                        {
+                          ...pull0.reviewThreads.nodes[0],
+                          comments: { totalCount: 1, nodes: [[]] },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        ];
+        for (const [input, env] of [
+          [pages, { GH_STUB_FAIL_LIST: '1' }],
+          // gh exits 0 with nothing on stdout, and jq then exits 0 too.
+          [pages, { GH_STUB_EMPTY_LIST: '1' }],
+          ...malformedPages.map((bad) => [bad, {}]),
         ]) {
           const failed = run(input, env);
           expect(failed.state).toBeNull();
           expect(failed.out).toContain(
             "Could not snapshot the PR's review threads",
           );
+        }
+        for (const bad of malformedPages) {
+          expect(reviewState(bad)).toBeNull();
         }
         expect(reviewState([{ data: null }])).toBeNull();
         expect(reviewState([])).toBeNull();
@@ -2190,7 +2307,16 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('adversarially attack your own patch too');
     expect(flat).toContain('**Bind the guard before every local publish.**');
     expect(flat).toContain(
+      'clear stale guard files, refresh `guard-now.json` in the same publish step (failing closed immediately if the refresh errors)',
+    );
+    expect(flat).toContain(
       'run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment',
+    );
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/guard-now.json ~/.cache/qwen-verify/pr<n>/guard-verdict.json ~/.cache/qwen-verify/pr<n>/guard.log ~/.cache/qwen-verify/pr<n>/guard.sha256',
+    );
+    expect(verifySkill).toContain(
+      '--snapshot ~/.cache/qwen-verify/pr<n>/guard-now.json \\',
     );
     expect(verifySkill).toContain(
       '--out ~/.cache/qwen-verify/pr<n>/guard-verdict.json',
@@ -2204,6 +2330,15 @@ describe('qwen-triage verify workflow', () => {
     );
     expect(verifySkill).toContain(
       '--guard-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/guard.sha256)" \\',
+    );
+    // Runner-backed VM publish preserves --execution-record and its digest in
+    // the same final verify-pr-check.mjs invocation as --require-guard.
+    expect(flat).toContain(
+      'For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker, vfkit, or provider VM)',
+    );
+    expect(verifySkill).toContain('--execution-record <execution-record> \\');
+    expect(verifySkill).toContain(
+      '--execution-record-sha256 <execution-record-sha256> \\',
     );
   });
 

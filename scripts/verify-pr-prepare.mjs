@@ -562,21 +562,37 @@ export const REVIEW_STATE_QUERY =
  */
 export function reviewState(pages) {
   if (!Array.isArray(pages) || pages.length === 0) return null;
-  const isObject = (value) => value !== null && typeof value === 'object';
+  const isObject = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  const isObjectOrNull = (value) => value == null || isObject(value);
   const pulls = pages.map((page) => page?.data?.repository?.pullRequest);
   if (
     pulls.some(
       (pull) =>
+        !isObject(pull) ||
         !Array.isArray(pull?.reviewThreads?.nodes) ||
         !Array.isArray(pull?.latestOpinionatedReviews?.nodes) ||
         !Array.isArray(pull?.comments?.nodes) ||
-        !pull.latestOpinionatedReviews.nodes.every(isObject) ||
-        !pull.comments.nodes.every(isObject) ||
+        !pull.latestOpinionatedReviews.nodes.every(
+          (review) =>
+            isObject(review) &&
+            isObjectOrNull(review.author) &&
+            isObjectOrNull(review.commit),
+        ) ||
+        !pull.comments.nodes.every(
+          (comment) => isObject(comment) && isObjectOrNull(comment.author),
+        ) ||
         !pull.reviewThreads.nodes.every(
           (thread) =>
             isObject(thread) &&
             Array.isArray(thread.comments?.nodes) &&
-            thread.comments.nodes.every(isObject),
+            thread.comments.nodes.every(
+              (comment) =>
+                isObject(comment) &&
+                isObjectOrNull(comment.author) &&
+                isObjectOrNull(comment.originalCommit) &&
+                isObjectOrNull(comment.pullRequestReview),
+            ),
         ),
     )
   ) {

@@ -100,8 +100,11 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
   comments(last: 100) { totalCount nodes { createdAt updatedAt url body author { login } authorAssociation isMinimized } }
   ```
 - Both `reviewState(pages)` in `scripts/verify-pr-prepare.mjs` and the `jq`
-  filter in `.github/workflows/qwen-triage.yml` validate `comments.nodes` as an
-  array of objects (failing closed to `null` / error when malformed) and emit:
+  filter in `.github/workflows/qwen-triage.yml` validate `pullRequest`,
+  `comments.nodes`, `latestOpinionatedReviews.nodes`, `reviewThreads.nodes`,
+  and each thread's `comments.nodes` as plain JSON objects (rejecting arrays
+  such as `[[]]` and `null` elements symmetrically, failing closed to `null` /
+  error when malformed) and emit:
   - `issueCommentCount`: `comments.totalCount` (so rounds disclose truncation
     under _Not covered_ when `> 100`).
   - `issueComments`: non-minimized comments whose `authorAssociation` is in
@@ -120,9 +123,16 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
   without adding a runtime dependency on `verify-pr-guard.mjs`.
 - **`verify-pr-guard.mjs`**:
   - Record `capturedAt` (UTC ISO-8601) in `fetchSnapshot()` (keeping
-    `isSnapshot()` backwards-compatible when `capturedAt` is absent).
-  - Harden same-file detection on `--compare` via `realpathSync` and `(dev, ino)`
-    so symlink and hardlink aliases cannot compare a snapshot with itself.
+    `isSnapshot()` backwards-compatible when `capturedAt` is absent) and enforce
+    strict `owner/repo` slug validation plus rejection of stray positional
+    arguments.
+  - On `--snapshot <file>`, pre-check target safety before fetching and remove
+    any stale regular snapshot already at that path when a refresh fails
+    (without touching symlinks, hardlinks, or non-regular files), so a retry
+    after a failed refresh cannot reuse an older `guard-now.json`.
+  - Harden same-file detection on `--compare` via `realpathSync`, parent-dir
+    canonicalization, and `(dev, ino)` so symlink and hardlink aliases cannot
+    compare a snapshot with itself.
   - Add `--out <verdict-file>` to `--compare`, refusing writes through symlinks,
     hardlinks, non-regular files, or paths aliasing `--start`/`--now`. Always
     write the verdict on both clean and dirty runs (preventing a stale
@@ -131,9 +141,9 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
 - **`verify-pr-check.mjs`**:
   - Add `--guard <verdict>`, `--guard-sha256 <64-hex>`,
     `--guard-max-age-sec <1..86400>` (default `600`), and `--require-guard`
-    (which also requires a valid host `--context` snapshot carrying repo, PR
-    number, and `headRefOid` so a fresh verdict from another PR or head cannot
-    be replayed).
+    (which also requires a digest-bound host `--context` snapshot with
+    `--context-sha256` carrying repo, PR number, and `headRefOid` so a fresh
+    verdict from another PR or head cannot be replayed).
   - Apply the same host-trust boundary used for `--context` and
     `--execution-record`: refuse in-tree paths, filesystem-root trust roots,
     hardlinks, symlinks, non-regular/FIFO/oversized files, digest mismatches,
@@ -144,10 +154,14 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     both ends, monotonic UTC timestamps
     (`startCapturedAt <= nowCapturedAt <= comparedAt`), freshness against
     `nowCapturedAt` and `comparedAt`, and a 60 s future-skew bound.
-- **`SKILL.md`**: Document the local `--publish` gate sequence writing
-  `guard-verdict.json` and `guard.sha256` into `~/.cache/qwen-verify/pr<n>/`
-  and requiring `verify-pr-check.mjs --require-guard` to exit 0 before
-  `gh pr comment`.
+- **`SKILL.md`**: Document the local `--publish` gate sequence that deletes any
+  stale `guard-now.json` / `guard-verdict.json`, refreshes `guard-now.json` in
+  the same step (exiting immediately on failure), compares into
+  `~/.cache/qwen-verify/pr<n>/guard-verdict.json` + `guard.sha256`, and requires
+  `verify-pr-check.mjs` with `--require-guard` to exit 0 before posting —
+  including the runner-backed VM variant (`microvm` / `provider-vm`) that keeps
+  the runner's `--execution-record`, `--execution-record-sha256`, and vault
+  artifact directory in the same final check.
 
 ## Design Decisions and Rationale
 

@@ -1525,6 +1525,7 @@ describe('reviewState', () => {
       {},
       [],
       [{ data: null }],
+      [{ data: { repository: { pullRequest: [] } } }],
       withPull({ reviewThreads: null }),
       withPull({ latestOpinionatedReviews: null }),
       withPull({ comments: null }),
@@ -1535,6 +1536,7 @@ describe('reviewState', () => {
         },
       }),
       withPull({ reviewThreads: { ...pull.reviewThreads, nodes: [null] } }),
+      withPull({ reviewThreads: { ...pull.reviewThreads, nodes: [[]] } }),
       withPull({
         reviewThreads: {
           ...pull.reviewThreads,
@@ -1543,8 +1545,34 @@ describe('reviewState', () => {
           ],
         },
       }),
+      withPull({
+        reviewThreads: {
+          ...pull.reviewThreads,
+          nodes: [
+            { ...pull.reviewThreads.nodes[0], comments: { nodes: [[]] } },
+          ],
+        },
+      }),
       withPull({ latestOpinionatedReviews: { nodes: [null] } }),
+      withPull({ latestOpinionatedReviews: { nodes: [[]] } }),
       withPull({ comments: { totalCount: 1, nodes: [null] } }),
+      withPull({ comments: { totalCount: 1, nodes: [[]] } }),
+      withPull({
+        comments: {
+          totalCount: 1,
+          nodes: [
+            {
+              createdAt: '2026-11-01T01:30:00Z',
+              updatedAt: '2026-11-01T01:30:00Z',
+              url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1',
+              body: 'x',
+              author: [],
+              authorAssociation: 'COLLABORATOR',
+              isMinimized: false,
+            },
+          ],
+        },
+      }),
     ]) {
       expect(reviewState(pages)).toBeNull();
     }

@@ -34,6 +34,7 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -43,6 +44,7 @@ import { GUARD_VERDICT_SCHEMA } from './verify-pr-check.mjs';
 export { GUARD_VERDICT_SCHEMA };
 
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
 
 function isIsoUtcTimestamp(value) {
   if (typeof value !== 'string' || !ISO_UTC_RE.test(value)) return false;
@@ -70,7 +72,9 @@ const HELP = `Usage:
 
 --snapshot fetches the head, the PR state and all three comment lists with
 --paginate, and writes them only when every call succeeded. A failed call exits
-1 and leaves no file, so a retry cannot be mistaken for a snapshot.
+1 and leaves no file behind (removing any stale regular snapshot already at that
+path, while refusing to touch symlinks, hardlinks, or non-regular files), so a
+retry after a failed refresh cannot be mistaken for a fresh snapshot.
 
 --compare is fail-closed: a malformed snapshot, a moved head, a changed state, a
 new or edited item, a vanished item, or a list shorter than the start snapshot
@@ -180,7 +184,9 @@ export function isSnapshot(value) {
     return false;
   }
   if (!Number.isInteger(value.pr) || value.pr <= 0) return false;
-  if (typeof value.repo !== 'string' || !value.repo.includes('/')) return false;
+  if (typeof value.repo !== 'string' || !REPO_SLUG_RE.test(value.repo)) {
+    return false;
+  }
   if (!/^[0-9a-f]{40}$/.test(value.headRefOid ?? '')) return false;
   if (typeof value.state !== 'string' || value.state === '') return false;
   if (value.capturedAt !== undefined && !isIsoUtcTimestamp(value.capturedAt)) {
@@ -226,6 +232,15 @@ export function compareSnapshots(start, now) {
   if (start.pr !== now.pr || start.repo !== now.repo) {
     reasons.push(
       `snapshots describe different PRs: ${start.repo}#${start.pr} vs ${now.repo}#${now.pr}`,
+    );
+  }
+  if (
+    start.capturedAt !== undefined &&
+    now.capturedAt !== undefined &&
+    Date.parse(now.capturedAt) < Date.parse(start.capturedAt)
+  ) {
+    reasons.push(
+      `now snapshot (${now.capturedAt}) is older than start snapshot (${start.capturedAt})`,
     );
   }
   if (start.headRefOid !== now.headRefOid) {
@@ -321,7 +336,7 @@ function parseArgs(argv) {
     missingValue: null,
   };
   const nextVal = (flag, i) => {
-    if (i + 1 >= argv.length) {
+    if (i + 1 >= argv.length || argv[i + 1] === '') {
       out.missingValue = flag;
       return null;
     }
@@ -363,6 +378,9 @@ function parseArgs(argv) {
     } else if (arg.startsWith('-')) {
       out.unknown = arg;
       break;
+    } else {
+      out.unknown = arg;
+      break;
     }
   }
   return out;
@@ -400,34 +418,63 @@ function sameFilePath(a, b) {
   return false;
 }
 
-function safeWriteFile(filePath, content) {
+function inspectWritableTarget(filePath) {
   try {
     const st = lstatSync(filePath);
     if (st.isSymbolicLink()) {
       return {
         ok: false,
+        existedRegular: false,
         error: `refusing to write through symbolic link ${filePath}`,
       };
     }
     if (!st.isFile()) {
       return {
         ok: false,
+        existedRegular: false,
         error: `refusing to write to non-regular file ${filePath}`,
       };
     }
     if (st.nlink !== 1) {
       return {
         ok: false,
+        existedRegular: false,
         error: `refusing to write through hard link ${filePath} (${st.nlink} names)`,
       };
     }
+    return { ok: true, existedRegular: true };
   } catch (error) {
     if (error?.code !== 'ENOENT') {
       return {
         ok: false,
+        existedRegular: false,
         error: `cannot inspect output path ${filePath}: ${error.message}`,
       };
     }
+    return { ok: true, existedRegular: false };
+  }
+}
+
+function removeStaleSnapshot(filePath) {
+  const checked = inspectWritableTarget(filePath);
+  if (!checked.ok) return { removed: false, error: checked.error };
+  if (!checked.existedRegular) return { removed: false, error: null };
+  try {
+    unlinkSync(filePath);
+    return { removed: true, error: null };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { removed: false, error: null };
+    return {
+      removed: false,
+      error: `could not remove stale snapshot ${filePath}: ${error.message}`,
+    };
+  }
+}
+
+function safeWriteFile(filePath, content) {
+  const checked = inspectWritableTarget(filePath);
+  if (!checked.ok) {
+    return { ok: false, error: checked.error };
   }
   try {
     writeFileSync(filePath, content);
@@ -538,12 +585,18 @@ function main(argv) {
     !Number.isInteger(args.pr) ||
     args.pr <= 0 ||
     !args.repo ||
+    !REPO_SLUG_RE.test(args.repo) ||
     !args.snapshot
   ) {
     process.stderr.write(
-      `verify-pr guard: --pr, --repo and --snapshot are required\n\n${HELP}`,
+      `verify-pr guard: --pr, --repo (<owner>/<repo>) and --snapshot are required\n\n${HELP}`,
     );
     return 2;
+  }
+  const targetCheck = inspectWritableTarget(args.snapshot);
+  if (!targetCheck.ok) {
+    process.stderr.write(`verify-pr guard: ${targetCheck.error}\n`);
+    return 1;
   }
   const run = (ghArgs) =>
     spawnSync('gh', ghArgs, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -553,8 +606,15 @@ function main(argv) {
     run,
   });
   if (!ok) {
+    const cleaned = targetCheck.existedRegular
+      ? removeStaleSnapshot(args.snapshot)
+      : { removed: false, error: null };
+    const statusNote = cleaned.removed
+      ? `removed stale ${args.snapshot}`
+      : 'nothing written';
+    const extra = cleaned.error ? `  ${cleaned.error}\n` : '';
     process.stderr.write(
-      `verify-pr guard: snapshot refused, nothing written\n${errors.map((e) => `  ${e}\n`).join('')}`,
+      `verify-pr guard: snapshot refused, ${statusNote}\n${errors.map((e) => `  ${e}\n`).join('')}${extra}`,
     );
     return 1;
   }

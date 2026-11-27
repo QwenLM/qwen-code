@@ -6099,7 +6099,30 @@ describe('checkGuardVerdict and --guard / --require-guard gate', () => {
         );
         expect(noContextGuard.status).toBe(1);
         expect(noContextGuard.stdout).toMatch(
-          /--require-guard requires a valid host --context snapshot/,
+          /--require-guard requires a digest-bound host --context snapshot/,
+        );
+
+        // --require-guard with --context but missing --context-sha256 also fails closed.
+        const unboundContextGuard = spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            hostCtxPath,
+            '--context-root',
+            cloneDir,
+            '--require-guard',
+            '--guard',
+            verdictPath,
+            '--guard-sha256',
+            guardSha,
+            roundDir,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(unboundContextGuard.status).toBe(1);
+        expect(unboundContextGuard.stdout).toMatch(
+          /--require-guard requires a digest-bound host --context snapshot/,
         );
 
         // --require-guard without --guard fails closed.
@@ -6255,6 +6278,275 @@ describe('checkGuardVerdict and --guard / --require-guard gate', () => {
         expect(planted.stdout).toMatch(
           /guard-verdict\.json must not reside inside the PR-writable artifact directory/,
         );
+      } finally {
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'supports runner-backed microvm (firecracker) and provider-vm artifacts together with --require-guard',
+    () => {
+      const baseDir = mkdtempSync(join(tmpdir(), 'verify-pr-check-vm-guard-'));
+      try {
+        const BASE_OID = 'a'.repeat(40);
+        const SHA = (ch) => ch.repeat(64);
+        const sha256 = (text) =>
+          createHash('sha256').update(text, 'utf8').digest('hex');
+
+        for (const variant of [
+          {
+            name: 'firecracker',
+            backend: 'firecracker',
+            mode: 'microvm',
+            boundaryNote: 'Firecracker microVM (hardware-isolated).',
+            extraRecord: {
+              workerPid: 20002,
+              workerExe: '/firecracker-v1.18.0-aarch64',
+              workerExitEvidence: 'absent',
+            },
+          },
+          {
+            name: 'provider-vm',
+            backend: 'provider-vm',
+            mode: 'vm',
+            boundaryNote: 'Disposable provider-vm (hardware-isolated).',
+            extraRecord: {
+              backendVersion: 'aliyun-ecs-2014-05-26',
+              platform: 'aliyun-cn-hangzhou',
+              workerPid: 20002,
+              workerExe: '/firecracker-v1.18.0-aarch64',
+              workerExitEvidence: 'absent',
+              providerLifecycle: {
+                allocationId: 'i-bp1guard001',
+                freshDiskId: 'd-bp1guard001',
+                boundRunId: 'provider-vm-run-01',
+                boundHeadRefOid: HEAD,
+                terminationState: 'terminated',
+                diskDeleted: true,
+              },
+            },
+          },
+        ]) {
+          const caseRoot = join(baseDir, variant.name);
+          const vaultDir = join(caseRoot, 'vault');
+          const hostDir = join(caseRoot, 'host');
+          mkdirSync(join(vaultDir, 'evidence'), { recursive: true });
+          mkdirSync(hostDir, { recursive: true });
+
+          const hostCtxPath = join(hostDir, 'pr.json');
+          const hostCtxRaw = JSON.stringify({
+            repo: 'QwenLM/qwen-code',
+            pr: 18549,
+            baseRefOid: BASE_OID,
+            headRefOid: HEAD,
+            trustClassification: {
+              prTrust: 'external',
+              executionClass: 'hardware-isolated',
+              escalationReasons: [],
+              headRefOid: HEAD,
+            },
+          });
+          writeFileSync(hostCtxPath, hostCtxRaw);
+          const ctxSha = sha256(hostCtxRaw);
+
+          const execRecord = {
+            schemaVersion: 'verify-pr-exec-record-v1',
+            runId: `${variant.name}-run-01`,
+            repo: 'QwenLM/qwen-code',
+            pr: 18549,
+            baseRefOid: BASE_OID,
+            headRefOid: HEAD,
+            contextDigest: ctxSha,
+            prTrust: 'external',
+            executionClass: 'hardware-isolated',
+            backend: variant.backend,
+            backendVersion: 'v1.18.0',
+            platform: 'linux-aarch64',
+            kernelDigest: SHA('1'),
+            rootfsDigest: SHA('2'),
+            trustedInputDigest: SHA('3'),
+            launchPolicyDigest: SHA('4'),
+            startedAt: '2026-11-27T12:00:00Z',
+            endedAt: '2026-11-27T12:00:08Z',
+            destroyedAt: '2026-11-27T12:00:09Z',
+            supervisorPid: 20001,
+            teardownStatus: 'destroyed',
+            diskDestroyed: true,
+            tokenRevoked: true,
+            outputStatus: 'complete',
+            ...variant.extraRecord,
+          };
+          const execRecordPath = join(hostDir, 'execution-record.json');
+          const execRecordRaw = JSON.stringify(execRecord);
+          writeFileSync(execRecordPath, execRecordRaw);
+          const execRecordSha = sha256(execRecordRaw);
+
+          writeFileSync(
+            join(vaultDir, 'report.md'),
+            `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** ${variant.boundaryNote}\n`,
+          );
+          writeFileSync(join(vaultDir, 'verdict.txt'), 'merge-ready\n');
+          writeFileSync(
+            join(vaultDir, 'assertions.json'),
+            JSON.stringify({ total: 4, pass: 4, fail: 0 }),
+          );
+          writeFileSync(
+            join(vaultDir, 'boundary.json'),
+            JSON.stringify({
+              mode: variant.mode,
+              backend: variant.backend,
+              executionClass: 'hardware-isolated',
+              prTrust: 'external',
+              runId: execRecord.runId,
+              headRefOid: HEAD,
+              executionRecordSha256: execRecordSha,
+              writtenAfterTeardown: true,
+            }),
+          );
+          writeFileSync(join(vaultDir, 'evidence', '01-vm.png'), 'png');
+
+          const nowIso = new Date().toISOString();
+          const startIso = new Date(Date.now() - 30_000).toISOString();
+          const makeSnap = (capturedAt, extra = {}) => ({
+            pr: 18549,
+            repo: 'QwenLM/qwen-code',
+            headRefOid: HEAD,
+            state: 'OPEN',
+            capturedAt,
+            reviews: [],
+            reviewComments: [],
+            issueComments: [],
+            ...extra,
+          });
+          const startPath = join(hostDir, 'guard-start.json');
+          const nowPath = join(hostDir, 'guard-now.json');
+          const verdictPath = join(hostDir, 'guard-verdict.json');
+          writeFileSync(startPath, JSON.stringify(makeSnap(startIso)));
+          writeFileSync(nowPath, JSON.stringify(makeSnap(nowIso)));
+
+          const gClean = spawnSync(
+            process.execPath,
+            [
+              GUARD_SCRIPT,
+              '--compare',
+              '--start',
+              startPath,
+              '--now',
+              nowPath,
+              '--out',
+              verdictPath,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(gClean.status).toBe(0);
+          const guardSha = /^ {2}guard-sha256 {2}([0-9a-f]{64})$/m.exec(
+            gClean.stdout,
+          )[1];
+
+          // Without --execution-record, the container-style command refuses valid VM output.
+          const missingExec = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              guardSha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(missingExec.status).toBe(1);
+          expect(missingExec.stdout).toMatch(/execution-record/i);
+
+          // Preserving the runner's --execution-record + --execution-record-sha256
+          // together with --require-guard passes cleanly for both firecracker and provider-vm.
+          const vmOk = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--execution-record',
+              execRecordPath,
+              '--execution-record-sha256',
+              execRecordSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              guardSha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(vmOk.status).toBe(0);
+
+          // A dirty guard verdict still blocks publication on the same valid VM artifacts.
+          writeFileSync(
+            nowPath,
+            JSON.stringify(
+              makeSnap(new Date().toISOString(), {
+                issueComments: [
+                  {
+                    id: 7223764648,
+                    stamp: nowIso,
+                    body: '[P1] review arrived',
+                  },
+                ],
+              }),
+            ),
+          );
+          const gDirty = spawnSync(
+            process.execPath,
+            [
+              GUARD_SCRIPT,
+              '--compare',
+              '--start',
+              startPath,
+              '--now',
+              nowPath,
+              '--out',
+              verdictPath,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(gDirty.status).toBe(1);
+          const dirtySha = sha256(readFileSync(verdictPath, 'utf8'));
+          const vmDirty = spawnSync(
+            process.execPath,
+            [
+              SCRIPT,
+              '--context',
+              hostCtxPath,
+              '--context-sha256',
+              ctxSha,
+              '--execution-record',
+              execRecordPath,
+              '--execution-record-sha256',
+              execRecordSha,
+              '--require-guard',
+              '--guard',
+              verdictPath,
+              '--guard-sha256',
+              dirtySha,
+              vaultDir,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(vmDirty.status).toBe(1);
+          expect(vmDirty.stdout).toMatch(
+            /--guard verdict is dirty: issueComments: 7223764648 is new/,
+          );
+        }
       } finally {
         rmSync(baseDir, { recursive: true, force: true });
       }

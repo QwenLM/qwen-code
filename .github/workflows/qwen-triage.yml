@@ -3209,8 +3209,9 @@ jobs:
                 .authorAssociation == "OWNER"
                 or .authorAssociation == "MEMBER"
                 or .authorAssociation == "COLLABORATOR";
+              def isObjOrNull: . == null or type == "object";
               [.[].data.repository.pullRequest] as $p
-              | if ($p | length) == 0 or any($p[]; (.reviewThreads.nodes | type) != "array" or (.latestOpinionatedReviews.nodes | type) != "array" or (.comments.nodes | type) != "array" or (all(.latestOpinionatedReviews.nodes[]; type == "object") | not) or (all(.comments.nodes[]; type == "object") | not))
+              | if ($p | length) == 0 or any($p[]; type != "object" or (.reviewThreads.nodes | type) != "array" or (.latestOpinionatedReviews.nodes | type) != "array" or (.comments.nodes | type) != "array" or (all(.latestOpinionatedReviews.nodes[]; type == "object" and (.author | isObjOrNull) and (.commit | isObjOrNull)) | not) or (all(.comments.nodes[]; type == "object" and (.author | isObjOrNull)) | not) or (all(.reviewThreads.nodes[]; type == "object" and (.comments.nodes | type) == "array" and all(.comments.nodes[]; type == "object" and (.author | isObjOrNull) and (.originalCommit | isObjOrNull) and (.pullRequestReview | isObjOrNull))) | not))
                 then error("malformed review state")
                 else {threads: [$p[].reviewThreads.nodes[]
                   | {resolved: .isResolved, outdated: .isOutdated, path, line, originalLine,

@@ -952,7 +952,7 @@ describe('local container recipe pins', () => {
       } else if (
         kind === 'guard' &&
         text.endsWith(guardLogSuffix) &&
-        text.includes('--out')
+        (text.includes('--out') || text.includes('--snapshot'))
       ) {
         text = text.slice(0, -guardLogSuffix.length).trimEnd();
       } else if (
@@ -1001,20 +1001,27 @@ describe('local container recipe pins', () => {
         );
       }
       if (kind === 'guard') {
-        const match = text.match(
+        const compareMatch = text.match(
           exact(
             String.raw` --compare --start (${pathValue}) --now (${pathValue}) --out (${pathValue})`,
           ),
         );
-        return (
-          match !== null &&
-          match.slice(1).every((path) => validDocumentedPath(path))
+        if (compareMatch !== null) {
+          return compareMatch
+            .slice(1)
+            .every((path) => validDocumentedPath(path));
+        }
+        const snapMatch = text.match(
+          exact(
+            String.raw` --pr <n> --repo (${repo}) --snapshot (${pathValue})`,
+          ),
         );
+        return snapMatch !== null && validDocumentedPath(snapMatch[2]);
       }
       if (kind === 'check') {
         const match = text.match(
           exact(
-            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)? (${pathValue})`,
+            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)? (${pathValue})`,
           ),
         );
         return (
@@ -7088,6 +7095,8 @@ describe('local container recipe pins', () => {
                       [
                         'prepare.log',
                         'pr.sha256',
+                        'guard-now.json',
+                        'guard-verdict.json',
                         'guard.log',
                         'guard.sha256',
                         'review-threads.json',
@@ -7594,10 +7603,10 @@ describe('local container recipe pins', () => {
       const families = calls.map((call) => call.family);
       const actions = calls.map((call) => call.action);
       return (
-        calls.length === 26 &&
+        calls.length === 28 &&
         families.filter((family) => family === 'prepare').length === 4 &&
-        families.filter((family) => family === 'check').length === 4 &&
-        families.filter((family) => family === 'guard').length === 1 &&
+        families.filter((family) => family === 'check').length === 5 &&
+        families.filter((family) => family === 'guard').length === 2 &&
         families.filter((family) => family === 'watch-state').length === 12 &&
         families.filter((family) => family === 'watch-gate').length === 3 &&
         families.filter((family) => family === 'model-proxy').length === 1 &&
@@ -7609,11 +7618,18 @@ describe('local container recipe pins', () => {
       );
     };
     expect(await onlyDocumentedPrepareCalls(skill)).toBe(true);
-    // Hostile mutations of the new guard-verdict and --require-guard gate must
-    // be rejected by the AST auditor.
+    // Hostile mutations of the new guard-refresh, guard-verdict, VM execution
+    // record, and --require-guard gate must be rejected by the AST auditor.
     for (const [label, mutated] of [
       [
-        'guard from untrusted PR clone',
+        'guard refresh from untrusted PR clone',
+        skill.replace(
+          'node <trusted-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo>',
+          'node <pr-clone>/scripts/verify-pr-guard.mjs \\\n  --pr <n> --repo <owner>/<repo>',
+        ),
+      ],
+      [
+        'guard compare from untrusted PR clone',
         skill.replace(
           'node <trusted-clone>/scripts/verify-pr-guard.mjs --compare',
           'node <pr-clone>/scripts/verify-pr-guard.mjs --compare',
@@ -7636,6 +7652,13 @@ describe('local container recipe pins', () => {
       [
         'command injection appended to guard check',
         skill.replace('--require-guard \\', '--require-guard --unknown \\'),
+      ],
+      [
+        'untrusted execution-record path in VM publish check',
+        skill.replace(
+          '--execution-record <execution-record> \\',
+          '--execution-record /tmp/evil.json \\',
+        ),
       ],
     ]) {
       expect(await onlyDocumentedPrepareCalls(mutated), label).toBe(false);

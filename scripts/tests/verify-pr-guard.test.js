@@ -503,6 +503,15 @@ describe('compareSnapshots', () => {
     expect(other.reasons.join('\n')).toMatch(
       /snapshots describe different PRs/,
     );
+
+    const inverted = compareSnapshots(
+      snapshot({ capturedAt: '2026-11-27T12:10:00.000Z' }),
+      snapshot({ capturedAt: '2026-11-27T12:05:00.000Z' }),
+    );
+    expect(inverted.clean).toBe(false);
+    expect(inverted.reasons).toContain(
+      'now snapshot (2026-11-27T12:05:00.000Z) is older than start snapshot (2026-11-27T12:10:00.000Z)',
+    );
   });
 
   it('reports every reason, so one fetch is enough to fold in', () => {
@@ -723,8 +732,9 @@ esac`;
     mkdirSync(dirOut);
     expect(run([...baseArgs, '--out', dirOut]).status).toBe(1);
 
-    // Usage errors for missing value, misplaced --out, and unknown flag.
+    // Usage errors for missing/empty value, misplaced --out, and unknown flag.
     expect(run([...baseArgs, '--out']).status).toBe(2);
+    expect(run([...baseArgs, '--out', '']).status).toBe(2);
     expect(
       run([
         '--pr',
@@ -738,6 +748,19 @@ esac`;
       ]).status,
     ).toBe(2);
     expect(run(['--unknown-flag']).status).toBe(2);
+    expect(run([...baseArgs, 'stray-positional']).status).toBe(2);
+    expect(
+      run([
+        '--pr',
+        '7',
+        '--repo',
+        'bad/repo/slug',
+        '--snapshot',
+        join(dir, 'bad-repo.json'),
+      ]).status,
+    ).toBe(2);
+    expect(isSnapshot(snapshot({ repo: 'bad/repo/slug' }))).toBe(false);
+    expect(isSnapshot(snapshot({ repo: 'owner/' }))).toBe(false);
   });
 
   it('leaves no file behind when a call fails, so a retry cannot read as a snapshot', () => {
@@ -755,5 +778,79 @@ esac`;
     expect(result.stderr).toContain('snapshot refused, nothing written');
     expect(result.stderr).toContain('reviewComments: gh exited 1');
     expect(existsSync(out)).toBe(false);
+  });
+
+  it('removes a stale regular snapshot when a refresh fails so a retry cannot pass with old data, without touching symlinks or hardlinks', () => {
+    const dir = tmpDir();
+    const startPath = join(dir, 'guard-start.json');
+    const nowPath = join(dir, 'guard-now.json');
+    const verdictPath = join(dir, 'guard-verdict.json');
+
+    // First capture succeeds and writes both start and now snapshots.
+    const okEnv = withGh(dir, GH_OK);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', startPath], okEnv)
+        .status,
+    ).toBe(0);
+    expect(
+      run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
+        .status,
+    ).toBe(0);
+    expect(existsSync(nowPath)).toBe(true);
+
+    // Next refresh fails because gh is unavailable: the stale regular
+    // guard-now.json is removed so a subsequent compare cannot silently reuse it.
+    const failing = GH_OK.replace(
+      `  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;`,
+      `  *pulls/7/comments*) echo 'dial tcp: i/o timeout' >&2; exit 1 ;;`,
+    );
+    const refreshFail = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+      withGh(dir, failing),
+    );
+    expect(refreshFail.status).toBe(1);
+    expect(refreshFail.stderr).toContain(`removed stale ${nowPath}`);
+    expect(existsSync(nowPath)).toBe(false);
+
+    const compareAfterFail = run([
+      '--compare',
+      '--start',
+      startPath,
+      '--now',
+      nowPath,
+      '--out',
+      verdictPath,
+    ]);
+    expect(compareAfterFail.status).toBe(1);
+    expect(compareAfterFail.stdout).toContain(
+      'now snapshot is missing or malformed',
+    );
+    expect(JSON.parse(readFileSync(verdictPath, 'utf8')).clean).toBe(false);
+
+    // Safety negative control: symlinks and hardlinks are refused before
+    // fetching and are never unlinked on failure.
+    const protectedTarget = join(dir, 'protected.json');
+    writeFileSync(protectedTarget, 'do-not-delete');
+    const symSnap = join(dir, 'sym-snap.json');
+    symlinkSync(protectedTarget, symSnap);
+    const symRes = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', symSnap],
+      withGh(dir, failing),
+    );
+    expect(symRes.status).toBe(1);
+    expect(symRes.stderr).toContain('symbolic link');
+    expect(existsSync(symSnap)).toBe(true);
+    expect(readFileSync(protectedTarget, 'utf8')).toBe('do-not-delete');
+
+    const hardSnap = join(dir, 'hard-snap.json');
+    linkSync(protectedTarget, hardSnap);
+    const hardRes = run(
+      ['--pr', '7', '--repo', 'owner/repo', '--snapshot', hardSnap],
+      withGh(dir, failing),
+    );
+    expect(hardRes.status).toBe(1);
+    expect(hardRes.stderr).toContain('hard link');
+    expect(existsSync(hardSnap)).toBe(true);
+    expect(readFileSync(protectedTarget, 'utf8')).toBe('do-not-delete');
   });
 });
