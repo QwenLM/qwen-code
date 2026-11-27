@@ -12,6 +12,219 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.28.7](https://github.com/QwenLM/qwen-code/releases/tag/v0.28.7) - 2026-11-26
+
+### Highlights
+
+- Qwen Code CLI is now available on the Harness kernel, with usage statistics off by default unless privacy.usageStatisticsEnabled is true. ([#18351](https://github.com/QwenLM/qwen-code/pull/18351))
+- Repeated-tool-call rejections now explain the cause and suggest /compress or /clear to recover, across TUI, headless, and daemon sessions. ([#18317](https://github.com/QwenLM/qwen-code/pull/18317))
+- Web Shell applies the selected thinking level at session startup, so the first prompt uses it without a second request. ([#18326](https://github.com/QwenLM/qwen-code/pull/18326))
+- The interactive CLI saves reasoning effort and context window per model and restores them on model switch or relaunch. ([#18316](https://github.com/QwenLM/qwen-code/pull/18316))
+- Worktree snapshots are retained per workspace by a configurable count and restored on reopen; worktree.maxRetained set to zero disables sweeping. ([#18009](https://github.com/QwenLM/qwen-code/pull/18009))
+- Managed Web Terminal tickets are stored in SQL, so any control-plane instance can serve the WebSocket upgrade while keeping single-use and cluster-wide caps. ([#18426](https://github.com/QwenLM/qwen-code/pull/18426))
+
+### Breaking Changes
+
+- Qwen Code no longer detects model loops or caps tool calls; tool results and errors now reach the model unchanged on all surfaces. ([#18418](https://github.com/QwenLM/qwen-code/pull/18418)) by @qqqys
+  - Qwen Code 不再检测模型循环或限制工具调用次数，工具结果和错误在所有界面原样传给模型。
+
+### Qwen Code CLI and Mods
+
+New Qwen Code CLI package on the Harness kernel, plus compatibility for Claude Code mods and simplified tool-call handling.
+
+- Adds the Qwen Code CLI product package on the Harness kernel, with usage statistics off by default unless privacy.usageStatisticsEnabled is set to true. ([#18351](https://github.com/QwenLM/qwen-code/pull/18351))
+- Mods written for Claude Code 2.1.332 now load in Qwen Code, registering their commands and drawing their band, with new hook names skipped via a one-line diagnostic. ([#18435](https://github.com/QwenLM/qwen-code/pull/18435))
+
+### Session Recovery and Takeover
+
+Improves how sessions, leases, and hosted Harness instances hand off and recover across control planes.
+
+- Lets clean idle suspensions and Action parks release their Session placement so another healthy Harness can take over before the old writer lease expires. ([#18404](https://github.com/QwenLM/qwen-code/pull/18404))
+- managed-agent: Reattach Hosted Harness sessions across control planes ([#18433](https://github.com/QwenLM/qwen-code/pull/18433))
+- Hosted Harness takeovers now end the released writer's lease in the same transaction, letting another pool member take over sooner. ([#18443](https://github.com/QwenLM/qwen-code/pull/18443))
+- Managed Agent recovery and single-Session views now read committed Harness status across replicas, with authenticated access and input blocked during active Turns. ([#18440](https://github.com/QwenLM/qwen-code/pull/18440))
+- Added seven Hosted Harness process cases covering Action parking wake scenarios and widened parked-seal Prompt ID fields to 128 characters. ([#18419](https://github.com/QwenLM/qwen-code/pull/18419))
+- Added MySQL regression tests with two real Harness processes verifying that a second Harness takes over a parked public Shell Action and the tool runs exactly once. ([#18410](https://github.com/QwenLM/qwen-code/pull/18410))
+
+### Multi-Instance Event and Ticket Sync
+
+Lets control-plane replicas share session events and Web Terminal tickets promptly and reliably.
+
+- Managed Web Terminal tickets are now stored in SQL, letting any control-plane instance serve the WebSocket upgrade while keeping single-use and cluster-wide ticket caps. ([#18426](https://github.com/QwenLM/qwen-code/pull/18426))
+- Session event streams now pick up events committed by other control-plane instances within a few hundred milliseconds instead of waiting for the 5-second store re-read. ([#18431](https://github.com/QwenLM/qwen-code/pull/18431))
+
+### Web Shell UI and Settings
+
+Refines Web Shell settings, drafts, suggestions, and workspace management for a smoother experience.
+
+- Web Shell adds a Settings → UI switch, on by default, to make arrow-key prompt history optional; Ctrl+R still opens history search. ([#18399](https://github.com/QwenLM/qwen-code/pull/18399))
+- Web Shell now sends follow-up suggestions only when explicitly accepted, so attachments no longer include unadded suggested text. ([#18437](https://github.com/QwenLM/qwen-code/pull/18437))
+- Web Shell drafts now preserve custom inline chip positions across reloads and session switches, restoring chips instead of showing raw serialized references. ([#18398](https://github.com/QwenLM/qwen-code/pull/18398))
+- Every locally trusted workspace in the Web Shell sidebar now has its own management menu for MCP, Skills, Extensions, Channels and Settings, plus a Trust action for untrusted ones. ([#18140](https://github.com/QwenLM/qwen-code/pull/18140))
+- Web Shell now applies the selected thinking level during session startup on hosts that support startup configuration, so the first prompt uses it without a second request. ([#18326](https://github.com/QwenLM/qwen-code/pull/18326))
+
+### Model and Prompt Behavior
+
+Improves how model requests, permission modes, and per-model settings are handled and persisted.
+
+- Appends the effective permission mode to model requests only when it changes, preserving the cacheable prompt prefix and persisting snapshots across resume and compaction. ([#18257](https://github.com/QwenLM/qwen-code/pull/18257))
+- The interactive CLI now saves reasoning effort and context window per model and restores them on model switch or relaunch. ([#18316](https://github.com/QwenLM/qwen-code/pull/18316))
+- core: explain how to recover from a repeated-tool-call rejection ([#18317](https://github.com/QwenLM/qwen-code/pull/18317))
+
+### Desktop and Worktree Management
+
+Enhances desktop Git status display and adds configurable worktree snapshot retention.
+
+- Fixes missing compact Git status severity badges in the desktop toolbar and adds width-aware progressive disclosure for Git branch indicators and status bar typography. ([#18359](https://github.com/QwenLM/qwen-code/pull/18359))
+- Worktree snapshots are now retained per workspace by a configurable count and restored on reopen; worktree.maxRetained set to zero disables automatic sweeping. ([#18009](https://github.com/QwenLM/qwen-code/pull/18009))
+
+### Daemon and Localization Fixes
+
+Fixes daemon admission under IO load and corrects Russian localization across the Web Shell.
+
+- The daemon's load-based admission gate now also checks event-loop lag, so IO storms no longer block new child spawns while CPUs are idle. ([#18420](https://github.com/QwenLM/qwen-code/pull/18420))
+- Fixes Russian plural forms for extension and MCP server counts and quota durations, uses singular capability names, and updates six Russian Web Shell settings descriptions. ([#18320](https://github.com/QwenLM/qwen-code/pull/18320))
+
+### Release and CI Reliability
+
+Speeds up release preparation and stabilizes CI test fixtures and export budgets.
+
+- Release preparation now uses a shallow single-commit checkout and fetches only version tags, avoiding full history clones on every release run. ([#18373](https://github.com/QwenLM/qwen-code/pull/18373))
+- The document export renderer byte budget is re-tracked to the latest CI measurement, and Docker integration cleanup no longer fails when its helper script was not checked out. ([#18456](https://github.com/QwenLM/qwen-code/pull/18456))
+- Updates verify-pr lifecycle test fixtures to use reaped child PIDs, fixing a flaky Linux unit test failure in the finalize end-to-end case. ([#18393](https://github.com/QwenLM/qwen-code/pull/18393))
+
+### Other Changes
+
+- serve: branch from nested workspace worktrees ([#18232](https://github.com/QwenLM/qwen-code/pull/18232))
+- Updated the English and Chinese Action parking coverage designs to record merged stages, implemented Shell lanes, passing Linux/MySQL runs, and remaining CI evidence. ([#18414](https://github.com/QwenLM/qwen-code/pull/18414))
+
+### 中文摘要
+
+#### 亮点
+
+- Qwen Code CLI 现已在 Harness 内核上提供，默认关闭使用统计，除非将 privacy.usageStatisticsEnabled 设为 true。 ([#18351](https://github.com/QwenLM/qwen-code/pull/18351))
+- 重复工具调用被拒时，错误信息会说明原因并建议使用 /compress 或 /clear 恢复，覆盖 TUI、无头模式和守护进程会话。 ([#18317](https://github.com/QwenLM/qwen-code/pull/18317))
+- Web Shell 在会话启动时应用所选思考级别，首个提示无需二次请求即可生效。 ([#18326](https://github.com/QwenLM/qwen-code/pull/18326))
+- 交互式 CLI 按模型保存 reasoning effort 和上下文窗口大小，并在切换模型或重新启动时恢复。 ([#18316](https://github.com/QwenLM/qwen-code/pull/18316))
+- 工作树快照按工作区按数量保留并在重新打开时恢复；worktree.maxRetained 设为零可关闭自动清理。 ([#18009](https://github.com/QwenLM/qwen-code/pull/18009))
+- Managed Web Terminal 票据存储于 SQL，任意控制平面实例均可处理 WebSocket 升级，同时保留一次性使用和集群级上限。 ([#18426](https://github.com/QwenLM/qwen-code/pull/18426))
+
+#### Qwen Code CLI 与 Mods
+
+在 Harness 内核上新增 Qwen Code CLI 产品包，兼容 Claude Code Mods，并简化工具调用处理。
+
+- 在 Harness 内核上新增 Qwen Code CLI 产品包，默认关闭使用统计，除非将 privacy.usageStatisticsEnabled 设为 true。 ([#18351](https://github.com/QwenLM/qwen-code/pull/18351))
+- 为 Claude Code 2.1.332 编写的 Mods 现在可在 Qwen Code 中加载、注册命令并绘制其 band，新钩子名称会以单行诊断跳过。 ([#18435](https://github.com/QwenLM/qwen-code/pull/18435))
+
+#### 会话恢复与接管
+
+改进会话、租约和托管 Harness 实例在控制平面之间的交接与恢复。
+
+- 允许干净的空闲挂起和 Action 停驻释放其 Session 放置，使其他健康的 Harness 能在旧写入租约到期前接管。 ([#18404](https://github.com/QwenLM/qwen-code/pull/18404))
+- 附件缓存为空的控制平面现在可在常驻会话冲突后重新附加到现有 Hosted Harness 会话，并将其复用于首个 Turn 和审批。 ([#18433](https://github.com/QwenLM/qwen-code/pull/18433))
+- Hosted Harness 接管时会在同一事务中结束已释放写入者的租约，使其他池成员能更早接管。 ([#18443](https://github.com/QwenLM/qwen-code/pull/18443))
+- Managed Agent 的恢复视图和单会话视图现在可跨副本读取已提交的 Harness 状态，访问需认证，活跃 Turn 期间会阻止新输入。 ([#18440](https://github.com/QwenLM/qwen-code/pull/18440))
+- 新增七个 Hosted Harness 进程用例覆盖 Action parking 唤醒场景，并将停放封存 Prompt ID 字段扩展至 128 字符。 ([#18419](https://github.com/QwenLM/qwen-code/pull/18419))
+- 新增使用两个真实 Harness 进程的 MySQL 回归测试，验证第二个 Harness 接管已停放的公共 Shell Action，且工具仅执行一次。 ([#18410](https://github.com/QwenLM/qwen-code/pull/18410))
+
+#### 多实例事件与票据同步
+
+让控制平面副本之间及时可靠地共享会话事件和 Web Terminal 票据。
+
+- Managed Web Terminal 票据现存储于 SQL，任意控制平面实例均可处理 WebSocket 升级，同时保留一次性使用和集群级票据上限。 ([#18426](https://github.com/QwenLM/qwen-code/pull/18426))
+- 会话事件流现在可在数百毫秒内获取其他控制平面实例提交的事件，而无需等待 5 秒的存储重读。 ([#18431](https://github.com/QwenLM/qwen-code/pull/18431))
+
+#### Web Shell 界面与设置
+
+优化 Web Shell 的设置、草稿、建议和工作区管理，带来更顺畅的体验。
+
+- Web Shell 在 Settings → UI 新增开关（默认开启），可关闭方向键调出历史提示；Ctrl+R 仍可搜索历史。 ([#18399](https://github.com/QwenLM/qwen-code/pull/18399))
+- Web Shell 仅在明确接受时才发送后续建议，附件提交不再夹带用户未添加的建议文本。 ([#18437](https://github.com/QwenLM/qwen-code/pull/18437))
+- Web Shell 草稿现在在刷新和切换会话后保留自定义内联 chip 的位置，恢复 chip 而非显示原始序列化引用。 ([#18398](https://github.com/QwenLM/qwen-code/pull/18398))
+- Web Shell 侧边栏中每个本地受信工作区现可管理 MCP、Skills、Extensions、Channels 和 Settings，未受信工作区可直接执行 Trust。 ([#18140](https://github.com/QwenLM/qwen-code/pull/18140))
+- 在支持启动配置的主机上，Web Shell 现在会在会话启动时应用所选的思考级别，使首个提示无需二次请求即可生效。 ([#18326](https://github.com/QwenLM/qwen-code/pull/18326))
+
+#### 模型与提示行为
+
+改进模型请求、权限模式以及按模型设置的保存与处理方式。
+
+- 仅在权限模式变化时向模型请求追加有效权限模式，保留可缓存的提示前缀，并在恢复和压缩过程中持久化快照。 ([#18257](https://github.com/QwenLM/qwen-code/pull/18257))
+- 交互式 CLI 现按模型保存 reasoning effort 和上下文窗口大小，并在切换模型或重新启动时恢复。 ([#18316](https://github.com/QwenLM/qwen-code/pull/18316))
+- 当服务商因重复工具调用拒绝请求时，错误信息现在会说明原因并建议使用 /compress 或 /clear 恢复，覆盖 TUI、无头模式和守护进程会话。 ([#18317](https://github.com/QwenLM/qwen-code/pull/18317))
+
+#### 桌面与工作树管理
+
+增强桌面 Git 状态显示，并新增可配置的工作树快照保留。
+
+- 修复桌面工具栏中紧凑 Git 状态严重性徽章缺失的问题，并为 Git 分支指示器和状态栏排版增加随宽度变化的渐进式显示。 ([#18359](https://github.com/QwenLM/qwen-code/pull/18359))
+- 工作树快照现按工作区按数量保留并在重新打开时恢复；worktree.maxRetained 设为零可关闭自动清理。 ([#18009](https://github.com/QwenLM/qwen-code/pull/18009))
+
+#### 守护进程与本地化修复
+
+修复 IO 负载下的守护进程准入问题，并纠正 Web Shell 的俄语本地化。
+
+- 守护进程的负载准入现在同时检查事件循环延迟，IO 高峰时 CPU 空闲也不再阻止启动新子进程。 ([#18420](https://github.com/QwenLM/qwen-code/pull/18420))
+- 修复扩展和 MCP 服务器数量及配额时长的俄语复数形式，使用单数能力名称，并更新六条俄语 Web Shell 设置说明。 ([#18320](https://github.com/QwenLM/qwen-code/pull/18320))
+
+#### 发布与 CI 可靠性
+
+加快发布准备，并稳定 CI 测试夹具与导出预算。
+
+- 发布准备现在使用浅层单提交检出并仅获取版本标签，避免每次发布运行都克隆完整历史。 ([#18373](https://github.com/QwenLM/qwen-code/pull/18373))
+- 文档导出渲染器的字节预算已按最新 CI 测量更新，Docker 集成清理步骤在辅助脚本未检出时不再失败。 ([#18456](https://github.com/QwenLM/qwen-code/pull/18456))
+- 更新 verify-pr 生命周期测试夹具以使用已回收的子进程 PID，修复 finalize 端到端用例中不稳定的 Linux 单元测试失败。 ([#18393](https://github.com/QwenLM/qwen-code/pull/18393))
+
+#### 其他变更
+
+- serve: branch from nested workspace worktrees ([#18232](https://github.com/QwenLM/qwen-code/pull/18232))
+- 更新中英文 Action parking 覆盖设计文档，记录已合并阶段、已实现的 Shell 通道、通过的 Linux/MySQL 运行及剩余 CI 证据。 ([#18414](https://github.com/QwenLM/qwen-code/pull/18414))
+
+### Complete Change List (27 pull requests)
+
+#### Features
+
+- qwen: add the Qwen Code CLI package on the Harness kernel ([#18351](https://github.com/QwenLM/qwen-code/pull/18351)) by @sorrycc
+- managed-agent: Release and reclaim suspended Harness placements ([#18404](https://github.com/QwenLM/qwen-code/pull/18404)) by @doudouOUC
+- managed-agent: Store terminal tickets in SQL ([#18426](https://github.com/QwenLM/qwen-code/pull/18426)) by @doudouOUC
+- managed-agent: Wake event streams for other instances' commits ([#18431](https://github.com/QwenLM/qwen-code/pull/18431)) by @doudouOUC
+- web-shell: make arrow-key prompt history optional ([#18399](https://github.com/QwenLM/qwen-code/pull/18399)) by @callmeYe
+- cli: persist reasoning effort and context window per model ([#18316](https://github.com/QwenLM/qwen-code/pull/18316)) by @callmeYe
+- cli: retain and restore worktree snapshots across workspaces ([#18009](https://github.com/QwenLM/qwen-code/pull/18009)) by @wenshao
+- managed-agent: Read Harness recovery status across replicas ([#18440](https://github.com/QwenLM/qwen-code/pull/18440)) by @doudouOUC
+- mods: load and draw Mods written for Claude Code 2.1.332 ([#18435](https://github.com/QwenLM/qwen-code/pull/18435)) by @qqqys
+
+#### Bug Fixes
+
+- core: explain how to recover from a repeated-tool-call rejection ([#18317](https://github.com/QwenLM/qwen-code/pull/18317)) by @qqqys
+- web-shell: keep compact Git status badges visible and adapt status bar to width ([#18359](https://github.com/QwenLM/qwen-code/pull/18359)) by @callmeYe
+- core: append effective permission context before model requests ([#18257](https://github.com/QwenLM/qwen-code/pull/18257)) by @callmeYe
+- serve: branch from nested workspace worktrees ([#18232](https://github.com/QwenLM/qwen-code/pull/18232)) by @callmeYe
+- i18n: correct Russian counts and settings descriptions ([#18320](https://github.com/QwenLM/qwen-code/pull/18320)) by @callmeYe
+- web-shell: apply standalone reasoning at session startup ([#18326](https://github.com/QwenLM/qwen-code/pull/18326)) by @chiga0
+- managed-agent: Reattach Hosted Harness sessions across control planes ([#18433](https://github.com/QwenLM/qwen-code/pull/18433)) by @doudouOUC
+- managed-agent: Preserve wake prompt IDs across Action parking ([#18419](https://github.com/QwenLM/qwen-code/pull/18419)) by @doudouOUC
+- managed-agent: End released writer leases on takeover ([#18443](https://github.com/QwenLM/qwen-code/pull/18443)) by @doudouOUC
+- serve: Corroborate load-admission CPU signal with event-loop lag ([#18420](https://github.com/QwenLM/qwen-code/pull/18420)) by @wenshao
+- web-shell: require explicit follow-up acceptance with attachments ([#18437](https://github.com/QwenLM/qwen-code/pull/18437)) by @callmeYe
+- web-shell: restore custom inline tags in composer drafts ([#18398](https://github.com/QwenLM/qwen-code/pull/18398)) by @callmeYe
+- web-templates: re-track export renderer budget and guard Docker cleanup ([#18456](https://github.com/QwenLM/qwen-code/pull/18456)) by @yiliang114
+
+#### Performance
+
+- release: shallow-checkout prepare job and fetch version tags without trees ([#18373](https://github.com/QwenLM/qwen-code/pull/18373)) by @yiliang114
+
+#### Documentation
+
+- managed-agent: Sync Action parking rollout status ([#18414](https://github.com/QwenLM/qwen-code/pull/18414)) by @doudouOUC
+- web-shell: enable per-workspace management from sidebar menu and hover overview ([#18140](https://github.com/QwenLM/qwen-code/pull/18140)) by @wenshao
+
+#### Internal Changes
+
+- test(verify-pr): use reaped child PIDs for torn-down worker fixtures ([#18393](https://github.com/QwenLM/qwen-code/pull/18393)) by @wenshao
+- test(managed-agent): Cover healthy pool handover for parked Actions ([#18410](https://github.com/QwenLM/qwen-code/pull/18410)) by @doudouOUC
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.28.6...v0.28.7
+
 ## [0.28.6](https://github.com/QwenLM/qwen-code/releases/tag/v0.28.6) - 2026-11-26
 
 ### Highlights
