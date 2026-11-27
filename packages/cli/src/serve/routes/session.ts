@@ -9600,14 +9600,33 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
+        const sourceValue = body['source'];
+        const source =
+          sourceValue === 'cron' || sourceValue === 'wakeup'
+            ? sourceValue
+            : undefined;
+        if (
+          sourceValue !== undefined &&
+          ((kind === 'cron' &&
+            sourceValue !== 'cron' &&
+            sourceValue !== 'wakeup') ||
+            (kind !== 'cron' && sourceValue !== undefined))
+        ) {
+          res.status(400).json({
+            error: '`source` must be "cron" or "wakeup" for a cron task',
+          });
+          return;
+        }
         if (
           kind !== 'agent' &&
           kind !== 'shell' &&
           kind !== 'monitor' &&
-          kind !== 'workflow'
+          kind !== 'workflow' &&
+          kind !== 'cron'
         ) {
           res.status(400).json({
-            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+            error:
+              '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
           });
           return;
         }
@@ -9625,6 +9644,7 @@ export function registerSessionRoutes(
               taskId,
               kind,
               clientId !== undefined ? { clientId } : undefined,
+              source,
             ),
           );
       },

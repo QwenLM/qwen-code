@@ -54,6 +54,8 @@ let taskActivityKey = 'monitor:running';
 let taskActivityActive = false;
 let refreshTrigger = 0;
 let workflowsEnabled = false;
+let scheduledTaskActivityKey = '';
+const scheduledTasksHandler = vi.fn();
 let latestTasks: DaemonSessionTaskWithWorkflowStatus[] = [];
 
 function deferred<T>(): Deferred<T> {
@@ -116,6 +118,8 @@ function Harness() {
     connected,
     refreshTrigger,
     workflowsEnabled,
+    scheduledTasksHandler,
+    scheduledTaskActivityKey,
   );
   return null;
 }
@@ -144,6 +148,8 @@ beforeEach(() => {
   taskActivityActive = false;
   refreshTrigger = 0;
   workflowsEnabled = false;
+  scheduledTaskActivityKey = '';
+  scheduledTasksHandler.mockReset();
   latestTasks = [];
   sdkMock.actions.getTasks.mockReset();
   sdkMock.actions.getWorkflowTasks.mockReset();
@@ -179,6 +185,19 @@ it('keeps task rows while paused and reloads after the daemon and session reconn
   await rerenderHarness();
   expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
   expect(latestTasks.map((task) => task.id)).toEqual(['m2']);
+});
+
+it('distinguishes an unsupported legacy snapshot from a supported empty one', async () => {
+  sdkMock.actions.getTasks.mockResolvedValue(snapshot('session-a'));
+  await renderHarness();
+  expect(scheduledTasksHandler).not.toHaveBeenCalled();
+
+  sdkMock.actions.getTasks.mockResolvedValue({
+    ...snapshot('session-a'),
+    scheduledTasks: [],
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(3_000));
+  expect(scheduledTasksHandler).toHaveBeenCalledExactlyOnceWith([]);
 });
 
 it('uses the opt-in task snapshot when workflows are enabled', async () => {
@@ -637,5 +656,144 @@ describe('useBackgroundTasks', () => {
       await oldRequest.promise;
     });
     expect(latestTasks).toEqual([runningMonitor]);
+  });
+
+  it('opens the shared snapshot channel for scheduled-task activity without a second request path', async () => {
+    taskActivityKey = '';
+    sdkMock.actions.getTasks.mockResolvedValue({
+      ...snapshot('session-a'),
+      scheduledTasks: [
+        {
+          id: 'session-wakeup-1',
+          source: 'wakeup',
+          cronExpr: '@wakeup',
+          prompt: 'continue checking',
+          recurring: false,
+          createdAt: 100,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: 10_000,
+        },
+      ],
+    });
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).not.toHaveBeenCalled();
+
+    scheduledTaskActivityKey = 'wakeup:create:completed';
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledExactlyOnceWith({
+      silent: true,
+    });
+    expect(scheduledTasksHandler).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ id: 'session-wakeup-1', source: 'wakeup' }),
+    ]);
+  });
+
+  it('keeps the background-task cadence when schedules are also pending', async () => {
+    vi.useFakeTimers();
+    sdkMock.actions.getTasks.mockResolvedValue({
+      ...snapshot('session-a', [monitor('monitor-live', 'running')]),
+      scheduledTasks: [
+        {
+          id: 'pending-cron',
+          source: 'cron',
+          cronExpr: '*/5 * * * *',
+          prompt: 'keep polling',
+          recurring: true,
+          createdAt: 100,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: 90_000,
+          enabled: true,
+        },
+      ],
+    });
+    taskActivityActive = true;
+    scheduledTaskActivityKey = 'create-cron';
+    await renderHarness();
+
+    await act(() => vi.advanceTimersByTimeAsync(2_999));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses a bounded 30-second cadence for pending schedules and settles after an external stop', async () => {
+    vi.useFakeTimers();
+    let pending = true;
+    sdkMock.actions.getTasks.mockImplementation(() => {
+      const result = snapshot('session-a', [
+        monitor('settled-background', 'completed'),
+      ]);
+      result.scheduledTasks = pending
+        ? [
+            {
+              id: 'pending-wakeup',
+              source: 'wakeup',
+              cronExpr: '@wakeup',
+              prompt: 'continue checking',
+              recurring: false,
+              createdAt: 100,
+              expiresAt: null,
+              lastFiredAt: null,
+              nextRunAt: 90_000,
+              enabled: true,
+            },
+          ]
+        : [];
+      return Promise.resolve(result);
+    });
+    taskActivityKey = 'scheduled-activity';
+    scheduledTaskActivityKey = 'create-wakeup';
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(29_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    pending = false;
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(scheduledTasksHandler).toHaveBeenLastCalledWith([]);
+
+    // Even with a retained terminal task row, the external stop is observed
+    // before polling settles; no later read may resurrect it.
+    await act(() => vi.advanceTimersByTimeAsync(9_000));
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-syncs immediately when scheduledTaskActivityKey changes while polling at 30s cadence', async () => {
+    vi.useFakeTimers();
+    sdkMock.actions.getTasks.mockImplementation(() => {
+      const result = snapshot('session-a', []);
+      result.scheduledTasks = [
+        {
+          id: 'active-cron',
+          source: 'cron',
+          cronExpr: '*/5 * * * *',
+          prompt: 'watch',
+          recurring: true,
+          createdAt: 100,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: 90_000,
+          enabled: true,
+        },
+      ];
+      return Promise.resolve(result);
+    });
+    scheduledTaskActivityKey = 'create-1';
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    // Settled at the 30s cadence; a new cron_delete/cron_create bumps
+    // scheduledTaskActivityKey and must trigger an immediate refresh without
+    // waiting for the 30s timer.
+    scheduledTaskActivityKey = 'create-1|delete-1';
+    await rerenderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
   });
 });

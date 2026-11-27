@@ -2224,4 +2224,122 @@ describe('ChatSurface', () => {
     );
     expect(onError).not.toHaveBeenCalled();
   });
+
+  it('supports transcriptContent, footer slots/ref/style, decisionRef, deduplicated approval-overlay testid, questionKeyboardActive, dialogOpen OR-combination, and memoized editorCommands', () => {
+    captured.transcript = undefined;
+    const footerRef = { current: null as HTMLDivElement | null };
+    const decisionRef = { current: null as HTMLDivElement | null };
+    const stableCommands = [
+      { name: 'help', description: 'Show help', category: 'builtin' as const },
+    ];
+    const approvalReq = permissionRequest('a-main');
+    const approvalController = fakeController({
+      pendingApprovals: [
+        { id: 'a-main', status: 'pending', request: approvalReq },
+      ],
+    });
+
+    const container = mountReact(
+      <ChatSurface
+        controller={approvalController}
+        transcriptContent={
+          <div data-testid="custom-transcript-host">custom</div>
+        }
+        footerRef={footerRef}
+        footerStyle={{ maxWidth: '720px' }}
+        footerClassName="app-footer"
+        footerHeader={<div data-testid="footer-header">top</div>}
+        footerTrailing={<div data-testid="footer-trailing">bottom</div>}
+        decisionRef={decisionRef}
+        decisionClassName="app-approval"
+        decisionTestId="approval-overlay"
+        approvalKeyboardActive={true}
+        questionKeyboardActive={false}
+        commands={stableCommands}
+      />,
+    );
+
+    // transcriptContent replaces default TranscriptViewport.
+    expect(
+      container.querySelector('[data-testid="custom-transcript-host"]'),
+    ).not.toBeNull();
+    expect(captured.transcript).toBeUndefined();
+
+    // footerRef, footerStyle, footerHeader, and footerTrailing attach on the
+    // footer wrapper, with footerTrailing outside the composerHidden wrapper.
+    expect(footerRef.current).toBe(container.querySelector('.app-footer'));
+    expect(footerRef.current?.style.maxWidth).toBe('720px');
+    expect(
+      footerRef.current?.querySelector('[data-testid="footer-header"]'),
+    ).not.toBeNull();
+    const trailingEl = footerRef.current?.querySelector(
+      '[data-testid="footer-trailing"]',
+    );
+    expect(trailingEl).not.toBeNull();
+    expect(trailingEl?.parentElement?.className).not.toContain(
+      'composerHidden',
+    );
+
+    // decisionRef attaches to the single deduplicated approval-overlay wrapper.
+    const approvalOverlays = container.querySelectorAll(
+      '[data-testid="approval-overlay"]',
+    );
+    expect(approvalOverlays).toHaveLength(1);
+    expect(decisionRef.current).toBe(approvalOverlays[0]);
+
+    // editorCommands preserves referential identity when commands is unchanged.
+    const firstCommands = captured.editor?.commands;
+    expect(firstCommands).toEqual(stableCommands);
+
+    // Switch to a question card: questionKeyboardActive overrides
+    // approvalKeyboardActive independently, while commands stays referentially identical.
+    const questionController = fakeController({
+      pendingApprovals: [],
+      pendingQuestions: [
+        { id: 'q-main', request: permissionRequest('q-main') },
+      ],
+    });
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={questionController}
+        transcriptContent={
+          <div data-testid="custom-transcript-host">custom</div>
+        }
+        footerRef={footerRef}
+        footerStyle={{ maxWidth: '720px' }}
+        footerClassName="app-footer"
+        decisionRef={decisionRef}
+        decisionClassName="app-approval"
+        decisionTestId="approval-overlay"
+        approvalKeyboardActive={true}
+        questionKeyboardActive={false}
+        commands={stableCommands}
+      />,
+    );
+    expect(captured.question?.keyboardActive).toBe(false);
+    expect(captured.editor?.commands).toBe(firstCommands);
+    expect(decisionRef.current).toBe(
+      container.querySelector('[data-testid="approval-overlay"]'),
+    );
+
+    // Even with no active card, composerProps.dialogOpen=true keeps ChatEditor
+    // dialogOpen=true under hideComposerWhenCardActive=true.
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({
+          pendingApprovals: [],
+          pendingQuestions: [],
+        })}
+        transcriptContent={
+          <div data-testid="custom-transcript-host">custom</div>
+        }
+        commands={stableCommands}
+        composerProps={{ dialogOpen: true }}
+      />,
+    );
+    expect(captured.editor?.dialogOpen).toBe(true);
+    expect(captured.editor?.commands).toBe(firstCommands);
+  });
 });

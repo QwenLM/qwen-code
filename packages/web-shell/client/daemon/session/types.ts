@@ -39,8 +39,8 @@ import type {
   DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -491,8 +491,8 @@ export interface SendPromptOptions {
   onAdmissionStarted?: () => void;
   /** Caller-generated key used to deduplicate retried prompt admissions. */
   idempotencyKey?: string;
-  /** Revalidates the caller before every HTTP attempt, including client recovery. */
-  beforeDispatch?: (clientId: string | undefined) => void;
+  /** Client-only revalidation, awaited before every HTTP attempt including recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void | Promise<void>;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -622,7 +622,10 @@ export interface DaemonSessionActions {
       | 'idempotencyKey'
       | 'onAdmissionStarted'
       | 'onAdmitted'
-    >,
+    > & {
+      /** Extra guard for an operation during detached client recovery. */
+      beforeDetachedDispatch?: SendPromptOptions['beforeDispatch'];
+    },
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
@@ -866,7 +869,8 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionWorkflowTasksStatus>;
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
+    source?: 'cron' | 'wakeup',
   ): Promise<{ cancelled: boolean }>;
   controlWorkflowTask(
     taskId: string,

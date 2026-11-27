@@ -52,6 +52,7 @@ import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getSchemaValidationRetryMessage } from '../utils/schemaValidator.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { withFixedPolicyHookStop } from '../omni/policy/fixed-policy-hook-stop.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -3894,7 +3895,7 @@ export class CoreToolScheduler {
             // the same tool starts fresh rather than tripping the threshold.
             const count = recordBatchRetryableToolError(
               reqInfo.name,
-              invocationOrError.message,
+              getSchemaValidationRetryMessage(invocationOrError.message),
             );
 
             const finalError =

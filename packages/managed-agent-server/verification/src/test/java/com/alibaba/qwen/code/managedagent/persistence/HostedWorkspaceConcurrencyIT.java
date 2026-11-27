@@ -12,7 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -458,7 +458,6 @@ class HostedWorkspaceConcurrencyIT {
         properties.getHarness().setCapabilityDigest("a".repeat(64));
         var broker = properties.getRuntimeBroker();
         broker.setToken(TOKEN);
-        broker.setPort(0);
         broker.setWorkspaceGeneration("1");
         broker.setWorkspaceCwd(root.toString());
         broker.setProvisioner("local-process");
@@ -554,7 +553,7 @@ class HostedWorkspaceConcurrencyIT {
             var request = new LinkedHashMap<String, Object>(body);
             request.put("protocolVersion", 1);
             request.put("requestId", UUID.randomUUID().toString());
-            return http.sendAsync(HttpRequest.newBuilder(endpoint.resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + route))
+            return http.sendAsync(HttpRequest.newBuilder(endpoint.resolve(RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + route))
                     .timeout(Duration.ofSeconds(30)).header("Authorization", "Bearer " + TOKEN)
                     .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(request))).build(),
                     HttpResponse.BodyHandlers.ofString());
@@ -709,8 +708,11 @@ class HostedWorkspaceConcurrencyIT {
                 }
             });
             try (var broker = new EmbeddedRuntimeBroker(store(source, properties), properties, bindings, sessions,
-                    executions, authority); var input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
-                publish(directory.resolve("ready.json"), Map.of("uri", broker.getBaseUri().toString()));
+                    executions, authority);
+                    var server = new RuntimeBrokerHttpControllerTestFixture(TOKEN, broker.service());
+                    var input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
+                server.start();
+                publish(directory.resolve("ready.json"), Map.of("uri", server.getBaseUri().toString()));
                 String line;
                 while ((line = input.readLine()) != null) {
                     JsonNode command = JSON.readTree(line);
