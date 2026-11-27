@@ -49,24 +49,13 @@ test('downloads silently, shows an update action in More and restarts in place @
   status = { ...status, state: 'ready' };
   await page.getByRole('button', { name: '更多', exact: true }).click();
   await expect(entry).toHaveAccessibleName('更新');
-  for (const width of [220, 343, 360, 260]) {
-    await page.evaluate((sidebarWidth) => {
-      localStorage.setItem(
-        'qwen-code-web-shell-sidebar-width',
-        String(sidebarWidth),
-      );
-    }, width);
-    await page.reload();
-    await page.getByRole('button', { name: '更多', exact: true }).click();
-    await expect(entry).toBeVisible();
-    const buttonBox = (await entry.boundingBox())!;
-    const settingsBox = (await page
-      .getByRole('button', { name: '设置', exact: true })
-      .boundingBox())!;
-    expect(buttonBox.width).toBeGreaterThan(100);
-    expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
-  }
-  await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
+  await expect(entry).toBeVisible();
+  const buttonBox = (await entry.boundingBox())!;
+  const settingsBox = (await page
+    .getByRole('button', { name: '设置', exact: true })
+    .boundingBox())!;
+  expect(buttonBox.width).toBeGreaterThan(100);
+  expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '收起', exact: true }).click();
   await page.getByRole('button', { name: '更多', exact: true }).click();
@@ -87,6 +76,56 @@ test('downloads silently, shows an update action in More and restarts in place @
   await expect(entry).toHaveCount(0);
   expect(preparations).toBe(1);
   expect(restarts).toBe(1);
+});
+
+test('keeps the update action above Settings across sidebar widths @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('daemon_update');
+  scenario.capabilities.qwenCodeVersion = '0.24.4';
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route('**/daemon/update**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        state: 'ready',
+        currentVersion: '0.24.4',
+        latestVersion: '0.24.6',
+        canInstall: true,
+      } satisfies DaemonUpdateStatus,
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
+    if (!localStorage.getItem('qwen-code-web-shell-sidebar-width')) {
+      localStorage.setItem('qwen-code-web-shell-sidebar-width', '220');
+    }
+  });
+  await page.goto(`/session/${scenario.sessionId}?language=zh-CN#turn-2`);
+  const entry = page.locator('[data-web-shell-update]');
+  for (const [index, width] of [220, 343, 360, 260].entries()) {
+    if (index > 0) {
+      await page.evaluate((sidebarWidth) => {
+        localStorage.setItem(
+          'qwen-code-web-shell-sidebar-width',
+          String(sidebarWidth),
+        );
+      }, width);
+      await page.reload();
+    }
+    await page.getByRole('button', { name: '更多', exact: true }).click();
+    await expect(entry).toBeVisible();
+    const buttonBox = (await entry.boundingBox())!;
+    const settingsBox = (await page
+      .getByRole('button', { name: '设置', exact: true })
+      .boundingBox())!;
+    expect(buttonBox.width).toBeGreaterThan(100);
+    expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
+  }
+  await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
 });
 
 test('older daemons do not expose update controls @smoke', async ({
