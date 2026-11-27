@@ -1365,7 +1365,7 @@ public final class JdbcRepositoryContract {
                 indexedId,
                 prefix + "-indexed-idempotency",
                 prefix + "-indexed-digest"));
-        tamper(dataSource, "execution_call_id", indexedId,
+        tamper(dataSource, "execution_call_id", "execution_call_id",
                 indexedId + " ", indexedId);
         if (padSpace) {
             assertEquals("Tool execution-call hash collision",
@@ -1423,13 +1423,13 @@ public final class JdbcRepositoryContract {
     }
 
     private static void tamper(DataSource dataSource, String column,
-            String executionCallId, String value) throws SQLException {
+            String selectorColumn, String selectorValue, String value) throws SQLException {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
                         "UPDATE ma_tool_execution SET " + column
-                                + " = ? WHERE execution_call_id = ?")) {
+                                + " = ? WHERE " + selectorColumn + " = ?")) {
             statement.setString(1, value);
-            statement.setString(2, executionCallId);
+            statement.setString(2, selectorValue);
             assertEquals(1, statement.executeUpdate());
         }
     }
