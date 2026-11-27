@@ -183,7 +183,6 @@ process.exit(42);
       assert.equal(calls.length, 2, 'expected preflight probe + real exec');
       assert.deepEqual(calls[0].bwrapFlags, [
         '--unshare-net',
-        '--die-with-parent',
         '--dev-bind',
         '/',
         '/',
@@ -192,13 +191,17 @@ process.exit(42);
 
       assert.deepEqual(calls[1].bwrapFlags, [
         '--unshare-net',
-        '--die-with-parent',
         '--dev-bind',
         '/',
         '/',
         '--chdir',
         workDir,
       ]);
+      assert.equal(
+        calls[1].bwrapFlags.includes('--die-with-parent'),
+        false,
+        'must not pass --die-with-parent under multi-threaded Runner.Worker',
+      );
       assert.deepEqual(calls[1].cmd, [
         process.execPath,
         targetScript,

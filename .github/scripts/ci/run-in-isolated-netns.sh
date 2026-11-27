@@ -61,7 +61,13 @@ if ! command -v bwrap >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! bwrap --unshare-net --die-with-parent --dev-bind / / -- true; then
+# Do not pass `--die-with-parent`: Linux `PR_SET_PDEATHSIG` fires SIGKILL (137)
+# when the spawning *thread* exits, so `exec`'ing `bwrap` directly under a
+# multi-threaded parent such as `.NET Runner.Worker` kills `bwrap` mid-run when
+# the ThreadPool retires that worker thread (observed on job 140587110681 after
+# 3m50s). GitHub Actions already tracks and reaps step processes via
+# `RUNNER_TRACKING_ID`.
+if ! bwrap --unshare-net --dev-bind / / -- true; then
   echo '::error::run-in-isolated-netns.sh: bwrap failed to enter an isolated network namespace on this host; refusing to fall back to the shared host network.' >&2
   exit 1
 fi
@@ -80,4 +86,4 @@ exec env \
   -u https_proxy \
   -u all_proxy \
   -u no_proxy \
-  bwrap --unshare-net --die-with-parent --dev-bind / / --chdir "$PWD" -- "$@"
+  bwrap --unshare-net --dev-bind / / --chdir "$PWD" -- "$@"
