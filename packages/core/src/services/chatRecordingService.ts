@@ -32,7 +32,7 @@ import {
   type SessionExecutionEngine,
   type SessionExecutionEnginePayload,
 } from './session-execution-engine.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, type Hash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
@@ -1328,6 +1328,8 @@ export class ChatRecordingService {
   private cachedConversationFile: string | undefined;
   private prefixUuidBloom: PromptUuidBloomState | undefined;
   private prefixUuidBloomPath: string | undefined;
+  private prefixHash: Hash | undefined;
+  private prefixHashOffset = 0;
   private legacyArchiveGeneration?: { filePath: string; value?: string };
   private pendingPromptTitleProjections = 0;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1718,6 +1720,8 @@ export class ChatRecordingService {
   private clearPrefixUuidBloom(): void {
     this.prefixUuidBloom = undefined;
     this.prefixUuidBloomPath = undefined;
+    this.prefixHash = undefined;
+    this.prefixHashOffset = 0;
   }
 
   private verifyPrefixUuidBloomBeforeWrite(
@@ -1751,9 +1755,46 @@ export class ChatRecordingService {
         return;
       }
       this.prefixUuidBloomPath = transcriptPath;
+      this.prefixHash = createHash('sha256');
+      this.prefixHashOffset = 0;
     } catch {
       this.clearPrefixUuidBloom();
     }
+  }
+
+  private advancePrefixHashTo(
+    transcriptPath: string,
+    targetSize: number,
+  ): string | undefined {
+    if (
+      !this.prefixHash ||
+      this.prefixUuidBloomPath !== transcriptPath ||
+      targetSize < this.prefixHashOffset
+    ) {
+      this.clearPrefixUuidBloom();
+      return undefined;
+    }
+    if (targetSize > this.prefixHashOffset) {
+      const fd = fs.openSync(transcriptPath, 'r');
+      try {
+        const chunk = Buffer.allocUnsafe(64 * 1024);
+        let offset = this.prefixHashOffset;
+        while (offset < targetSize) {
+          const toRead = Math.min(chunk.length, targetSize - offset);
+          const bytesRead = fs.readSync(fd, chunk, 0, toRead, offset);
+          if (bytesRead <= 0) {
+            this.clearPrefixUuidBloom();
+            return undefined;
+          }
+          this.prefixHash.update(chunk.subarray(0, bytesRead));
+          offset += bytesRead;
+        }
+        this.prefixHashOffset = offset;
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    return this.prefixHash.copy().digest('hex');
   }
 
   private recordUuidForPrefixBloom(record: ChatRecord): void {
@@ -1797,28 +1838,16 @@ export class ChatRecordingService {
         return;
       }
       const stats = fs.statSync(transcriptPath);
-      let tailHex: string | undefined;
-      if (stats.size > 0) {
-        const tailLen = Math.min(64, stats.size);
-        const fd = fs.openSync(transcriptPath, 'r');
-        try {
-          const buf = Buffer.allocUnsafe(tailLen);
-          const bytesRead = fs.readSync(
-            fd,
-            buf,
-            0,
-            tailLen,
-            stats.size - tailLen,
-          );
-          if (bytesRead === tailLen) {
-            tailHex = buf.toString('hex');
-          }
-        } finally {
-          fs.closeSync(fd);
-        }
-      }
+      const prefixSha256 =
+        stats.size > 0 &&
+        this.prefixUuidBloom &&
+        this.prefixUuidBloomPath === transcriptPath
+          ? this.advancePrefixHashTo(transcriptPath, stats.size)
+          : undefined;
       const prefixUuidBloom =
-        this.prefixUuidBloom && this.prefixUuidBloomPath === transcriptPath
+        prefixSha256 !== undefined &&
+        this.prefixUuidBloom &&
+        this.prefixUuidBloomPath === transcriptPath
           ? encodePromptUuidBloom(this.prefixUuidBloom)
           : undefined;
       writeSessionPromptTimeSidecar(sidecarPath, {
@@ -1831,7 +1860,7 @@ export class ChatRecordingService {
           sessionId: record.sessionId,
           cwd: record.cwd,
         },
-        ...(tailHex !== undefined ? { tailHex } : {}),
+        ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
         ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       });
     } catch {

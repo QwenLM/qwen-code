@@ -212,6 +212,7 @@ import {
   setSessionTranscriptIndexCacheMaxBytesForTest,
   setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptPromptTimeScanModeHookForTest,
+  setSessionTranscriptReadStreamBytesHookForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptPageTooLargeError,
@@ -224,6 +225,7 @@ import {
   type SessionTranscriptReadPageOptions,
   type SessionTranscriptRecordPage,
   type TranscriptIndexBuildModeEvent,
+  type TranscriptReadStreamBytesEvent,
 } from './session-transcript-reader.js';
 import { sessionPromptTimeSidecarPath } from './session-prompt-time-sidecar.js';
 import {
@@ -7352,9 +7354,8 @@ describe('SessionTranscriptReader', () => {
       setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
         scansPrefixDup.push(e),
       );
-      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
-        p1.timestamp,
-      );
+      const withSidecar = await newReader().getLastUserPromptAt(sessionId);
+      expect(withSidecar).toBe(p1.timestamp);
       expect(scansPrefixDup).toEqual([
         expect.objectContaining({
           filePath: file,
@@ -7362,6 +7363,11 @@ describe('SessionTranscriptReader', () => {
           startOffset: 0,
         }),
       ]);
+      // Explicitly verify parity against a cold read with the sidecar deleted.
+      await fs.rm(sidecarPath, { force: true });
+      resetSessionTranscriptIndexCacheForTest();
+      const withoutSidecar = await newReader().getLastUserPromptAt(sessionId);
+      expect(withSidecar).toBe(withoutSidecar);
 
       // Duplicate UUID aliasing an earlier non-conversation prefix record must also fall back.
       await writeRecords([p1, p2, pNonConv]);
@@ -7992,6 +7998,297 @@ describe('SessionTranscriptReader', () => {
       if (resB.status === 'fulfilled') {
         expect(resB.value.records.length).toBe(5);
       }
+    });
+
+    it('detects equal-length in-place prefix rewrites that preserve the last 64 bytes on both incremental dense-index and prompt-time tail paths', async () => {
+      // 1. Dense-index path: rewrite u1 -> u9 equal-length while keeping the
+      // last 64 bytes of a1 identical, then append a2. Latest readPage &
+      // readTurnIndexPage (no cursor/snapshot) must fall back to full build
+      // and return [u9, a1, a2] / [u9] rather than throwing Unavailable.
+      const u1 = {
+        ...record('u1', null, 'first prompt'),
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const a1 = {
+        ...record('a1', u1.uuid, `assistant response tail ${'x'.repeat(120)}`),
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      };
+      const file = await writeRecords([u1, a1]);
+      const originalRaw = await fs.readFile(file, 'utf8');
+
+      const buildEvents: TranscriptIndexBuildModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => buildEvents.push(e));
+
+      const reader = newReader();
+      const firstPage = await reader.readPage(sessionId, { limit: 10 });
+      expect(firstPage.records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
+      expect(buildEvents.at(-1)?.mode).toBe('full');
+
+      const u9 = { ...u1, uuid: 'u9' };
+      const a1Rewritten = { ...a1, parentUuid: 'u9' };
+      const a2 = {
+        ...record('a2', a1.uuid, 'appended assistant turn'),
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:03.000Z',
+      };
+      const rewrittenPrefix = `${JSON.stringify(u9)}\n${JSON.stringify(a1Rewritten)}\n`;
+      // Confirm the equal-length rewrite preserved the exact last 64 bytes of the old prefix.
+      expect(rewrittenPrefix.length).toBe(originalRaw.length);
+      expect(rewrittenPrefix.slice(-64)).toBe(originalRaw.slice(-64));
+      await fs.writeFile(
+        file,
+        `${rewrittenPrefix}${JSON.stringify(a2)}\n`,
+        'utf8',
+      );
+
+      const latestPage = await reader.readPage(sessionId, { limit: 10 });
+      const latestTurns = await reader.readTurnIndexPage(sessionId);
+      expect(buildEvents.at(-1)?.mode).toBe('full');
+      expect(buildEvents.at(-1)?.startOffset).toBe(0);
+      expect(latestPage.records.map((r) => r.uuid)).toEqual(['u9', 'a1', 'a2']);
+      expect(latestTurns.turns.map((t) => t.turnId)).toEqual(['u9']);
+
+      // 2. Prompt-time sidecar path: edit early user timestamp equal-length
+      // (00:00:01Z -> 00:00:09Z) preserving the last 64 bytes of a1, then
+      // append a2. Must fall back to lightweight_scan and return 00:00:09Z.
+      resetSessionTranscriptIndexCacheForTest();
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+      await fs.rm(sidecarPath, { force: true });
+      await writeRecords([u1, a1]);
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        '2026-01-01T00:00:01.000Z',
+      );
+      const u1Edited = { ...u1, timestamp: '2026-01-01T00:00:09.000Z' };
+      const editedPrefix = `${JSON.stringify(u1Edited)}\n${JSON.stringify(a1)}\n`;
+      expect(editedPrefix.length).toBe(originalRaw.length);
+      expect(editedPrefix.slice(-64)).toBe(originalRaw.slice(-64));
+      await fs.writeFile(
+        file,
+        `${editedPrefix}${JSON.stringify(a2)}\n`,
+        'utf8',
+      );
+
+      resetSessionTranscriptIndexCacheForTest();
+      const scans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans.push(e));
+      const withSidecar = await newReader().getLastUserPromptAt(sessionId);
+      expect(withSidecar).toBe('2026-01-01T00:00:09.000Z');
+      expect(scans).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      await fs.rm(sidecarPath, { force: true });
+      resetSessionTranscriptIndexCacheForTest();
+      const coldWithoutSidecar =
+        await newReader().getLastUserPromptAt(sessionId);
+      expect(withSidecar).toBe(coldWithoutSidecar);
+    });
+
+    it('closes the tail ReadStream immediately when the first appended record invalidates linear extension', async () => {
+      const u1 = {
+        ...record('u1', null, 'initial prompt'),
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const a1 = {
+        ...record('a1', u1.uuid, 'initial answer'),
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      };
+      const file = await writeRecords([u1, a1]);
+      const prefixSize = (await fs.stat(file)).size;
+
+      // Warm sidecar at the small prefix.
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+
+      // Append a rewind as the VERY FIRST record after the prefix, followed by
+      // ~3 MiB of assistant records.
+      const rewindRec: ChatRecord = {
+        ...record('r1', u1.uuid, ''),
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+      };
+      const tailRecords: ChatRecord[] = [rewindRec];
+      let prevUuid = rewindRec.uuid;
+      const bigBody = 'z'.repeat(8 * 1024);
+      for (let i = 0; i < 384; i += 1) {
+        const aRec: ChatRecord = {
+          ...record(`a-bulk-${i}`, prevUuid, bigBody),
+          type: 'assistant',
+        };
+        tailRecords.push(aRec);
+        prevUuid = aRec.uuid;
+      }
+      await appendRecords(file, ...tailRecords);
+      const totalSize = (await fs.stat(file)).size;
+      expect(totalSize - prefixSize).toBeGreaterThan(2 * 1024 * 1024);
+
+      resetSessionTranscriptIndexCacheForTest();
+      const streamEvents: TranscriptReadStreamBytesEvent[] = [];
+      const scanEvents: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptReadStreamBytesHookForTest((e) =>
+        streamEvents.push(e),
+      );
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scanEvents.push(e),
+      );
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      expect(scanEvents).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      const tailStream = streamEvents.find(
+        (e) => e.filePath === file && e.startOffset === prefixSize,
+      );
+      const fullStream = streamEvents.find(
+        (e) => e.filePath === file && e.startOffset === 0,
+      );
+      expect(tailStream).toBeDefined();
+      expect(fullStream).toBeDefined();
+      // Tail stream must stop within at most 2 chunks (~128 KiB), NOT read the ~3 MiB tail to EOF.
+      expect(tailStream!.bytesRead).toBeLessThanOrEqual(128 * 1024);
+      expect(fullStream!.bytesRead).toBe(totalSize);
+    });
+
+    it('persists and reuses prompt-time sidecar for project-owned worktree sessions while rejecting foreign worktrees and honoring allowSidecarWrite=false', async () => {
+      const worktreeCwd = path.join(
+        workspaceDir,
+        '.qwen',
+        'worktrees',
+        'task-wt',
+      );
+      await fs.mkdir(worktreeCwd, { recursive: true });
+      const wtPrompt = {
+        ...record('u-wt', null, 'worktree prompt'),
+        cwd: worktreeCwd,
+        timestamp: '2026-02-01T10:00:00.000Z',
+      };
+      const file = await writeRecords([wtPrompt]);
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+
+      // 1. allowSidecarWrite=false must never write a sidecar even for an owned worktree.
+      expect(
+        await svc().getLastUserPromptAt(sessionId, 'active', {
+          allowSidecarWrite: false,
+        }),
+      ).toBe(wtPrompt.timestamp);
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      // 2. Direct reader without validateFirstRecord keeps strict cwd === workspaceCwd.
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        wtPrompt.timestamp,
+      );
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      // 3. Trusted SessionService cold read validates project ownership via validateFirstRecord,
+      // writes sidecar, and hits sidecar_exact after restart.
+      resetSessionTranscriptIndexCacheForTest();
+      const scans1: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans1.push(e));
+      expect(await svc().getLastUserPromptAt(sessionId)).toBe(
+        wtPrompt.timestamp,
+      );
+      expect(scans1).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+
+      resetSessionTranscriptIndexCacheForTest();
+      const scans2: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans2.push(e));
+      expect(await svc().getLastUserPromptAt(sessionId)).toBe(
+        wtPrompt.timestamp,
+      );
+      expect(scans2).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_exact',
+        }),
+      ]);
+
+      // 4. Foreign-repo worktree must be rejected and never persist a sidecar.
+      await fs.rm(sidecarPath, { force: true });
+      resetSessionTranscriptIndexCacheForTest();
+      const foreignWorktreeCwd = path.join(
+        runtimeDir,
+        'other-repo',
+        '.qwen',
+        'worktrees',
+        'task-wt',
+      );
+      await fs.mkdir(foreignWorktreeCwd, { recursive: true });
+      await writeRecords([{ ...wtPrompt, cwd: foreignWorktreeCwd }]);
+      expect(await svc().getLastUserPromptAt(sessionId)).toBeUndefined();
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('keeps ChatRecordingService healthy when prompt-time sidecar persistence fails', async () => {
+      const activeFile = newReader().getSessionFilePath(sessionId, 'active');
+      const activeSidecar = sessionPromptTimeSidecarPath(
+        path.dirname(activeFile),
+        sessionId,
+      );
+      // Place a non-empty directory at the sidecar path so atomic rename fails.
+      await fs.mkdir(activeSidecar, { recursive: true });
+      await fs.writeFile(path.join(activeSidecar, 'blocker'), 'x', 'utf8');
+
+      const config = {
+        storage: new Storage(workspaceDir),
+        getTargetDir: () => workspaceDir,
+        getSessionId: () => sessionId,
+        getProjectRoot: () => workspaceDir,
+        getCliVersion: () => 'test',
+        getModel: () => 'test',
+        getAuthType: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getResumedSessionData: () => undefined,
+      } as unknown as Config;
+      const recorder = new ChatRecordingService(config, undefined, false);
+      recorder.recordUserMessage([
+        { text: 'first prompt despite sidecar error' },
+      ]);
+      await recorder.flush();
+      recorder.recordUserMessage([
+        { text: 'second prompt must still persist' },
+      ]);
+      await recorder.flush();
+
+      const lines = (await fs.readFile(activeFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as ChatRecord);
+      expect(lines.filter((r) => r.type === 'user')).toHaveLength(2);
     });
   });
 });

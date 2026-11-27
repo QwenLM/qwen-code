@@ -775,7 +775,7 @@ interface IncrementalIndexState {
   firstRecordTimestamp?: string;
   rawStartTime?: string;
   loopEstimatedBytes: number;
-  tailFingerprint: Buffer;
+  prefixSha256: string;
   endsWithNewline: boolean;
 }
 
@@ -790,7 +790,8 @@ const pendingIncrementalIndexStates = new WeakMap<
   IncrementalIndexState
 >();
 
-const INCREMENTAL_TAIL_FINGERPRINT_BYTES = 64;
+const PREFIX_HASH_CHUNK_BYTES = 256 * 1024;
+const MAX_TAIL_HASH_BUFFER_BYTES = 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_TRANSCRIPT_BUILDS = 2;
 
 export type TranscriptIndexBuildModeEvent = {
@@ -798,6 +799,12 @@ export type TranscriptIndexBuildModeEvent = {
   mode: 'full' | 'incremental';
   startOffset: number;
   snapshotSize: number;
+};
+
+export type TranscriptReadStreamBytesEvent = {
+  filePath: string;
+  startOffset: number;
+  bytesRead: number;
 };
 
 export type PromptTimeScanModeEvent = {
@@ -1016,6 +1023,9 @@ let indexBuildModeHookForTest:
   | undefined;
 let promptTimeScanModeHookForTest:
   | ((event: PromptTimeScanModeEvent) => void)
+  | undefined;
+let readStreamBytesHookForTest:
+  | ((event: TranscriptReadStreamBytesEvent) => void)
   | undefined;
 
 class CooperativeReadScheduler {
@@ -2588,7 +2598,7 @@ function estimateIncrementalIndexStateBytes(
 ): number {
   let total =
     INDEX_CONTAINER_BASE_BYTES +
-    state.tailFingerprint.length +
+    estimateStringBytes(state.prefixSha256) +
     estimateStringBytes(state.firstRecordTimestamp) +
     estimateStringBytes(state.rawStartTime) +
     estimateStringBytes(state.executionEngine.reason);
@@ -2658,11 +2668,7 @@ function findExtendableBaseIndex(
       continue;
     }
     const state = incrementalIndexStates.get(candidate);
-    if (
-      !state ||
-      !state.endsWithNewline ||
-      state.tailFingerprint.length === 0
-    ) {
+    if (!state || !state.endsWithNewline || state.prefixSha256.length === 0) {
       continue;
     }
     if (!best || candidate.snapshotSize > best.index.snapshotSize) {
@@ -2672,34 +2678,13 @@ function findExtendableBaseIndex(
   return best;
 }
 
-function updateTailFingerprint(previous: Buffer, chunk: Buffer): Buffer {
-  if (chunk.length === 0) return previous;
-  if (chunk.length >= INCREMENTAL_TAIL_FINGERPRINT_BYTES) {
-    return Buffer.from(
-      chunk.subarray(chunk.length - INCREMENTAL_TAIL_FINGERPRINT_BYTES),
-    );
-  }
-  const combinedLength = previous.length + chunk.length;
-  if (combinedLength <= INCREMENTAL_TAIL_FINGERPRINT_BYTES) {
-    return Buffer.concat([previous, chunk], combinedLength);
-  }
-  const keepFromPrevious = INCREMENTAL_TAIL_FINGERPRINT_BYTES - chunk.length;
-  return Buffer.concat(
-    [previous.subarray(previous.length - keepFromPrevious), chunk],
-    INCREMENTAL_TAIL_FINGERPRINT_BYTES,
-  );
-}
-
-async function verifyPrefixTailMatches(
+async function verifyByteIsNewline(
   filePath: string,
-  prefixSize: number,
-  expectedTail: Buffer,
+  offset: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
   signal?.throwIfAborted();
-  if (expectedTail.length === 0 || prefixSize < expectedTail.length) {
-    return false;
-  }
+  if (offset < 0) return false;
   let handle: fsp.FileHandle;
   try {
     handle = await fsp.open(filePath, 'r');
@@ -2709,30 +2694,119 @@ async function verifyPrefixTailMatches(
   }
   try {
     signal?.throwIfAborted();
-    const buffer = Buffer.allocUnsafe(expectedTail.length);
-    const { bytesRead } = await handle.read(
-      buffer,
-      0,
-      expectedTail.length,
-      prefixSize - expectedTail.length,
-    );
-    return bytesRead === expectedTail.length && buffer.equals(expectedTail);
+    const buffer = Buffer.allocUnsafe(1);
+    const { bytesRead } = await handle.read(buffer, 0, 1, offset);
+    return bytesRead === 1 && buffer[0] === 0x0a;
   } finally {
     await handle.close();
   }
 }
 
-async function verifyByteIsNewline(
+async function verifyPrefixSha256(
   filePath: string,
-  offset: number,
+  prefixSize: number,
+  expectedSha256: string,
+  signal?: AbortSignal,
+): Promise<crypto.Hash | undefined> {
+  signal?.throwIfAborted();
+  if (prefixSize <= 0 || expectedSha256.length !== 64) {
+    return undefined;
+  }
+  const hash = crypto.createHash('sha256');
+  const scheduler = new CooperativeReadScheduler();
+  let bytesHashed = 0;
+  let lastByte = -1;
+  const stream = fs.createReadStream(filePath, {
+    start: 0,
+    end: prefixSize - 1,
+    highWaterMark: PREFIX_HASH_CHUNK_BYTES,
+  });
+  const onAbort = () => {
+    stream.destroy(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    );
+  };
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  }
+  try {
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buffer.length > 0) {
+        hash.update(buffer);
+        bytesHashed += buffer.length;
+        lastByte = buffer[buffer.length - 1]!;
+      }
+      await scheduler.afterUnit(buffer.length, signal);
+    }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    stream.destroy();
+  }
+  if (bytesHashed !== prefixSize || lastByte !== 0x0a) {
+    return undefined;
+  }
+  if (hash.copy().digest('hex') !== expectedSha256) {
+    return undefined;
+  }
+  return hash;
+}
+
+async function updateHashFromRange(
+  filePath: string,
+  startOffset: number,
+  endExclusive: number,
+  hash: crypto.Hash,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  return verifyPrefixTailMatches(
-    filePath,
-    offset + 1,
-    Buffer.from([0x0a]),
-    signal,
-  );
+  signal?.throwIfAborted();
+  if (endExclusive <= startOffset) return true;
+  const expectedLength = endExclusive - startOffset;
+  const scheduler = new CooperativeReadScheduler();
+  let bytesHashed = 0;
+  const stream = fs.createReadStream(filePath, {
+    start: startOffset,
+    end: endExclusive - 1,
+    highWaterMark: PREFIX_HASH_CHUNK_BYTES,
+  });
+  const onAbort = () => {
+    stream.destroy(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    );
+  };
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  }
+  try {
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buffer.length > 0) {
+        hash.update(buffer);
+        bytesHashed += buffer.length;
+      }
+      await scheduler.afterUnit(buffer.length, signal);
+    }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (isFileMissingError(error)) return false;
+    throw error;
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    stream.destroy();
+  }
+  return bytesHashed === expectedLength;
 }
 
 async function forEachLineInSnapshot(
@@ -2743,7 +2817,7 @@ async function forEachLineInSnapshot(
     line: Buffer,
     offset: number,
     length: number,
-  ) => void | Promise<void>,
+  ) => boolean | void | Promise<boolean | void>,
   options: {
     startOffset?: number;
     signal?: AbortSignal;
@@ -2760,6 +2834,7 @@ async function forEachLineInSnapshot(
   let pendingLength = 0;
   let pendingOffset = startOffset;
   let streamOffset = startOffset;
+  let stoppedEarly = false;
   const stream = fs.createReadStream(filePath, {
     start: startOffset,
     end: snapshotSize - 1,
@@ -2808,12 +2883,18 @@ async function forEachLineInSnapshot(
           rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
             ? rawLine.subarray(0, rawLine.length - 1)
             : rawLine;
-        await onLine(line, lineOffset, line.length);
+        const keepGoing = await onLine(line, lineOffset, line.length);
+        if (keepGoing === false) {
+          stoppedEarly = true;
+          stream.destroy();
+          break;
+        }
         await scheduler.afterUnit(line.length, signal);
         pending = [];
         pendingLength = 0;
         lineStart = lineEnd + 1;
       }
+      if (stoppedEarly) break;
 
       if (lineStart < buffer.length) {
         if (pendingLength === 0) {
@@ -2835,14 +2916,16 @@ async function forEachLineInSnapshot(
     }
 
     signal?.throwIfAborted();
-    if (pendingLength > 0) {
+    if (!stoppedEarly && pendingLength > 0) {
       const rawLine = makePendingLine();
       const line =
         rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, pendingOffset, line.length);
-      await scheduler.afterUnit(line.length, signal);
+      const keepGoing = await onLine(line, pendingOffset, line.length);
+      if (keepGoing !== false) {
+        await scheduler.afterUnit(line.length, signal);
+      }
     }
   } catch (error) {
     if (signal?.aborted) {
@@ -2853,6 +2936,11 @@ async function forEachLineInSnapshot(
     if (signal) {
       signal.removeEventListener('abort', onAbort);
     }
+    readStreamBytesHookForTest?.({
+      filePath,
+      startOffset,
+      bytesRead: stream.bytesRead,
+    });
     stream.destroy();
   }
 }
@@ -3113,20 +3201,25 @@ async function buildIndex(params: {
   const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
   try {
     signal?.throwIfAborted();
+    let prefixHash: crypto.Hash | undefined;
     if (
       params.base &&
       params.base.index.snapshotSize > 0 &&
-      params.base.index.snapshotSize < snapshotSize &&
-      (await verifyPrefixTailMatches(
+      params.base.index.snapshotSize < snapshotSize
+    ) {
+      prefixHash = await verifyPrefixSha256(
         filePath,
         params.base.index.snapshotSize,
-        params.base.state.tailFingerprint,
+        params.base.state.prefixSha256,
         signal,
-      ))
-    ) {
-      usedBase = params.base;
-      scanStartOffset = usedBase.index.snapshotSize;
+      );
+      if (prefixHash) {
+        usedBase = params.base;
+        scanStartOffset = usedBase.index.snapshotSize;
+      }
     }
+    const snapshotHash = prefixHash ?? crypto.createHash('sha256');
+    let lastByte = usedBase ? 0x0a : -1;
 
     const executionEngine = usedBase
       ? SessionExecutionEngineAccumulator.fromSnapshot(
@@ -3161,9 +3254,6 @@ async function buildIndex(params: {
     let firstRecordTimestamp: string | undefined =
       usedBase?.state.firstRecordTimestamp;
     let startTime: string | undefined = usedBase?.state.rawStartTime;
-    let tailFingerprint: Buffer = usedBase
-      ? usedBase.state.tailFingerprint
-      : Buffer.alloc(0);
 
     const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
     const buildHeapUsedStart = process.memoryUsage().heapUsed;
@@ -3352,7 +3442,10 @@ async function buildIndex(params: {
           startOffset: scanStartOffset,
           signal,
           onRawChunk: (chunk) => {
-            tailFingerprint = updateTailFingerprint(tailFingerprint, chunk);
+            if (chunk.length > 0) {
+              snapshotHash.update(chunk);
+              lastByte = chunk[chunk.length - 1]!;
+            }
           },
         },
       );
@@ -3549,10 +3642,8 @@ async function buildIndex(params: {
       firstRecordTimestamp,
       rawStartTime,
       loopEstimatedBytes: estimatedIndexBytes,
-      tailFingerprint,
-      endsWithNewline:
-        tailFingerprint.length > 0 &&
-        tailFingerprint[tailFingerprint.length - 1] === 0x0a,
+      prefixSha256: snapshotHash.digest('hex'),
+      endsWithNewline: lastByte === 0x0a,
     });
   } finally {
     releaseBuild();
@@ -4396,7 +4487,7 @@ interface PromptScanNode {
 interface PromptTimeResolution {
   snapshot: LastUserPromptSnapshot;
   leafUuid?: string;
-  tailHex?: string;
+  prefixSha256?: string;
   prefixUuidBloom?: SessionPromptTimeUuidBloom;
   managed?: boolean;
   shouldPersistSidecar: boolean;
@@ -4570,7 +4661,7 @@ export class SessionTranscriptReader {
       lastUserPromptAt: string | null;
       leafUuid: string;
       firstRecordOwner: { sessionId: string; cwd: string };
-      tailHex?: string;
+      prefixSha256?: string;
       prefixUuidBloom?: SessionPromptTimeUuidBloom;
     };
     signal: AbortSignal;
@@ -4584,22 +4675,13 @@ export class SessionTranscriptReader {
       sidecar,
       signal,
     } = params;
-    // Require a prefix UUID Bloom filter so tail extension has zero false
-    // negatives against duplicate UUIDs aliasing any earlier prefix record.
+    // Require both a prefix UUID Bloom filter (zero false negatives against
+    // duplicate UUIDs) and a full-prefix SHA-256 digest (rejects any in-place
+    // prefix edit before appending).
     const bloom = sidecar.prefixUuidBloom
       ? decodePromptUuidBloom(sidecar.prefixUuidBloom)
       : undefined;
-    if (!bloom) {
-      return undefined;
-    }
-    const expectedTail = sidecar.tailHex
-      ? Buffer.from(sidecar.tailHex, 'hex')
-      : undefined;
-    if (
-      expectedTail &&
-      (expectedTail.length === 0 ||
-        expectedTail[expectedTail.length - 1] !== 0x0a)
-    ) {
+    if (!bloom || !sidecar.prefixSha256) {
       return undefined;
     }
     let linear = true;
@@ -4608,20 +4690,16 @@ export class SessionTranscriptReader {
     let expectedParent = sidecar.leafUuid;
     let latestPrompt = sidecar.lastUserPromptAt ?? undefined;
     let tailConversationRecords = 0;
-    let tailFingerprint: Buffer = expectedTail ?? Buffer.alloc(0);
+    let tailChunks: Buffer[] | undefined = [];
+    let tailBufferedBytes = 0;
+    let nextPrefixSha256: string | undefined;
 
     const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
     try {
       signal.throwIfAborted();
-      const boundaryMatches = expectedTail
-        ? await verifyPrefixTailMatches(
-            filePath,
-            sidecar.snapshotSize,
-            expectedTail,
-            signal,
-          )
-        : await verifyByteIsNewline(filePath, sidecar.snapshotSize - 1, signal);
-      if (!boundaryMatches) {
+      if (
+        !(await verifyByteIsNewline(filePath, sidecar.snapshotSize - 1, signal))
+      ) {
         return undefined;
       }
       await forEachLineInSnapshot(
@@ -4629,7 +4707,7 @@ export class SessionTranscriptReader {
         snapshotSize,
         sessionId,
         (line) => {
-          if (!linear) return;
+          if (!linear) return false;
           const text = line.toString('utf8').trim();
           if (text.length === 0) return;
           const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
@@ -4645,11 +4723,11 @@ export class SessionTranscriptReader {
             if (envelope.subtype === MANAGED_SESSION_HEADER_SUBTYPE) {
               hasManagedHeader = true;
               linear = false;
-              return;
+              return false;
             }
             if (promptUuidBloomMayContain(bloom, envelope.uuid)) {
               linear = false;
-              return;
+              return false;
             }
             if (!isTranscriptConversationRecord(envelope)) {
               addPromptUuidToBloom(bloom, envelope.uuid);
@@ -4660,7 +4738,7 @@ export class SessionTranscriptReader {
               envelope.parentUuid !== expectedParent
             ) {
               linear = false;
-              return;
+              return false;
             }
             addPromptUuidToBloom(bloom, envelope.uuid);
             tailConversationRecords += 1;
@@ -4669,15 +4747,56 @@ export class SessionTranscriptReader {
               latestPrompt = envelope.lastUserPromptAt;
             }
           }
+          return true;
         },
         {
           startOffset: sidecar.snapshotSize,
           signal,
           onRawChunk: (chunk) => {
-            tailFingerprint = updateTailFingerprint(tailFingerprint, chunk);
+            if (!tailChunks || chunk.length === 0) return;
+            tailBufferedBytes += chunk.length;
+            if (tailBufferedBytes > MAX_TAIL_HASH_BUFFER_BYTES) {
+              tailChunks = undefined;
+              return;
+            }
+            tailChunks.push(Buffer.from(chunk));
           },
         },
       );
+      if (!linear || hasManagedHeader) {
+        return undefined;
+      }
+      if (sessionIdMismatch) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      // Verify the entire prefix digest only after the tail passed linear and
+      // Bloom checks, so early-invalidating rewinds never spend I/O hashing
+      // the prefix.
+      const prefixHash = await verifyPrefixSha256(
+        filePath,
+        sidecar.snapshotSize,
+        sidecar.prefixSha256,
+        signal,
+      );
+      if (!prefixHash) {
+        return undefined;
+      }
+      if (tailChunks !== undefined) {
+        for (const chunk of tailChunks) {
+          prefixHash.update(chunk);
+        }
+        nextPrefixSha256 = prefixHash.digest('hex');
+      } else if (
+        await updateHashFromRange(
+          filePath,
+          sidecar.snapshotSize,
+          snapshotSize,
+          prefixHash,
+          signal,
+        )
+      ) {
+        nextPrefixSha256 = prefixHash.digest('hex');
+      }
     } catch (error) {
       if (isFileMissingError(error)) {
         throw new SessionTranscriptSnapshotUnavailableError(sessionId);
@@ -4685,13 +4804,6 @@ export class SessionTranscriptReader {
       throw error;
     } finally {
       releaseBuild();
-    }
-
-    if (sessionIdMismatch) {
-      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-    }
-    if (!linear || hasManagedHeader) {
-      return undefined;
     }
 
     promptTimeScanModeHookForTest?.({
@@ -4719,8 +4831,8 @@ export class SessionTranscriptReader {
         firstRecordOwner: sidecar.firstRecordOwner,
       },
       leafUuid: expectedParent,
-      ...(tailFingerprint.length > 0
-        ? { tailHex: tailFingerprint.toString('hex') }
+      ...(nextPrefixSha256 !== undefined
+        ? { prefixSha256: nextPrefixSha256 }
         : {}),
       ...(nextBloom !== undefined ? { prefixUuidBloom: nextBloom } : {}),
       managed: false,
@@ -4785,7 +4897,7 @@ export class SessionTranscriptReader {
     let hasManagedHeader = false;
     let sessionIdMismatch = false;
     let timestamp: string | undefined;
-    let tailFingerprint: Buffer = Buffer.alloc(0);
+    const prefixHash = crypto.createHash('sha256');
 
     const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
     try {
@@ -4872,7 +4984,7 @@ export class SessionTranscriptReader {
           {
             signal,
             onRawChunk: (chunk) => {
-              tailFingerprint = updateTailFingerprint(tailFingerprint, chunk);
+              if (chunk.length > 0) prefixHash.update(chunk);
             },
           },
         );
@@ -4951,15 +5063,16 @@ export class SessionTranscriptReader {
     const prefixUuidBloom = hasManagedHeader
       ? undefined
       : buildPromptUuidBloom(nodes.keys(), nodes.size);
+    const prefixSha256 = hasManagedHeader
+      ? undefined
+      : prefixHash.digest('hex');
     return {
       snapshot: {
         lastUserPromptAt: timestamp,
         firstRecordOwner,
       },
       leafUuid,
-      ...(tailFingerprint.length > 0
-        ? { tailHex: tailFingerprint.toString('hex') }
-        : {}),
+      ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
       ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       managed: hasManagedHeader,
       shouldPersistSidecar: true,
@@ -5021,10 +5134,9 @@ export class SessionTranscriptReader {
         throw new SessionTranscriptSnapshotUnavailableError(sessionId);
       }
       const indexIncrementalState = incrementalIndexStates.get(index);
-      const tailHex =
-        indexIncrementalState &&
-        indexIncrementalState.tailFingerprint.length > 0
-          ? indexIncrementalState.tailFingerprint.toString('hex')
+      const prefixSha256 =
+        !managed && indexIncrementalState
+          ? indexIncrementalState.prefixSha256
           : undefined;
       const prefixUuidBloom = managed
         ? undefined
@@ -5044,7 +5156,7 @@ export class SessionTranscriptReader {
           },
         },
         leafUuid: index.leafUuid,
-        ...(tailHex !== undefined ? { tailHex } : {}),
+        ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
         ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
         managed,
         shouldPersistSidecar: true,
@@ -5231,36 +5343,40 @@ export class SessionTranscriptReader {
             resolved.shouldPersistSidecar &&
             resolved.leafUuid &&
             resolved.snapshot.firstRecordOwner &&
-            resolved.snapshot.firstRecordOwner.sessionId.toLowerCase() ===
-              sessionId.toLowerCase() &&
-            resolved.snapshot.firstRecordOwner.cwd === this.workspaceCwd &&
-            promptTimeScope(filePath, this.workspaceCwd).get(key) ===
-              owner.entry &&
-            (!readOptions.validateFirstRecord ||
-              (await readOptions.validateFirstRecord(
-                resolved.snapshot.firstRecordOwner,
-              ))) &&
             promptTimeScope(filePath, this.workspaceCwd).get(key) ===
               owner.entry
           ) {
-            writeSessionPromptTimeSidecar(
-              sessionPromptTimeSidecarPath(path.dirname(filePath), sessionId),
-              {
-                fileIdentity,
-                snapshotSize: stats.size,
-                lastUpdated,
-                lastUserPromptAt: resolved.snapshot.lastUserPromptAt ?? null,
-                leafUuid: resolved.leafUuid,
-                firstRecordOwner: resolved.snapshot.firstRecordOwner,
-                ...(resolved.tailHex !== undefined
-                  ? { tailHex: resolved.tailHex }
-                  : {}),
-                ...(resolved.prefixUuidBloom !== undefined
-                  ? { prefixUuidBloom: resolved.prefixUuidBloom }
-                  : {}),
-                ...(resolved.managed ? { managed: true } : {}),
-              },
-            );
+            const ownerMatches = readOptions.validateFirstRecord
+              ? await readOptions.validateFirstRecord(
+                  resolved.snapshot.firstRecordOwner,
+                )
+              : resolved.snapshot.firstRecordOwner.sessionId.toLowerCase() ===
+                  sessionId.toLowerCase() &&
+                resolved.snapshot.firstRecordOwner.cwd === this.workspaceCwd;
+            if (
+              ownerMatches &&
+              promptTimeScope(filePath, this.workspaceCwd).get(key) ===
+                owner.entry
+            ) {
+              writeSessionPromptTimeSidecar(
+                sessionPromptTimeSidecarPath(path.dirname(filePath), sessionId),
+                {
+                  fileIdentity,
+                  snapshotSize: stats.size,
+                  lastUpdated,
+                  lastUserPromptAt: resolved.snapshot.lastUserPromptAt ?? null,
+                  leafUuid: resolved.leafUuid,
+                  firstRecordOwner: resolved.snapshot.firstRecordOwner,
+                  ...(resolved.prefixSha256 !== undefined
+                    ? { prefixSha256: resolved.prefixSha256 }
+                    : {}),
+                  ...(resolved.prefixUuidBloom !== undefined
+                    ? { prefixUuidBloom: resolved.prefixUuidBloom }
+                    : {}),
+                  ...(resolved.managed ? { managed: true } : {}),
+                },
+              );
+            }
           }
 
           return resolved.snapshot;
@@ -6886,6 +7002,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   maxConcurrentTranscriptBuildsForTest = undefined;
   indexBuildModeHookForTest = undefined;
   promptTimeScanModeHookForTest = undefined;
+  readStreamBytesHookForTest = undefined;
 }
 
 export function setSessionTranscriptMaxConcurrentBuildsForTest(
@@ -6904,6 +7021,12 @@ export function setSessionTranscriptPromptTimeScanModeHookForTest(
   hook: ((event: PromptTimeScanModeEvent) => void) | undefined,
 ): void {
   promptTimeScanModeHookForTest = hook;
+}
+
+export function setSessionTranscriptReadStreamBytesHookForTest(
+  hook: ((event: TranscriptReadStreamBytesEvent) => void) | undefined,
+): void {
+  readStreamBytesHookForTest = hook;
 }
 
 export function getSessionTranscriptBuildSemaphoreStatsForTest(): {

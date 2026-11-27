@@ -186,7 +186,7 @@ describe('session-prompt-time-sidecar', () => {
         lastUserPromptAt: null,
         leafUuid: 'u1',
         firstRecordOwner: { sessionId: 's', cwd: '/r' },
-        tailHex: 'not-hex',
+        prefixSha256: 'not-hex',
       }),
       JSON.stringify({
         version: 1,
@@ -196,7 +196,7 @@ describe('session-prompt-time-sidecar', () => {
         lastUserPromptAt: null,
         leafUuid: 'u1',
         firstRecordOwner: { sessionId: 's', cwd: '/r' },
-        tailHex: 'abc',
+        prefixSha256: 'abc123',
       }),
       JSON.stringify({
         version: 1,

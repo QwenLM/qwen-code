@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 
 const isoTimestampSchema = z.string().datetime({ offset: true });
-const tailHexSchema = /^[0-9a-f]{2,128}$/;
+const sha256HexSchema = /^[0-9a-f]{64}$/;
 
 const PROMPT_UUID_BLOOM_MIN_BYTES = 256;
 const PROMPT_UUID_BLOOM_MAX_BYTES = 131_072; // 128 KiB (~100k records at <1% FP)
@@ -40,7 +40,7 @@ export interface SessionPromptTimeSidecar {
   lastUserPromptAt: string | null;
   leafUuid: string;
   firstRecordOwner: { sessionId: string; cwd: string };
-  tailHex?: string;
+  prefixSha256?: string;
   prefixUuidBloom?: SessionPromptTimeUuidBloom;
   managed?: boolean;
 }
@@ -296,12 +296,10 @@ function parseSessionPromptTimeSidecar(
     return undefined;
   }
 
-  const tailHex = record['tailHex'];
+  const prefixSha256 = record['prefixSha256'];
   if (
-    tailHex !== undefined &&
-    (typeof tailHex !== 'string' ||
-      tailHex.length % 2 !== 0 ||
-      !tailHexSchema.test(tailHex))
+    prefixSha256 !== undefined &&
+    (typeof prefixSha256 !== 'string' || !sha256HexSchema.test(prefixSha256))
   ) {
     return undefined;
   }
@@ -328,7 +326,7 @@ function parseSessionPromptTimeSidecar(
       sessionId: owner['sessionId'],
       cwd: owner['cwd'],
     },
-    ...(tailHex !== undefined ? { tailHex } : {}),
+    ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
     ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
     ...(managed !== undefined ? { managed } : {}),
   };
@@ -371,8 +369,8 @@ export function writeSessionPromptTimeSidecar(
     !isNonEmptyString(data.leafUuid) ||
     !isNonEmptyString(data.firstRecordOwner.sessionId) ||
     !isNonEmptyString(data.firstRecordOwner.cwd) ||
-    (data.tailHex !== undefined &&
-      (data.tailHex.length % 2 !== 0 || !tailHexSchema.test(data.tailHex))) ||
+    (data.prefixSha256 !== undefined &&
+      !sha256HexSchema.test(data.prefixSha256)) ||
     (data.prefixUuidBloom !== undefined &&
       !parsePromptUuidBloom(data.prefixUuidBloom))
   ) {
@@ -392,7 +390,9 @@ export function writeSessionPromptTimeSidecar(
       sessionId: data.firstRecordOwner.sessionId,
       cwd: data.firstRecordOwner.cwd,
     },
-    ...(data.tailHex !== undefined ? { tailHex: data.tailHex } : {}),
+    ...(data.prefixSha256 !== undefined
+      ? { prefixSha256: data.prefixSha256 }
+      : {}),
     ...(data.prefixUuidBloom !== undefined
       ? { prefixUuidBloom: data.prefixUuidBloom }
       : {}),
