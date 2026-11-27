@@ -1114,6 +1114,9 @@ export async function main() {
       undefined,
       privateAcpParentCapability === undefined
         ? {
+            ...(!isAcpMode && !isBareMode(argv.bare)
+              ? { modelPreferences: settings.merged.model?.preferences ?? {} }
+              : {}),
             workflowAncestorTrustProvider:
               createLocalWorkflowAncestorTrustProvider(
                 getOperatorTrustSettings(settings),
