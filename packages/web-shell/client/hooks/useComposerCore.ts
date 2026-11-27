@@ -74,7 +74,7 @@ import {
   pushInputHistoryEntry,
   useInputHistory,
 } from '../hooks/useInputHistory';
-import { subscribeSidechannelRemotePrompt } from '../daemon/remotePromptSidechannel';
+import { subscribeSidechannelRemotePrompt } from '../utils/remote-prompt-sidechannel';
 import type { DaemonInputHistoryKind } from '../daemon/workspace/types';
 import {
   useAtMentionMenu,
