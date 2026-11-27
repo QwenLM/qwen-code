@@ -54,6 +54,8 @@ Worker 在安装会话上下文时从实际挂载验证目录。关闭会话仅�
 退役已注册的存储绑定时，Broker 验证原 Worker 的身份并取得其停止回执。正在执行的文件操作必须完成并获确认，Worker 才能回证停止。
 前台 Shell 使用会话级放置。每次获取运行绑定仍由供应方确认原挂载的实际存储身份。
 
+宿主永久删除已登记 Workspace 的实例后，属主仍可读取会话历史。属主另行删除某个会话时，受信宿主可通过 Java 方法 `SessionLifecycleService.admitRetiredWorkspaceDelete` 提交原 Workspace ID、代次和存储围栏操作 ID。准入事务校验会话创建者、原围栏及所属代次持久的停写证据，并确认同一存储的其他运行绑定也已退役。随后沿用常规 DELETE 协调器收尾该会话的 journal 和资源、持久化操作回执。公开 HTTP 入口不接受宿主退役授权。
+
 ## 持久化与兼容性
 
 在一个事务中写入现有 `ma_storage`、`ma_storage_owner` 与 `ma_request_receipt`。

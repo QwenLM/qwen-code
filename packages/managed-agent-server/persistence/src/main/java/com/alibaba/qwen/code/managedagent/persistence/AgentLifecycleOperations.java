@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.RetiredWorkspace;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
@@ -322,6 +323,13 @@ final class AgentLifecycleOperations {
     OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean publicLifecycle, boolean trustedChildClose) {
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest,
+                actorId, supported, protocolVersion, publicLifecycle, trustedChildClose, null);
+    }
+
+    OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind, String actorDigest,
+            String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
+            boolean publicLifecycle, boolean trustedChildClose, RetiredWorkspace retired) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         // A resumed admission pins the new operation to the failed one's
         // protocol (below), so the tenant lock keys on the prospect of
@@ -386,7 +394,12 @@ final class AgentLifecycleOperations {
                                 || !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        if (session.workspace() != null) {
+        if (retired != null) {
+            if (lifecycle == null || kind != OperationKind.DELETE) {
+                throw AgentSessionPolicies.workspaceExecutionUnavailable();
+            }
+            lifecycle.requireRetiredWorkspace(session, retired);
+        } else if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {

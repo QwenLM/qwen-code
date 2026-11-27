@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -699,6 +700,46 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.transactions.<com.fasterxml.jackson.databind.JsonNode>execute(ignored -> fixture.lifecycle.recoverEffects(second))).isNotNull();
         assertThat(fixture.transactions.<Boolean>execute(ignored -> fixture.store.completeOperation(
                 "tenant", fixture.session, first.operationId(), "worker", first.claimGeneration(), true))).isFalse();
+    }
+
+    @Test
+    void retiredWorkspaceRequiresTheSessionsOwnGenerationAndAllowsOtherProvenGenerations() {
+        var fixture = fixture();
+        String alias = "external";
+        var registry = new ExternalStorageRegistrationStore(fixture.jdbc, new DataSourceTransactionManager(fixture.jdbc.getDataSource()));
+        var registration = new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("host", "backing", 1),
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias(alias, "/external", "/mount", "workspace"));
+        registry.registerExternalStorage("tenant", "register", registration);
+        var selected = org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord.class);
+        org.mockito.Mockito.when(selected.tenantId()).thenReturn("tenant");
+        org.mockito.Mockito.when(selected.workspace()).thenReturn(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", alias, 2L, alias, ".", "config", 1));
+        var retired = new com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.RetiredWorkspace(alias, 2, "delete-instance");
+        var originals = new java.util.ArrayList<RuntimeBindingRecord>();
+        for (String generation : List.of("1", "2")) {
+            var scope = new RuntimeScope("tenant", alias, generation, "/mount", WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+            originals.add(fixture.bindings.findOrCreate(new RuntimeProvisionRequest(scope, null, "external-workspace", alias)));
+        }
+        fixture.bindings.requestStorageFence("tenant", alias, retired.storageFenceOperationId());
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.requireRetiredWorkspace(selected, retired)))
+                .hasMessageContaining("blocked");
+        for (var original : originals) {
+            var now = java.time.Instant.now();
+            var ready = fixture.bindings.claimOperation(original.getBindingId(), "host", Duration.ofMinutes(1));
+            var seed = ready.getProvisionSeed();
+            var attested = fixture.bindings.compareAndSet(ready, ready.withAttestation(new RuntimeLease(seed.getProvisionalRuntimeId(),
+                    java.net.URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
+                    new RuntimeResourceHandle("external-workspace", 1, java.util.Map.of("worker", original.getBindingId())), now, now));
+            var draining = fixture.bindings.compareAndSet(attested, attested.withDrainRequested(true, now));
+            var proof = new com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt(original.getBindingId(), original.getGeneration(),
+                    seed.getProvisionRequestId(), draining.getResourceHandle(), now);
+            fixture.bindings.compareAndSet(draining, draining.withDrainReceipt(proof).withState(RuntimeBindingRecord.State.RELEASED, draining.getLease(), now));
+        }
+        fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.requireRetiredWorkspace(selected, retired));
+        fixture.jdbc.update("UPDATE ma_runtime_binding SET drain_receipt_json = NULL WHERE binding_id = ?", originals.getFirst().getBindingId());
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.lifecycle.requireRetiredWorkspace(selected, retired)))
+                .hasMessageContaining("blocked");
     }
 
     @Test

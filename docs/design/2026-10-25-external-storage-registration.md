@@ -73,6 +73,8 @@ Foreground Shell retains its Session-only placement contract.
 The provider still has to confirm the identity of the original mounted storage
 on acquisition.
 
+After a host permanently deletes a registered Workspace's instance, its Session history remains available to the owner. A trusted embedding can pass the original Workspace ID, generation and storage fence operation to `SessionLifecycleService.admitRetiredWorkspaceDelete` when that owner asks to delete an individual Session. Admission checks the Session's creator, the exact fence and the original generation's durable stop evidence. Every other binding on that storage must also have released its writers. The regular DELETE coordinator settles the Session's journal and resources and persists the operation receipt. Public HTTP callers cannot supply the embedding's retirement authority.
+
 ## Persistence and compatibility
 
 Use existing `ma_storage`, `ma_storage_owner` and `ma_request_receipt` rows in one

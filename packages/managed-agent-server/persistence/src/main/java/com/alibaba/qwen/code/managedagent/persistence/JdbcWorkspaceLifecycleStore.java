@@ -1,13 +1,17 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecords;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.RetiredWorkspace;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -45,6 +49,45 @@ public class JdbcWorkspaceLifecycleStore
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
         this.packs = packs;
+    }
+
+    /** Called under the tenant placement lock. A migration fence or a released alias alone proves no retirement. */
+    void requireRetiredWorkspace(SessionRecord session, RetiredWorkspace retired) {
+        String tenant = session.tenantId();
+        String storage = retired.workspaceId();
+        if (session.workspace() == null || !storage.equals(session.workspace().getStorageId())
+                || !storage.equals(session.workspace().getWorkspaceId()) || retired.generation() != session.workspace().getWorkspaceGeneration()
+                || !retired.storageFenceOperationId().equals(WorkspaceMigrationAdmission.owner(jdbc, tenant, storage))
+                || jdbc.queryForList("SELECT 1 FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
+                        + " AND registration_state = 'REGISTERED'", Integer.class, tenant, storage).isEmpty()) {
+            throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+        }
+        WorkspaceMigrationAdmission.requirePhysicalOpen(jdbc, tenant, storage);
+        if (!(bindings.getIfAvailable() instanceof JdbcRuntimeBindingRepository original)) {
+            throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+        }
+        String cursor = null;
+        boolean originalGeneration = false;
+        List<RuntimeBindingRecord> page;
+        do {
+            String after = cursor;
+            page = jdbc.execute((ConnectionCallback<List<RuntimeBindingRecord>>) connection ->
+                    original.findByStorage(connection, tenant, storage, after, 100));
+            for (var binding : page) {
+                var request = binding.getRequest();
+                if (!WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(request)
+                        || !tenant.equals(request.getScope().getTenantId()) || !storage.equals(request.getStorageId())
+                        || binding.getState() != RuntimeBindingRecord.State.RELEASED
+                        || (binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)) && !binding.hasStoppedWriters()) {
+                    throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                }
+                originalGeneration |= Long.toString(retired.generation()).equals(request.getScope().getWorkspaceGeneration());
+                cursor = binding.getBindingId();
+            }
+        } while (page.size() == 100);
+        if (!originalGeneration) {
+            throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+        }
     }
 
     java.util.Set<String> requireIdleJournalWithPacks(String tenant, String session,
@@ -346,7 +389,7 @@ public class JdbcWorkspaceLifecycleStore
         if (!(repository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources)) {
             throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
         }
-        var originals = jdbc.execute((ConnectionCallback<List<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>>) connection ->
+        var originals = jdbc.execute((ConnectionCallback<List<RuntimeBindingRecord>>) connection ->
                 ((com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources) repository).verifyHarnessResources(connection, operation.tenantId(), operation.sessionId()));
         String profile = jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 String.class, operation.tenantId(), operation.sessionId());

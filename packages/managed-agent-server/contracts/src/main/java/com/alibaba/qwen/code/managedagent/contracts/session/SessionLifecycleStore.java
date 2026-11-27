@@ -60,6 +60,22 @@ public interface SessionLifecycleStore {
         return beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported);
     }
 
+    /** A trusted embedding confirms that its original external Workspace was permanently deleted. */
+    record RetiredWorkspace(String workspaceId, long generation, String storageFenceOperationId) {
+        public RetiredWorkspace {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireId(workspaceId, "workspaceId");
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireOperationId(storageFenceOperationId, "storageFenceOperationId");
+            if (generation < 1) {
+                throw new IllegalArgumentException("Invalid Workspace generation");
+            }
+        }
+    }
+
+    default OperationAdmission beginRetiredWorkspaceDelete(String tenantId, String sessionId, String actorId,
+            String actorDigest, String key, String digest, boolean supported, int protocolVersion, RetiredWorkspace retired) {
+        throw new UnsupportedOperationException("Retired Workspace Session deletion is unavailable");
+    }
+
     public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
     /** The given Sessions with a completed workspace close, in one read. */

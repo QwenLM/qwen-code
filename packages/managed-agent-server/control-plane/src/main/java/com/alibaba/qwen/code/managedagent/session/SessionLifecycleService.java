@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.RetiredWorkspace;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -108,6 +109,15 @@ public class SessionLifecycleService {
                 idempotencyKey, sessionId, kind);
         return webShellOperation(admission.operation(),
                 admission.replayed());
+    }
+
+    /** Embedded host only. Public callers cannot supply permanent-retirement authority. */
+    public PublicCommandOperation admitRetiredWorkspaceDelete(SessionPrincipal principal, String idempotencyKey,
+            String sessionId, RetiredWorkspace retired) {
+        java.util.Objects.requireNonNull(retired);
+        OperationAdmission admission = admit(principal.tenantId(), principal, principal.userId(),
+                idempotencyKey, sessionId, OperationKind.DELETE, retired);
+        return publicOperation(admission.operation(), admission.replayed());
     }
 
     // The read-back shape is chosen by kind: a cwd change answers with its
@@ -223,6 +233,11 @@ public class SessionLifecycleService {
             SessionPrincipal principal,
             String rawActorId,
             String idempotencyKey, String sessionId, OperationKind kind) {
+        return admit(tenantId, principal, rawActorId, idempotencyKey, sessionId, kind, null);
+    }
+
+    private OperationAdmission admit(String tenantId, SessionPrincipal principal, String rawActorId,
+            String idempotencyKey, String sessionId, OperationKind kind, RetiredWorkspace retired) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         SessionRecord session = store.requireSession(tenantId, sessionId);
         if (principal == null) {
@@ -232,12 +247,19 @@ public class SessionLifecycleService {
         }
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
+        if (retired != null && (session.workspace() == null || !retired.workspaceId().equals(session.workspace().getWorkspaceId())
+                || retired.generation() != session.workspace().getWorkspaceGeneration()
+                || !retired.workspaceId().equals(session.workspace().getStorageId()))) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
         if (session.workspace() != null) {
             boolean activeLifecycle = usesLifecycleProtocol(session, kind);
-            admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, rawActorId, actorDigest(rawActorId),
-                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session)
-                            : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace()),
-                    activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
+            boolean supported = activeLifecycle ? coordinator.supportsWorkspaceLifecycle(session)
+                    : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace());
+            int protocol = activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0;
+            admission = retired == null
+                    ? store.beginWorkspaceLifecycle(tenantId, sessionId, kind, rawActorId, actorDigest(rawActorId), idempotencyKey, digest, supported, protocol)
+                    : store.beginRetiredWorkspaceDelete(tenantId, sessionId, rawActorId, actorDigest(rawActorId), idempotencyKey, digest, supported, protocol, retired);
         } else {
             // The raw route keeps the raw actor end to end: the authority
             // check and the pre-ownership digest never construct a

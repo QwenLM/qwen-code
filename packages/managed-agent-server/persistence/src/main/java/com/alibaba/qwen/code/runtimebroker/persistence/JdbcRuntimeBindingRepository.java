@@ -779,37 +779,39 @@ public final class JdbcRuntimeBindingRepository
 
     @Override
     public List<RuntimeBindingRecord> findByStorage(String tenantId, String storageId, String afterBindingId, int limit) {
+        return JdbcRepositorySupport.read(dataSource, connection -> findByStorage(connection, tenantId, storageId, afterBindingId, limit));
+    }
+
+    /** Read the registered storage's original generations on the caller's placement transaction. */
+    public List<RuntimeBindingRecord> findByStorage(Connection connection, String tenantId, String storageId,
+            String afterBindingId, int limit) throws SQLException {
         if (limit < 1 || limit > 100) {
             throw new IllegalArgumentException("Storage batch must contain 1-100 bindings");
         }
-        return JdbcRepositorySupport.read(
-                dataSource,
-                connection -> {
-                    List<RuntimeBindingRecord> values = new ArrayList<>();
-                    try (PreparedStatement statement =
-                            connection.prepareStatement(
-                                    "SELECT "
-                                            + BINDING_COLUMNS
-                                            + " FROM ma_runtime_binding WHERE tenant_id = ? AND"
-                                            + " storage_id = ? AND CAST(tenant_id AS BINARY(2048))"
-                                            + " = CAST(? AS BINARY(2048)) AND CAST(storage_id AS"
-                                            + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
-                                            + " binding_id > ? ORDER BY binding_id LIMIT ?")) {
-                        JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
-                        JdbcRepositorySupport.setIdentity(statement, 2, storageId);
-                        JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-                        JdbcRepositorySupport.setIdentity(statement, 4, storageId);
-                        JdbcRepositorySupport.setIdentity(
-                                statement, 5, afterBindingId == null ? "" : afterBindingId);
-                        statement.setInt(6, limit);
-                        try (ResultSet rows = statement.executeQuery()) {
-                            while (rows.next()) {
-                                values.add(mapBinding(rows));
-                            }
-                        }
-                    }
-                    return List.copyOf(values);
-                });
+        List<RuntimeBindingRecord> values = new ArrayList<>();
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "SELECT "
+                                + BINDING_COLUMNS
+                                + " FROM ma_runtime_binding WHERE tenant_id = ? AND"
+                                + " storage_id = ? AND CAST(tenant_id AS BINARY(2048))"
+                                + " = CAST(? AS BINARY(2048)) AND CAST(storage_id AS"
+                                + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND"
+                                + " binding_id > ? ORDER BY binding_id LIMIT ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, storageId);
+            JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 4, storageId);
+            JdbcRepositorySupport.setIdentity(
+                    statement, 5, afterBindingId == null ? "" : afterBindingId);
+            statement.setInt(6, limit);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    values.add(mapBinding(rows));
+                }
+            }
+        }
+        return List.copyOf(values);
     }
 
     @Override
