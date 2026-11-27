@@ -59,7 +59,9 @@ type ToolApprovalTestProps = Parameters<
   typeof import('./messages/ToolApproval').ToolApproval
 >[0];
 let latestToolApprovalProps: ToolApprovalTestProps | undefined;
+let latestAskUserQuestionProps: any;
 let renderRealChatEditor: boolean;
+const transcriptScrollToBottom = vi.fn();
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
   | ((tool: {
@@ -246,73 +248,83 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-      data-file-changes={JSON.stringify(
-        [...(props.turnFileChanges?.values() ?? [])].flat(),
-      )}
-    >
-      {props.messages.length}
-      {props.failedPromptMessageId ? (
+  TranscriptViewport: forwardRef(function MockTranscriptViewport(
+    props: any,
+    ref: any,
+  ) {
+    useImperativeHandle(ref, () => ({
+      scrollToBottom: transcriptScrollToBottom,
+    }));
+    return (
+      <div
+        data-testid="pane-messages"
+        data-approval={props.pendingApproval ? 'yes' : 'no'}
+        data-responding={String(Boolean(props.isResponding))}
+        data-session-viewport={String(Boolean(props.sessionViewportEnabled))}
+        data-file-changes={JSON.stringify(
+          [...(props.turnFileChanges?.values() ?? [])].flat(),
+        )}
+      >
+        {props.messages.length}
+        {props.failedPromptMessageId ? (
+          <button
+            data-testid="pane-failed-prompt-retry"
+            data-failed-status={props.failedPromptStatus}
+            type="button"
+            onClick={props.onRetryFailedPrompt}
+          >
+            {props.failedPromptMessageId}
+          </button>
+        ) : null}
         <button
-          data-testid="pane-failed-prompt-retry"
-          data-failed-status={props.failedPromptStatus}
+          data-testid="pane-open-turn-output"
           type="button"
-          onClick={props.onRetryFailedPrompt}
-        >
-          {props.failedPromptMessageId}
-        </button>
-      ) : null}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-review"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'review',
-            kind: 'review',
-            title: 'Turn review',
-            turnId: 'turn-1',
-            changes: [
-              {
-                path: '/w/source.ts',
-                status: 'modified',
-                toolCallId: 'write-0',
-                isArtifact: false,
-                diffs: [],
-              },
-            ],
-          })
-        }
-      />
-    </div>
-  ),
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'artifact:turn-artifact',
+              kind: 'artifact',
+              title: 'Turn artifact',
+              turnId: 'turn-1',
+              artifactId: 'turn-artifact',
+              artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+              workspaceCwd: '/w',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-attachment"
+          type="button"
+          onClick={() =>
+            props.onAttachmentPreview?.({
+              name: 'data.json',
+              attachmentId: 'attachment-1',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-review"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'review',
+              kind: 'review',
+              title: 'Turn review',
+              turnId: 'turn-1',
+              changes: [
+                {
+                  path: '/w/source.ts',
+                  status: 'modified',
+                  toolCallId: 'write-0',
+                  isArtifact: false,
+                  diffs: [],
+                },
+              ],
+            })
+          }
+        />
+      </div>
+    );
+  }),
 }));
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
@@ -471,15 +483,18 @@ vi.mock('./messages/ToolApproval', () => ({
   },
 }));
 vi.mock('./messages/AskUserQuestion', () => ({
-  AskUserQuestion: (props: any) => (
-    <button
-      data-testid="ask-approval"
-      data-keyboard-active={String(props.keyboardActive)}
-      onClick={() => props.onConfirm(props.request.id, 'opt')}
-    >
-      ask
-    </button>
-  ),
+  AskUserQuestion: (props: any) => {
+    latestAskUserQuestionProps = props;
+    return (
+      <button
+        data-testid="ask-approval"
+        data-keyboard-active={String(props.keyboardActive)}
+        onClick={() => props.onConfirm(props.request.id, 'opt')}
+      >
+        ask
+      </button>
+    );
+  },
 }));
 
 const RealChatEditor = (
@@ -522,7 +537,9 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   latestToolApprovalProps = undefined;
+  latestAskUserQuestionProps = undefined;
   renderRealChatEditor = false;
+  transcriptScrollToBottom.mockClear();
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
   queuedPromptSessionHasActivePrompt = undefined;
@@ -3246,11 +3263,7 @@ describe('ChatPane', () => {
         new MouseEvent('click', { bubbles: true }),
       ),
     );
-    expect(submitPermission).toHaveBeenCalledWith(
-      'perm-1',
-      'proceed',
-      undefined,
-    );
+    expect(submitPermission).toHaveBeenCalledWith('perm-1', 'proceed');
   });
 
   it('routes an AskUserQuestion permission to the AskUserQuestion overlay', () => {
@@ -3810,7 +3823,7 @@ describe('ChatPane', () => {
       latestChatEditorProps.onSelectMode('yolo');
       await expect(
         latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
-      ).rejects.toThrow('still pending');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(submitPermission).not.toHaveBeenCalled();
     expect(latestToolApprovalProps!.disabled).toBe(true);
@@ -3887,7 +3900,7 @@ describe('ChatPane', () => {
     await act(async () => {
       await expect(
         latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
-      ).rejects.toThrow('permission failed');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
     await act(async () =>
@@ -4701,5 +4714,121 @@ describe('pane reported-artifact registration (R6-1)', () => {
       kind: 'html',
       storage: 'workspace',
     });
+  });
+});
+
+describe('ChatPane ChatSurface convergence (slice 4)', () => {
+  it('renders through ChatSurface, routes AskUserQuestion submit and dismiss, forwards isResponding, and scrolls transcript on submit', async () => {
+    streamingStateValue = 'responding';
+    pendingPermission = {
+      id: 'ask-1',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick one', options: [{ label: 'Alpha' }] }],
+      },
+    };
+    render();
+    expect(testid('chat-surface')).not.toBeNull();
+    expect(testid('pane-messages')?.getAttribute('data-responding')).toBe(
+      'true',
+    );
+    expect(testid('pane-messages')?.getAttribute('data-session-viewport')).toBe(
+      'true',
+    );
+    expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('no');
+    expect(latestChatEditorProps.workspaceFeaturesEnabled).toBe(true);
+
+    // Submit answers through ChatSurface -> controller.respondQuestion.
+    await act(async () => {
+      const ok = await latestAskUserQuestionProps.onConfirm(
+        'ask-1',
+        'allow-once',
+        { '0': 'Alpha' },
+      );
+      expect(ok).toBe(true);
+    });
+    expect(submitPermission).toHaveBeenCalledWith('ask-1', 'allow-once', {
+      '0': 'Alpha',
+    });
+
+    // Dismissing a fresh question routes through controller.respondApproval.
+    pendingPermission = {
+      id: 'ask-2',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick two', options: [{ label: 'Beta' }] }],
+      },
+    };
+    rerender();
+    await act(async () => {
+      const ok = await latestAskUserQuestionProps.onConfirm(
+        'ask-2',
+        'reject-once',
+      );
+      expect(ok).toBe(true);
+    });
+    expect(submitPermission).toHaveBeenCalledWith('ask-2', 'reject-once');
+
+    // Submitting a prompt calls scrollToBottom through ChatSurface.transcriptRef.
+    pendingPermission = null;
+    streamingStateValue = 'idle';
+    rerender();
+    await act(async () => {
+      latestOnSubmit?.('hello pane');
+    });
+    expect(transcriptScrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps composer status chrome mounted and approval-hidden while hiding the editor in readOnly mode', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    expect(testid('chat-surface')).not.toBeNull();
+    expect(container!.querySelector('[data-web-shell-composer]')).toBeNull();
+    expect(testid('pane-streaming')).not.toBeNull();
+    expect(testid('workspace-runtime-stopped')).not.toBeNull();
+    expect(testid('pane-streaming')?.parentElement?.className).not.toContain(
+      'composerHidden',
+    );
+
+    pendingPermission = {
+      id: 'perm-ro',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
+    rerender({ readOnly: true });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-streaming')?.parentElement?.className).toContain(
+      'composerHidden',
+    );
+  });
+
+  it('releases ExitPlanMode handoff lock when respondToPermission returns false', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-unapplied',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    respondToPermission.mockResolvedValueOnce(false);
+    render();
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm(
+          'plan-unapplied',
+          'restore_previous',
+        ),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
   });
 });

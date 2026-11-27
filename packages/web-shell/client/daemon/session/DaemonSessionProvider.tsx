@@ -7066,6 +7066,18 @@ export function useDaemonPromptSettled(
   }
 }
 
+export function useOptionalDaemonPromptSettled(
+  listener: DaemonPromptSettledListener | undefined,
+): void {
+  const subscribe = useContext(DaemonPromptSettlementContext);
+  const listenerRef = useRef(listener);
+  listenerRef.current = listener;
+  useEffect(
+    () => subscribe?.((event) => listenerRef.current?.(event)),
+    [subscribe],
+  );
+}
+
 export function useDaemonConnection(): DaemonConnectionState {
   const connection = useContext(DaemonConnectionContext);
   if (!connection) {
