@@ -1037,8 +1037,7 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
   it('scopes both chat effort entry points to the recorded task', async () => {
     const modelServiceId = 'qwen-startup-test(openai)';
     const settingsPath = path.join(homeDir, '.qwen', 'settings.json');
-    const sharedSettings = readFileSync(settingsPath, 'utf8');
-    const tasks: Array<{ sessionId: string; clientId: string }> = [];
+    const tasks: Array<{ sessionId: string; clientId?: string }> = [];
     const create = async () => {
       const task = await client.createOrAttachSession({
         workspaceCwd: REPO_ROOT,
@@ -1048,17 +1047,30 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
       tasks.push(task);
       return task;
     };
-    const choice = async ({ sessionId, clientId }: (typeof tasks)[number]) =>
-      (
-        await client.sessionContext(sessionId, clientId)
-      ).state.configOptions.find(({ id }) => id === 'reasoning_effort')
-        ?.currentValue;
+    const expectChoice = async (
+      task: (typeof tasks)[number],
+      value: string,
+    ) => {
+      expect(
+        await client.sessionContext(task.sessionId, task.clientId),
+      ).toMatchObject({
+        state: {
+          configOptions: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'reasoning_effort',
+              currentValue: value,
+            }),
+          ]),
+        },
+      });
+    };
 
     try {
       const menu = await create();
       const command = await create();
-      expect(await choice(menu)).toBe('none');
-      expect(await choice(command)).toBe('none');
+      await expectChoice(menu, 'none');
+      await expectChoice(command, 'none');
+      const sharedSettings = readFileSync(settingsPath, 'utf8');
       await expect(
         client.setSessionConfigOption(
           menu.sessionId,
@@ -1082,10 +1094,10 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
         ),
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
 
-      expect(await choice(menu)).toBe('high');
-      expect(await choice(command)).toBe('high');
+      await expectChoice(menu, 'high');
+      await expectChoice(command, 'high');
       expect(readFileSync(settingsPath, 'utf8')).toBe(sharedSettings);
-      expect(await choice(await create())).toBe('none');
+      await expectChoice(await create(), 'none');
     } finally {
       await Promise.all(
         tasks.map(({ sessionId }) => client.closeSession(sessionId)),
