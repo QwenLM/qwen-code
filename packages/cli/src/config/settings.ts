@@ -366,16 +366,15 @@ function repairDeadFolderTrustKey(
     return undefined;
   }
 
-  // A boolean canonical value keeps precedence; the dead key is dropped
+  // Any present canonical value keeps precedence; the dead key is dropped
   // either way so it does not survive as a second, unread copy of the choice.
-  // A canonical value of any other type (e.g. a null written for "unset")
-  // is not a choice any consumer honors — readers resolve the key as
-  // `boolean ?? false` or reject it — so the usable legacy boolean replaces
-  // it instead of being deleted alongside it.
+  // Non-boolean canonical values count here: `isFolderTrustEnabled` resolves
+  // the key with `?? false`, so a truthy one such as `"true"` is what opens
+  // the gate today, and replacing it would persist the gate shut. Only a
+  // nullish value carries no choice and lets the legacy boolean take over.
   delete folderTrust[FOLDER_TRUST_DEAD_KEY];
-  if (
-    typeof getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH) === 'boolean'
-  ) {
+  const canonical = getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH);
+  if (canonical !== undefined && canonical !== null) {
     return `Removed the unused 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' key; '${FOLDER_TRUST_ENABLED_PATH}' already set the folder-trust choice.`;
   }
 
@@ -1017,7 +1016,12 @@ export class LoadedSettings {
       const content = fs.readFileSync(file.path, 'utf-8');
       const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // The load path repairs the dead folder-trust key right after parsing;
+        // re-reads of the same file must agree with it, or a repair that could
+        // not be persisted is lost on the first reload. Stays in-memory: the
+        // reload must not write, and workspace settings are never repaired.
         if (scope !== SettingScope.Workspace) {
+          repairDeadFolderTrustKey(parsed as Record<string, unknown>);
           parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
         }
         const resolved = resolveEnvVarsInObject(

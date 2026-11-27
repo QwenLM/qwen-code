@@ -857,6 +857,71 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it('keeps a truthy non-boolean canonical value ahead of the dead key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: 'true', featureEnabled: false },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // `isFolderTrustEnabled` resolves the key with `?? false`, so `"true"`
+      // already opens the gate; taking the dead key's `false` would shut it
+      // and persist that across restarts.
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBeTruthy();
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: 'true',
+      });
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: 'true' },
+      });
+    });
+
+    it('keeps an unpersisted repair through a reload', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const staleContent = JSON.stringify({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        security: { folderTrust: { featureEnabled: true } },
+      });
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? staleContent : '{}',
+      );
+      // Read-only home: the repair cannot be written back, so it only lives in
+      // memory and the file keeps the dead key.
+      (fs.writeFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: read-only file system');
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+    });
+
     it('replaces a non-boolean canonical value with the dead-key boolean', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
