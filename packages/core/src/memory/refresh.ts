@@ -10,6 +10,7 @@ import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getAllMemoryFilenames } from '../utils/memory-constants.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
+import type { ProjectMemoryOwner } from './paths.js';
 import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -59,6 +60,7 @@ function logPrefix(
 function classifyWrittenMemoryScope(
   candidate: MemoryWriteCandidate,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): 'project' | 'user' | undefined {
   if (!isSuccessfulWrite(candidate)) {
     return undefined;
@@ -68,12 +70,15 @@ function classifyWrittenMemoryScope(
     return undefined;
   }
   const resolved = resolveCandidatePath(filePath, projectRoot);
-  if (!isAllowedMemoryPath(resolved, projectRoot)) {
+  if (!isAllowedMemoryPath(resolved, projectRoot, {}, owner)) {
     return undefined;
   }
-  return isAllowedMemoryPath(resolved, projectRoot, {
-    includeUserMemory: false,
-  })
+  return isAllowedMemoryPath(
+    resolved,
+    projectRoot,
+    { includeUserMemory: false },
+    owner,
+  )
     ? 'project'
     : 'user';
 }
@@ -81,10 +86,11 @@ function classifyWrittenMemoryScope(
 export function didWriteManagedMemory(
   candidates: readonly MemoryWriteCandidate[],
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   return candidates.some(
     (candidate) =>
-      classifyWrittenMemoryScope(candidate, projectRoot) !== undefined,
+      classifyWrittenMemoryScope(candidate, projectRoot, owner) !== undefined,
   );
 }
 
@@ -115,24 +121,27 @@ export function didWriteProjectContextFile(
 async function rebuildWrittenMemoryIndexes(
   candidates: readonly MemoryWriteCandidate[],
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
   options?: Pick<RefreshMemoryAfterWriteOptions, 'logContext'>,
 ): Promise<void> {
   let wroteProjectMemory = false;
   let wroteUserMemory = false;
 
   for (const candidate of candidates) {
-    const scope = classifyWrittenMemoryScope(candidate, projectRoot);
+    const scope = classifyWrittenMemoryScope(candidate, projectRoot, owner);
     wroteProjectMemory ||= scope === 'project';
     wroteUserMemory ||= scope === 'user';
   }
 
   await Promise.all([
     wroteProjectMemory
-      ? rebuildManagedAutoMemoryIndex(projectRoot).catch((err: unknown) => {
-          debugLogger.warn(
-            `${logPrefix(options)}rebuildManagedAutoMemoryIndex failed: ${err}`,
-          );
-        })
+      ? rebuildManagedAutoMemoryIndex(projectRoot, owner).catch(
+          (err: unknown) => {
+            debugLogger.warn(
+              `${logPrefix(options)}rebuildManagedAutoMemoryIndex failed: ${err}`,
+            );
+          },
+        )
       : Promise.resolve(),
     wroteUserMemory
       ? rebuildUserAutoMemoryIndex().catch((err: unknown) => {
@@ -179,11 +188,12 @@ export async function refreshMemoryAfterManagedWrite(
     }
 
     const projectRoot = config.getProjectRoot();
-    if (!didWriteManagedMemory(candidates, projectRoot)) {
+    const owner = config.getProjectMemoryOwner?.();
+    if (!didWriteManagedMemory(candidates, projectRoot, owner)) {
       return false;
     }
 
-    await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
+    await rebuildWrittenMemoryIndexes(candidates, projectRoot, owner, options);
 
     await refreshMemoryInstruction(config, options);
     return true;
