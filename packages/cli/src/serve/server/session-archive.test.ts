@@ -55,6 +55,7 @@ import {
   DaemonDrainingError,
 } from './session-archive.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 import {
   makeRetainedSession,
   makeRetentionRepo,
@@ -4351,11 +4352,7 @@ describe('retained snapshot archive lifecycle', () => {
     },
   );
 
-  it.runIf(
-    process.platform !== 'win32' &&
-      typeof process.getuid === 'function' &&
-      process.getuid() !== 0,
-  )(
+  it.skipIf(!arePermissionBitsEnforced())(
     'does not treat an unreadable sidecar parent as a missing sidecar',
     async () => {
       const workspace = path.join(root, 'unreadable-parent');
