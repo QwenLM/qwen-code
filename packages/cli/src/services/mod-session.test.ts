@@ -1944,6 +1944,7 @@ describe('Mod session ownership', () => {
           pluginConfigs: { 'hello-mod@inline': { options: { value: 'user' } } },
         },
       },
+      workspace: { settings: {} },
       system: {
         settings: {
           pluginConfigs: { 'hello-mod': { options: { value: 'system' } } },
