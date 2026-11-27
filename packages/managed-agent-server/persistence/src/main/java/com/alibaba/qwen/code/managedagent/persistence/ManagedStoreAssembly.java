@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -33,9 +35,9 @@ final class ManagedStoreAssembly {
     ManagedStoreAssembly(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher,
             JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcManagedSessionSkills creationSkills,
-            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
             JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
