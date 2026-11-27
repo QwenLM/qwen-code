@@ -27,6 +27,7 @@ import {
   DEFAULT_OPENAI_BASE_URL,
   normalizeOpenAiWireBaseUrl,
 } from '../core/openaiContentGenerator/constants.js';
+import { getHuggingFaceRoute, tokenLimit } from '../core/tokenLimits.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
@@ -302,6 +303,19 @@ function buildInheritedAgentContentGeneratorConfig(
     ? parentConfig.apiKeyEnvKey
     : undefined;
 
+  if (
+    !sameProvider ||
+    nextConfig.baseUrl !== parentConfig.baseUrl ||
+    (nextConfig.model !== parentConfig.model &&
+      getHuggingFaceRoute(nextConfig.model, nextConfig.baseUrl))
+  ) {
+    nextConfig.contextWindowSize = tokenLimit(
+      nextConfig.model,
+      'input',
+      nextConfig.baseUrl,
+    );
+  }
+
   return nextConfig;
 }
 
@@ -493,6 +507,22 @@ function applyResolvedModelConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }
+  }
+
+  // Materialize the target's fallback so Config cannot reuse the session window.
+  if (
+    resolvedModel.generationConfig.contextWindowSize === undefined &&
+    (isolateGenerationConfig ||
+      !sameProvider ||
+      targetConfig.model !== parentConfig.model ||
+      targetConfig.baseUrl !== parentConfig.baseUrl ||
+      differentRowForSameModel)
+  ) {
+    targetConfig.contextWindowSize = tokenLimit(
+      targetConfig.model,
+      'input',
+      targetConfig.baseUrl,
+    );
   }
 }
 

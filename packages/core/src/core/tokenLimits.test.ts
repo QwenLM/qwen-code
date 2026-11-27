@@ -29,7 +29,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'glm-4-7': { context: 200_000, output: 131_072 },
     'qwen3-8-max': { context: 262_144, output: 131_072 },
     // Reachable only through the dashed spelling of a stripped dotted version.
-    'twin-model-v2-1': { context: 222_222, output: 33_333 },
+    'twin-model-v2-1': { context: 122_222, output: 33_333 },
   };
   // Only the catalog read is stubbed; versionSpellingAlias is a pure string
   // rewrite, so the twin fallback sees the real rule.
@@ -73,29 +73,50 @@ describe('normalize', () => {
     ).toBe('262144');
   });
 
-  it('resolves an HF router id to the limits of its model', () => {
+  it('looks up family output limits and smaller family windows for HF router IDs', () => {
     for (const [id, base] of [
       ['zai-org/GLM-5.3-Flash:zai-org', 'zai-org/GLM-5.3-Flash'],
       ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 'deepseek-v4.1-flash'],
       ['deepseek-ai/DeepSeek-V3.1:together', 'deepseek-ai/DeepSeek-V3.1'],
     ]) {
-      expect(tokenLimit(id, 'input', HF_ROUTER_URL)).toBe(
-        tokenLimit(base, 'input'),
-      );
       expect(tokenLimit(id, 'output', HF_ROUTER_URL)).toBe(
         tokenLimit(base, 'output'),
       );
     }
     expect(
-      tokenLimit('zai-org/GLM-5.3-Flash:zai-org', 'input', HF_ROUTER_URL),
-    ).toBe(1_000_000);
-    expect(
       tokenLimit('org/Twin-Model-V2.1:together', 'input', HF_ROUTER_URL),
-    ).toBe(222_222);
+    ).toBe(122_222);
     expect(
       tokenLimit('org/Twin-Model-V2.1:together', 'output', HF_ROUTER_URL),
     ).toBe(33_333);
   });
+
+  it.each([
+    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144],
+    ['  qwen|openai:DEEPSEEK-AI/DeepSeek-V4.1-Flash:Featherless  ', 262_144],
+    ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 1_048_576],
+    ['zai-org/GLM-5.3-Flash:deepinfra', 1_048_576],
+    ['moonshotai/Kimi-K3:fireworks', 1_048_576],
+  ])('uses the published HF context window for %s', (model, window) => {
+    expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBe(window);
+  });
+
+  it.each([
+    'deepseek-ai/DeepSeek-V4.1-Flash:fastest',
+    'deepseek-ai/DeepSeek-V4.1-Flash:unlisted',
+    'another-org/DeepSeek-V4.1-Flash:featherless',
+    'zai-org/GLM-5.3-Flash:zai-org',
+  ])(
+    'keeps the default window for %s without a published route limit',
+    (model) => {
+      expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+    },
+  );
 
   it('should lowercase and trim the model string', () => {
     expect(normalize('  GEMINI-1.5-PRO  ')).toBe('gemini-1.5-pro');

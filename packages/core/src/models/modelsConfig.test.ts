@@ -749,7 +749,7 @@ describe('ModelsConfig', () => {
   it.each([
     {
       generationConfig: undefined,
-      contextWindowSize: 1_000_000,
+      contextWindowSize: 1_048_576,
       modalities: { image: true },
     },
     {
@@ -763,7 +763,7 @@ describe('ModelsConfig', () => {
   ])(
     'uses the effective Hugging Face endpoint when refreshing a registered model with $generationConfig',
     ({ generationConfig, contextWindowSize, modalities }) => {
-      const modelId = 'zai-org/GLM-5.3-Flash:zai-org';
+      const modelId = 'zai-org/GLM-5.3-Flash:deepinfra';
       const baseUrl = 'https://router.huggingface.co/v1';
       const modelsConfig = openaiConfig(
         [entry(modelId, 'GLM', undefined, undefined, generationConfig)],

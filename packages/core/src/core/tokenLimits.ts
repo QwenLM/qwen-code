@@ -144,32 +144,48 @@ const LIMITS = {
   '16k': 16_384,
 } as const;
 
+// The router publishes context_length for individual model and provider pairs.
+// https://huggingface.co/docs/inference-providers/hub-api
+const HUGGING_FACE_CONTEXT_WINDOWS = new Map<string, TokenCount>([
+  ['deepseek-ai/deepseek-v4.1-flash:deepinfra', 1_048_576],
+  ['deepseek-ai/deepseek-v4.1-flash:featherless', LIMITS['256k']],
+  ['moonshotai/kimi-k3:fireworks', 1_048_576],
+  ['zai-org/glm-5.3-flash:deepinfra', 1_048_576],
+]);
+
 /**
  * The Hugging Face router uses a single provider or policy suffix. Suffixes on
  * other endpoints can describe distinct models, and catalog keys have no URL.
  */
-function withoutHuggingFaceRouteSuffix(
+export function getHuggingFaceRoute(
   model: string,
   baseUrl?: string,
-): string {
-  if (!baseUrl || !model.includes(':')) return model;
+): { id: string; model: string } | undefined {
+  if (!baseUrl || !model.includes(':')) return undefined;
   try {
     const url = new URL(baseUrl);
     if (url.protocol !== 'https:' || url.host !== 'router.huggingface.co') {
-      return model;
+      return undefined;
     }
   } catch {
-    return model;
+    return undefined;
   }
-  return model.trim().replace(/(\/[^/:|\s]+):(?!batch$)[^/:|\s]+$/i, '$1');
+
+  const trimmed = model.trim();
+  const id = /(?:^|[|:])([^|:]*\/[^/:|\s]+:(?!batch$)[^/:|\s]+)$/i.exec(
+    trimmed,
+  )?.[1];
+  if (!id) return undefined;
+  return {
+    id: id.toLowerCase(),
+    model: trimmed.slice(0, trimmed.lastIndexOf(':')),
+  };
 }
 
 /** Robust normalizer: strips provider prefixes, pipes/colons, date/version suffixes, etc. */
 export function normalize(model: string, baseUrl?: string): string {
-  let s = withoutHuggingFaceRouteSuffix(
-    (model ?? '').toLowerCase().trim(),
-    baseUrl,
-  );
+  let s = (model ?? '').toLowerCase().trim();
+  s = getHuggingFaceRoute(s, baseUrl)?.model ?? s;
 
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
@@ -486,7 +502,19 @@ export function knownTokenLimit(
   type: TokenLimitType = 'input',
   baseUrl?: string,
 ): TokenCount | undefined {
-  return findTokenLimit(withoutHuggingFaceRouteSuffix(model, baseUrl), type);
+  const route = getHuggingFaceRoute(model, baseUrl);
+  if (!route) return findTokenLimit(model, type);
+  if (type === 'output') return findTokenLimit(route.model, type);
+
+  const providerWindow = HUGGING_FACE_CONTEXT_WINDOWS.get(route.id);
+  if (providerWindow !== undefined) return providerWindow;
+
+  // A family window can narrow the default when the selected provider's
+  // window is unknown.
+  return Math.min(
+    findTokenLimit(route.model, 'input') ?? DEFAULT_TOKEN_LIMIT,
+    DEFAULT_TOKEN_LIMIT,
+  );
 }
 
 /**
@@ -526,7 +554,7 @@ export function defaultOutputCeiling(
   model: Model,
   baseUrl?: string,
 ): TokenCount {
-  const lookupModel = withoutHuggingFaceRouteSuffix(model, baseUrl);
+  const lookupModel = getHuggingFaceRoute(model, baseUrl)?.model ?? model;
   const outputLimit = tokenLimit(lookupModel, 'output');
   const normalized = normalize(lookupModel);
   if (

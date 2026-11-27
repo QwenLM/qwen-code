@@ -19,6 +19,7 @@ import {
   DEFAULT_OPENAI_BASE_URL,
 } from '../core/openaiContentGenerator/constants.js';
 import { determineProvider } from '../core/openaiContentGenerator/index.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ResolvedModelConfig } from './types.js';
@@ -175,6 +176,48 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
 
+    it('keeps the configured window for a raw override on a regular gateway', () => {
+      const result = buildOver('gpt-4o', { authType: 'openai' });
+
+      expect(result.contextWindowSize).toBe(parentConfig.contextWindowSize);
+    });
+
+    it('uses the overridden endpoint for a raw model window', () => {
+      const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+      const baseUrl = 'https://router.huggingface.co/v1';
+      const result = buildOver(model, {
+        authType: 'openai',
+        baseUrl,
+      });
+
+      expect(result.contextWindowSize).toBeGreaterThan(DEFAULT_TOKEN_LIMIT);
+      expect(result.contextWindowSize).toBe(
+        tokenLimit(model, 'input', baseUrl),
+      );
+    });
+
+    it.each([
+      ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144],
+      ['deepseek-ai/DeepSeek-V4.1-Flash:fastest', DEFAULT_TOKEN_LIMIT],
+    ])(
+      'uses the window for a different raw HF route %s on the same endpoint',
+      (model, contextWindowSize) => {
+        const baseUrl = 'https://router.huggingface.co/v1';
+        const result = buildOver(
+          model,
+          { authType: 'openai' },
+          {
+            ...parentConfig,
+            model: 'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
+            baseUrl,
+            contextWindowSize: 1_048_576,
+          },
+        );
+
+        expect(result).toMatchObject({ model, baseUrl, contextWindowSize });
+      },
+    );
+
     it('does not inherit mandatory thinking from another model', () => {
       const result = buildOver(
         'custom-model',
@@ -197,7 +240,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.timeout).toBeUndefined();
       expect(result.streamIdleTimeoutMs).toBeUndefined();
       expect(result.maxRetries).toBeUndefined();
-      expect(result.contextWindowSize).toBeUndefined();
+      expect(result.contextWindowSize).toBe(DEFAULT_TOKEN_LIMIT);
       expect(result.extra_body).toBeUndefined();
       // Parent credentials NOT inherited (different provider)
       expect(result.apiKeyEnvKey).toBeUndefined();
@@ -279,6 +322,76 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.reasoning).toEqual({ effort: 'medium' });
       // Fields not in registry stay cleared (cross-provider)
       expect(result.extra_body).toBeUndefined();
+    });
+
+    it.each([
+      [undefined, DEFAULT_TOKEN_LIMIT],
+      [262_144, 262_144],
+    ])(
+      'uses the Tinker child window with a registry window of %s',
+      (contextWindowSize, expected) => {
+        const baseUrl =
+          'https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1';
+        const model = 'zai-org/GLM-5.3-Flash:peft:262144';
+        const hfBaseUrl = 'https://router.huggingface.co/v1';
+        const result = buildOver(
+          model,
+          { authType: AuthType.USE_OPENAI },
+          {
+            ...parentConfig,
+            model: 'zai-org/GLM-5.3-Flash:deepinfra',
+            baseUrl: hfBaseUrl,
+            reasoningRouteBaseUrl: hfBaseUrl,
+            contextWindowSize: 1_000_000,
+          },
+          {
+            ...openaiResolved,
+            id: model,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+            generationConfig: { contextWindowSize },
+          },
+        );
+
+        expect(result).toMatchObject({
+          model,
+          baseUrl,
+          contextWindowSize: expected,
+        });
+      },
+    );
+
+    it('inherits the live context window only for the same registered row', () => {
+      const model = 'shared-model';
+      const models = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            { id: model },
+            { id: model, baseUrl: DEFAULT_OPENAI_BASE_URL },
+          ],
+        },
+      });
+      const config = {
+        getContentGeneratorConfig: () => ({
+          ...parentConfig,
+          model,
+          baseUrl: DEFAULT_OPENAI_BASE_URL,
+          reasoningRouteBaseUrl: null,
+        }),
+        getModelsConfig: () => models,
+      } as unknown as Config;
+      const buildAt = (registryBaseUrl: string | null) =>
+        buildAgentContentGeneratorConfig(config, model, {
+          authType: AuthType.USE_OPENAI,
+          registryBaseUrl,
+        });
+
+      expect(buildAt(null).contextWindowSize).toBe(
+        parentConfig.contextWindowSize,
+      );
+      expect(buildAt(DEFAULT_OPENAI_BASE_URL).contextWindowSize).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
     });
 
     it('should preserve a zero stream idle timeout from the registry', () => {

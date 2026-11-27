@@ -380,7 +380,7 @@ describe('AgentComposer', () => {
     });
 
     it('looks up a router model using the agent endpoint', () => {
-      agentModel = 'zai-org/GLM-5.3-Flash:zai-org';
+      agentModel = 'zai-org/GLM-5.3-Flash:deepinfra';
       agentRuntimeView = {
         contentGeneratorConfig: {
           authType: 'openai',
@@ -390,7 +390,7 @@ describe('AgentComposer', () => {
 
       render(<AgentComposer agentId="agent-1" />);
 
-      expect(agentFooterProps.contextWindowSize).toBe(1_000_000);
+      expect(agentFooterProps.contextWindowSize).toBe(1_048_576);
     });
 
     it("reads the session's window from inside the agent's runtime frame", async () => {

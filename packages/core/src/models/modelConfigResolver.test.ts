@@ -103,19 +103,25 @@ describe('modelConfigResolver', () => {
       it.each([
         [
           'https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          1_048_576,
+          true,
+        ],
+        [
+          'https://router.huggingface.co/v1',
           'zai-org/GLM-5.3-Flash:zai-org',
-          1_000_000,
+          200_000,
           true,
         ],
         [
           'https://router.huggingface.co.example.com/v1',
-          'zai-org/GLM-5.3-Flash:zai-org',
+          'zai-org/GLM-5.3-Flash:deepinfra',
           undefined,
           undefined,
         ],
         [
           'blob:https://router.huggingface.co/v1',
-          'zai-org/GLM-5.3-Flash:zai-org',
+          'zai-org/GLM-5.3-Flash:deepinfra',
           undefined,
           undefined,
         ],
@@ -141,6 +147,28 @@ describe('modelConfigResolver', () => {
           expect(config.model).toBe(model);
           expect(config.contextWindowSize).toBe(context);
           expect(config.modalities?.image).toBe(image);
+        },
+      );
+
+      it.each([
+        [undefined, 262_144],
+        [240_000, 240_000],
+      ])(
+        'applies the Featherless context fallback with configured window %s',
+        (contextWindowSize, expected) => {
+          const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: model,
+            },
+            settings: {
+              generationConfig: { contextWindowSize },
+            },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(expected);
         },
       );
 
