@@ -43,6 +43,10 @@ export const GITHUB_CI_ONLY_FILES = new Set([
   '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
   '.github/workflows/qwen-pr-safety-precheck.yml',
   '.github/workflows/update-ecs-runner-qwen.yml',
+  // Read directly by pr-safety-precheck.test.mjs (runs in the dep-free helper
+  // lane on github_ci_only/full, skipped on docs_only).
+  'docs/users/configuration/settings.md',
+  'docs/users/features/headless.md',
 ]);
 
 function isDocsOnlyFile(file) {
@@ -111,8 +115,8 @@ function isTestFreeMarkdown(file) {
 }
 
 function classifyPath(file) {
-  if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
   if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
+  if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
   if (isTestFreeMarkdown(file)) return CI_PROFILES.GITHUB_CI_ONLY;
   // A test may read it from a TypeScript suite, so it keeps the full profile.
   if (TEST_READ_MARKDOWN.has(file.replace(/\\/g, '/'))) {

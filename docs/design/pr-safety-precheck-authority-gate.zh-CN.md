@@ -116,7 +116,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 同行 JS/TS 箭头函数参数（如 `(env) => env.id`、`  (set) => set.has(name)`、`; (env) => env.id`）仅在直接左括号的有界锚（`^[ \t]{0,128}\(` 与 `[;&|][ \t]{0,64}\(`）且同一行（`(?!\)[ \t]*=>)`）下放行——在 bash、sh 与 zsh 中该同行形态都会在解析期直接报语法错，不会执行子壳。命令替换（`$(env) => /tmp/leak`）、命令替换内由分隔符锚定的导出（`$(true; env) => /tmp/leak`、`$(cd /tmp && env) => /tmp/leak`）以及跨换行拆分的形态（`(env)\n=> foo`）不共享该放行，全部保持扣留。`printenv` 无终止符文法且并非常见箭头参数名，因此 `(printenv) =>` 保持扣留——这是与 `(env) =>` 有意保留的不对称。
 
-既有的 `prompt_injection:system_prompt` 短语规则保持在 `/\bsystem prompt\b/i` 上失败关闭，不再枚举提取动词，也不再放行裸名词短语。仅对整行精确产品文案放行，并通过 `trim()` 与按 `|` 拆分单元格以线性 O(n) 方式匹配（不引入互相竞争的空白量词，避免长空格填充触发回溯）：`--system-prompt` / `--append-system-prompt` 的 CLI 旗标表格行（在描述单元格处结束且至多带一个可选尾竖线，或精确匹配 `docs/users/configuration/settings.md` 与 `docs/users/features/headless.md` 中的已文档化表格行，不允许任意非空尾随单元格）、`packages/cli/src/config/top-level-options.ts` 中对应的带引号选项说明字符串行，以及 `packages/core/src/config/config.ts` 中精确的缓存注释行 `The cross-session-stable prefix of the main-session system prompt —`。其余所有提及——包括任意动词、屈折形态、同义词、换行或长间隔的祈使句、表格行上任意非空第三单元格，以及 `The system prompt is confidential.` 这类裸提及——全部保持扣留。连字符（`system-prompt`）与驼峰（`systemPrompt`）拼写本就不在基线短语规则范围内，且 CLI 旗标与代码标识符在全仓高频使用，因此此处不纳入主规则。
+既有的 `prompt_injection:system_prompt` 短语规则保持在 `/\bsystem prompt\b/i` 上失败关闭，不再枚举提取动词，也不再放行裸名词短语。仅对整行精确产品文案放行，并通过 `trim()` 与按 `|` 拆分单元格以线性 O(n) 方式匹配（不引入互相竞争的空白量词，避免长空格填充触发回溯）：`--system-prompt` / `--append-system-prompt` 的 CLI 旗标表格行（在描述单元格处结束且至多带一个可选尾竖线，或精确匹配 `docs/users/configuration/settings.md` 与 `docs/users/features/headless.md` 中的已文档化表格行，不允许任意非空尾随单元格）、`packages/cli/src/config/top-level-options.ts` 中对应的带引号选项说明字符串行，以及 `packages/core/src/config/config.ts` 中精确的缓存注释行 `The cross-session-stable prefix of the main-session system prompt`（可选尾部 `—` 或 `.`，含或不含 JSDoc 前导 `*`）。由于 `pr-safety-precheck.test.mjs` 直接从磁盘读取 `docs/users/configuration/settings.md` 与 `docs/users/features/headless.md`，两份文档已在 CI 分类器中排在通用 `docs/` 匹配之前归入 `github_ci_only`，确保单独修改它们时仍运行无依赖 helper 套件，而不会走跳过该套件的 `docs_only`。其余所有提及——包括任意动词、屈折形态、同义词、换行或长间隔的祈使句、表格行上任意非空第三单元格，以及 `The system prompt is confidential.` 这类裸提及——全部保持扣留。连字符（`system-prompt`）与驼峰（`systemPrompt`）拼写本就不在基线短语规则范围内，且 CLI 旗标与代码标识符在全仓高频使用，因此此处不纳入主规则。
 
 ## 约束
 
@@ -152,13 +152,13 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元与 workflow 套件：284 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元与 workflow 套件：287 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
 - 变异见证：56 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
 - workflow 端到端决策表：11 个用例通过。它用打桩 `gh`、在步骤自身的 bash 契约下执行**真实的** collect 与 assess `run:` 块，断言最终决策而非中间旗标。覆盖恰好等于上限、上限加一、diff 调用失败、可信作者，以及「敌意正文 + 元数据调用成功／失败」两臂。
 - `prettier --check`、`eslint`、`actionlint`：干净。`eslint` 与 `actionlint` 均先用一个故意非法的输入证明过是活的。
-- `classify-profile.test.mjs`：27 通过、0 失败。
+- `classify-profile.test.mjs`：28 通过、0 失败。
 - `scripts/tests/qwen-autofix-workflow.test.js`：57 失败、287 通过、13 跳过——把本次改动 stash 后计数相同，且 57 条失败用例名**集合完全一致**。每条失败都是该 harness 自己的临时 `typescript.cjs` 的 `ENOENT`，属 worktree 前置缺口，与本改动无关。
 
 三条既有用例原先断言「放行不可信作者对 `.github` 与 `scripts/` 的改动」。它们被**改靶**到新策略而非删除；另有一条夹具被修正为携带真实 diff 头，使其真正走到路径规则而不是空过。

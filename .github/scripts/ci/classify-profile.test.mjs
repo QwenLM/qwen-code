@@ -63,6 +63,9 @@ test('lists every lightweight Markdown a test names in TEST_READ_MARKDOWN', () =
     tracked.filter(
       (file) =>
         /\.md$/i.test(file) &&
+        // Explicit GITHUB_CI_ONLY_FILES Markdown is covered by the dep-free
+        // helper lane that runs on github_ci_only, not treated as test-free.
+        !GITHUB_CI_ONLY_FILES.has(file) &&
         classifyChangedFiles([file]) === 'github_ci_only',
     ),
   );
@@ -165,9 +168,52 @@ test('uses github_ci_only for the allowed GitHub CI helper files', () => {
 });
 
 test('uses github_ci_only for each allowed GitHub CI helper file', () => {
+  assert.deepEqual(
+    [...GITHUB_CI_ONLY_FILES].sort(),
+    [
+      '.github/CODEOWNERS',
+      '.github/actionlint.yaml',
+      '.github/scripts/pr-safety-precheck.mjs',
+      '.github/scripts/pr-safety-precheck.test.mjs',
+      '.github/scripts/pr-safety-precheck.workflow.test.mjs',
+      '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
+      '.github/workflows/qwen-pr-safety-precheck.yml',
+      '.github/workflows/update-ecs-runner-qwen.yml',
+      'docs/users/configuration/settings.md',
+      'docs/users/features/headless.md',
+    ].sort(),
+  );
   for (const file of GITHUB_CI_ONLY_FILES) {
-    assert.equal(classifyChangedFiles([file]), 'github_ci_only');
+    assert.equal(classifyChangedFiles([file]), 'github_ci_only', file);
   }
+});
+
+test('routes precheck-read docs pages to github_ci_only instead of docs_only', () => {
+  assert.equal(
+    classifyChangedFiles(['docs/users/configuration/settings.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['docs/users/features/headless.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      'docs/users/configuration/settings.md',
+      'docs/usage.md',
+    ]),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/users/configuration/settings-next.md',
+        previous_filename: 'docs/users/configuration/settings.md',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
 });
 
 test('uses github_ci_only, not docs_only, for CODEOWNERS changes', () => {

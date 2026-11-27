@@ -302,7 +302,7 @@ listed above. These are coverage gaps, not safety claims. Dumps written for anot
 
 Same-line JS/TS arrow-function parameters such as `(env) => env.id`, `  (set) => set.has(name)`, and `; (env) => env.id` are released only on bounded anchors that directly open a parenthesis (`^[ \t]{0,128}\(` and `[;&|][ \t]{0,64}\(`) and only on the same line (`(?!\)[ \t]*=>)`), where bash, sh and zsh all reject the line with a parse error before executing the subshell. Command substitution (`$(env) => /tmp/leak`), separator-anchored dumps inside command substitution (`$(true; env) => /tmp/leak`, `$(cd /tmp && env) => /tmp/leak`), and newline-split forms (`(env)\n=> foo`) do not share that release and remain held. `printenv` has no terminator grammar and is not a common arrow parameter, so `(printenv) =>` remains held — an intentional asymmetry with `(env) =>`.
 
-The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed on `/\bsystem prompt\b/i` rather than enumerating extraction verbs or releasing a bare noun phrase. Only exact full-line product prose lines are released, matched linearly via `trim()` and `|`-cell splitting (with no competing whitespace quantifiers so long padding stays O(n)): the CLI flag table rows for `--system-prompt` / `--append-system-prompt` (terminating at the description cell with at most an optional trailing pipe, or matching the exact documented table rows in `docs/users/configuration/settings.md` and `docs/users/features/headless.md` with no arbitrary trailing cell), the matching quoted option description strings in `packages/cli/src/config/top-level-options.ts`, and the exact cache-comment line `The cross-session-stable prefix of the main-session system prompt —` in `packages/core/src/config/config.ts`. Every other mention — including imperatives with any verb, inflection, synonym, newline, or long gap, a non-empty arbitrary third cell on a flag table row, as well as bare mentions such as `The system prompt is confidential.` — remains held. Hyphenated (`system-prompt`) and camelCase (`systemPrompt`) spellings are outside the baseline phrase rule and are not added here because CLI flags and code identifiers use them throughout the repository.
+The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed on `/\bsystem prompt\b/i` rather than enumerating extraction verbs or releasing a bare noun phrase. Only exact full-line product prose lines are released, matched linearly via `trim()` and `|`-cell splitting (with no competing whitespace quantifiers so long padding stays O(n)): the CLI flag table rows for `--system-prompt` / `--append-system-prompt` (terminating at the description cell with at most an optional trailing pipe, or matching the exact documented table rows in `docs/users/configuration/settings.md` and `docs/users/features/headless.md` with no arbitrary trailing cell), the matching quoted option description strings in `packages/cli/src/config/top-level-options.ts`, and the exact cache-comment line `The cross-session-stable prefix of the main-session system prompt` (with optional trailing `—` or `.`, with or without leading JSDoc `*`) in `packages/core/src/config/config.ts`. Because `pr-safety-precheck.test.mjs` reads `docs/users/configuration/settings.md` and `docs/users/features/headless.md` directly from disk, both files are listed in `GITHUB_CI_ONLY_FILES` ahead of the generic `docs/` match so a PR editing either page still runs the dep-free helper suite instead of taking `docs_only`. Every other mention — including imperatives with any verb, inflection, synonym, newline, or long gap, a non-empty arbitrary third cell on a flag table row, as well as bare mentions such as `The system prompt is confidential.` — remains held. Hyphenated (`system-prompt`) and camelCase (`systemPrompt`) spellings are outside the baseline phrase rule and are not added here because CLI flags and code identifiers use them throughout the repository.
 
 ## Constraints
 
@@ -366,7 +366,7 @@ The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed 
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 284 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 287 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
@@ -397,7 +397,7 @@ The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed 
   hostile body with the metadata call both succeeding and failing.
 - `prettier --check`, `eslint`, `actionlint`: clean. Both `eslint` and
   `actionlint` were first proven live against a deliberately invalid input.
-- `classify-profile.test.mjs`: 27 passed, 0 failed.
+- `classify-profile.test.mjs`: 28 passed, 0 failed.
 - `scripts/tests/qwen-autofix-workflow.test.js`: 57 failed, 287 passed,
   13 skipped — identical counts and an identical set of 57 failing test names
   with the change stashed. Every failure is an `ENOENT` for the harness's own
