@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
 import { act } from 'react';
-import { DaemonUnavailableError } from '../daemon/availability';
+import {
+  DaemonUnavailableError,
+  type DaemonAvailability,
+} from '../daemon/availability';
+import { DaemonAvailabilityContext } from '../daemon/availability-context';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const availabilityMock = vi.hoisted(() => ({
+
+const availabilityMock = {
   enabled: false,
   available: true,
   controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    subscribe: () => () => {},
     getGeneration: () => 0,
     assertAvailable: vi.fn(() => {
       if (!availabilityMock.available) throw new DaemonUnavailableError();
@@ -15,11 +23,7 @@ const availabilityMock = vi.hoisted(() => ({
       availabilityMock.available = false;
     }),
   },
-}));
-vi.mock('../daemon/availability-context', () => ({
-  useDaemonAvailabilityController: () =>
-    availabilityMock.enabled ? availabilityMock.controller : undefined,
-}));
+};
 
 import {
   useFileUpload,
@@ -45,8 +49,22 @@ function Probe({ client, maxBytes, targetKey }: ProbeProps) {
   return null;
 }
 
+function buildProbeTree(props: ProbeProps) {
+  return (
+    <DaemonAvailabilityContext.Provider
+      value={
+        availabilityMock.enabled
+          ? (availabilityMock.controller as unknown as DaemonAvailability)
+          : undefined
+      }
+    >
+      <Probe {...props} />
+    </DaemonAvailabilityContext.Provider>
+  );
+}
+
 function render(props: ProbeProps) {
-  act(() => root!.render(<Probe {...props} />));
+  act(() => root!.render(buildProbeTree(props)));
 }
 
 function makeFile(name: string, size = 3): File {
@@ -783,7 +801,9 @@ describe('useFileUpload', () => {
       .mockImplementation(() => {});
     try {
       const rendersBefore = probeRenderCount;
-      root!.render(<Probe client={clientB} maxBytes={MAX} targetKey="ws:/b" />);
+      root!.render(
+        buildProbeTree({ client: clientB, maxBytes: MAX, targetKey: 'ws:/b' }),
+      );
       // Poll on chained macrotasks until the switch render commits (the
       // fixed hook bumps the generation during that render). Each poll
       // message posts after the previous task, so the chain lands between

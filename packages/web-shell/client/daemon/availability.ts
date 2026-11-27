@@ -10,13 +10,15 @@ import type {
   DaemonClientOptions,
   DaemonTransport,
 } from '@qwen-code/sdk/daemon';
+import {
+  ServiceUnavailableError,
+  type ServiceAvailabilityController,
+  type ServiceAvailabilityState,
+} from '../utils/service-availability.js';
 
-export type DaemonAvailabilityState =
-  | 'available'
-  | 'unavailable'
-  | 'auth-required';
+export type DaemonAvailabilityState = ServiceAvailabilityState;
 
-export class DaemonUnavailableError extends Error {
+export class DaemonUnavailableError extends ServiceUnavailableError {
   constructor() {
     super('The daemon is unavailable. Automatic refresh is paused.');
     this.name = 'DaemonUnavailableError';
@@ -83,7 +85,7 @@ function retryAfterMsFrom(response: Response): number | undefined {
 }
 
 /** One recovery loop for all requests owned by an active daemon connection. */
-export class DaemonAvailability {
+export class DaemonAvailability implements ServiceAvailabilityController {
   private state: DaemonAvailabilityState = 'available';
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setTimeout>;
