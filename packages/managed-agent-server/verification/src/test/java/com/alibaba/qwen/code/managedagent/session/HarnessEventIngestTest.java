@@ -103,8 +103,9 @@ class HarnessEventIngestTest {
         IngestReceipt first = ingest(0, 3, null, text(1, "Hel"), foreign(2), text(3, "lo"));
         assertThat(first.cursor()).isEqualTo(3);
         assertThat(first.leaseRenewAfterMillis()).isEqualTo(20_000);
+        assertThat(first.terminal()).isFalse();
 
-        ingest(3, 4, null, complete(4));
+        assertThat(ingest(3, 4, null, complete(4)).terminal()).isTrue();
 
         TurnRecord settled = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
         assertThat(settled.status()).isEqualTo("COMPLETED");

@@ -68,7 +68,7 @@ public class HarnessEventIngest {
         if (request.throughSequence() > cursor) {
             try {
                 if (record(turn, owner, request, events, cursor)) {
-                    return receipt(tenantId, sessionId, request);
+                    return receipt(tenantId, sessionId, request, true);
                 }
             } catch (IllegalStateException lost) {
                 requireOwned(tenantId, sessionId, request, owner);
@@ -77,13 +77,13 @@ public class HarnessEventIngest {
         }
         if (request.end() != null) {
             end(turn, owner, request, committedSequence);
-            return receipt(tenantId, sessionId, request);
+            return receipt(tenantId, sessionId, request, false);
         }
         if (!store.renewTurn(tenantId, sessionId, turn.turnId(), owner, leaseDuration)) {
             throw refusal(ManagedSessionStoreModels.ERROR_INGEST_NOT_OWNER,
                     "The Harness no longer holds the Turn.", null);
         }
-        return receipt(tenantId, sessionId, request);
+        return receipt(tenantId, sessionId, request, false);
     }
 
     private boolean record(TurnRecord turn, String owner, IngestEventsRequest request,
@@ -147,10 +147,11 @@ public class HarnessEventIngest {
         return turn;
     }
 
-    private IngestReceipt receipt(String tenantId, String sessionId, IngestEventsRequest request) {
+    private IngestReceipt receipt(String tenantId, String sessionId, IngestEventsRequest request,
+            boolean terminal) {
         long cursor = store.findTurn(tenantId, sessionId, request.turnId()).map(HarnessEventIngest::cursor)
                 .orElse(request.throughSequence());
-        return new IngestReceipt(cursor, renewInterval.toMillis());
+        return new IngestReceipt(cursor, renewInterval.toMillis(), terminal);
     }
 
     private static long cursor(TurnRecord turn) {

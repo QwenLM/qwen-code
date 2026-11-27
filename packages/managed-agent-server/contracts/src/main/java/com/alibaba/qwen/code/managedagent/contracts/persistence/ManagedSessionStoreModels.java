@@ -353,7 +353,8 @@ public final class ManagedSessionStoreModels {
             @Pattern(regexp = INGEST_END_PARKED + "|" + INGEST_END_RECOVERY_BLOCKED) String end) {
     }
 
-    public record IngestReceipt(long cursor, long leaseRenewAfterMillis) {
+    /** {@code terminal} means the request recorded the Turn's terminal event. */
+    public record IngestReceipt(long cursor, long leaseRenewAfterMillis, boolean terminal) {
     }
 
     public record CommitResource(
