@@ -67,6 +67,29 @@ describe('TypeScript SDK release workflow', () => {
     expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
+  it('only fans release-published consumers out to CLI tags', () => {
+    // A GITHUB_TOKEN-created release emits no workflow-triggering event, so
+    // the SDK release never reached `on: release: published`. With CI_BOT_PAT
+    // it does, and `sdk-typescript-*` tags must stay invisible to the CLI
+    // consumers: finalize exits 1 on them, sync-release-to-oss holds its
+    // single concurrency lock to download assets they do not ship, and the DSW
+    // gate job burns a self-hosted runner to no-op. Keep the workflow_dispatch
+    // arm each one needs, and key on the tag prefix like the sibling workflows.
+    for (const [path, job] of [
+      ['.github/workflows/finalize-release.yml', 'finalize'],
+      ['.github/workflows/sync-release-to-oss.yml', 'sync'],
+      ['.github/workflows/dsw-swe-verified-release.yml', 'release_gate'],
+    ]) {
+      const ifClause = parse(readFileSync(path, 'utf8')).jobs[job].if;
+      expect(ifClause, path).toContain(
+        "github.event_name == 'workflow_dispatch'",
+      );
+      expect(ifClause, path).toContain(
+        "startsWith(github.event.release.tag_name, 'v')",
+      );
+    }
+  });
+
   it('spaces PR creation out from the release to avoid secondary rate limits', () => {
     // `gh pr create` runs right after the branch push and release creation,
     // which can trip GitHub's "was submitted too quickly" GraphQL secondary
