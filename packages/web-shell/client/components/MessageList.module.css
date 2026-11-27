@@ -96,13 +96,6 @@
   transition: width 320ms ease;
 }
 
-/* Virtual rows have their own size measurements; only skip layout and paint
-   for offscreen rows on the non-virtualized path. */
-.nonVirtualRow {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 80px;
-}
-
 .loadingSkeleton {
   display: flex;
   flex-direction: column;

@@ -45,10 +45,6 @@ test('warms Shiki within the transcript scroll margin, not for the entire replay
   const blocks = list.locator('[data-selection-code-language="typescript"]');
   await expect(blocks).toHaveCount(blockCount);
   await expect(list.locator('.shiki').first()).toBeVisible();
-  const row = blocks
-    .first()
-    .locator('xpath=ancestor::*[@data-web-shell-message-row]');
-  await expect(row).toHaveCSS('content-visibility', 'auto');
   const target = blocks.nth(17);
   await expect(target.locator('.shiki')).toHaveCount(0);
   const initial = await list.locator('.shiki').count();

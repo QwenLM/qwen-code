@@ -3750,15 +3750,9 @@ export function WebShellSidebar({
             : 'sidebar.completedUnread',
       )
     : undefined;
-  // Use the shell's measured width, not the window width: embedded shells
-  // can use the mobile drawer inside a desktop viewport.
-  const mobileDrawerHidden =
-    containerWidth !== undefined && containerWidth <= 760 && !mobileOpen;
   const sessionPollInterval =
     projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
-      ? (hasRunningSession || selectedSessionSource === 'channel') &&
-        !error &&
-        !mobileDrawerHidden
+      ? (hasRunningSession || selectedSessionSource === 'channel') && !error
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
         : IDLE_SESSION_POLL_INTERVAL_MS
       : undefined;
