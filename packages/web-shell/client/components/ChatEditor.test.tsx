@@ -9250,7 +9250,51 @@ describe('ChatEditor composerIntegrations boundary', () => {
     });
 
     expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
-    expect(container.textContent).toContain('main');
+    expect(
+      container.querySelector('[data-testid="git-mode-chip"]'),
+    ).not.toBeNull();
+  });
+
+  it('injects only the voice button when only VoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { VoiceButton: TestVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
+  });
+
+  it('injects only live voice when only LiveVoiceButton is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      composerIntegrations: { LiveVoiceButton: TestLiveVoiceButton },
+    });
+
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+  });
+
+  it('injects only the branch picker when only BranchPickerPopover is provided', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice', 'gitBranch'],
+      gitBranch: 'main',
+      composerIntegrations: { BranchPickerPopover: TestBranchPickerPopover },
+    });
+
+    expect(
+      container.querySelector('[data-testid="branch-picker"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="voice-button"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="live-voice-button"]'),
+    ).toBeNull();
   });
 
   it('resets active voice state when VoiceButton integration is removed', () => {

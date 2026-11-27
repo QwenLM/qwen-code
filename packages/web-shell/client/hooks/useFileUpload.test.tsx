@@ -5,6 +5,11 @@ import {
   type DaemonAvailability,
 } from '../daemon/availability';
 import { DaemonAvailabilityContext } from '../daemon/availability-context';
+import {
+  ServiceAvailabilityContext,
+  ServiceUnavailableError,
+  type ServiceAvailabilityController,
+} from '../utils/service-availability.js';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -1076,5 +1081,35 @@ describe('useFileUpload', () => {
     availabilityMock.available = true;
     render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
     expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a bare ServiceUnavailableError from ServiceAvailabilityContext to noDaemon', async () => {
+    const neutralController: ServiceAvailabilityController = {
+      getSnapshot: () => 'unavailable',
+      subscribe: () => () => {},
+      getGeneration: () => 0,
+      assertAvailable: vi.fn(() => {
+        throw new ServiceUnavailableError();
+      }),
+      reportFailure: vi.fn(),
+    };
+    const client = { uploadWorkspaceFile: vi.fn() };
+    act(() =>
+      root!.render(
+        <ServiceAvailabilityContext.Provider value={neutralController}>
+          <Probe client={client} maxBytes={MAX} targetKey="ws:/neutral" />
+        </ServiceAvailabilityContext.Provider>,
+      ),
+    );
+    await act(async () => {
+      latest!.uploadFiles([makeFile('neutral.txt')], '.');
+    });
+    expect(client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(latest!.uploads).toHaveLength(1);
+    expect(latest!.uploads[0]).toMatchObject({
+      status: 'error',
+      errorCode: 'noDaemon',
+      error: undefined,
+    });
   });
 });

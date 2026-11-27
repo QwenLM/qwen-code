@@ -9,7 +9,7 @@ import { LiveVoiceButton } from '../../live/LiveVoiceButton';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import type { ComposerIntegrations } from './composer-integrations';
 
-export const DAEMON_COMPOSER_INTEGRATIONS: ComposerIntegrations = {
+export const DAEMON_COMPOSER_INTEGRATIONS: Required<ComposerIntegrations> = {
   VoiceButton,
   LiveVoiceButton,
   BranchPickerPopover,
