@@ -1089,6 +1089,38 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       '',
     );
     verifyAppImageClosure(extractedRoot);
+    // Every sibling must resolve from the host on its own, and a copy inside
+    // the image shadows it just like a bundled libwayland-client.so.0 does.
+    // Listed literally rather than looped over HOST_PROVIDED_SONAMES, so an
+    // entry dropped from that set fails here instead of at release time.
+    fs.rmSync(gdk);
+    for (const soname of [
+      'libwayland-cursor.so.0',
+      'libwayland-egl.so.1',
+      'libwayland-server.so.0',
+    ]) {
+      fs.writeFileSync(
+        fakeReadelf,
+        [
+          '#!/usr/bin/env sh',
+          'case "$2" in',
+          `  ${executable})`,
+          `    printf '  (NEEDED) Shared library: [${soname}]\\\\n'`,
+          '    ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      verifyAppImageClosure(extractedRoot);
+      const library = writeElf(`usr/lib/${soname}`);
+      assert.throws(
+        () => verifyAppImageClosure(extractedRoot),
+        new RegExp(
+          `AppImage must not bundle host-baseline libraries: ${soname.replaceAll('.', '\\.')}$`,
+        ),
+      );
+      fs.rmSync(library);
+    }
   } finally {
     process.env.PATH = previousPath;
   }

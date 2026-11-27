@@ -192,7 +192,10 @@ export function verifyAppImageClosure(extractedRoot) {
   // An old libwayland-client lacks wl_fixes_interface, which breaks dlopening
   // the host's libEGL_mesa.so.0 and leaves the window gray (mesa#11316).
   const shadowed = new Set(
-    [...bundled].filter((name) => APPIMAGE_HOST_LIBRARIES.has(name)),
+    [...bundled].filter(
+      (name) =>
+        APPIMAGE_HOST_LIBRARIES.has(name) || HOST_PROVIDED_SONAMES.has(name),
+    ),
   );
   if (shadowed.size > 0) {
     throw new Error(
