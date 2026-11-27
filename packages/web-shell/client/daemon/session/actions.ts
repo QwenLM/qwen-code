@@ -109,7 +109,6 @@ import type {
   SettledPrompt,
   PendingSessionLoad,
   DaemonProductSessionContext,
-  SendPromptOptions,
 } from './types.js';
 
 interface RefBox<T> {
@@ -310,7 +309,6 @@ export interface CreateDaemonSessionActionsArgs {
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
-  nativeWebShell?: boolean;
   getConnection: () => DaemonConnectionState;
   getPromptStatus: () => DaemonPromptStatus;
   getEventDetailMode: () => 'full' | 'summary';
@@ -523,7 +521,6 @@ export function createDaemonSessionActions({
   restoreDetachedWorktreeSession,
   getDefaultSessionContext,
   getClient,
-  nativeWebShell,
   getConnection,
   getPromptStatus,
   getEventDetailMode,
@@ -556,37 +553,6 @@ export function createDaemonSessionActions({
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
-
-  function usesSessionReasoningPersistence(
-    session: DaemonSessionClient,
-  ): boolean {
-    // The daemon validates ownership. The request stays scoped to the task
-    // even when client-side workspace metadata is missing or stale.
-    return (
-      nativeWebShell === true &&
-      session.restoreStrategy.kind === 'workspace' &&
-      getConnection().capabilities?.features.includes(
-        'session_reasoning_persistence',
-      ) === true
-    );
-  }
-
-  function promptMetadata(
-    session: DaemonSessionClient,
-    submittedPrompt: string | undefined,
-    inputAnnotations: SendPromptOptions['inputAnnotations'],
-  ) {
-    const persist = usesSessionReasoningPersistence(session);
-    const hasSubmittedPrompt = typeof submittedPrompt === 'string';
-    if (!persist && !hasSubmittedPrompt && !inputAnnotations) return undefined;
-    return {
-      ...(hasSubmittedPrompt
-        ? { 'qwen.submittedPrompt': submittedPrompt }
-        : {}),
-      ...(inputAnnotations ? { inputAnnotations } : {}),
-      ...(persist ? { 'qwenCode/persistSessionReasoning': true } : {}),
-    };
-  }
 
   async function refreshSessionRecovery(session: DaemonSessionClient) {
     const generation = advanceSessionRecoveryGeneration(
@@ -1600,12 +1566,14 @@ export function createDaemonSessionActions({
           promptRequest['idempotencyKey'] = options.idempotencyKey;
         }
         options?.onAdmissionStarted?.();
-        const meta = promptMetadata(
-          session,
-          options?.submittedPrompt,
-          inputAnnotations,
-        );
-        if (meta) promptRequest['_meta'] = meta;
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
+        }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
@@ -1990,12 +1958,14 @@ export function createDaemonSessionActions({
       if (options?.idempotencyKey) {
         promptRequest['idempotencyKey'] = options.idempotencyKey;
       }
-      const meta = promptMetadata(
-        session,
-        options?.submittedPrompt,
-        inputAnnotations,
-      );
-      if (meta) promptRequest['_meta'] = meta;
+      if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+        promptRequest['_meta'] = {
+          ...(typeof options?.submittedPrompt === 'string'
+            ? { 'qwen.submittedPrompt': options.submittedPrompt }
+            : {}),
+          ...(inputAnnotations ? { inputAnnotations } : {}),
+        };
+      }
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
@@ -2132,12 +2102,14 @@ export function createDaemonSessionActions({
         if (options?.idempotencyKey) {
           promptRequest['idempotencyKey'] = options.idempotencyKey;
         }
-        const meta = promptMetadata(
-          session,
-          options?.submittedPrompt,
-          inputAnnotations,
-        );
-        if (meta) promptRequest['_meta'] = meta;
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
+        }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
@@ -2569,11 +2541,6 @@ export function createDaemonSessionActions({
         'Set reasoning effort failed',
         'set_reasoning_effort',
       );
-      const { preferSessionPersistence, ...persistence } = opts ?? {};
-      const persistToSession =
-        preferSessionPersistence === true &&
-        persistence.persist === true &&
-        usesSessionReasoningPersistence(session);
       let completePersistedAction: (() => void) | undefined;
       const persistedAction = opts?.persist
         ? new Promise<void>((resolve) => {
@@ -2593,11 +2560,7 @@ export function createDaemonSessionActions({
       try {
         const result = await trackSessionConfigMutation(
           session,
-          session.setConfigOption(
-            'reasoning_effort',
-            value,
-            persistToSession ? { persistToSession: true } : opts && persistence,
-          ),
+          session.setConfigOption('reasoning_effort', value, opts),
           'Set reasoning effort timed out',
           mutation,
           false,
@@ -2639,7 +2602,7 @@ export function createDaemonSessionActions({
               ...current,
               reasoning: nextReasoning,
               providers:
-                !persistToSession && opts?.persist && result.persisted
+                opts?.persist && result.persisted
                   ? withPersistedReasoningPreview(
                       current.providers,
                       sourceModel,

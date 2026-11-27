@@ -241,7 +241,6 @@ import {
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
   PERSIST_REASONING_SELECTION_META_KEY,
-  PERSIST_SESSION_REASONING_META_KEY,
   REASONING_SELECTION_PERSISTED_META_KEY,
 } from '../../acp-integration/model-configuration.js';
 import {
@@ -13064,7 +13063,6 @@ export function registerSessionRoutes(
         const configId = body['configId'];
         const value = body['value'];
         const persist = body['persist'];
-        const persistToSession = body['persistToSession'];
         if (configId !== 'reasoning_effort' && configId !== 'workflow_mode') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort or workflow_mode',
@@ -13078,11 +13076,7 @@ export function registerSessionRoutes(
           return;
         }
         if (configId === 'workflow_mode') {
-          if (
-            (value !== 'on' && value !== 'off') ||
-            persist !== undefined ||
-            persistToSession !== undefined
-          ) {
+          if ((value !== 'on' && value !== 'off') || persist !== undefined) {
             res.status(400).json({
               error:
                 'Workflow mode requires on/off and does not accept persist',
@@ -13112,25 +13106,6 @@ export function registerSessionRoutes(
           });
           return;
         }
-        if (
-          persistToSession !== undefined &&
-          (typeof persistToSession !== 'boolean' || persist === true)
-        ) {
-          res.status(400).json({
-            error:
-              'persistToSession must be boolean and cannot be combined with persist: true',
-          });
-          return;
-        }
-        if (persistToSession === true && !runtime.trusted) {
-          sendUntrustedSessionOwner(
-            res,
-            'POST /session/:id/config-option',
-            sessionId,
-            runtime,
-          );
-          return;
-        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const assertOpen = captureRuntimeGenerationAssertion(runtime);
@@ -13140,11 +13115,13 @@ export function registerSessionRoutes(
             sessionId,
             configId,
             value,
-            ...(persistToSession === true
-              ? { _meta: { [PERSIST_SESSION_REASONING_META_KEY]: true } }
-              : persist === true
-                ? { _meta: { [PERSIST_REASONING_SELECTION_META_KEY]: true } }
-                : {}),
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
           },
           clientId !== undefined ? { clientId } : undefined,
           assertOpen,

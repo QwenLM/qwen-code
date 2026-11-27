@@ -432,7 +432,6 @@ export interface NonInteractiveSlashCommandSessionHooks {
   /** @see CommandContext['session']['startNewSession'] */
   startNewSession?: (sessionId: string) => void;
   confirmAction?: CommandContext['confirmAction'];
-  setReasoningEffort?: CommandContext['session']['setReasoningEffort'];
 }
 
 export const handleSlashCommand = async (
@@ -736,9 +735,6 @@ export const handleSlashCommand = async (
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
-      ...(sessionHooks?.setReasoningEffort
-        ? { setReasoningEffort: sessionHooks.setReasoningEffort }
-        : {}),
       ...(sessionHooks?.startNewSession
         ? { startNewSession: sessionHooks.startNewSession }
         : {}),

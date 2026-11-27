@@ -637,7 +637,7 @@ export interface DaemonSessionActions {
   setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
-    opts?: { persist?: boolean; preferSessionPersistence?: true },
+    opts?: { persist?: boolean },
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,

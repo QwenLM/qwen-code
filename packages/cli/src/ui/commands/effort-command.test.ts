@@ -48,21 +48,6 @@ describe('effortCommand', () => {
     });
   });
 
-  it('delegates scoped effort changes without writing shared settings', async () => {
-    const setSessionEffort = vi.fn(async (effort) =>
-      setReasoningEffort(effort),
-    );
-    context.session.setReasoningEffort = setSessionEffort;
-    await expect(effortCommand.action!(context, 'high')).resolves.toMatchObject(
-      {
-        type: 'message',
-        messageType: 'info',
-      },
-    );
-    expect(setSessionEffort).toHaveBeenCalledExactlyOnceWith('high');
-    expect(setValue).not.toHaveBeenCalled();
-  });
-
   it('opens the picker dialog when called with no args interactively', async () => {
     const res = await effortCommand.action!(context, '');
     expect(res).toMatchObject({ type: 'dialog', dialog: 'effort' });

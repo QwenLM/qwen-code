@@ -246,10 +246,6 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
   [
-    'session_reasoning_persistence',
-    (toggles) => toggles.hostedHarness !== true,
-  ],
-  [
     'session_btw_stream',
     (toggles) => toggles.sessionBtwStreamAvailable === true,
   ],

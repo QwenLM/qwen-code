@@ -51,7 +51,6 @@ import type {
   DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
-  DaemonReasoningPersistenceOptions,
   ReasoningSelection,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
@@ -1085,7 +1084,7 @@ export class DaemonSessionClient {
   setConfigOption(
     configId: 'reasoning_effort',
     value: ReasoningSelection,
-    opts?: DaemonReasoningPersistenceOptions,
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult>;
   setConfigOption(
     configId: 'workflow_mode',
@@ -1094,7 +1093,7 @@ export class DaemonSessionClient {
   async setConfigOption(
     configId: 'reasoning_effort' | 'workflow_mode',
     value: ReasoningSelection | 'on' | 'off',
-    opts?: DaemonReasoningPersistenceOptions,
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     if (configId === 'workflow_mode') {
       if ((value !== 'on' && value !== 'off') || opts !== undefined) {
@@ -1114,8 +1113,8 @@ export class DaemonSessionClient {
       configId,
       value as ReasoningSelection,
       {
-        ...opts,
         clientId: this.clientId,
+        persist: opts?.persist,
       },
     );
   }

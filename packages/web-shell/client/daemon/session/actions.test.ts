@@ -11,7 +11,6 @@ import {
   type DaemonContinueSessionResult,
   DaemonSessionClient,
   type DaemonSessionContextStatus,
-  type DaemonSessionRestoreStrategy,
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import { AcpHttpTransport } from '@qwen-code/sdk/daemon/transports';
@@ -36,7 +35,6 @@ import type {
   DaemonProductSessionContext,
   PendingSessionLoad,
   SettledPrompt,
-  SendPromptOptions,
 } from './types';
 
 describe('Generated UI action invalidation', () => {
@@ -436,260 +434,6 @@ describe('sendPrompt admission notices', () => {
       }),
     );
   });
-});
-
-describe('native Web Shell session reasoning persistence', () => {
-  const workspace = {
-    id: 'local',
-    cwd: '/workspace',
-    primary: true,
-    trusted: true,
-  };
-  const capabilities: DaemonCapabilities = {
-    v: 1,
-    mode: 'http-bridge',
-    features: ['session_reasoning_persistence'],
-    modelServices: [],
-    workspaces: [workspace],
-  };
-  const liveIntent = { persist: true, preferSessionPersistence: true } as const;
-
-  it('records thinking off and on in the task while preserving the workspace preview', async () => {
-    const session = createMockSession('session-a');
-    session.setConfigOption.mockImplementation(async (_id, value) => ({
-      configOptions: reasoningConfigOptions(value),
-      persisted: true,
-    }));
-    const providers = workspaceProvidersStatus('low');
-    const { actions, getConnection } = createActionsHarness({
-      nativeWebShell: true,
-      session,
-      connection: {
-        status: 'connected',
-        sessionId: session.sessionId,
-        sessionContext: { kind: 'workspace', cwd: workspace.cwd },
-        currentModel: 'qwen3.8-max',
-        capabilities,
-        providers,
-      },
-    });
-
-    await actions.setReasoningEffort('none', liveIntent);
-    expect(getConnection().reasoning?.enabled).toBe(false);
-    await actions.setReasoningEffort('medium', liveIntent);
-    expect(getConnection().reasoning).toMatchObject({
-      enabled: true,
-      effort: 'medium',
-    });
-    expect(session.setConfigOption.mock.calls).toEqual([
-      ['reasoning_effort', 'none', { persistToSession: true }],
-      ['reasoning_effort', 'medium', { persistToSession: true }],
-    ]);
-    expect(getConnection().providers).toBe(providers);
-    await actions.clearSession();
-    expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('low');
-  });
-
-  it.each([
-    { name: 'an embedded client', nativeWebShell: false, capabilities },
-    {
-      name: 'a prior daemon',
-      nativeWebShell: true,
-      capabilities: { ...capabilities, features: [] },
-    },
-    {
-      name: 'a projectless session',
-      nativeWebShell: true,
-      capabilities,
-      projectless: true,
-    },
-  ])(
-    'preserves the existing wire requests for $name',
-    async ({ nativeWebShell, capabilities, projectless = false }) => {
-      const session = createMockSession('session-a');
-      if (projectless) session.restoreStrategy = { kind: 'standalone' };
-      session.setConfigOption.mockResolvedValue({
-        configOptions: reasoningConfigOptions('medium'),
-        persisted: !projectless,
-      });
-      const { actions } = createActionsHarness({
-        nativeWebShell,
-        session,
-        connection: {
-          status: 'connected',
-          sessionId: session.sessionId,
-          capabilities,
-        },
-      });
-      await actions.setReasoningEffort('medium', {
-        ...liveIntent,
-        persist: !projectless,
-      });
-      expect(session.setConfigOption).toHaveBeenCalledExactlyOnceWith(
-        'reasoning_effort',
-        'medium',
-        { persist: !projectless },
-      );
-      await actions.submitPrompt('Read the files', { submittedPrompt: 'Read' });
-      expect(session.submitPrompt).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          _meta: { 'qwen.submittedPrompt': 'Read' },
-        }),
-      );
-    },
-  );
-
-  it.each([
-    { name: 'missing workspace metadata', workspaces: undefined },
-    { name: 'an unknown workspace', workspaces: [] },
-    {
-      name: 'a Live runtime',
-      workspaces: [{ ...workspace, kind: 'live' as const }],
-      sessionContext: { kind: 'live' as const },
-    },
-    {
-      name: 'an untrusted workspace',
-      workspaces: [{ ...workspace, trusted: false }],
-    },
-    {
-      name: 'an SSH workspace',
-      workspaces: [
-        { ...workspace, ssh: { host: 'remote', directory: '/workspace' } },
-      ],
-    },
-  ])(
-    'uses session scope and surfaces the daemon rejection for $name',
-    async ({ workspaces, sessionContext }) => {
-      const session = createMockSession('session-a');
-      const error = new DaemonHttpError(
-        400,
-        {},
-        'Task-level reasoning settings require a recorded local workspace task',
-      );
-      session.setConfigOption.mockRejectedValueOnce(error);
-      const addNotice = vi.fn();
-      const { actions, getConnection } = createActionsHarness({
-        nativeWebShell: true,
-        addNotice,
-        session,
-        connection: {
-          status: 'connected',
-          sessionId: session.sessionId,
-          sessionContext,
-          capabilities: { ...capabilities, workspaces },
-        },
-      });
-
-      await expect(
-        actions.setReasoningEffort('medium', liveIntent),
-      ).rejects.toBe(error);
-      expect(session.setConfigOption).toHaveBeenCalledExactlyOnceWith(
-        'reasoning_effort',
-        'medium',
-        { persistToSession: true },
-      );
-      expect(getConnection().reasoning).toBeUndefined();
-      expect(addNotice).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          operation: 'set_reasoning_effort',
-          message: expect.stringContaining(error.message),
-        }),
-      );
-      await actions.submitPrompt('/effort medium');
-      expect(session.submitPrompt).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          _meta: { 'qwenCode/persistSessionReasoning': true },
-        }),
-      );
-    },
-  );
-
-  it('requires the session write acknowledgement and preserves welcome settings persistence', async () => {
-    const session = createMockSession('session-a');
-    const { actions, getConnection } = createActionsHarness({
-      nativeWebShell: true,
-      session,
-      connection: {
-        status: 'connected',
-        sessionId: session.sessionId,
-        capabilities,
-      },
-    });
-    await expect(
-      actions.setReasoningEffort('medium', liveIntent),
-    ).rejects.toThrow('Daemon did not confirm reasoning effort "medium"');
-    expect(getConnection().reasoning).toBeUndefined();
-
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('medium'),
-      persisted: true,
-    });
-    await actions.setReasoningEffort('medium', { persist: true });
-    expect(session.setConfigOption.mock.calls).toEqual([
-      ['reasoning_effort', 'medium', { persistToSession: true }],
-      ['reasoning_effort', 'medium', { persist: true }],
-    ]);
-  });
-
-  it.each(['sendPrompt', 'submitPrompt', 'sendDetachedPrompt'] as const)(
-    'opts %s into task-local reasoning without replacing existing metadata',
-    async (method) => {
-      const session = createMockSession('session-a');
-      const { actions, activePromptsRef } = createActionsHarness({
-        nativeWebShell: true,
-        ...(method === 'sendDetachedPrompt' ? {} : { session }),
-        connection: {
-          status: 'connected',
-          sessionId:
-            method === 'sendDetachedPrompt'
-              ? 'other-session'
-              : session.sessionId,
-          sessionContext:
-            method === 'sendDetachedPrompt'
-              ? { kind: 'live' }
-              : { kind: 'workspace', cwd: workspace.cwd },
-          capabilities,
-        },
-      });
-      const inputAnnotations: SendPromptOptions['inputAnnotations'] = [
-        {
-          type: 'reference',
-          start: 0,
-          end: 5,
-          text: '@file',
-          reference: { id: 'file' },
-        },
-      ];
-      const options = { submittedPrompt: '@file', inputAnnotations };
-      if (method === 'sendDetachedPrompt') {
-        await actions.sendDetachedPrompt(
-          session as unknown as DaemonSessionClient,
-          '@file',
-          options,
-        );
-      } else if (method === 'submitPrompt') {
-        await actions.submitPrompt('@file', options);
-      } else {
-        const turn = actions.sendPrompt('@file', options);
-        await vi.waitFor(() =>
-          expect(
-            activePromptsRef.current.get(session.sessionId)?.resolve,
-          ).toBeTypeOf('function'),
-        );
-        activePromptsRef.current
-          .get(session.sessionId)
-          ?.resolve?.({ stopReason: 'end_turn' });
-        await turn;
-      }
-      expect(session.submitPrompt.mock.calls[0]?.[0]).toMatchObject({
-        _meta: {
-          'qwen.submittedPrompt': '@file',
-          inputAnnotations,
-          'qwenCode/persistSessionReasoning': true,
-        },
-      });
-    },
-  );
 });
 
 describe('sendPrompt client registration recovery', () => {
@@ -8238,7 +7982,6 @@ function createActionsHarness(
     setRestoreSessionContext?: ReturnType<typeof vi.fn>;
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
     getClient?: () => DaemonClient | undefined;
-    nativeWebShell?: boolean;
     getEventDetailMode?: () => 'full' | 'summary';
     getPromptStatus?: () => 'idle' | 'waiting' | 'streaming';
   } = {},
@@ -8319,7 +8062,6 @@ function createActionsHarness(
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),
     getClient: opts.getClient,
-    nativeWebShell: opts.nativeWebShell,
     getConnection: () => connection,
     getPromptStatus: opts.getPromptStatus ?? (() => 'idle'),
     getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
@@ -8402,10 +8144,6 @@ function createMockSession(
   return {
     sessionId,
     workspaceCwd: '/workspace',
-    restoreStrategy: {
-      kind: 'workspace',
-      workspaceCwd: '/workspace',
-    } as DaemonSessionRestoreStrategy,
     clientId,
     client: {
       workspaceByCwd: vi.fn(() => ({
