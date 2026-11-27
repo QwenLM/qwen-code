@@ -965,6 +965,15 @@ public class ManagedAgentStore implements AgentStateStore {
         turnExecution.recordAdmission(tenantId, sessionId, turnId, owner, eventEpoch, lastEventId);
     }
 
+    @Override
+    @Transactional
+    public boolean recordAdmissionHandOff(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch, long lastEventId,
+            String harnessOwner, Duration leaseDuration) {
+        return turnExecution.recordAdmissionHandOff(tenantId, sessionId, turnId, owner,
+                eventEpoch, lastEventId, harnessOwner, leaseDuration);
+    }
+
     @Transactional
     public void recordRecoveryAdmission(String tenantId, String sessionId,
             String turnId, String owner, String expectedTurnEventEpoch,

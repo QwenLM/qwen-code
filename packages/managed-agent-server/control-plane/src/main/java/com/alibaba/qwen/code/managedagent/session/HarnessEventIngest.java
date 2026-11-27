@@ -27,7 +27,7 @@ import java.util.Set;
  */
 @Component
 public class HarnessEventIngest {
-    static final String OWNER_PREFIX = "harness:";
+    static final String OWNER_PREFIX = AgentStateStore.HARNESS_DISPATCH_OWNER_PREFIX;
     private static final Set<String> ACTIVE = Set.of("ACCEPTED", "RUNNING", "CANCELLING");
 
     private final AgentStateStore store;
