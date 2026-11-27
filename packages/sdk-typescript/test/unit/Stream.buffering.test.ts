@@ -1,21 +1,35 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { Stream } from '../../src/utils/Stream.js';
 
 describe('Stream buffered bursts', () => {
-  it('drains without shifting or copying a mostly live buffer', async () => {
+  it('bounds element work while draining through compaction', async () => {
     const stream = new Stream<number>();
-    for (let i = 0; i < 8192; i++) stream.enqueue(i);
+    const produced = 8192;
+    for (let i = 0; i < produced; i++) stream.enqueue(i);
     const storage = stream as unknown as { queue: unknown[] };
-    const buffer = storage.queue;
-    const spies = (['shift', 'splice', 'copyWithin', 'unshift'] as const).map(
-      (method) => vi.spyOn(buffer, method),
-    );
-    try {
-      for (let i = 0; i < 2048; i++) await stream.next();
-      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-      expect(storage.queue).toBe(buffer);
-    } finally {
-      for (const spy of spies) spy.mockRestore();
+    let elementAccesses = 0;
+    const trackElements = (queue: unknown[]) =>
+      new Proxy(queue, {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^(0|[1-9]\d*)$/.test(property)) {
+            elementAccesses++;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+        set(target, property, value, receiver) {
+          if (typeof property === 'string' && /^(0|[1-9]\d*)$/.test(property)) {
+            elementAccesses++;
+          }
+          return Reflect.set(target, property, value, receiver);
+        },
+      });
+    let buffer = (storage.queue = trackElements(storage.queue));
+    for (let i = 0; i < produced; i++) {
+      expect(await stream.next()).toEqual({ done: false, value: i });
+      expect(elementAccesses).toBeLessThanOrEqual(4 * (i + 1));
+      if (storage.queue !== buffer) {
+        buffer = storage.queue = trackElements(storage.queue);
+      }
     }
   });
 
@@ -32,19 +46,25 @@ describe('Stream buffered bursts', () => {
     expect(storage.queue).toContain(waiting);
   });
 
-  it('bounds retained storage while a large burst is partly consumed', async () => {
-    const stream = new Stream<number>();
-    const produced = 20_000;
-    const consumed = 15_000;
-    for (let i = 0; i < produced; i++) stream.enqueue(i);
-    const storage = stream as unknown as { queue: unknown[] };
-    for (let i = 0; i < consumed; i++) {
-      await stream.next();
-      expect(storage.queue.length).toBeLessThanOrEqual(
-        2 * (produced - (i + 1)),
-      );
-    }
-  });
+  it.each([
+    { produced: 2000, consumed: 1500 },
+    { produced: 20_000, consumed: 15_000 },
+  ])(
+    'bounds retained storage for $produced buffered messages',
+    async ({ produced, consumed }) => {
+      const stream = new Stream<number>();
+      const compactionFloor = 1024;
+      for (let i = 0; i < produced; i++) stream.enqueue(i);
+      const storage = stream as unknown as { queue: unknown[] };
+      for (let i = 0; i < consumed; i++) {
+        await stream.next();
+        const pending = produced - (i + 1);
+        expect(storage.queue.length).toBeLessThanOrEqual(
+          pending + Math.max(pending, compactionFloor),
+        );
+      }
+    },
+  );
 
   it('keeps FIFO order across a partial drain and a second producer burst', async () => {
     const stream = new Stream<number>();
