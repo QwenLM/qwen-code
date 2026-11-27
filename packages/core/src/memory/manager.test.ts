@@ -4683,6 +4683,54 @@ describe('MemoryManager', () => {
       await mgr.drain({ timeoutMs: 500 });
     });
 
+    it('preserves FIFO order across sessions sharing a memory store', async () => {
+      const first = deferred<ExtractResult>();
+      const second = deferred<ExtractResult>();
+      const managers = [
+        new MemoryManager(),
+        new MemoryManager(),
+        new MemoryManager(),
+      ];
+      const extract = vi.mocked(runAutoMemoryExtract);
+      extract
+        .mockClear()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise)
+        .mockResolvedValueOnce(extractResult('C', [], 2));
+
+      const a = managers[0].scheduleExtract(
+        extractParams('/project', 'A', 'one'),
+      );
+      expect(
+        (
+          await managers[1].scheduleExtract(
+            extractParams('/project', 'B', 'old B'),
+          )
+        ).skippedReason,
+      ).toBe('queued');
+      expect(
+        (await managers[2].scheduleExtract(extractParams('/project', 'C', 'C')))
+          .skippedReason,
+      ).toBe('queued');
+      const revised = extractParams('/project', 'B', 'new B');
+      expect((await managers[1].scheduleExtract(revised)).skippedReason).toBe(
+        'queued',
+      );
+      expect(extract).toHaveBeenCalledTimes(1);
+
+      first.resolve(extractResult('A', [], 2));
+      await a;
+      expect(extract).toHaveBeenLastCalledWith(revised);
+      expect(extract).toHaveBeenCalledTimes(2);
+      second.resolve(extractResult('B', [], 2));
+      await Promise.all(managers.map((manager) => manager.drain()));
+      expect(extract.mock.calls.map(([p]) => p.sessionId)).toEqual([
+        'A',
+        'B',
+        'C',
+      ]);
+    });
+
     // B2: extract is skipped with 'memory_pressure' when the shared
     // MemoryPressureMonitor reports hard/critical pressure. The cursor is NOT
     // advanced (runAutoMemoryExtract never runs), so the unread messages are

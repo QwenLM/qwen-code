@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import {
   DaemonClient,
   DaemonHttpError,
@@ -17,6 +18,7 @@ import {
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
+import type { RestoreWorktreeSessionRequest } from '../../src/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
@@ -147,6 +149,151 @@ function recordingFetch(
   ) as unknown as typeof globalThis.fetch;
   return { fetch: fetchImpl, calls };
 }
+
+describe('worktree snapshot restore', () => {
+  it('uses the snapshot-restore route and workspace-scoped restore fields', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 'id/with/slash',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        callbackReplay: [],
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession(
+      'id/with/slash',
+      {
+        workspaceCwd: '/work/secondary',
+        historyPageSize: 41,
+        approvalMode: 'yolo',
+        sourceType: 'fixture',
+        sourceId: 'fixture-1',
+      } satisfies RestoreWorktreeSessionRequest,
+      'local-client',
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      'http://daemon/session/id%2Fwith%2Fslash/worktree-restore',
+    );
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('local-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      approvalMode: 'yolo',
+      historyPageSize: 41,
+      sourceType: 'fixture',
+      sourceId: 'fixture-1',
+    });
+  });
+
+  it('keeps legacy empty-body normalization for a primary-owned restore', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/primary',
+        attached: false,
+        restoreState: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client.restoreWorktreeSession('s-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({});
+  });
+
+  it('makes scope explicit through a workspace client but refuses id-only selectors', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        attached: false,
+        state: {},
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await client
+      .workspaceByCwd('/work/secondary')
+      .restoreWorktreeSession('s-1', { historyPageSize: 77 }, 'client-1');
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+      historyPageSize: 77,
+    });
+
+    await expect(
+      client.workspaceByCwd('secondary-id').restoreWorktreeSession('s-1'),
+    ).rejects.toThrow('registered workspace cwd');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns a replay-ready session client after ordinary restore', async () => {
+    const compactedReplay = [{ id: 1, v: 1, type: 'session_update', data: {} }];
+    const liveJournal = [{ id: 27, v: 1, type: 'session_update', data: {} }];
+    const lifecycleReplay = [
+      { id: 26, v: 1, type: 'session_update', data: {} },
+    ];
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/secondary',
+        state: { mode: 'replay-ready' },
+        lastEventId: 27,
+        eventEpoch: 'epoch-restore',
+        compactedReplay,
+        liveJournal,
+        lifecycleReplay,
+        lifecycleReplayIncomplete: true,
+        historyHasMore: true,
+        historyAnchorRecordId: 'anchor-restore-1',
+        replayProjectionWatermark: 17,
+        replayDegraded: true,
+        worktree: {
+          slug: 'recovered',
+          path: '/work/secondary/.qwen/worktrees/recovered',
+          branch: '',
+        },
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const restored = await DaemonSessionClient.restoreWorktree(
+      client,
+      's-1',
+      {
+        workspaceCwd: '/work/secondary',
+      },
+      'restore-client',
+    );
+    expect(restored).toBeInstanceOf(DaemonSessionClient);
+    expect(restored.workspaceCwd).toBe('/work/secondary');
+    expect(restored.worktree?.branch).toBe('');
+    expect(restored.state).toEqual({ mode: 'replay-ready' });
+    expect(restored.replaySnapshot).toEqual({
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete: true,
+    });
+    expect(restored.lastEventId).toBe(27);
+    expect(restored.eventEpoch).toBe('epoch-restore');
+    expect(restored.historyHasMore).toBe(true);
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+    expect(restored.replayDegraded).toBe(true);
+    expect(restored.consumeReplaySnapshot().compactedReplay).toEqual(
+      compactedReplay,
+    );
+    expect(restored.replaySnapshot.compactedReplay).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('restore-client');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      cwd: '/work/secondary',
+    });
+  });
+});
 
 describe('DaemonClient', () => {
   describe('MCP App request deadlines', () => {
@@ -5414,6 +5561,138 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('requires snapshot capability before posting a pinned prompt and verifies its receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'hi' }],
+        pinSkills: true,
+        expectedSkillDigest: digest,
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: [] })
+          : jsonResponse(500, { error: 'unexpected prompt' }),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }).promptNonBlocking(
+          's-1',
+          body,
+        ),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+
+      let admittedDigest = digest;
+      const { fetch: supported } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 1,
+              skillDigest: admittedDigest,
+            }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: supported,
+      });
+      await expect(
+        client.promptNonBlocking('s-1', body),
+      ).resolves.toMatchObject({
+        promptId: 'p-1',
+        skillDigest: digest,
+      });
+      admittedDigest = 'b'.repeat(64);
+      await expect(client.promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm',
+      );
+    });
+
+    it('requires a usable event cursor and prompt identity in a pinned acceptance', async () => {
+      for (const receipt of [
+        { lastEventId: 0 },
+        { promptId: 'p', lastEventId: -1 },
+      ]) {
+        const { fetch } = recordingFetch((req) =>
+          req.url.endsWith('/capabilities')
+            ? jsonResponse(200, { features: ['turn_skill_file_snapshot'] })
+            : jsonResponse(202, { ...receipt, skillDigest: 'a'.repeat(64) }),
+        );
+        await expect(
+          new DaemonClient({
+            baseUrl: 'http://daemon',
+            fetch,
+          }).promptNonBlocking('s', {
+            pinSkills: true,
+            prompt: [{ type: 'text', text: 'test' }],
+          }),
+        ).rejects.toThrow('usable pinned prompt receipt');
+      }
+    });
+
+    it('rejects inconsistent resource pinning before contacting a legacy daemon', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const prompt = [{ type: 'text' as const, text: 'test' }];
+      for (const options of [
+        { expectedSkillDigest: 'a'.repeat(64) },
+        { pinExtensions: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, pinExtensions: true },
+        { pinSkills: true, expectedExtensionGeneration: 1 },
+        { pinSkills: true, expectedSkillDigest: 'invalid' },
+        {
+          pinSkills: true,
+          pinExtensions: true,
+          expectedExtensionGeneration: -1,
+        },
+      ]) {
+        await expect(
+          client.promptNonBlocking('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+        await expect(
+          client.prompt('s-1', { prompt, ...options }),
+        ).rejects.toThrow();
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('checks native skill session effects capability before sending and verifies its receipt', async () => {
+      const body = {
+        prompt: [{ type: 'text' as const, text: 'guarded' }],
+        pinSkills: true,
+        requireSessionSkillEffects: true,
+      };
+      let capable = false;
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              features: capable
+                ? [
+                    'turn_skill_session_effects_check',
+                    'turn_skill_file_snapshot',
+                  ]
+                : ['turn_skill_file_snapshot'],
+            })
+          : jsonResponse(202, {
+              promptId: 'p-1',
+              lastEventId: 0,
+              skillDigest: 'a'.repeat(64),
+            }),
+      );
+      const client = () =>
+        new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client().promptNonBlocking('s-1', body),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+      capable = true;
+      await expect(client().promptNonBlocking('s-1', body)).rejects.toThrow(
+        'did not confirm the requested skill session effects',
+      );
+      expect(
+        calls.filter((call) => call.url.endsWith('/session/s-1/prompt')),
+      ).toHaveLength(1);
+    });
+
     it('maps invalid client id responses on non-blocking prompts', async () => {
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/s-1/prompt')) {
@@ -8280,6 +8559,65 @@ describe('DaemonClient', () => {
         status,
         body,
         message: `POST /session/:id/model: ${expected}`,
+      });
+    });
+  });
+
+  describe('rateSessionTurn', () => {
+    it('POSTs promptId and rating and returns the recorded answer', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn('s-1', 'prompt-1', 'up');
+      expect(result).toEqual({ recorded: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'up',
+      });
+    });
+
+    it('sends the client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn(
+        's-1',
+        'prompt-1',
+        'down',
+        'client-1',
+      );
+      expect(result).toEqual({ recorded: false });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'down',
+      });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces the route label on failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: "`rating` must be 'up' or 'down'" }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('POST /session/:id/feedback'),
       });
     });
   });
@@ -11697,6 +12035,44 @@ describe('DaemonClient', () => {
       expect(calls[0]).toMatchObject({
         method: 'GET',
         url: 'http://daemon/workspace/memory',
+      });
+    });
+
+    it('forwards content=true on workspace-qualified memory reads', async () => {
+      const snapshot = {
+        v: 1,
+        workspaceCwd: '/work/b',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file' as const,
+            path: '/work/b/QWEN.md',
+            scope: 'workspace' as const,
+            bytes: 12,
+            content: '# Secondary\n',
+          },
+        ],
+        totalBytes: 12,
+        fileCount: 1,
+        ruleCount: 0,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.workspaceByCwd('/work/b').workspaceMemory({
+          includeContent: true,
+        }),
+      ).resolves.toEqual(snapshot);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory?content=true',
+      });
+      await client.workspaceByCwd('/work/b').workspaceMemory();
+      expect(calls[1]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory',
       });
     });
 

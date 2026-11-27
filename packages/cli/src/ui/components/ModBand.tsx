@@ -22,6 +22,9 @@ import {
   modBandChildKeys,
   modBandColor,
   modBandLayout,
+  modBandMaxLines,
+  modBandProgress,
+  modBandScrolls,
   modBandWrap,
   type ModBandPalette,
 } from '../utils/mod-band-tree.js';
@@ -62,9 +65,9 @@ function boxProps(props: ModRenderProps): BoxProps {
   } as BoxProps;
 }
 
-function textProps(props: ModRenderProps): TextProps {
+function textProps(props: ModRenderProps, inScroller: boolean): TextProps {
   const colors = palette();
-  const wrap = modBandWrap(props);
+  const wrap = modBandWrap(props, inScroller);
   return {
     color: modBandColor(props['color'], colors),
     backgroundColor: modBandColor(props['backgroundColor'], colors),
@@ -78,38 +81,76 @@ function textProps(props: ModRenderProps): TextProps {
   };
 }
 
+function drawProgress(props: ModRenderProps, key: string): ReactNode {
+  const { label, bar, figure } = modBandProgress(props);
+  return (
+    <Text key={key} wrap="truncate-end">
+      {label}{' '}
+      {bar ? (
+        <>
+          <Text
+            color={modBandColor(props['color'], palette()) ?? theme.text.accent}
+          >
+            {'█'.repeat(bar.filled)}
+          </Text>
+          <Text dimColor>{'░'.repeat(bar.empty)}</Text>
+          {figure !== undefined && ` ${figure}`}
+        </>
+      ) : (
+        (figure ?? <Text dimColor>…</Text>)
+      )}
+    </Text>
+  );
+}
+
 function drawNode(
   node: ModRenderNode,
   key: string,
   inText: boolean,
+  inScroller: boolean,
 ): ReactNode {
   if (typeof node === 'string')
     return inText ? (
       cleanModBandText(node)
     ) : (
-      <Text key={key}>{cleanModBandText(node)}</Text>
+      <Text key={key} {...(inScroller && { wrap: 'truncate-end' })}>
+        {cleanModBandText(node)}
+      </Text>
     );
   if (node.type === 'engine') return null;
+  if (node.type === 'Progress') return drawProgress(node.props, key);
   const props = node.props ?? {};
   const kids = node.children ?? [];
   const keys = modBandChildKeys(kids);
+  const scrolls =
+    node.type === 'Box' ? modBandScrolls(props, inScroller) : inScroller;
   const children = kids.map((child, index) =>
-    drawNode(child, keys[index], node.type === 'Text'),
+    drawNode(child, keys[index], node.type === 'Text', scrolls),
   );
-  return node.type === 'Text' ? (
-    <Text key={key} {...textProps(props)}>
+  if (node.type === 'Box')
+    return (
+      <Box key={key} {...boxProps(props)}>
+        {children}
+      </Box>
+    );
+  const text = (
+    <Text key={key} {...textProps(props, inScroller)}>
       {children}
     </Text>
+  );
+  const lines = inText ? undefined : modBandMaxLines(props, inScroller);
+  return lines === undefined ? (
+    text
   ) : (
-    <Box key={key} {...boxProps(props)}>
-      {children}
+    <Box key={key} maxHeight={lines} overflowY="hidden" flexDirection="column">
+      {text}
     </Box>
   );
 }
 
 /** Draws a tree the runtime accepted, as Claude Code's terminal draws it. */
 export function drawModTree(tree: ModRenderElement): ReactNode {
-  return drawNode(tree, 'root', false);
+  return drawNode(tree, 'root', false, false);
 }
 
 interface ModBandProps {

@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ModelOptionsSelector > selects Ultracode separately from Extra High and submits xhigh plus the mode 1`] = `
+" Model Options
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Model: Ultimate
+
+   Context Window   Maximum context length the model reads at once.
+          Default
+ ❯ Thinking Effort  Extra High + Workflow orchestration; this session only.
+     ◀   Ultracode    ▶
+
+ Selected: ▦ Default · ✦ Ultracode
+
+ ↑↓ select · ←→ switch · Enter apply settings · Esc back
+"
+`;

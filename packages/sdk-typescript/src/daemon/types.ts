@@ -1220,6 +1220,21 @@ export interface DaemonStatusReport {
     error?: string;
     sessions: { active: number };
     permissions: { pending: number; policy: string };
+    /**
+     * Load-based fresh-session admission state. Additive — older daemons
+     * omit this field, and `enabled: false` marks the operator opt-out or
+     * an injected bridge. While `overloaded`, new child spawns are refused
+     * with 503 `system_overloaded`; live sessions and the control plane stay
+     * open. `reason` is widened to string per the SDK convention.
+     */
+    loadAdmission?: {
+      enabled: boolean;
+      overloaded: boolean;
+      reason: string | null;
+      loadRatio: number;
+      eventLoopLagP99Ms: number;
+      sampledAtMs: number;
+    };
     channel: { live: boolean };
     // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
     // widened to string to avoid coupling the wire type to the daemon's unions.
@@ -1489,6 +1504,10 @@ export interface DaemonWorktreeInfo {
    * not re-list pre-session work. Absent when unknown.
    */
   baseBranch?: string;
+  /** An owned checkout removed after capturing its retained snapshot. */
+  worktreeRemoved?: { archiveKey: string };
+  /** True only after a matching archive pair passed strict validation. */
+  canRestore?: boolean;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -1915,6 +1934,14 @@ export interface DaemonSessionSummary {
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight (dangling admission, reconciled interruption, or a teardown
+   * flush), so opening the session can offer "Continue execution". A hint for
+   * list surfaces only — the loaded session's recovery status stays
+   * authoritative. Absent when there is no ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -2577,6 +2604,57 @@ export interface DaemonSessionArtifactsEnvelope {
   warnings?: string[];
   warningDetails?: DaemonSessionArtifactWarningDetail[];
 }
+
+export interface DaemonArtifactLibrarySessionMetadata {
+  displayName?: string;
+  createdAt: string;
+  archiveState: 'active' | 'archived';
+  sourceType: string;
+  sourceId?: string;
+}
+
+export interface DaemonArtifactLibrarySessionEnvelope
+  extends DaemonSessionArtifactsEnvelope {
+  session: DaemonArtifactLibrarySessionMetadata;
+}
+
+export interface DaemonArtifactLibraryMemberError {
+  sessionId: string;
+  status: number;
+  code: string;
+  message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: 'snapshot' | 'line' | 'index' | 'replay' | 'artifact_library';
+  measuredBytes?: number;
+  retryable?: boolean;
+}
+
+export interface DaemonWorkspaceArtifactLibraryResult {
+  v: 1;
+  sessions: DaemonArtifactLibrarySessionEnvelope[];
+  errors: DaemonArtifactLibraryMemberError[];
+}
+
+export type DaemonWorkspaceArtifactLibraryStreamEvent =
+  | { type: 'start'; v: 1; total: number }
+  | ({ type: 'session' } & DaemonArtifactLibrarySessionEnvelope)
+  | ({ type: 'session_error'; v: 1 } & DaemonArtifactLibraryMemberError)
+  | {
+      type: 'complete';
+      v: 1;
+      total: number;
+      succeeded: number;
+      failed: number;
+      skipped: number;
+    }
+  | {
+      type: 'error';
+      v: 1;
+      status: number;
+      code: string;
+      message: string;
+    };
 
 export interface DaemonSessionArtifactMutationResult {
   v: 1;
@@ -4375,8 +4453,10 @@ export type DaemonUsageRange = 'today' | 'week' | 'month';
 export interface DaemonUsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;
@@ -4403,10 +4483,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
+  /** Runs ended on this date, which can differ from their request-token day. */
   sessions: number;
 }
 
@@ -4431,7 +4512,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + sessions across the range window. */
+  /** Per-day tokens + ended-run counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;
@@ -4441,6 +4522,17 @@ export interface DaemonUsageDashboard {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/feedback`. */
+export interface RateSessionTurnResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached the session's
+   * telemetry logger. RUM delivery itself remains best-effort and is
+   * additionally gated by the usage-statistics opt-in.
+   */
+  recorded: boolean;
 }
 
 /** Creation-only selection; does not change shared defaults or later session behavior. */
@@ -4704,6 +4796,12 @@ export interface DaemonSettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: unknown;
+  /**
+   * The value a host writes when it toggles a boolean that has no stored
+   * value and no schema default, mirroring `unsetToggleValue` in the CLI
+   * settings dialogs. Absent when the schema does not declare one.
+   */
+  unsetToggleValue?: boolean;
   options?: ReadonlyArray<{ value: string | number; label: string }>;
   values: {
     effective: unknown;

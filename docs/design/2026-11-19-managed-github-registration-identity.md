@@ -1,9 +1,10 @@
 # Managed GitHub ledger registration-identity keying
 
-- **Status:** proposed
+- **Status:** merged — PR #17775, squash `ceb421295f` (2026-11-20). Deferred follow-ups tracked in #17769.
 - **Date:** 2026-11-19
-- **Scope:** `packages/channels/github` (state store + adapter), `channel-base` contract comment, tests
+- **Scope:** `packages/channels/github` (state store + adapter), `channel-base` contract comment, tests, the PR-watch E2E rig
 - **Related:** the WeCom adapter's P1-D/E fix (PR #17441) and the DingTalk keying (PR #17742); the shared `destinationKey` contract in `channel-base`; [Chinese version](2026-11-19-managed-github-registration-identity.zh-CN.md)
+- **Verification at merge:** github suite 1090 green; the CI-pinned PR-watch E2E rig (`npm run test:e2e:managed-pr-watch`) all green, including P3's same-destination crash-replay; rig CI-pinning suite 96 green; `tsc --build` / ESLint / Prettier clean; load-bearing mutation witnesses killed. The episode carry is non-destructive (never evicts the loaded ledger's own counters, floors carried values at the prs baseline, adds only while there is room, logged overflow).
 
 ## Problem
 
@@ -25,7 +26,7 @@ Mirror the WeCom / DingTalk shape exactly:
 
 The lock stays per-entry deliberately: a per-destination lock would let two registrations of one configured name + endpoint each acquire a lock and run concurrently, duplicating inbound processing. The ledger keying adds cross-registration isolation without narrowing the lock.
 
-The shared `destinationKey` comment in `channel-base` is updated to name WeCom, DingTalk **and GitHub** as the adapters that bind the registration identity, leaving email (a separate variant) as the remaining follow-up.
+The shared `destinationKey` comment in `channel-base` is updated to name WeCom, DingTalk **and GitHub** as the adapters that bind the registration identity, leaving email (a separate variant) as the remaining follow-up. _(Update: email registration-identity keying is added in #17925; the comment now names WeCom, DingTalk, GitHub and email as binders.)_
 
 ## Upgrade consequence and diagnostics
 
@@ -35,7 +36,7 @@ To make the drop explicit rather than silent, `connect()` detects a sibling `man
 
 ## Files affected
 
-- `packages/channels/base/src/managed-channel.ts` — `destinationKey` comment: name WeCom, DingTalk and GitHub as binders; email remains a follow-up.
+- `packages/channels/base/src/managed-channel.ts` — `destinationKey` comment: name WeCom, DingTalk and GitHub as binders; email remains a follow-up. _(Update: email is added as a binder in #17925.)_
 - `packages/channels/github/src/managed-state.ts` — store constructor: entry-keyed directory + identity-keyed ledger file; `load()` split arms; `strandedLegacyLedger()` (pending/outbound/`watchPending`/watermark/readable) + `archiveStrandedLegacy()` + `entryWatchEpisodes()` (entry-scoped `Math.max` merge across legacy, keyed ledgers, and archives).
 - `packages/channels/github/src/managed-github-adapter.ts` — pass `destinationKey` to the store; `connect()` strand notice (pending count folds in `watchPending`, with a queued-transition loss clause) + entry-scoped episode merge into the loaded state + deferred archive + archived-path log.
 - `packages/channels/github/src/managed-state.test.ts` — file-path expectations updated; keying, isolation, stranding and corrupt-legacy witnesses added; `entryWatchEpisodes()` sanitization (incl. non-safe-integer), archive-survival, sibling `Math.max` merge (both read orders), uncapped carry-source, prs-baseline-only carry, and continue-past-unreadable witnesses; `watchPending` count + unknown-receipt outbound witnesses.
@@ -51,7 +52,7 @@ To make the drop explicit rather than silent, `connect()` detects a sibling `man
 - The `disconnect()` row-deregistration gate is a separate concern and is not touched here.
 - The stranding diagnostic covers only the pre-upgrade `managed-state.json`. After the upgrade, an identity change abandons the previous registration's identity-keyed ledger (`managed-state-<hash>.json`) with no notice — the same gap as the DingTalk sibling, tracked as item 1 of #17769 and not implemented here; the diagnostic should not be read as covering every stranding case.
 - No control-plane (Java) change; no `channel-base` contract/API change — only the `destinationKey` doc comment is updated.
-- The email store is out of scope (a separate variant); it is the remaining follow-up.
+- The email store is out of scope (a separate variant); it is the remaining follow-up. _(Update: email registration-identity keying is added in #17925.)_
 
 ## Open questions
 

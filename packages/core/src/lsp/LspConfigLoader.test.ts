@@ -249,6 +249,19 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs[0]?.args).toEqual(['--stdio']);
   });
 
+  it('scopes a managed artifact revision to its own language servers', async () => {
+    const definition = {
+      ts: { command: 'server', extensionToLanguage: { '.ts': 'typescript' } },
+    };
+    const managed = { ...tsPlugin(definition), artifactGeneration: 4 };
+    const unmanaged = { ...tsPlugin(definition), id: 'other' };
+    const configs = await loader().loadExtensionConfigs([managed, unmanaged]);
+    expect(configs.map((config) => config.extensionArtifactRevision)).toEqual([
+      'ts-plugin:4',
+      undefined,
+    ]);
+  });
+
   it('loads lspServers config from referenced file and hydrates variables', async () => {
     mock({
       [extensionPath]: {

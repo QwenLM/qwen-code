@@ -16,6 +16,7 @@ import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
   CHANNEL_LIVENESS_META_KEY,
+  SESSION_RETIREMENT_RECEIPT_META_KEY,
   CHANNEL_LIVENESS_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -37,6 +38,7 @@ interface NegotiatedChannelCapabilities {
     categories: readonly ActiveWorkHoldCategory[];
   };
   channelLiveness: boolean;
+  retirementReceipts: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -50,6 +52,7 @@ export function createChannelInitializeRequest(
   return {
     protocolVersion: PROTOCOL_VERSION,
     _meta: {
+      [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1,
       [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
         v: ACTIVE_WORK_HEARTBEAT_VERSION,
         intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
@@ -116,6 +119,8 @@ export function negotiateChannelCapabilities(
     : undefined;
   return {
     activeWork,
+    retirementReceipts:
+      response._meta?.[SESSION_RETIREMENT_RECEIPT_META_KEY] === 1,
     channelLiveness:
       isRecord(channelLivenessCapability) &&
       channelLivenessCapability['v'] === CHANNEL_LIVENESS_VERSION,

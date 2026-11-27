@@ -50,7 +50,7 @@ Only a clean suspension writes the stamp, after the per-input unattempted proof;
 
 ### 3.4 Transport notice
 
-The parent §4.2 due recheck stays and becomes a head-column condition in the wake fence (`TransportWakeActivator.java:125-139`): a head with `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` either has nothing deliverable or has its next attempt already owned by the backstop at `wake_retry_at`, so the notice is dropped (`NOT_DUE`). Because the stamp certifies the whole projection, the `is_wake_pending = 0` arm is as safe as the future-due arm, and it covers a notice delayed past a seal whose input had already settled. A notice for a due stamped head still loads through the existing `activateForWake`; moving the transport to the passive verb is not part of this slice.
+The parent §4.2 due recheck stays and becomes a head-column condition in the wake fence (`TransportWakeActivator.java:125-139`): a head with `wake_seal_revision = journal_revision AND (is_wake_pending = 0 OR wake_retry_at > NOW)` either has nothing deliverable or has its next attempt already owned by the backstop at `wake_retry_at`, so the notice is dropped (`NOT_DUE`). Because the stamp certifies the whole projection, the `is_wake_pending = 0` arm is as safe as the future-due arm, and it covers a notice delayed past a seal whose input had already settled. A notice for a due stamped head, like any other notice the fence admits, loads through the passive `recoverForWake` the backstop uses (parent §4.2 step 3); it no longer takes the active `activateForWake`, whose takeover load could drive a crashed Session's Runtime recovery.
 
 ### 3.5 Rollout
 

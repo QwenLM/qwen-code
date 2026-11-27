@@ -53,6 +53,7 @@ import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
+import { withFixedPolicyHookStop } from '../omni/policy/fixed-policy-hook-stop.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -143,6 +144,7 @@ import {
   persistAndTruncateToolResult,
 } from '../tools/truncation.js';
 import {
+  applyPermissionRequestHookUpdates,
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
@@ -170,8 +172,8 @@ import {
   getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
   prepareAutoModeFallback,
-  shouldClassifyAllShellForAutoMode,
-  shouldForceAutoModeReviewForAllow,
+  confirmAutomaticReviewOnAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
@@ -1652,6 +1654,8 @@ interface CoreToolSchedulerOptions {
   beforeToolLaunch?: (call: ScheduledToolCall) => boolean | Promise<boolean>;
   /** Whether the owning agent loop has already settled. */
   isFinished?: () => boolean;
+  /** Keep cancelled Code Mode batches open for the owning loop's deadline. */
+  waitForNestedToolSettlement?: boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
@@ -2009,12 +2013,16 @@ export class CoreToolScheduler {
   // Session PreToolUse hooks that applied to a call when its hook ran; one
   // registered later (by a skill in the same batch) stops the call.
   private readonly preToolUseSessionHookIds = new Map<string, Set<string>>();
+  private readonly approvedHookPermissionUpdates = new Map<string, unknown[]>();
   // Calls whose input a hook replaced; they lose the Code Mode Bash
   // concurrency exemption, which assumes the model's own commands.
   private readonly hookReplacedInputCallIds = new Set<string>();
   // Sanitized PreToolUse additionalContext keyed by callId. Held until the
   // batch's terminal assembly and cleared with the batch's hook owners.
   private readonly preToolUseContexts = new Map<string, string>();
+  // Calls whose tool hook returned `continue: false` without blocking, with
+  // the reason; set on their final responses when the batch completes.
+  private readonly hookStopReasons = new Map<string, string>();
   // Hook context of code-mode nested calls, keyed by the parent exec callId.
   // A nested result is a value for the script, not for the model, so its
   // context is delivered with the parent's result instead.
@@ -2042,13 +2050,21 @@ export class CoreToolScheduler {
     signal: AbortSignal;
     runtimeView?: RuntimeContentGeneratorView;
     owner?: HookExecutionOwner;
+    sessionId: string;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
+  private activeRequest?: ToolCallRequestInfo | ToolCallRequestInfo[];
+  private activeSessionId?: string;
+  private retired = false;
   private nestedToolScheduler?: CoreToolScheduler;
   private nestedToolCalls: ToolCall[] = [];
   private nestedSequence = 0;
   private nestedFlushScheduled = false;
+  private readonly pendingNestedTools = new Map<
+    Promise<CodeModeToolResult>,
+    NonNullable<CoreToolScheduler['activeRequest']>
+  >();
   private nestedQueue: Array<{
     request: ToolCallRequestInfo;
     signal: AbortSignal;
@@ -2082,17 +2098,33 @@ export class CoreToolScheduler {
 
   private getOrCreateNestedToolScheduler(): CoreToolScheduler {
     if (this.nestedToolScheduler) return this.nestedToolScheduler;
-    this.nestedToolScheduler = new CoreToolScheduler({
+    const isFinished = (): boolean =>
+      this.nestedToolScheduler !== scheduler ||
+      this.schedulerOptions.isFinished?.() === true;
+    const scheduler: CoreToolScheduler = new CoreToolScheduler({
       ...this.schedulerOptions,
+      isFinished,
       modToolCheck: undefined,
       beforeToolLaunch: undefined,
+      outputUpdateHandler: this.outputUpdateHandler
+        ? (callId, output) => {
+            if (!isFinished()) this.outputUpdateHandler?.(callId, output);
+          }
+        : undefined,
+      onEditorClose: () => {
+        if (!isFinished()) this.onEditorClose();
+      },
+      onToolResultFullTurnModel: this.onToolResultFullTurnModel
+        ? (model) =>
+            !isFinished() && this.onToolResultFullTurnModel?.(model) === true
+        : undefined,
       onAllToolCallsComplete: async (calls) => {
         for (const call of calls) {
           const resolver = this.nestedResolvers.get(call.request.callId);
           if (!resolver) continue;
           this.nestedResolvers.delete(call.request.callId);
           try {
-            resolver.onResult?.(call.response);
+            if (!isFinished()) resolver.onResult?.(call.response);
           } catch (error) {
             resolver.reject(error);
             continue;
@@ -2120,15 +2152,18 @@ export class CoreToolScheduler {
         }
       },
       onToolCallsUpdate: (calls) => {
+        if (isFinished()) return;
         this.nestedToolCalls = calls;
         this.notifyToolCallsUpdate();
       },
     });
-    this.nestedToolScheduler.hookContextSink = (request, context) => {
+    this.nestedToolScheduler = scheduler;
+    scheduler.hookContextSink = (request, context) => {
       const parentCallId = request.parentCallId;
       // Only a parent still executing can deliver it; a late nested call
       // must not leave an entry nothing will consume.
       if (
+        isFinished() ||
         !parentCallId ||
         !this.toolCalls.some(
           (call) =>
@@ -2141,13 +2176,14 @@ export class CoreToolScheduler {
       contexts.push(context);
       this.nestedHookContexts.set(parentCallId, contexts);
     };
-    return this.nestedToolScheduler;
+    return scheduler;
   }
 
   private dispatchCodeModeTool(
     name: string,
     args: Record<string, unknown>,
     parent: ToolCallRequestInfo,
+    owner: CoreToolScheduler['activeRequest'],
     signal: AbortSignal,
     onResult?: (response: ToolCallResponseInfo) => void,
   ): Promise<CodeModeToolResult> {
@@ -2171,12 +2207,18 @@ export class CoreToolScheduler {
       source: 'code_mode',
       goalContext: parent.goalContext,
     };
-    return new Promise<CodeModeToolResult>((resolve, reject) => {
+    const settled = new Promise<CodeModeToolResult>((resolve, reject) => {
       this.nestedQueue.push({ request, signal, resolve, reject, onResult });
       if (this.nestedFlushScheduled) return;
       this.nestedFlushScheduled = true;
       setTimeout(() => this.flushNestedQueue(), CODE_MODE_BATCH_WINDOW_MS);
     });
+    if (this.schedulerOptions.waitForNestedToolSettlement && owner) {
+      this.pendingNestedTools.set(settled, owner);
+      const remove = () => this.pendingNestedTools.delete(settled);
+      void settled.then(remove, remove);
+    }
+    return settled;
   }
 
   private flushNestedQueue(): void {
@@ -2196,9 +2238,17 @@ export class CoreToolScheduler {
     };
     for (const entry of active) {
       entry.signal.addEventListener('abort', abortBatch, { once: true });
+      const stopForwardingAbort = () =>
+        entry.signal.removeEventListener('abort', abortBatch);
       this.nestedResolvers.set(entry.request.callId, {
-        resolve: entry.resolve,
-        reject: entry.reject,
+        resolve: (result) => {
+          stopForwardingAbort();
+          entry.resolve(result);
+        },
+        reject: (error) => {
+          stopForwardingAbort();
+          entry.reject(error);
+        },
         onResult: entry.onResult,
       });
     }
@@ -2207,18 +2257,13 @@ export class CoreToolScheduler {
         active.map((entry) => entry.request),
         batchController.signal,
       ),
-    )
-      .catch((error) => {
-        for (const entry of active) {
-          this.nestedResolvers.delete(entry.request.callId);
-          entry.reject(error);
-        }
-      })
-      .finally(() => {
-        for (const entry of active) {
-          entry.signal.removeEventListener('abort', abortBatch);
-        }
-      });
+    ).catch((error) => {
+      for (const { request } of active) {
+        const resolver = this.nestedResolvers.get(request.callId);
+        this.nestedResolvers.delete(request.callId);
+        resolver?.reject(error);
+      }
+    });
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -2644,6 +2689,7 @@ export class CoreToolScheduler {
     this.preToolUseIds.delete(callId);
     this.preToolUseAsks.delete(callId);
     this.preToolUseSessionHookIds.delete(callId);
+    this.approvedHookPermissionUpdates.delete(callId);
     this.hookReplacedInputCallIds.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
@@ -2804,6 +2850,7 @@ export class CoreToolScheduler {
       : {
           success: true,
           hasAdditionalContext: !!r.additionalContext,
+          ...(r.endsTurn && { shouldStop: true, blockType: 'stop' }),
         };
   };
 
@@ -3188,6 +3235,7 @@ export class CoreToolScheduler {
     runtimeView?: RuntimeContentGeneratorView,
   ): Promise<void> {
     const owner = captureHookExecutionOwner(this.config);
+    const sessionId = this.config.getSessionId();
     if (this.isRunning() || this.isScheduling) {
       if (signal.aborted) {
         return Promise.reject(new Error('Tool call cancelled while in queue.'));
@@ -3211,6 +3259,7 @@ export class CoreToolScheduler {
           signal,
           runtimeView,
           owner,
+          sessionId,
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -3222,7 +3271,40 @@ export class CoreToolScheduler {
         });
       });
     }
-    return this.scheduleWithOwner(request, signal, runtimeView, owner);
+    return this.scheduleWithOwner(
+      request,
+      signal,
+      runtimeView,
+      owner,
+      sessionId,
+    );
+  }
+
+  /**
+   * Leave an abandoned batch on this instance and move its queue to a fresh
+   * scheduler. The queue keeps its identity for queued abort listeners.
+   */
+  handoffAfterAbandonment(
+    request: ToolCallRequestInfo | ToolCallRequestInfo[],
+    createReplacement: (
+      nestedCallIds: ReadonlySet<string>,
+    ) => CoreToolScheduler,
+  ): void {
+    if (
+      this.retired ||
+      this.activeRequest !== request ||
+      (!this.isScheduling && !this.isRunning())
+    ) {
+      return;
+    }
+    const replacement = createReplacement(
+      new Set(this.nestedToolCalls.map(({ request }) => request.callId)),
+    );
+    this.retired = true;
+    this.activeRequest = undefined;
+    replacement.requestQueue = this.requestQueue;
+    replacement.validationRetryCounts = new Map(this.validationRetryCounts);
+    replacement.drainRequestQueueIfIdle();
   }
 
   private scheduleWithOwner(
@@ -3230,7 +3312,10 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     runtimeView: RuntimeContentGeneratorView | undefined,
     owner: HookExecutionOwner | undefined,
+    sessionId: string,
   ): Promise<void> {
+    this.activeRequest = request;
+    this.activeSessionId = sessionId;
     const items = Array.isArray(request) ? request : [request];
     for (const item of items) this.hookOwners.set(item.callId, owner);
     return runWithHookExecutionOwner(owner, () =>
@@ -3247,19 +3332,19 @@ export class CoreToolScheduler {
   }
 
   private drainRequestQueueIfIdle(): void {
-    if (
-      this.requestQueue.length === 0 ||
-      this.isScheduling ||
-      this.isRunning()
-    ) {
+    if (this.retired || this.isScheduling || this.isRunning()) {
       return;
     }
+    this.activeRequest = undefined;
+    this.activeSessionId = undefined;
+    if (this.requestQueue.length === 0) return;
     const next = this.requestQueue.shift()!;
     this.scheduleWithOwner(
       next.request,
       next.signal,
       next.runtimeView,
       next.owner,
+      next.sessionId,
     )
       .then(next.resolve)
       .catch(next.reject);
@@ -3915,7 +4000,7 @@ export class CoreToolScheduler {
       // A PermissionRequest hook's replacement input re-enters this loop as
       // a rebuilt call that carries that hook's one-time allow; it is not
       // fired again, so a call takes at most two rounds.
-      const permissionRequestGrants = new Set<string>();
+      const permissionRequestGrants = new Map<string, unknown[]>();
       for (const toolCall of newToolCalls) {
         if (toolCall.status !== 'validating') {
           continue;
@@ -4062,8 +4147,12 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              canonicalName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -4356,13 +4445,53 @@ export class CoreToolScheduler {
               continue;
             }
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  signal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(
+                        automaticApproval === 'mode-changed'
+                          ? 'Approval mode changed before confirmation. Please retry.'
+                          : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                      ),
+                      ToolErrorType.EXECUTION_DENIED,
+                      'not_started',
+                    ),
+                  );
+                  setToolSpanFailure(
+                    toolSpan,
+                    TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                  );
+                  this.finalizeToolSpan(reqInfo.callId);
+                  continue;
+                }
+                if (automaticApproval === 'cancelled') {
+                  this.cancelPreExecutionIfAborted(
+                    reqInfo.callId,
+                    signal,
+                    toolSpan,
+                  );
+                  continue;
+                }
                 this.setToolCallOutcome(
                   reqInfo.callId,
                   ToolConfirmationOutcome.ProceedAlways,
                 );
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
+              }
               case 'blocked':
                 debugLogger.warn(
                   `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
@@ -4656,14 +4785,18 @@ export class CoreToolScheduler {
               | undefined;
             const hooksEnabled = !this.config.getDisableAllHooks();
 
-            const permissionRequestGrant = permissionRequestGrants.has(
+            const permissionRequestGrant = permissionRequestGrants.get(
               reqInfo.callId,
             );
             if ((hooksEnabled && messageBus) || permissionRequestGrant) {
               const permissionMode = String(this.config.getApprovalMode());
               const hookResult: PermissionRequestHookResult =
                 permissionRequestGrant
-                  ? { hasDecision: true, shouldAllow: true }
+                  ? {
+                      hasDecision: true,
+                      shouldAllow: true,
+                      updatedPermissions: permissionRequestGrant,
+                    }
                   : await runInRequestGoalContext(reqInfo, () =>
                       firePermissionRequestHook(
                         messageBus,
@@ -4772,6 +4905,12 @@ export class CoreToolScheduler {
                       approval.outcome,
                     );
                     this.setToolCallOutcome(reqInfo.callId, approval.outcome);
+                    if (hookResult.updatedPermissions?.length) {
+                      this.approvedHookPermissionUpdates.set(
+                        reqInfo.callId,
+                        hookResult.updatedPermissions,
+                      );
+                    }
                     this.setStatusInternal(reqInfo.callId, 'scheduled');
                     continue;
                   }
@@ -4785,16 +4924,56 @@ export class CoreToolScheduler {
                       toolSpan,
                     );
                     if (rebuilt) {
-                      permissionRequestGrants.add(reqInfo.callId);
+                      permissionRequestGrants.set(
+                        reqInfo.callId,
+                        hookResult.updatedPermissions ?? [],
+                      );
                       newToolCalls.push(rebuilt);
                     }
                     continue;
                   }
-                  await runInRequestGoalContext(reqInfo, () =>
-                    preparedConfirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    ),
-                  );
+                  if (
+                    invocation.requiresUserInteraction?.() === true ||
+                    (invocation.requiresAutoReviewOnAllow?.() === true &&
+                      this.config.getApprovalMode() !== approvalMode &&
+                      !(
+                        approvalMode === ApprovalMode.AUTO &&
+                        this.config.getApprovalMode() === ApprovalMode.YOLO
+                      ))
+                  ) {
+                    this.setStatusInternal(
+                      reqInfo.callId,
+                      'error',
+                      createErrorResponse(
+                        reqInfo,
+                        new Error(
+                          invocation.requiresUserInteraction?.()
+                            ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                            : 'Approval mode changed before confirmation. Please retry.',
+                        ),
+                        ToolErrorType.EXECUTION_DENIED,
+                        'not_started',
+                      ),
+                    );
+                    setToolSpanFailure(
+                      toolSpan,
+                      TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                      TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                    );
+                    this.finalizeToolSpan(reqInfo.callId);
+                    continue;
+                  }
+                  await runInRequestGoalContext(reqInfo, async () => {
+                    if (preparedConfirmationDetails.onAutoConfirm) {
+                      await preparedConfirmationDetails.onAutoConfirm(
+                        this.config.getApprovalMode(),
+                      );
+                    } else {
+                      await preparedConfirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                    }
+                  });
                   if (
                     this.cancelPreExecutionIfAborted(
                       reqInfo.callId,
@@ -4812,6 +4991,12 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  if (hookResult.updatedPermissions?.length) {
+                    this.approvedHookPermissionUpdates.set(
+                      reqInfo.callId,
+                      hookResult.updatedPermissions,
+                    );
+                  }
                   this.setStatusInternal(reqInfo.callId, 'scheduled');
                 } else {
                   // Hook denied permission - cancel with optional message
@@ -5880,8 +6065,27 @@ export class CoreToolScheduler {
       this.toolSpans.set(callId, toolSpan);
     }
     try {
-      await runInToolSpanContext(toolSpan, () =>
-        this._executeToolCallBody(scheduledCall, signal, toolSpan),
+      await withFixedPolicyHookStop(
+        (reason) => {
+          if (
+            signal.aborted ||
+            !this.toolCalls.some(
+              (call) =>
+                call.request === scheduledCall.request &&
+                call.status === 'executing',
+            )
+          ) {
+            return false;
+          }
+          if (!this.hookStopReasons.has(callId)) {
+            this.hookStopReasons.set(callId, reason);
+          }
+          return true;
+        },
+        () =>
+          runInToolSpanContext(toolSpan, () =>
+            this._executeToolCallBody(scheduledCall, signal, toolSpan),
+          ),
       );
     } catch (error) {
       // _executeToolCallBody records the span outcome only AFTER its main
@@ -6023,6 +6227,9 @@ export class CoreToolScheduler {
       // awaited headlessly behind the scheduler (its confirmation belongs to
       // the outer tool call), so there an 'ask' fails closed as a deny.
       blockReason = result.blockReason || 'Tool execution blocked by hook';
+      if (result.blockType === 'stop') {
+        this.hookStopReasons.set(callId, blockReason);
+      }
     } else if (fixedPolicy && result.updatedInput) {
       blockReason =
         'PreToolUse updatedInput is not supported for policy-owned tool calls, which skip the permission flow; the tool was not run.';
@@ -6170,6 +6377,7 @@ export class CoreToolScheduler {
     span: Span,
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
+    const batch = this.activeRequest;
     const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
@@ -6300,6 +6508,17 @@ export class CoreToolScheduler {
         );
         return;
       }
+    }
+
+    const hookPermissionUpdates =
+      this.approvedHookPermissionUpdates.get(callId);
+    if (hookPermissionUpdates) {
+      this.approvedHookPermissionUpdates.delete(callId);
+      await applyPermissionRequestHookUpdates(
+        hookPermissionUpdates,
+        this.config,
+        signal,
+      );
     }
 
     if (signal.aborted) {
@@ -6470,10 +6689,16 @@ export class CoreToolScheduler {
         // Stash the promote AbortController on the executing tool call so
         // a UI surface (Ctrl+B keybind) can find the foreground shell's
         // promote trigger by callId.
-        const setPromoteAbortControllerCallback = (ac: AbortController) => {
+        const setPromoteAbortControllerCallback = (
+          ac: AbortController | undefined,
+        ) => {
           this.toolCalls = this.toolCalls.map((tc) =>
             tc.request.callId === callId && tc.status === 'executing'
-              ? { ...tc, promoteAbortController: ac }
+              ? {
+                  ...tc,
+                  promoteAbortController: ac,
+                  ...(ac === undefined && { pid: undefined }),
+                }
               : tc,
           );
           this.notifyToolCallsUpdate();
@@ -6536,6 +6761,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6543,7 +6769,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -6591,6 +6817,7 @@ export class CoreToolScheduler {
                         name,
                         args,
                         scheduledCall.request,
+                        batch,
                         nestedSignal,
                         onResult,
                       ),
@@ -6598,7 +6825,7 @@ export class CoreToolScheduler {
                   execute,
                 )
               : scheduledCall.request.source === 'code_mode'
-                ? runWithToolCallSource({ kind: 'code_mode' }, execute)
+                ? runWithToolCallSource({ kind: 'code_mode', signal }, execute)
                 : execute();
           }),
         );
@@ -6649,6 +6876,9 @@ export class CoreToolScheduler {
         toolResult = await promise;
       }
       producerToolResult = toolResult;
+      if (toolResult.hookStopReason !== undefined) {
+        this.hookStopReasons.set(callId, toolResult.hookStopReason);
+      }
       observeProducerOutput = (
         response: CoreToolCallResponseInfo,
         replacement = false,
@@ -6891,7 +7121,18 @@ export class CoreToolScheduler {
             ? toolResult.llmContent
             : undefined,
         );
-        observeProducerOutput(cancelledResponse, true);
+        if (toolResult.keptWhenCancelled) {
+          cancelledResponse.responseParts = convertToFunctionResponse(
+            getModelFacingToolName(scheduledCall.request),
+            callId,
+            toolResult.llmContent,
+          );
+          cancelledResponse.contentLength =
+            typeof toolResult.llmContent === 'string'
+              ? toolResult.llmContent.length
+              : undefined;
+        }
+        observeProducerOutput(cancelledResponse, !toolResult.keptWhenCancelled);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
@@ -6904,20 +7145,24 @@ export class CoreToolScheduler {
           persistedOutputFiles?: string[];
           visionBridgeNotice?: string;
         },
+        result?: CoreToolCallResponseInfo,
       ): boolean => {
         if (!signal.aborted || (isTimeout && parentAbortedAtExecutionSettle)) {
           return false;
         }
-        const cancelledResponse = createCancelledResponse(
-          scheduledCall.request,
-          // Reached only after `execute()` settled with a result.
-          cancelledAfterCompletionMessage(signal),
-          executionStatus,
-          artifacts,
-          preserved?.persistedOutputFiles,
-          preserved?.visionBridgeNotice,
-        );
-        observeProducerOutput(cancelledResponse, true);
+        const cancelledResponse =
+          result && toolResult.keptWhenCancelled
+            ? result
+            : createCancelledResponse(
+                scheduledCall.request,
+                // Reached only after `execute()` settled with a result.
+                cancelledAfterCompletionMessage(signal),
+                executionStatus,
+                artifacts,
+                preserved?.persistedOutputFiles,
+                preserved?.visionBridgeNotice,
+              );
+        observeProducerOutput(cancelledResponse, cancelledResponse !== result);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
         return true;
@@ -6992,13 +7237,19 @@ export class CoreToolScheduler {
                   }
                 : {
                     success: true,
-                    shouldStop: r.shouldStop,
+                    shouldStop: r.shouldStop || r.endsTurn === true,
                     hasAdditionalContext: !!r.additionalContext,
-                    blockType: r.shouldStop ? 'stop' : undefined,
+                    blockType: r.shouldStop || r.endsTurn ? 'stop' : undefined,
                   };
             },
           );
           if (cancelIfFinished()) return;
+          if (postHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              postHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Capture additional context from hook; appended after the
           // model-facing truncation below.
@@ -7480,10 +7731,14 @@ export class CoreToolScheduler {
           }
         }
         if (
-          cancelAfterPostProcessing(artifacts, {
-            persistedOutputFiles: successResponse.persistedOutputFiles,
-            visionBridgeNotice: successResponse.visionBridgeNotice,
-          })
+          cancelAfterPostProcessing(
+            artifacts,
+            {
+              persistedOutputFiles: successResponse.persistedOutputFiles,
+              visionBridgeNotice: successResponse.visionBridgeNotice,
+            },
+            successResponse,
+          )
         ) {
           return;
         }
@@ -7540,6 +7795,12 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
           if (cancelIfFinished()) return;
+          if (failureHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              failureHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Append additional context from hook if provided
           if (
@@ -8016,6 +8277,12 @@ export class CoreToolScheduler {
             this.postToolUseFailureEndMeta,
           );
           if (cancelIfFinished(cancelMessage)) return;
+          if (failureHookResult.endsTurn) {
+            this.hookStopReasons.set(
+              callId,
+              failureHookResult.stopReason || 'No reason provided',
+            );
+          }
 
           // Append additional context from hook if provided
           if (
@@ -8091,6 +8358,7 @@ export class CoreToolScheduler {
       );
       this.toolCalls = [];
       this.isFinalizingToolCalls = true;
+      const batch = this.activeRequest;
       // Captured before PostToolBatch, which can rewrite a cancelled call
       // into an error; a cancelled call never delivers PreToolUse context.
       const preToolUseContextCallIds = new Set(
@@ -8165,14 +8433,16 @@ export class CoreToolScheduler {
                     }
                   : {
                       success: true,
-                      shouldStop: r.shouldStop,
+                      shouldStop: r.shouldStop || r.endsTurn === true,
                       hasAdditionalContext: !!r.additionalContext,
                       hasArtifacts: !!r.artifacts?.length,
-                      blockType: r.shouldStop ? 'stop' : undefined,
-                      postBatchStop: r.shouldStop,
-                      postBatchStopReason: r.shouldStop
-                        ? r.stopReason || 'no reason given'
-                        : undefined,
+                      blockType:
+                        r.shouldStop || r.endsTurn ? 'stop' : undefined,
+                      postBatchStop: r.shouldStop || r.endsTurn === true,
+                      postBatchStopReason:
+                        r.shouldStop || r.endsTurn
+                          ? r.stopReason || 'no reason given'
+                          : undefined,
                     },
             );
           const batchParentSpan = this.postToolBatchSpanCallId
@@ -8216,6 +8486,20 @@ export class CoreToolScheduler {
             }
           }
 
+          const lastCallId = completedCalls.at(-1)?.request.callId;
+          if (
+            batchHookResult.endsTurn &&
+            lastCallId !== undefined &&
+            !completedCalls.some(({ request }) =>
+              this.hookStopReasons.has(request.callId),
+            )
+          ) {
+            this.hookStopReasons.set(
+              lastCallId,
+              batchHookResult.stopReason || 'No reason provided',
+            );
+          }
+
           completedCalls = withPostToolBatchAdditionalContext(
             completedCalls,
             batchHookResult.additionalContext,
@@ -8225,6 +8509,12 @@ export class CoreToolScheduler {
             batchHookResult.artifacts,
           );
         }
+        completedCalls = completedCalls.map((call) => {
+          const hookStopReason = this.hookStopReasons.get(call.request.callId);
+          return hookStopReason === undefined
+            ? call
+            : { ...call, response: { ...call.response, hookStopReason } };
+        });
 
         // After PostToolBatch so a batch stop cannot erase it, and before the
         // final budget so the batch/send caps still bound it. A call whose
@@ -8278,10 +8568,28 @@ export class CoreToolScheduler {
           );
         }
 
+        if (batchSignal?.aborted && this.pendingNestedTools.size > 0) {
+          const ownPending = [...this.pendingNestedTools]
+            .filter(([, owner]) => owner === batch)
+            .map(([pending]) => pending);
+          if (ownPending.length > 0) await Promise.allSettled(ownPending);
+          // An earlier exec can leave an aborted child in a hook. Detach
+          // those children so they can't hold this batch's completed results
+          // or block the next batch's nested calls.
+          if (this.pendingNestedTools.size > 0) {
+            this.pendingNestedTools.clear();
+            this.nestedToolScheduler = undefined;
+            this.nestedToolCalls = [];
+          }
+        }
+
         for (const call of completedCalls) {
           this.finalizeToolSpan(call.request.callId, true);
         }
 
+        // A cancelled batch can settle after /clear rotates this Config.
+        const ownsTelemetry =
+          this.activeSessionId === this.config.getSessionId();
         for (const call of completedCalls) {
           const provenance =
             call.response.responseParts
@@ -8307,7 +8615,10 @@ export class CoreToolScheduler {
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           // A call its owner refused to launch never ran.
-          if (!this.launchRefusedCallIds.delete(call.request.callId)) {
+          if (
+            !this.launchRefusedCallIds.delete(call.request.callId) &&
+            ownsTelemetry
+          ) {
             logToolCall(this.config, new ToolCallEvent(call, this.config));
           }
         }
@@ -8336,6 +8647,7 @@ export class CoreToolScheduler {
           for (const call of completedCalls) {
             this.hookOwners.delete(call.request.callId);
             this.preToolUseContexts.delete(call.request.callId);
+            this.hookStopReasons.delete(call.request.callId);
             this.nestedHookContexts.delete(call.request.callId);
             this.failureContextsForParent.delete(call.request.callId);
             this.finalizeToolSpan(call.request.callId, true);
@@ -8656,17 +8968,20 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Preserve this contract for future invocation implementations.
+        // Named-workspace confirmations are excluded by hideAlwaysAllow above.
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-            shouldClassifyAllShellForAutoMode(
-              pendingTool.request.name,
-              this.config,
-            ));
+          shouldRequireAutoModeReviewForAllow(
+            pendingTool.invocation,
+            pmCtx,
+            pendingTool.request.name,
+            this.config,
+          );
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow requires AUTO review for ${pendingTool.request.name}`,
           );
           const actionFingerprint = getAutoModeActionFingerprint(
             pendingTool.request.name,

@@ -127,6 +127,7 @@ describe('MemoryDialog', () => {
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
+      getProjectAutoMemoryRoot: () => getAutoMemoryRoot('/tmp/project'),
       getBareMode: vi.fn(() => false),
       isSafeMode: vi.fn(() => false),
       // Stale snapshot getters — the dialog must NOT read its toggle state
@@ -526,6 +527,7 @@ describe('MemoryDialog', () => {
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
+      getProjectAutoMemoryRoot: () => getAutoMemoryRoot('/tmp/project'),
       getBareMode: vi.fn(() => true),
       isSafeMode: vi.fn(() => false),
       getManagedAutoMemoryEnabled: vi.fn(() => false),
@@ -562,6 +564,7 @@ describe('MemoryDialog', () => {
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
+      getProjectAutoMemoryRoot: () => getAutoMemoryRoot('/tmp/project'),
       getBareMode: vi.fn(() => true),
       isSafeMode: vi.fn(() => false),
       getManagedAutoMemoryEnabled: vi.fn(() => false),

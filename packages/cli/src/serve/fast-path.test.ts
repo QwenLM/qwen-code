@@ -597,6 +597,21 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses --load-admission and its negation on the fast path', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--no-load-admission']),
+    ).toMatchObject({
+      kind: 'serve',
+      options: { loadAdmission: false },
+    });
+    expect(parseServeFastPathArgs(['serve', '--load-admission'])).toMatchObject(
+      {
+        kind: 'serve',
+        options: { loadAdmission: true },
+      },
+    );
+  });
+
   it('parses --tls-cert and --tls-key on the fast path', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -725,6 +740,7 @@ describe('serve fast path argument parsing', () => {
       ['token', ['--token', 'token']],
       ['max-sessions', ['--max-sessions', '10']],
       ['max-total-sessions', ['--max-total-sessions', '20']],
+      ['load-admission', ['--no-load-admission']],
       [
         'max-pending-prompts-per-session',
         ['--max-pending-prompts-per-session', '5'],

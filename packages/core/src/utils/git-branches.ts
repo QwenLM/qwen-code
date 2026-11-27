@@ -83,22 +83,35 @@ const GIT_ENV_VARS_TO_CLEAR = [
 const NORMALIZED_GIT_ENV_VARS_TO_CLEAR = new Set(
   GIT_ENV_VARS_TO_CLEAR.map((key) => key.toLowerCase()),
 );
-const REMOTE_GIT_TRANSPORT_KEYS = new Set(
-  ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS'].map((key) =>
-    key.toLowerCase(),
-  ),
+// The ambient transport credentials `gitRemoteEnv()` restores, and the ones
+// the simple-git loader allowlists: v4's guard deletes every other ambient
+// guarded key, so an operator's SSH identity would otherwise vanish for the
+// clients that never set `.env()`.
+export const REMOTE_GIT_TRANSPORT_KEYS = [
+  'GIT_SSH_COMMAND',
+  'GIT_SSH',
+  'GIT_ASKPASS',
+  'SSH_ASKPASS',
+] as const;
+const NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS = new Set(
+  REMOTE_GIT_TRANSPORT_KEYS.map((key) => key.toLowerCase()),
 );
+// The operator-set variables gitEnv() restores after the scrub. Exported so
+// the simple-git loader's allowlist derives from the same list instead of
+// hand-copying it: a key added here must reach the v4 environment guard too,
+// or every `.env(gitEnv())` spawn throws for operators who export it.
+export const GIT_METADATA_RESTORE_KEYS = [
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_DATE',
+  'GIT_SSL_CAINFO',
+  'GIT_SSL_CAPATH',
+] as const;
 const GIT_METADATA_KEYS = new Set(
-  [
-    'GIT_AUTHOR_NAME',
-    'GIT_AUTHOR_EMAIL',
-    'GIT_AUTHOR_DATE',
-    'GIT_COMMITTER_NAME',
-    'GIT_COMMITTER_EMAIL',
-    'GIT_COMMITTER_DATE',
-    'GIT_SSL_CAINFO',
-    'GIT_SSL_CAPATH',
-  ].map((key) => key.toLowerCase()),
+  GIT_METADATA_RESTORE_KEYS.map((key) => key.toLowerCase()),
 );
 
 // Transport names git ships helpers for: `ext` is deny-by-default but
@@ -153,7 +166,8 @@ export function gitRemoteEnv(
   const source = base ?? process.env;
   const env = gitEnv(source);
   for (const [key, value] of Object.entries(source)) {
-    if (REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+    if (NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase()))
+      env[key] = value;
   }
   return env;
 }

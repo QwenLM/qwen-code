@@ -358,6 +358,78 @@ describe('Hosted approval waiters', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('parks without resolving and removes every timer and registration', async () => {
+    vi.useFakeTimers();
+    const waiters = new HostedApprovalWaiters();
+    let settled = false;
+    void waiters
+      .wait(
+        'parked',
+        Date.now() + 60_000,
+        new AbortController().signal,
+        () => false,
+      )
+      .then(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(waiters.park('parked')).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    waiters.notify('parked');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+  });
+
+  it('refuses to park while a policy poll is in flight', async () => {
+    vi.useFakeTimers();
+    const waiters = new HostedApprovalWaiters();
+    let finish!: () => void;
+    void waiters.wait(
+      'policy',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(waiters.park('policy')).toBe(false);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waiters.park('policy')).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses to park while a decision is being resolved', () => {
+    const waiters = new HostedApprovalWaiters();
+    void waiters.wait(
+      'decision',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+    );
+    waiters.beginResolution('decision');
+    expect(waiters.park('decision')).toBe(false);
+    waiters.endResolution('decision');
+    expect(waiters.park('decision')).toBe(true);
+  });
+
+  it('keeps the park mutex until the last overlapping resolution ends', () => {
+    const waiters = new HostedApprovalWaiters();
+    void waiters.wait(
+      'decision',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+    );
+    waiters.beginResolution('decision');
+    waiters.beginResolution('decision');
+    waiters.endResolution('decision');
+    expect(waiters.park('decision')).toBe(false);
+    waiters.endResolution('decision');
+    expect(waiters.park('decision')).toBe(true);
+  });
+
   it('does not wait for an Action that is already final', async () => {
     vi.useFakeTimers();
     const waiters = new HostedApprovalWaiters();

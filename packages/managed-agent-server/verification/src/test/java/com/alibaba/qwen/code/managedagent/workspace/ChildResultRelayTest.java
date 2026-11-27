@@ -1585,6 +1585,27 @@ class ChildResultRelayTest {
         verify(store, never()).terminalResultText(TENANT, CHILD, "turn-1");
     }
 
+    // #18149 Stage 3: an Action-parked child Turn stays RUNNING, so a park
+    // that outlives the message-turn bound with a message still waiting is
+    // a wait, never the bound's failure.
+    @Test
+    void waitsOutAParkedChildPastTheMessageTurnBound() {
+        watching();
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null,
+                AgentStateStore.HARNESS_ACTION_PARKED, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new JdbcChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L, null));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
     // The settlement names the messages it saw, so the parent refuses it
     // over one opened after the relay's reads (a message accepted in that
     // window would otherwise be closed away unread).

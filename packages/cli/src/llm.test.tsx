@@ -26,23 +26,27 @@ import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
   main,
+  persistRunUsageOnExit,
   registerLspHotReload,
   setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
+import type { ChatRecord, Config, UiEvent } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  EVENT_API_RESPONSE,
+  InputFormat,
+  OutputFormat,
+  persistSessionUsage,
+  Storage,
+  uiTelemetryService,
+} from '@qwen-code/qwen-code-core';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import {
-  ApprovalMode,
-  InputFormat,
-  OutputFormat,
-  Storage,
-} from '@qwen-code/qwen-code-core';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -72,6 +76,7 @@ const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
 const mockAssertFullIcuAvailable = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockPersistSessionUsage = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
   () =>
     (..._args: unknown[]) =>
@@ -168,8 +173,20 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     registerSession: (...args: unknown[]) => mockRegisterSession(...args),
+    // The exit-persist test must not write to the developer's own ~/.qwen.
+    persistSessionUsage: mockPersistSessionUsage,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: mockPersistSessionUsage,
+  }),
+);
 
 vi.mock('./config/config.js', () => ({
   loadCliConfig: vi.fn().mockResolvedValue({
@@ -1491,6 +1508,53 @@ describe('llm.tsx main function', () => {
       try {
         await expect(main()).rejects.toThrow(
           'stop after loader env scrub check',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([undefined, 'memory-override'])(
+    'binds the daemon ACP memory base from its launch environment (%s)',
+    async (override) => {
+      const runtimeBase = join(llmTestHome, 'daemon-runtime');
+      const memoryBase = override ? join(llmTestHome, override) : undefined;
+      vi.stubEnv('QWEN_CODE_SERVE', '1');
+      vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', 'trusted-test-parent');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeBase);
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', memoryBase);
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = join(llmTestHome, 'foreign');
+        return {
+          errors: [],
+          merged: { advanced: {}, security: { auth: {} }, ui: {} },
+          setValue: vi.fn(),
+          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never;
+      });
+      const reachedBinding = new Error('stop after daemon memory binding');
+      const bindProjectMemoryToWorkspace = vi.fn(() => {
+        throw reachedBinding;
+      });
+      vi.mocked(loadCliConfig).mockResolvedValue({
+        bindProjectMemoryToWorkspace,
+      } as unknown as Config);
+
+      try {
+        await expect(main()).rejects.toBe(reachedBinding);
+        expect(bindProjectMemoryToWorkspace).toHaveBeenCalledWith(
+          memoryBase ?? runtimeBase,
         );
       } finally {
         vi.unstubAllEnvs();
@@ -2918,7 +2982,16 @@ describe('llm.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
+    const cleanupRegistrations: Array<{
+      handler: () => unknown;
+      options?: { first?: boolean };
+    }> = [];
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(
+      (handler, options) => {
+        cleanupRegistrations.push({ handler, options });
+        return () => {};
+      },
+    );
     const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
       .mock.calls.length;
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
@@ -2988,9 +3061,30 @@ describe('llm.tsx main function', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
+      shutdown: vi.fn(),
+      shutdownExecutionEnvironments: vi.fn(),
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+
+    uiTelemetryService.reset();
+    uiTelemetryService.addEvent(
+      {
+        'event.name': EVENT_API_RESPONSE,
+        'event.timestamp': new Date().toISOString(),
+        response_id: 'validated-exit-response',
+        model: 'exit-model',
+        duration_ms: 1,
+        input_token_count: 5,
+        output_token_count: 0,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        total_token_count: 5,
+        prompt_id: 'validated-exit-prompt',
+      } as UiEvent,
+      'validated-exit',
+    );
+    mockPersistSessionUsage.mockClear();
 
     process.env['SANDBOX'] = '1';
     try {
@@ -3044,6 +3138,33 @@ describe('llm.tsx main function', () => {
       validatedConfig,
       settingsArg,
     );
+
+    // The usage hook must be registered with the actual startup client
+    // before both shutdown hooks. Direct helper tests cannot prove this wiring.
+    const usageIndex = cleanupRegistrations.findIndex(
+      (_, index) => cleanupRegistrations[index + 1]?.options?.first === true,
+    );
+    expect(usageIndex).toBeGreaterThanOrEqual(0);
+    const usageHandler = cleanupRegistrations[usageIndex]?.handler;
+    expect(usageHandler).toBeTypeOf('function');
+    await usageHandler?.();
+    expect(mockPersistSessionUsage).toHaveBeenCalledTimes(1);
+    const persistedExit = mockPersistSessionUsage.mock.calls[0]?.[0];
+    expect(persistedExit?.sessionId).toBe('test-session-id');
+    expect(persistedExit?.project).toBe('/');
+    expect(persistedExit?.metrics.models['exit-model']?.api.totalRequests).toBe(
+      1,
+    );
+    expect(persistedExit?.metrics.models['exit-model']?.tokens.prompt).toBe(5);
+    expect(configStub.shutdown).not.toHaveBeenCalled();
+    await cleanupRegistrations[usageIndex + 1]?.handler?.();
+    await cleanupRegistrations[usageIndex + 2]?.handler?.();
+    expect(configStub.shutdownExecutionEnvironments).toHaveBeenCalledOnce();
+    expect(configStub.shutdown).toHaveBeenCalledOnce();
+    expect(mockPersistSessionUsage.mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(configStub.shutdown).mock.invocationCallOrder[0]!,
+    );
+
     const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
       .calls[cleanupRegistrationStart]?.[0];
     expect(housekeepingCleanup).toBeTypeOf('function');
@@ -5318,5 +5439,61 @@ describe('startInteractiveUI', () => {
       await vi.advanceTimersByTimeAsync(90_000);
       expect(performCheck.mock.calls.length).toBe(afterCleanup);
     });
+  });
+});
+
+describe('persistRunUsageOnExit', () => {
+  const config = {
+    getSessionId: () => 'exit-session',
+    getProjectRoot: () => '/exit/project',
+  } as unknown as Config;
+  const apiResponseEvent = (tokens: number) =>
+    ({
+      'event.name': EVENT_API_RESPONSE,
+      'event.timestamp': new Date().toISOString(),
+      response_id: `r-${tokens}`,
+      model: 'm',
+      duration_ms: 1,
+      input_token_count: tokens,
+      output_token_count: 0,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      total_token_count: tokens,
+      prompt_id: 'exit-session',
+    }) as UiEvent;
+
+  beforeEach(() => {
+    uiTelemetryService.reset();
+    vi.mocked(persistSessionUsage).mockClear();
+  });
+
+  it('writes nothing for a run whose only traffic was replayed', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('persists only this run after a resume replayed history', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+    uiTelemetryService.addEvent(apiResponseEvent(5), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(persistSessionUsage).mock.calls[0]?.[0] as {
+      sessionId: string;
+      metrics: {
+        models: Record<
+          string,
+          { api: { totalRequests: number }; tokens: { prompt: number } }
+        >;
+      };
+    };
+    expect(arg.sessionId).toBe('exit-session');
+    expect(arg.metrics.models['m']!.api.totalRequests).toBe(1);
+    // The replayed 1000 tokens never reached the persisted counters.
+    expect(arg.metrics.models['m']!.tokens.prompt).toBe(5);
   });
 });

@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -14,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -198,7 +199,7 @@ final class JournalHistoryQueries {
         }
         boolean more = candidates.size() > selected;
         Long next = more ? transactions.getLast().journalRevision() : null;
-        java.util.Collections.reverse(transactions);
+        Collections.reverse(transactions);
         restore(tenantId, workspaceId, sessionId, writerToken);
         return new ManagedSessionStoreModels.RecentTransactionPage(List.copyOf(transactions), through, next, more);
     }
@@ -212,9 +213,9 @@ final class JournalHistoryQueries {
         }
         String key = JournalStoreRows.commandKeyHash(operation, commandId);
         var sizes = jdbc.query("SELECT journal_revision, byte_length FROM ma_session_journal_tx"
-                        + " WHERE tenant_id = ? AND session_id = ? AND command_key_hash = ? AND journal_revision <= ?",
+                        + " WHERE tenant_id = ? AND session_id = ? AND command_ref = ? AND journal_revision <= ?",
                 (row, index) -> new TransactionSize(row.getLong("journal_revision"), row.getLong("byte_length")),
-                tenantId, sessionId, key, through);
+                tenantId, sessionId, ManagedSchemaKeys.identity(key), through);
         StoredTransaction transaction = null;
         if (!sizes.isEmpty()) {
             TransactionSize size = sizes.getFirst();
@@ -405,10 +406,9 @@ final class JournalHistoryQueries {
 
     void requireInitialResource(JsonNode ref, JournalStoreRows.HeadRow head, String kind) throws IOException {
         WorkspaceRecoveryReader.validateRef(ref);
-        String scope = ManagedSessionStore.sessionScopeKey(head.tenantId(), head.sessionId());
         var resources = jdbc.query("SELECT " + ManagedSchemaProjection.RESOURCE.columns()
-                        + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND resource_id = ?",
-                storeRows.resourceMapper, ManagedSessionStore.resourceKey(scope, ref.path("resourceId").asText()), scope, ref.path("resourceId").asText());
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                storeRows.resourceMapper, head.tenantId(), head.sessionId(), ref.path("resourceId").asText());
         if (resources.size() != 1) {
             throw JournalStoreRows.journalCorrupt();
         }

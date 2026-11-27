@@ -27,6 +27,10 @@ const EN = {
   'notice.queue':
     'Some interactions were not processed because the queue was full. Wait for the update, then repeat the intended action.',
   'notice.local': 'Refreshing the page discards unsaved changes.',
+  'notice.effectDropped':
+    'Nothing was copied or downloaded because the values changed. Click again.',
+  'notice.effectUnavailable':
+    'This host cannot copy or download from the view.',
   'continue.label': 'Continue analysis with current parameters',
   'continue.again': 'Review again after checking the session',
   'continue.fix': 'Ask the assistant to fix this view',
@@ -79,6 +83,8 @@ const ZH_CN: Record<MessageKey, string> = {
   'notice.outdated': '当前显示的结果可能仍基于之前的参数。',
   'notice.queue': '队列已满，部分操作未被处理。请等待更新完成后重新操作。',
   'notice.local': '刷新页面会丢弃尚未保存的修改。',
+  'notice.effectDropped': '值已经变化，所以没有复制或下载。请再点一次。',
+  'notice.effectUnavailable': '此宿主无法从视图中复制或下载。',
   'continue.label': '用当前参数继续分析',
   'continue.again': '确认会话状态后重新审阅',
   'continue.fix': '请助手修复此视图',

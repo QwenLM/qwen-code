@@ -14,11 +14,11 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -100,8 +100,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
         realOperationSource = fixture.jdbc().queryForObject(
                 "SELECT request_json FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'"
-                        + " AND session_id = ? LIMIT 1", String.class,
-                "session-1".getBytes(StandardCharsets.UTF_8));
+                        + " AND session_id = ? LIMIT 1", String.class, "session-1");
     }
 
     private MockMvc mvc(ManagedArtifactService service) {
@@ -174,9 +173,9 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     private String seedArtifactSession(String tenant, String sessionId, String workspaceId, String status,
             boolean ownerOnly, String ownerActor, String sessionKind, String operationWorkspaceId,
             String operationState) throws Exception {
-        byte[] creatorKey = new WorkspaceActor(tenant, "creator").getActorId().getBytes(StandardCharsets.UTF_8);
-        byte[] ownerKey = ownerActor == null ? null
-                : new WorkspaceActor(tenant, ownerActor).getActorId().getBytes(StandardCharsets.UTF_8);
+        String creatorKey = new WorkspaceActor(tenant, "creator").getActorId();
+        String ownerKey = ownerActor == null ? null
+                : new WorkspaceActor(tenant, ownerActor).getActorId();
         if (workspaceId == null) {
             fixture.jdbc().update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
                     + " gmt_create, gmt_modified, creator_actor_key, owner_actor_key, owner_only, session_kind)"
@@ -192,26 +191,27 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                     tenant, sessionId, status, workspaceId, creatorKey, ownerKey, ownerOnly ? 1 : 0, sessionKind);
         }
         String resultId = "result-" + sessionId;
-        String scope = ManagedToolResultStore.identity("s", tenant, sessionId).substring(2);
+        String scope = ManagedIdentityRefs.ref(ManagedIdentityRefs.PUBLICATION_SCOPE_REF_BYTES, tenant, sessionId);
         ObjectNode source = (ObjectNode) JSON.readTree(realOperationSource);
         source.put("id", resultId);
         source.put("sessionId", sessionId);
         source.put("workspaceId", operationWorkspaceId);
-        fixture.jdbc().update("INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
-                + " operation_kind, tenant_id, session_id, workspace_id, target_kind, target_key,"
+        fixture.jdbc().update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id,"
+                + " operation_kind, tenant_id, session_id, workspace_id, target_kind, target_id,"
                 + " request_digest, request_json, state, phase, gmt_create, gmt_modified)"
-                + " SELECT ?, ?, ?, operation_kind, ?, ?, ?, target_kind, target_key,"
+                + " SELECT ?, 'SESSION', ?, ?, operation_kind, ?, ?, ?, target_kind, target_id,"
                 + " request_digest, ?, ?, phase, gmt_create, gmt_modified FROM ma_operation"
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_id = ? LIMIT 1",
-                DigestUtils.sha256Hex("op-" + sessionId), scope, resultId, tenant, sessionId,
-                operationWorkspaceId, source.toString(), operationState,
-                "session-1".getBytes(StandardCharsets.UTF_8));
+                ManagedIdentityRefs.operationRef("TOOL_RESULT_PROJECTION", tenant, "SESSION", sessionId,
+                        "execution-1", resultId),
+                sessionId, resultId, tenant, sessionId,
+                operationWorkspaceId, source.toString(), operationState, "session-1");
         String artifactId = "artifact_" + DigestUtils.sha256Hex(sessionId);
         ObjectNode descriptor = (ObjectNode) stdout.deepCopy();
         descriptor.put("id", artifactId);
         descriptor.put("session_id", sessionId);
         descriptor.put("result_id", resultId);
-        fixture.jdbc().update("INSERT INTO ma_artifact (artifact_id, result_id, scope_key,"
+        fixture.jdbc().update("INSERT INTO ma_artifact (artifact_id, result_id, scope_ref,"
                 + " descriptor_json, publication_id, binding_json, manifest_ref_json, stream_id,"
                 + " creation_sequence) SELECT ?, ?, ?, ?, publication_id, binding_json, manifest_ref_json,"
                 + " stream_id, creation_sequence FROM ma_artifact WHERE artifact_id = ? LIMIT 1",
@@ -589,16 +589,44 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
 
     @Test
     void theWorkspacePagePredicateHasAnIndexAccessPath() throws Exception {
-        try (var connection = fixture.jdbc().getDataSource().getConnection();
-                var rows = connection.getMetaData()
-                        .getIndexInfo(null, null, "ma_operation", false, false)) {
-            var columns = new ArrayList<String>();
-            while (rows.next()) {
-                if ("idx_ma_operation_workspace".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
-                    columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+        // CI's full-tier MySQL serves several databases from one server, so an
+        // unscoped getIndexInfo(null, null, ...) matches ma_operation in every
+        // database and returns each column once per database. A decoy schema
+        // carrying the same index name reproduces that condition on any host;
+        // the read must scope to this test's own catalog and schema.
+        var decoy = "decoy_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        boolean mysql;
+        try (var connection = fixture.jdbc().getDataSource().getConnection()) {
+            mysql = connection.getMetaData().getDatabaseProductName()
+                    .toLowerCase(java.util.Locale.ROOT).contains("mysql");
+        }
+        boolean created = false;
+        try {
+            fixture.jdbc().update("CREATE SCHEMA " + decoy);
+            created = true;
+            fixture.jdbc().update("CREATE TABLE " + decoy + ".ma_operation (id BIGINT,"
+                    + " workspace_id VARBINARY(2048), operation_kind VARCHAR(48), state VARCHAR(32))");
+            fixture.jdbc().update(mysql
+                    ? "CREATE INDEX idx_ma_operation_workspace ON " + decoy
+                            + ".ma_operation (workspace_id, operation_kind, state, id)"
+                    : "CREATE INDEX " + decoy + ".idx_ma_operation_workspace ON " + decoy
+                            + ".ma_operation (workspace_id, operation_kind, state, id)");
+            try (var connection = fixture.jdbc().getDataSource().getConnection();
+                    var rows = connection.getMetaData().getIndexInfo(
+                            connection.getCatalog(), connection.getSchema(),
+                            "ma_operation", false, false)) {
+                var columns = new ArrayList<String>();
+                while (rows.next()) {
+                    if ("idx_ma_operation_workspace".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
+                        columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+                    }
                 }
+                assertThat(columns).containsExactly("workspace_id", "operation_kind", "state", "id");
             }
-            assertThat(columns).containsExactly("workspace_id", "operation_kind", "state", "id");
+        } finally {
+            if (created) {
+                fixture.jdbc().update(mysql ? "DROP DATABASE " + decoy : "DROP SCHEMA " + decoy + " CASCADE");
+            }
         }
     }
 }
