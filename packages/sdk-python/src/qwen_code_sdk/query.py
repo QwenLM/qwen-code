@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterable, Mapping, MutableMapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, Literal, cast
@@ -39,6 +40,9 @@ from .types import (
 from .validation import validate_query_options
 
 _DONE = object()
+_incoming_control_task: ContextVar[asyncio.Task[None] | None] = ContextVar(
+    "incoming_control_task", default=None
+)
 
 
 def _parse_effort_status(value: Any) -> EffortStatus | None:
@@ -88,6 +92,8 @@ class Query:
             asyncio.Queue()
         )
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._close_reason: Exception | None = None
         self._started = False
         self._start_lock = asyncio.Lock()
         self._cancel_event = asyncio.Event()
@@ -105,13 +111,17 @@ class Query:
 
     async def _ensure_started(self) -> None:
         if self._closed:
-            raise RuntimeError("Query is closed")
+            raise (
+                self._close_reason or RuntimeError("Query is closed")
+            ).with_traceback(None)
         if self._started:
             return
 
         async with self._start_lock:
             if self._closed:
-                raise RuntimeError("Query is closed")
+                raise (
+                    self._close_reason or RuntimeError("Query is closed")
+                ).with_traceback(None)
             if self._started:
                 return
             await self._transport.start()
@@ -146,7 +156,7 @@ class Query:
         try:
             assert isinstance(self._prompt, str)
             await self._wait_initialized()
-            if self._closed:
+            if self.is_closed():
                 return
             message: SDKUserMessage = {
                 "type": "user",
@@ -232,6 +242,8 @@ class Query:
         cancel_event = asyncio.Event()
 
         async def runner() -> None:
+            # wait_for creates a separate callback task on Python 3.10/3.11.
+            token = _incoming_control_task.set(asyncio.current_task())
             try:
                 await self._handle_control_request(request, cancel_event)
             except asyncio.CancelledError:
@@ -239,6 +251,7 @@ class Query:
             except Exception as exc:  # pragma: no cover - fatal background path
                 await self._finish_with_error(exc)
             finally:
+                _incoming_control_task.reset(token)
                 self._incoming_control_requests.pop(request_id, None)
 
         task = asyncio.create_task(runner())
@@ -388,13 +401,17 @@ class Query:
         subtype: str,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        if self._closed:
-            raise RuntimeError("Query is closed")
+        if self.is_closed():
+            raise (
+                self._close_reason or RuntimeError("Query is closed")
+            ).with_traceback(None)
 
         if subtype != "initialize":
             await self._wait_initialized()
-            if self._closed:
-                raise RuntimeError("Query is closed")
+            if self.is_closed():
+                raise (
+                    self._close_reason or RuntimeError("Query is closed")
+                ).with_traceback(None)
 
         request_id = str(uuid4())
 
@@ -562,7 +579,7 @@ class Query:
         return self._session_id
 
     def is_closed(self) -> bool:
-        return self._closed
+        return self._closed or self._terminal_event_sent
 
     def _fail_pending_control_requests(self, error: Exception) -> None:
         for request_id, pending in list(self._pending_control_requests.items()):
@@ -573,7 +590,7 @@ class Query:
             self._pending_control_requests.pop(request_id, None)
 
     async def _cancel_incoming_control_requests(self) -> None:
-        current_task = asyncio.current_task()
+        current_task = _incoming_control_task.get() or asyncio.current_task()
         tasks: list[asyncio.Task[None]] = []
 
         for incoming in list(self._incoming_control_requests.values()):
@@ -587,39 +604,68 @@ class Query:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self) -> None:
-        if self._closed:
-            return
+        if self._close_task is None:
+            if self._closed:
+                return
+            self._close_task = asyncio.create_task(self._close())
+        elif self._closed:
+            current_task = _incoming_control_task.get() or asyncio.current_task()
+            # Teardown may be waiting for this query's callback/input cleanup.
+            if asyncio.current_task() is self._input_task or any(
+                incoming.task is current_task
+                for incoming in self._incoming_control_requests.values()
+            ):
+                return
 
-        self._closed = True
-        self._cancel_event.set()
+        await asyncio.shield(self._close_task)
 
-        error = RuntimeError("Query is closed")
-        self._fail_pending_control_requests(error)
-        await self._cancel_incoming_control_requests()
+    async def _close(self) -> None:
+        async with self._start_lock:
+            if self._closed:
+                return
 
-        await self._transport.close()
+            self._closed = True
+            self._cancel_event.set()
 
-        if self._input_task is not None:
-            self._input_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._input_task
+            error = RuntimeError("Query is closed")
+            self._close_reason = error
+            self._fail_pending_control_requests(error)
+            await self._cancel_incoming_control_requests()
 
-        if self._router_task is not None:
-            with contextlib.suppress(Exception):
-                await self._router_task
+            await self._transport.close()
 
-        await self._finish()
+            if self._input_task is not None:
+                self._input_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._input_task
+
+            if self._router_task is not None:
+                current_task = _incoming_control_task.get() or asyncio.current_task()
+                inside_incoming = any(
+                    incoming.task is current_task
+                    for incoming in self._incoming_control_requests.values()
+                )
+                if not inside_incoming:
+                    with contextlib.suppress(Exception):
+                        await self._router_task
+
+            await self._finish()
 
     async def _finish(self) -> None:
         if self._terminal_event_sent:
             return
+        # Keep queued messages readable and leave input-task cleanup to close().
         self._terminal_event_sent = True
+        self._cancel_event.set()
+        self._fail_pending_control_requests(RuntimeError("Query is closed"))
+        await self._cancel_incoming_control_requests()
         await self._message_queue.put(_DONE)
 
     async def _finish_with_error(self, exc: Exception) -> None:
         if self._terminal_event_sent:
             return
         self._closed = True
+        self._close_reason = self._close_reason or exc
         self._terminal_event_sent = True
         self._cancel_event.set()
         self._fail_pending_control_requests(exc)
