@@ -947,3 +947,52 @@ describe('load admission with an unreadable core count (Android/Termux)', () => 
     expect(snap.loadRatio).toBe(0.5);
   });
 });
+
+describe('load admission with an unreadable CPU signal (non-reading)', () => {
+  let signals: LoadAdmissionSignals;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: 5 };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const tick = (times = 1) => {
+    for (let i = 0; i < times; i++) {
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+  };
+
+  it('does not latch cpu_load on an unreadable signal even with high lag', () => {
+    const monitor = createLoadAdmissionMonitor({ readSignals: () => signals });
+    signals = {
+      loadRatio: 0,
+      eventLoopLagP99Ms: 300,
+      loadReadable: false,
+    };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 3);
+    // The lag signal may engage on its own; the CPU signal must not.
+    expect(monitor.snapshot().reason).not.toBe('cpu_load');
+    monitor.dispose();
+  });
+
+  it('does not release an already latched cpu_load on an unreadable reading', () => {
+    const monitor = createLoadAdmissionMonitor({ readSignals: () => signals });
+    signals = { loadRatio: LOAD_RATIO_ENTER, eventLoopLagP99Ms: 300 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().reason).toBe('cpu_load');
+    // Core count drops out while the loop is quiet: a fabricated 0 would
+    // satisfy both exit clauses and clear the latch; a non-reading must not.
+    signals = { loadRatio: 0, eventLoopLagP99Ms: 5, loadReadable: false };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES * 3);
+    expect(monitor.snapshot().reason).toBe('cpu_load');
+    // A real low reading still releases it.
+    signals = { loadRatio: 0.1, eventLoopLagP99Ms: 5 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    monitor.dispose();
+  });
+});

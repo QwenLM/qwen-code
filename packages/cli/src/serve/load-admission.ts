@@ -34,6 +34,13 @@ export interface LoadAdmissionSnapshot {
 export interface LoadAdmissionSignals {
   readonly loadRatio: number;
   readonly eventLoopLagP99Ms: number;
+  /**
+   * False when the CPU signal could not be read (core count unavailable).
+   * The tick then skips the CPU state machine instead of feeding it a
+   * fabricated 0, which would release a latched `cpu_load` on a reading
+   * that carries no information. Omitted means readable.
+   */
+  readonly loadReadable?: boolean;
 }
 
 /** Status shape reported when no monitor runs (opt-out or injected bridge). */
@@ -157,12 +164,14 @@ export function createLoadAdmissionMonitor(
     let cores = 0;
     readSignals = () => {
       if (!(cores > 0)) cores = os.cpus().length;
-      const loadRatio = hostLoadRatio(os.loadavg()[0], cores);
+      const load = os.loadavg()[0];
+      const loadRatio = hostLoadRatio(load, cores);
+      const loadReadable = cores > 0 && Number.isFinite(load);
       // Window-scoped p99: reset after each read so the figure describes
       // the last interval, not the since-start average.
       const eventLoopLagP99Ms = loopDelay.percentile(99) / 1_000_000;
       loopDelay.reset();
-      return { loadRatio, eventLoopLagP99Ms };
+      return { loadRatio, eventLoopLagP99Ms, loadReadable };
     };
   }
 
@@ -188,10 +197,16 @@ export function createLoadAdmissionMonitor(
     // daemon capacity: engage only when the loop already feels the
     // pressure; release once it is healthy again, even if host load stays
     // high.
-    advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
-      enter: latest.eventLoopLagP99Ms >= LOAD_CORROBORATION_ENTER_MS,
-      exit: latest.eventLoopLagP99Ms < LOAD_CORROBORATION_EXIT_MS,
-    });
+    // An unreadable CPU signal is a non-reading, not a reading of zero: skip
+    // the state machine so it neither latches nor releases on it. Releasing
+    // on a fabricated 0 would also let the corroboration-OR clear an already
+    // latched cpu_load, and block the clear while the loop stays busy.
+    if (latest.loadReadable !== false) {
+      advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT, {
+        enter: latest.eventLoopLagP99Ms >= LOAD_CORROBORATION_ENTER_MS,
+        exit: latest.eventLoopLagP99Ms < LOAD_CORROBORATION_EXIT_MS,
+      });
+    }
     advanceSignal(
       lag,
       latest.eventLoopLagP99Ms,
