@@ -693,6 +693,15 @@ export class CronScheduler {
   }
 
   /**
+   * Returns the single pending loop wakeup, if any (read-only accessor;
+   * the map holds at most one). Lets a serving daemon surface a session's
+   * pending self-paced wakeup without mutating scheduler state.
+   */
+  getPendingWakeup(): SessionWakeup | null {
+    return this.wakeups.values().next().value ?? null;
+  }
+
+  /**
    * Returns the number of active jobs and wakeups.
    */
   get size(): number {

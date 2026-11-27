@@ -705,3 +705,57 @@
 .runLink:hover {
   color: var(--foreground);
 }
+
+.loopWakeupsSection {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.loopWakeupsHeading {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.loopWakeupRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+}
+
+.loopWakeupIcon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  align-self: center;
+  color: var(--muted-foreground);
+}
+
+.loopWakeupName {
+  font-weight: 500;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.loopWakeupNext {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.loopWakeupPrompt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

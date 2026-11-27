@@ -2112,6 +2112,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.sessionScopedSnapshot':
     'This is a session-scoped scheduled task. Showing the snapshot from when it was created.',
   'scheduledTasks.empty': 'No scheduled tasks yet. Create one to get started.',
+  'scheduledTasks.loopWakeups': 'Pending loop wakeups (session-only)',
+  'scheduledTasks.loopWakeupNextTick': (v) => `next tick ${v?.time ?? ''}`,
   'scheduledTasks.create': 'Create',
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
@@ -2735,6 +2737,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
 
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
+  'sidebar.loopWakeup': (v) => `Loop: next tick ${v?.time ?? ''}`,
   'sidebar.workflows': 'Workflows',
   'sidebar.goals': 'Goals',
   'sidebar.prWatches': 'PR watches',
@@ -4372,6 +4375,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'status.mode': 'Approval mode',
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
+  'chatHeader.loopNextTick': (v) => `Loop · next tick ${v?.time ?? ''}`,
   'chatHeader.toggleRightPanel': 'Toggle right panel',
   'chatHeader.openArtifacts': (v) => `Artifacts (${v?.count ?? 0})`,
   'environment.title': 'Environment',

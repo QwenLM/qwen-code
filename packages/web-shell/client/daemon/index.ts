@@ -123,6 +123,7 @@ export type {
   DaemonScheduledTask,
   DaemonScheduledTaskGateStatus,
   DaemonScheduledTaskRun,
+  DaemonLoopWakeup,
   DaemonCreateScheduledTaskRequest,
   DaemonUpdateScheduledTaskRequest,
   DaemonResourceOptions,

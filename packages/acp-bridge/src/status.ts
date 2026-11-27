@@ -139,6 +139,11 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
   sessionContextUsage: 'qwen/status/session/context_usage',
+  /**
+   * The session's single pending loop wakeup (`/loop`), or null. Session-only
+   * state — lost when the session ends; `prompt` is truncated to 200 chars.
+   */
+  sessionWakeupStatus: 'qwen/status/session/wakeup_status',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
   sessionTaskRuntime: 'qwen/status/session/task_runtime',
@@ -812,6 +817,23 @@ export interface ServeSessionContextUsageStatus {
   workspaceRoot?: string;
   usage: ServeSessionContextUsage;
   formattedText: string;
+}
+
+export interface ServeSessionWakeupStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  /**
+   * The session's single pending loop wakeup (`/loop`), or null when none is
+   * armed. Session-only state: lost when the session (or its ACP child) ends.
+   * `prompt` is truncated to its first 200 characters.
+   */
+  pendingWakeup: null | {
+    id: string;
+    fireAtMs: number;
+    createdAt: number;
+    prompt: string;
+    todoWorkChainId?: string;
+  };
 }
 
 export interface ServeSessionSupportedCommandsStatus {

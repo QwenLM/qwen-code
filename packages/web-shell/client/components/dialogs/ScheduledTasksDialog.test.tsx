@@ -80,6 +80,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
 const { I18nProvider } = await import('../../i18n');
 const { WebShellPortalRootContext } = await import('../../portalRoot');
+const { formatClockTime } = await import('../../utils/formatDateTime');
 
 let container: HTMLDivElement | null = null;
 let portalRoot: HTMLDivElement | null = null;
@@ -109,6 +110,17 @@ async function mount(
     observedContactsAvailable?: boolean;
     primaryWorkspaceCwd?: string;
     autofixPrWatchesAvailable?: boolean;
+    loopWakeups?: Map<
+      string,
+      {
+        sessionId: string;
+        fireAtMs: number;
+        createdAt: number;
+        prompt: string;
+        todoWorkChainId?: string;
+      }
+    >;
+    loopWakeupSessionNames?: Map<string, string>;
     workspaces?: Array<{
       id: string;
       cwd: string;
@@ -164,6 +176,8 @@ async function mount(
               observedContactsAvailable={nextOpts.observedContactsAvailable}
               primaryWorkspaceCwd={nextOpts.primaryWorkspaceCwd}
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
+              loopWakeups={nextOpts.loopWakeups}
+              loopWakeupSessionNames={nextOpts.loopWakeupSessionNames}
               workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
               onError={nextOpts.onError ?? vi.fn()}
@@ -3817,5 +3831,100 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
       'delivery',
     );
+  });
+});
+
+describe('ScheduledTasksDialog loop wakeups', () => {
+  const makeWakeup = (
+    over: Partial<{
+      sessionId: string;
+      fireAtMs: number;
+      prompt: string;
+    }> = {},
+  ) => ({
+    sessionId: '11111111-2222-4333-8444-555555555555',
+    fireAtMs: Date.now() + 60_000,
+    createdAt: Date.now(),
+    prompt: 'check the docker slot',
+    ...over,
+  });
+
+  const section = () =>
+    document.querySelector('[data-testid="scheduled-tasks-loop-wakeups"]');
+
+  it('shows a pending wakeup with joined name, next tick and prompt', async () => {
+    const wakeup = makeWakeup();
+    await mount([], {
+      loopWakeups: new Map([[wakeup.sessionId, wakeup]]),
+      loopWakeupSessionNames: new Map([
+        [wakeup.sessionId, 'Docker slot poller'],
+      ]),
+    });
+
+    expect(section()).not.toBeNull();
+    expect(section()!.textContent).toContain(
+      'Pending loop wakeups (session-only)',
+    );
+    expect(section()!.textContent).toContain('Docker slot poller');
+    expect(section()!.textContent).toContain(
+      `next tick ${formatClockTime(wakeup.fireAtMs)}`,
+    );
+    expect(section()!.textContent).toContain('check the docker slot');
+  });
+
+  it('falls back to the session id prefix when no name is known', async () => {
+    const wakeup = makeWakeup({ sessionId: '0123456789abcdef' });
+    await mount([], { loopWakeups: new Map([[wakeup.sessionId, wakeup]]) });
+
+    expect(section()!.textContent).toContain('01234567');
+    expect(section()!.textContent).not.toContain('012345678');
+  });
+
+  it('truncates long prompts', async () => {
+    const prompt = `x`.repeat(200);
+    const wakeup = makeWakeup({ prompt });
+    await mount([], { loopWakeups: new Map([[wakeup.sessionId, wakeup]]) });
+
+    expect(section()!.textContent).toContain(`${prompt.slice(0, 120)}…`);
+    expect(section()!.textContent).not.toContain(`${prompt.slice(0, 121)}`);
+  });
+
+  it('orders wakeups by next tick and skips already-fired ones', async () => {
+    const soon = makeWakeup({
+      sessionId: 'aaaaaaaa-0000-4000-8000-000000000001',
+      fireAtMs: Date.now() + 30_000,
+      prompt: 'first',
+    });
+    const later = makeWakeup({
+      sessionId: 'bbbbbbbb-0000-4000-8000-000000000002',
+      fireAtMs: Date.now() + 120_000,
+      prompt: 'second',
+    });
+    const fired = makeWakeup({
+      sessionId: 'cccccccc-0000-4000-8000-000000000003',
+      fireAtMs: Date.now() - 1_000,
+      prompt: 'fired',
+    });
+    await mount([], {
+      loopWakeups: new Map([
+        [later.sessionId, later],
+        [soon.sessionId, soon],
+        [fired.sessionId, fired],
+      ]),
+    });
+
+    const text = section()!.textContent ?? '';
+    expect(text).not.toContain('fired');
+    expect(text.indexOf('first')).toBeLessThan(text.indexOf('second'));
+  });
+
+  it('omits the section for an empty map', async () => {
+    await mount([], { loopWakeups: new Map() });
+    expect(section()).toBeNull();
+  });
+
+  it('omits the section when the prop is absent', async () => {
+    await mount([]);
+    expect(section()).toBeNull();
   });
 });

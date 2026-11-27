@@ -123,6 +123,73 @@ describe('workspace actions', () => {
     client.dispose();
   });
 
+  it('reads loop wakeups from the scheduled-tasks payload', async () => {
+    const wakeup = {
+      sessionId: 'sess-1',
+      fireAtMs: 1_700_000_060_000,
+      createdAt: 1_700_000_000_000,
+      prompt: 'check the slot',
+      todoWorkChainId: 'chain-1',
+    };
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () =>
+        Response.json({ v: 1, tasks: [], wakeups: [wakeup] }),
+      );
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: 'http://daemon',
+    });
+    expect(await actions.fetchScheduledTaskWakeups()).toEqual([wakeup]);
+    expect(await actions.fetchScheduledTaskWakeups('ws-b')).toEqual([wakeup]);
+    expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toEqual([
+      '/scheduled-tasks',
+      '/workspaces/ws-b/scheduled-tasks',
+    ]);
+    client.dispose();
+  });
+
+  it('treats an older daemon without the wakeups field as having none', async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => Response.json({ v: 1, tasks: [] }));
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: 'http://daemon',
+    });
+    await expect(actions.fetchScheduledTaskWakeups()).resolves.toEqual([]);
+    client.dispose();
+  });
+
+  it('surfaces a failed wakeups read like the sibling scheduled-task actions', async () => {
+    const fetch = vi.fn().mockImplementation(async () =>
+      Response.json(
+        {
+          error:
+            'Failed to read scheduled tasks (the tasks file may be corrupt)',
+        },
+        { status: 500 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const client = new DaemonClient({ baseUrl: 'http://daemon' });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: 'http://daemon',
+    });
+    await expect(actions.fetchScheduledTaskWakeups()).rejects.toThrow(
+      'Failed to read scheduled tasks',
+    );
+    client.dispose();
+  });
+
   it('uses authenticated process-global subscription routes without a workspace', async () => {
     const fetch = vi
       .fn()
