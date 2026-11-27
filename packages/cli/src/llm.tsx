@@ -1283,8 +1283,13 @@ export async function main() {
     }
 
     // Persist session usage for cross-session reports (must run before
-    // config.shutdown() which clears telemetry state).
-    registerCleanup(() => persistRunUsageOnExit(config));
+    // config.shutdown() which clears telemetry state). In ACP mode each hosted
+    // session persists its own live delta on teardown in QwenAgent; running
+    // the process-wide exit writer here would append a duplicate record under
+    // the bootstrap config's session id.
+    if (!isAcpMode) {
+      registerCleanup(() => persistRunUsageOnExit(config));
+    }
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,

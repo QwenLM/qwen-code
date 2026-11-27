@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class ManagedSessionStoreModels {
@@ -63,6 +64,17 @@ public final class ManagedSessionStoreModels {
             "managed_session_head_corrupt";
     public static final String ERROR_RECOVERY_CONFLICT =
             "managed_session_recovery_conflict";
+    public static final String ERROR_INGEST_CURSOR_MISMATCH =
+            "managed_event_ingest_cursor_mismatch";
+    public static final String ERROR_INGEST_NOT_READY =
+            "managed_event_ingest_not_ready";
+    public static final String ERROR_INGEST_NOT_OWNER =
+            "managed_event_ingest_not_owner";
+    public static final String ERROR_INGEST_END_REFUSED =
+            "managed_event_ingest_end_refused";
+    public static final int MAX_INGEST_EVENTS = 64;
+    public static final String INGEST_END_PARKED = "parked";
+    public static final String INGEST_END_RECOVERY_BLOCKED = "recovery_blocked";
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
@@ -321,6 +333,28 @@ public final class ManagedSessionStoreModels {
     public record RecoveryStateReceipt(long writerGeneration,
             String recoveryStatus, String recoveryDetailCode,
             boolean replayed) {
+    }
+
+    /**
+     * Committed event envelopes of one Harness-owned Turn, in journal order,
+     * covering {@code (afterSequence, throughSequence]}. The writer ID is the
+     * Harness boot that owns the Turn.
+     */
+    public record IngestEventsRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 128) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 64) String eventEpoch,
+            @NotBlank @Size(max = 64) String turnId,
+            @NotBlank @Size(max = 64) String promptId,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long afterSequence,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long throughSequence,
+            @NotNull @Size(max = MAX_INGEST_EVENTS) List<Map<String, Object>> events,
+            @Pattern(regexp = INGEST_END_PARKED + "|" + INGEST_END_RECOVERY_BLOCKED) String end) {
+    }
+
+    /** {@code terminal} means the request recorded the Turn's terminal event. */
+    public record IngestReceipt(long cursor, long leaseRenewAfterMillis, boolean terminal) {
     }
 
     public record CommitResource(

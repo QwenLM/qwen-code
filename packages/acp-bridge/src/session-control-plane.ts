@@ -15203,14 +15203,14 @@ export function createSessionControlPlane(
       return requestSessionTurnIndexPage(req);
     },
 
-    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context, source) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       return requestSessionStatus<{ cancelled: boolean }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
-        { taskId, taskKind },
+        { taskId, taskKind, ...(source ? { source } : {}) },
       );
     },
 

@@ -7,6 +7,7 @@
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   DaemonClient,
+  DaemonHttpError,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -926,16 +927,35 @@ export function createDaemonWorkspaceActions({
         'Create scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async updateScheduledTask(id, patch, workspaceId) {
-      requireClient(getClient, 'Update scheduled task failed');
+    async assertScheduledTaskOwnerSelection(expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Scheduled task owner selection failed'),
+        expectedSessionId,
+      );
+    },
+
+    async updateScheduledTask(id, patch, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Update scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -952,11 +972,15 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async runScheduledTask(id, workspaceId) {
-      requireClient(getClient, 'Run scheduled task failed');
+    async runScheduledTask(id, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Run scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}/run`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -967,16 +991,28 @@ export function createDaemonWorkspaceActions({
         'Run scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },
 
-    async deleteScheduledTask(id, workspaceId) {
-      requireClient(getClient, 'Delete scheduled task failed');
+    async deleteScheduledTask(id, workspaceId, expectedSessionId) {
+      await requireScheduledOwnerSelection(
+        requireClient(getClient, 'Delete scheduled task failed'),
+        expectedSessionId,
+      );
       const path = scheduledTasksPath(
         workspaceId,
         `/${encodeURIComponent(id)}`,
+        expectedSessionId,
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
@@ -1533,6 +1569,19 @@ function requireClient(
   return client;
 }
 
+async function requireScheduledOwnerSelection(
+  client: DaemonClient,
+  expectedSessionId: string | null | undefined,
+): Promise<void> {
+  if (expectedSessionId === undefined) return;
+  const capabilities = await client.capabilities();
+  if (!capabilities.features.includes('scheduled_task_owner_selection')) {
+    throw new Error(
+      'This daemon cannot safely select a scheduled task by owner. Upgrade it before using expectedSessionId.',
+    );
+  }
+}
+
 function requireWorkspaceCwd(
   getWorkspaceCwd: () => string | undefined,
 ): string {
@@ -1557,11 +1606,21 @@ function requireWorkspaceClient(
 // primary surface. `suffix` appends the task id (and `/run`) for item routes.
 // The aggregated view passes the primary workspace as `undefined`, so the
 // primary keeps its trust-free unqualified surface while secondaries use the
-// (trust-checked) qualified one.
-function scheduledTasksPath(workspaceId?: string, suffix = ''): string {
-  return workspaceId
+// (trust-checked) qualified one; the primary still applies the server-side
+// runtime trust gate.
+function scheduledTasksPath(
+  workspaceId?: string,
+  suffix = '',
+  expectedSessionId?: string | null,
+): string {
+  const path = workspaceId
     ? `/workspaces/${encodeURIComponent(workspaceId)}/scheduled-tasks${suffix}`
     : `/scheduled-tasks${suffix}`;
+  if (expectedSessionId === undefined) return path;
+  const query = new URLSearchParams({
+    expectedSessionId: expectedSessionId ?? '',
+  });
+  return `${path}?${query.toString()}`;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

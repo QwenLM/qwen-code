@@ -172,6 +172,63 @@ for (const failure of ['decline', 'throw']) {
   });
 }
 
+for (const { height, tallHeader, direct } of [
+  { height: 813 },
+  { height: 420 },
+  { height: 420, tallHeader: true },
+  { height: 420, tallHeader: true, direct: true },
+]) {
+  test(`scrolls inside the 506 × ${height} model ${direct ? 'sheet' : 'card'}${tallHeader ? ' with a tall host header' : ''}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 506, height });
+    await openDemo(
+      page,
+      `?reasoning=${direct ? '0' : '1'}&manyModels=1${tallHeader ? '&tallHeader=1' : ''}`,
+    );
+    await openPicker(page);
+
+    const panel = page.locator(
+      direct
+        ? '[data-web-shell-model-sheet] > [data-vaul-no-drag]'
+        : '[data-web-shell-model-sheet-list]',
+    );
+    const last = row(page, gamma);
+    await expect(row(page, beta)).toHaveAccessibleDescription(
+      'Special rate of 0.5×.',
+    );
+    expect(
+      await panel.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    ).toBe(0);
+    await expect(last).not.toBeInViewport();
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport({ ratio: 1 });
+    await expect(panel.getByRole('searchbox')).toBeInViewport({ ratio: 1 });
+    await expect(panel.locator('[data-demo-header]')).not.toBeInViewport();
+  });
+}
+
+test.describe('short touch viewport', () => {
+  test.use({
+    hasTouch: true,
+    isMobile: true,
+    viewport: { width: 506, height: 420 },
+  });
+
+  test('keeps the model search touch target at least 44 px', async ({
+    page,
+  }) => {
+    await openDemo(page, '?reasoning=1&manyModels=1');
+    await openPicker(page);
+
+    expect(
+      (await page.getByRole('searchbox').boundingBox())!.height,
+    ).toBeGreaterThanOrEqual(44);
+  });
+});
+
 test('lets a touch host consume a row click before selection', async ({
   browser,
   baseURL,

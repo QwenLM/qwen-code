@@ -1853,7 +1853,7 @@ export const ZH: Messages = {
   'daemon.usage.dailyTokensTitle': 'Tokens',
   'daemon.usage.dailyTokensSub': '每日 token 总量',
   'daemon.usage.dailySessionsTitle': '会话',
-  'daemon.usage.dailySessionsSub': '每日结束运行数',
+  'daemon.usage.dailySessionsSub': '每日活跃会话数',
   'delete.cannotCurrent': '当前会话正在运行，无法删除。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',
@@ -2414,6 +2414,9 @@ export const ZH: Messages = {
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建会话',
+  'sidebar.overloadPaused': '系统过载 · 暂停新建',
+  'sidebar.overloadDetail': (v) =>
+    `主机负荷比 ${v?.['ratio'] ?? '?'}，事件循环 p99 ${v?.['lag'] ?? '?'} ms（${v?.['reason'] ?? 'unknown'}）。负荷回落后恢复新建。`,
   'sidebar.newWorktreeTask': '新建 Worktree 会话',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',
@@ -2894,18 +2897,8 @@ export const ZH: Messages = {
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'error.loopDetected.explicitCap': (vars) =>
     `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
-  'error.loopDetected.backstop': (vars) =>
-    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
-  'error.loopDetected.repeatedCall':
-    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
   'error.loopDetected.providerDuplicateId':
     '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
-  'error.loopDetected.invalidToolParams':
-    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
-  'error.loopDetected.repeatedToolFailure':
-    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
@@ -4154,6 +4147,28 @@ export const ZH: Messages = {
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
   'chatHeader.openArtifacts': (v) => `产物（${v?.count ?? 0}）`,
+  'chatHeader.openScheduledTasks': (v) => `定时任务（${v?.count ?? 0}）`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `定时任务（${v?.count ?? 0}，已暂停）`,
+  'environment.scheduledTasks': '定时任务',
+  'environment.scheduledTasks.scopeDurable': '持久化',
+  'environment.scheduledTasks.scopeSession': '仅当前会话',
+  'environment.scheduledTasks.scopeWakeup': '循环唤醒',
+  'environment.scheduledTasks.statusActive': '运行中',
+  'environment.scheduledTasks.statusPaused': '已暂停',
+  'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}后`,
+  'environment.scheduledTasks.stop': '停止',
+  'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '这是持久定时任务；实时状态不可用，展示其创建时的快照。',
+  'scheduledTasks.sessionScopedActive':
+    '当前会话运行中，停止后会立即取消后续触发。',
+  'scheduledTasks.sessionScopedPaused':
+    '当前会话的定时任务已暂停。停止后会移除剩余调度。',
+  'scheduledTasks.sessionScopedCancelled': '该会话级定时任务已停止或已过期。',
+  'scheduledTasks.stopSessionTask': '停止任务',
+  'scheduledTasks.error.cancelFailed': '停止定时任务失败',
+  'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 个定时任务`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,

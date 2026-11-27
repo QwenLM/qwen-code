@@ -62,6 +62,10 @@ import {
   deleteSessionGoalSidecar,
   moveSessionGoalSidecar,
 } from './session-goal-sidecar.js';
+import {
+  moveSessionPromptTimeSidecar,
+  removeSessionPromptTimeSidecar,
+} from './session-prompt-time-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -106,6 +110,19 @@ vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
   moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
   deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
 }));
+vi.mock('./session-prompt-time-sidecar.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./session-prompt-time-sidecar.js')>();
+  return {
+    ...actual,
+    removeSessionPromptTimeSidecar: vi.fn((filePath: string) =>
+      actual.removeSessionPromptTimeSidecar(filePath),
+    ),
+    moveSessionPromptTimeSidecar: vi.fn((from: string, to: string) =>
+      actual.moveSessionPromptTimeSidecar(from, to),
+    ),
+  };
+});
 
 type Line = Record<string, unknown>;
 
@@ -305,6 +322,8 @@ describe('SessionService', () => {
     vi.mocked(commitUsageBeforeTranscriptDeletion)
       .mockReset()
       .mockReturnValue(true);
+    vi.mocked(removeSessionPromptTimeSidecar).mockClear();
+    vi.mocked(moveSessionPromptTimeSidecar).mockClear();
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -1649,9 +1668,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      // One fence check per cleanup step: main's goal + artifact-summary
-      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
+      // One fence check per cleanup step: main's goal + artifact-summary +
+      // branch sidecars (11) plus prompt-time sidecar removal (1) → 12.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(12);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1780,14 +1799,27 @@ describe('SessionService', () => {
         'should remove prompt ledger sidecars in both archive states',
         '.ledger.jsonl',
       ],
+      [
+        'should remove prompt-time sidecars in both archive states',
+        '.prompt-time.json',
+      ],
     ])('%s', async (_title, ext) => {
       onlyIn('archived');
       existsFor(`${sessionIdA}${ext}`);
 
       expect(await removeA()).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive());
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats(ext));
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive(ext));
+      if (ext === '.prompt-time.json') {
+        expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+          inChats(ext),
+        );
+        expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+          inArchive(ext),
+        );
+      } else {
+        expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats(ext));
+        expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive(ext));
+      }
     });
 
     it('should remove both JSONL files when active and archived copies conflict', async () => {
@@ -2188,6 +2220,18 @@ describe('SessionService', () => {
       // The goal sidecar move added one fence check to the conflict path (5);
       // this PR's separate branch-sidecar reconcile try adds one more → 6.
       expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
+      // Conflict reconcile also drops the discarded lineage's prompt-time sidecar.
+      const droppedPromptTime =
+        kind === 'archive'
+          ? inChats('.prompt-time.json')
+          : inArchive('.prompt-time.json');
+      expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+        droppedPromptTime,
+      );
+      expect(moveSessionPromptTimeSidecar).not.toHaveBeenCalledWith(
+        droppedPromptTime,
+        expect.anything(),
+      );
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');

@@ -489,10 +489,8 @@ class HostedProcessCrashIT {
             var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                     "-cp", classpath, HostedProcessCrashFixtureMain.class.getName(), root.toString(), node,
                     cli.toString(), tenant, fault));
-            if (fault.equals("recovery-settlement")) {
-                command.addAll(List.of(Integer.toString(springPort), Integer.toString(harnessProxyPort),
-                        Integer.toString(brokerPort)));
-            }
+            command.addAll(List.of(Integer.toString(springPort), Integer.toString(harnessProxyPort),
+                    Integer.toString(brokerPort)));
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile());
             builder.environment().put("FG6C_MYSQL_URL", required("mysql.url"));
             builder.environment().put("FG6C_MYSQL_USER", required("mysql.user"));
@@ -524,7 +522,7 @@ class HostedProcessCrashIT {
             await(() -> Files.exists(readiness) || !brokerSidecar.isAlive(), 90, "resident Broker readiness");
             assertThat(brokerSidecar.isAlive()).as("Broker failed: %s", Files.readString(log)).isTrue();
             assertThat(JSON.readTree(Files.readString(readiness)).path("brokerUrl").asText())
-                    .isEqualTo("http://127.0.0.1:" + brokerPort + "/");
+                    .isEqualTo("http://127.0.0.1:" + brokerPort);
         }
 
         private void assertResidentExecution() {
