@@ -6,27 +6,42 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, startTransition, Suspense, useState } from 'react';
+import {
+  act,
+  forwardRef,
+  startTransition,
+  Suspense,
+  useImperativeHandle,
+  useState,
+} from 'react';
 import type {
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types.js';
+import type { MessageListHandle } from '../components/MessageList.js';
 import type { QuestionAnswer, SessionChatController } from './contract.js';
 import { regionsToCapabilities } from './capabilities.js';
 
 const captured = vi.hoisted(() => ({
   transcript: undefined as Record<string, unknown> | undefined,
+  transcriptScrollToBottom: vi.fn(),
   approval: undefined as Record<string, unknown> | undefined,
   question: undefined as Record<string, unknown> | undefined,
   editor: undefined as Record<string, unknown> | undefined,
 }));
 
 vi.mock('../components/TranscriptViewport.js', () => ({
-  TranscriptViewport: (props: Record<string, unknown>) => {
+  TranscriptViewport: forwardRef(function MockTranscriptViewport(
+    props: Record<string, unknown>,
+    ref,
+  ) {
     captured.transcript = props;
+    useImperativeHandle(ref, () => ({
+      scrollToBottom: captured.transcriptScrollToBottom,
+    }));
     return <div data-testid="transcript-viewport" />;
-  },
+  }),
 }));
 vi.mock('../components/messages/ToolApproval.js', () => ({
   ToolApproval: (props: Record<string, unknown>) => {
@@ -2034,5 +2049,179 @@ describe('ChatSurface', () => {
       <ChatSurface controller={controller} composerVisible={false} />,
     );
     expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+  });
+
+  it('supports transcriptRef, footerClassName, composerEditorVisible, transcript isResponding override, and excludes questions from TranscriptViewport.pendingApproval', () => {
+    captured.transcriptScrollToBottom.mockClear();
+    const transcriptRef = { current: null as MessageListHandle | null };
+    const questionRequest = permissionRequest('q-only');
+    const controller = fakeController({
+      phase: 'idle',
+      pendingApprovals: [],
+      pendingQuestions: [{ id: 'q-only', request: questionRequest }],
+    });
+
+    const container = mountReact(
+      <ChatSurface
+        controller={controller}
+        transcriptRef={transcriptRef}
+        footerClassName="custom-footer"
+        transcriptProps={{ isResponding: true }}
+        composerEditorVisible={false}
+        composerStatus={<div data-testid="ro-status">status</div>}
+        composerFooter={<div data-testid="ro-footer">footer</div>}
+      />,
+    );
+
+    // transcriptRef forwards to TranscriptViewport handle.
+    transcriptRef.current?.scrollToBottom();
+    expect(captured.transcriptScrollToBottom).toHaveBeenCalledTimes(1);
+
+    // transcriptProps.isResponding overrides controller.phase-derived isRunning.
+    expect(captured.transcript?.isResponding).toBe(true);
+
+    // AskUserQuestion is not a tool approval: pendingApproval stays null while
+    // approvalOverlayActive remains true.
+    expect(captured.transcript?.pendingApproval).toBeNull();
+    expect(captured.transcript?.approvalOverlayActive).toBe(true);
+
+    // footerClassName wraps the bottom stack (decision card + composer block).
+    const footerEl = container.querySelector('.custom-footer');
+    expect(footerEl).not.toBeNull();
+    expect(
+      footerEl?.querySelector('[data-testid="question-overlay"]'),
+    ).not.toBeNull();
+    expect(footerEl?.querySelector('[data-testid="ro-status"]')).not.toBeNull();
+
+    // composerEditorVisible=false keeps composerStatus mounted inside the
+    // approval-hidden wrapper while hiding ChatEditor and composerFooter.
+    expect(
+      container.querySelector('[data-testid="ro-status"]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+    expect(container.querySelector('[data-testid="ro-footer"]')).toBeNull();
+
+    // Clearing the question unhides composerStatus while keeping the editor absent.
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({
+          phase: 'idle',
+          pendingApprovals: [],
+          pendingQuestions: [],
+        })}
+        footerClassName="custom-footer"
+        composerEditorVisible={false}
+        composerStatus={<div data-testid="ro-status">status</div>}
+        composerFooter={<div data-testid="ro-footer">footer</div>}
+      />,
+    );
+    expect(
+      container.querySelector('[data-testid="ro-status"]')?.parentElement
+        ?.className,
+    ).not.toContain('composerHidden');
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+
+    // onComposerCancel overrides controller.cancel() when supplied and stays
+    // suppressed when composerCancelEnabled=false.
+    const onComposerCancel = vi.fn();
+    const cancelSpy = vi.fn(async () => ({
+      admission: 'accepted' as const,
+      outcome: 'unsettled' as const,
+      target: { sessionId: 's1' },
+    }));
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    (captured.editor?.onCancel as (() => void) | undefined)?.();
+    expect(onComposerCancel).toHaveBeenCalledTimes(1);
+    expect(cancelSpy).not.toHaveBeenCalled();
+
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        composerCancelEnabled={false}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    expect(captured.editor?.onCancel).toBeUndefined();
+  });
+
+  it('does not report a late approval rejection after switching sessions or unmounting', async () => {
+    let resolveApproval!: (result: {
+      admission: 'unknown';
+      target: { sessionId: string; requestId: string };
+    }) => void;
+    const onError = vi.fn();
+    const s1 = fakeController({
+      sessionId: 's1',
+      pendingApprovals: [
+        { id: 'a1', status: 'pending', request: permissionRequest('a1') },
+      ],
+      respondApproval: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveApproval = resolve;
+          }),
+      ),
+    });
+    const s2 = fakeController({ sessionId: 's2' });
+
+    const container = mountReact(
+      <ChatSurface controller={s1} onError={onError} />,
+    );
+    const confirm = captured.approval?.onConfirm as (
+      id: string,
+      optionId: string,
+    ) => Promise<void>;
+    const pending = confirm('a1', 'submit');
+
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+
+    resolveApproval({
+      admission: 'unknown',
+      target: { sessionId: 's1', requestId: 'a1' },
+    });
+    await expect(pending).rejects.toThrow('localized:chat.approvalNotAccepted');
+    expect(onError).not.toHaveBeenCalled();
+
+    // Unmount arm: same session, but surface unmounts before rejection arrives.
+    let resolveUnmounted!: (result: {
+      admission: 'unknown';
+      target: { sessionId: string; requestId: string };
+    }) => void;
+    const s3 = fakeController({
+      sessionId: 's3',
+      pendingApprovals: [
+        { id: 'a3', status: 'pending', request: permissionRequest('a3') },
+      ],
+      respondApproval: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveUnmounted = resolve;
+          }),
+      ),
+    });
+    mountReact(<ChatSurface controller={s3} onError={onError} />);
+    const confirmUnmounted = captured.approval?.onConfirm as (
+      id: string,
+      optionId: string,
+    ) => Promise<void>;
+    const pendingUnmounted = confirmUnmounted('a3', 'submit');
+    cleanupReact();
+    resolveUnmounted({
+      admission: 'unknown',
+      target: { sessionId: 's3', requestId: 'a3' },
+    });
+    await expect(pendingUnmounted).rejects.toThrow(
+      'localized:chat.approvalNotAccepted',
+    );
+    expect(onError).not.toHaveBeenCalled();
   });
 });

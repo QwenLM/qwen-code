@@ -55,9 +55,10 @@ describe('main CI failure resolver', () => {
     expect(yml.on.workflow_run.types).toEqual(['completed']);
   });
 
-  it('runs only for a green main-side run', () => {
-    // Pin the whole expression: an appended arm could admit pull-request
-    // runs, which say nothing about main. The dispatch arm mirrors the
+  it('runs for a green main run or a green pre-merged PR gate', () => {
+    // Pin the whole expression so a later arm cannot admit another PR
+    // workflow, whose job closure would not prove a main regression resolved.
+    // The dispatch arm mirrors the
     // reporter's: SDK Java runs on dispatch and schedule only, so without it
     // that whole family never retires.
     expect(job.if).toBe(
@@ -69,7 +70,10 @@ describe('main CI failure resolver', () => {
         'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && " +
         "github.event.workflow_run.head_branch == 'main' && " +
-        "github.event.workflow.name == 'SDK Java')) }}",
+        "github.event.workflow.name == 'SDK Java') || " +
+        "((github.event.workflow_run.event == 'pull_request' || " +
+        "github.event.workflow_run.event == 'pull_request_review') && " +
+        "github.event.workflow.name == 'Managed Agent gate')) }}",
     );
     expect(yml.permissions).toEqual({
       actions: 'read',
@@ -96,6 +100,7 @@ describe('main CI failure resolver', () => {
     // own run and write issues, so it must not add a second copy of that
     // secret path.
     expect(script).not.toContain('CI_DEV_BOT_PAT');
+    expect(script).toContain('/commits/${RUN_HEAD_SHA}/pulls');
   });
 
   it('matches the reporter’s title families', () => {
@@ -104,7 +109,14 @@ describe('main CI failure resolver', () => {
     expect(script).toContain('startswith($family + " on ")');
   });
 
-  function runResolver({ issues, views, greenJobs }) {
+  function runResolver({
+    issues,
+    views,
+    greenJobs,
+    runEvent = 'push',
+    runHeadSha = '',
+    prAssociation = true,
+  }) {
     const directory = mkdtempSync(join(tmpdir(), 'main-ci-resolve-'));
     const bin = join(directory, 'bin');
     const ghLog = join(directory, 'gh-calls');
@@ -127,7 +139,10 @@ describe('main CI failure resolver', () => {
       join(bin, 'gh'),
       '#!/bin/sh\n' +
         'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
-        'if [ "$1" = api ]; then cat "$GH_GREEN_JOBS"; exit 0; fi\n' +
+        'if [ "$1" = api ]; then\n' +
+        '  case "$2" in */pulls) printf "%s\\n" "$GH_PR_ASSOCIATION"; exit 0;; esac\n' +
+        '  cat "$GH_GREEN_JOBS"; exit 0\n' +
+        'fi\n' +
         'if [ "$1" = issue ] && [ "$2" = list ]; then cat "$GH_ISSUES"; exit 0; fi\n' +
         'if [ "$1" = issue ] && [ "$2" = view ]; then\n' +
         '  cat "$GH_ISSUE_DIR/issue-$3.json" || exit 1\n' +
@@ -148,13 +163,17 @@ describe('main CI failure resolver', () => {
           GH_GREEN_JOBS: greenFile,
           GH_ISSUES: issuesFile,
           GH_ISSUE_DIR: viewDir,
+          GH_PR_ASSOCIATION: prAssociation,
           GH_TOKEN: 'workflow-token',
           CONFIGURED_BOT_LOGIN: 'qwen-code-dev-bot',
           REPO: 'QwenLM/qwen-code',
-          WORKFLOW_NAME: 'Qwen Code CI',
           RUN_ID: '12345',
           RUN_STARTED_AT: '2026-11-26T12:00:00Z',
           RUN_URL: 'https://github.example/run/12345',
+          RUN_HEAD_SHA: runHeadSha,
+          RUN_EVENT: runEvent,
+          WORKFLOW_NAME:
+            runEvent === 'push' ? 'Qwen Code CI' : 'Managed Agent gate',
         },
       });
       return { result, calls: readFileSync(ghLog, 'utf8') };
@@ -237,6 +256,73 @@ describe('main CI failure resolver', () => {
       });
       expect(result.status, result.stderr).toBe(0);
       expect(calls).not.toContain('issue close 201');
+    },
+  );
+
+  it.skipIf(!replayable)(
+    'retires a PR gate failure only on the same PR and commit',
+    () => {
+      const sha = 'ec948cf2cdc1';
+      const body = `[Run 45591376211](https://github.example/run/45591376211) · commit \`${sha}\`\n\n- [\`SDK Java (full) / MySQL / Java 21\`](https://github.example/job/1)`;
+      const greenJobs = ['SDK Java (full) / MySQL / Java 21'];
+      const headSha = `${sha}abcdef`;
+      const gateView = (number) =>
+        issueView(number, body, {
+          title: 'Main CI failed: Managed Agent gate — sample failure',
+        });
+      const gateIssue = (number) => ({
+        ...listedIssue(number, 'qwen-code-dev-bot'),
+        title: 'Main CI failed: Managed Agent gate — sample failure',
+      });
+      const { result, calls } = runResolver({
+        issues: [gateIssue(501), gateIssue(502), gateIssue(503)],
+        views: {
+          501: gateView(501),
+          502: gateView(502),
+          503: gateView(503),
+        },
+        greenJobs,
+        runEvent: 'pull_request',
+        runHeadSha: headSha,
+        prAssociation: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls, `${result.stdout}\n${result.stderr}`).toContain(
+        'issue close 501',
+      );
+
+      const otherPr = runResolver({
+        issues: [gateIssue(502)],
+        views: { 502: gateView(502) },
+        greenJobs,
+        runEvent: 'pull_request_review',
+        runHeadSha: `${sha}abcdef`,
+        prAssociation: false,
+      });
+      expect(otherPr.result.status, otherPr.result.stderr).toBe(0);
+      expect(otherPr.calls).not.toContain('issue close 502');
+
+      const rebuiltCommit = runResolver({
+        issues: [gateIssue(503)],
+        views: { 503: gateView(503) },
+        greenJobs,
+        runEvent: 'pull_request',
+        runHeadSha: 'a-rebuilt-commit',
+        prAssociation: true,
+      });
+      expect(rebuiltCommit.result.status, rebuiltCommit.result.stderr).toBe(0);
+      expect(rebuiltCommit.calls).not.toContain('issue close 503');
+
+      const rebuiltPr = runResolver({
+        issues: [gateIssue(504)],
+        views: { 504: gateView(504) },
+        greenJobs,
+        runEvent: 'pull_request',
+        runHeadSha: headSha,
+        prAssociation: false,
+      });
+      expect(rebuiltPr.result.status, rebuiltPr.result.stderr).toBe(0);
+      expect(rebuiltPr.calls).not.toContain('issue close 504');
     },
   );
 

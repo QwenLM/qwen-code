@@ -931,10 +931,13 @@ describe('archiveDaemonSessions', () => {
       bridge: {
         closeSession: vi.fn(async (sessionId) => {
           if (sessionId === archivedId) {
+            // Attach before orchestration continues: an awaited pending
+            // promise in finally must not be this rejection's first handler.
             competingMaintenance = coordinator.runExclusiveMany(
               [blockedId],
               () => blocked,
             );
+            competingMaintenance.catch(() => {});
           }
         }),
       },
