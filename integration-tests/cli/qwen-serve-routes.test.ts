@@ -1648,4 +1648,40 @@ describe('qwen serve — archive coordinator over real HTTP', () => {
         `worktree cleanup preserved checkout action=delete session="${sessionId}" reason="unreadable sidecar (unsafe sidecar file type)"`,
       );
   });
+
+  it('logs worktree sidecar unlink failures to daemon stderr on real HTTP delete', async () => {
+    await expect
+      .poll(() => daemonStderr, { timeout: 10_000 })
+      .toMatch(
+        /retention candidates|worktree retention (?:preserved state|paused)/,
+      );
+
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, `delete eisdir ${sessionId}`),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    // A directory at the sidecar path makes unlinkSync fail on every platform
+    // (EISDIR / EPERM), even under root or Windows.
+    mkdirSync(sidecarPath);
+
+    try {
+      const stderrStart = daemonStderr.length;
+      const result = await client.deleteSessionsData([sessionId]);
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(result.errors).toEqual([]);
+      expect(existsSync(activePath)).toBe(false);
+      expect(lstatSync(sidecarPath, { throwIfNoEntry: false })).toBeDefined();
+      await expect
+        .poll(() => daemonStderr.slice(stderrStart), { timeout: 5_000 })
+        .toMatch(
+          new RegExp(
+            `qwen serve: worktree sidecar not removed: .*${sessionId}\\.worktree\\.json`,
+          ),
+        );
+    } finally {
+      rmSync(sidecarPath, { recursive: true, force: true });
+    }
+  });
 });

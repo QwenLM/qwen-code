@@ -1822,6 +1822,23 @@ describe('SessionService', () => {
       }
     });
 
+    it('warns and finishes sibling cleanup when unlinking a worktree sidecar throws', async () => {
+      onlyIn('active');
+      existsFor(`${sessionIdA}.worktree.json`, `${sessionIdA}.pr.json`);
+      const { service, warnings } = withWarnings();
+      unlinkSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (filePath.toString().endsWith('.worktree.json')) {
+          throw errno('EISDIR: illegal operation on a directory', 'EISDIR');
+        }
+      });
+
+      expect(await service.removeSession(sessionIdA)).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats());
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats('.pr.json'));
+      expect(warnings.join('\n')).toContain('worktree sidecar not removed');
+      expect(warnings.join('\n')).toContain('EISDIR');
+    });
+
     it('should remove both JSONL files when active and archived copies conflict', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       existsFor(`/chats/archive/${sessionIdA}.jsonl`);
