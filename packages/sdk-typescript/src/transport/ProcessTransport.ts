@@ -25,6 +25,7 @@ export class ProcessTransport implements Transport {
   private options: TransportOptions;
   private ready = false;
   private _exitError: Error | null = null;
+  private recoverableStdinError: Error | null = null;
   private closed = false;
   private inputClosed = false;
   private abortController: AbortController;
@@ -278,15 +279,33 @@ export class ProcessTransport implements Transport {
   private setupEventHandlers(): void {
     if (!this.childProcess) return;
 
+    this.childStdin?.on('error', (error: Error) => {
+      this.inputClosed = true;
+      // Writable errors are emitted asynchronously, outside write()'s catch.
+      if (this.closed || this.childProcess?.exitCode === 0) return;
+      this.ready = false;
+      if (!this._exitError) {
+        this.recoverableStdinError = new Error(
+          `CLI stdin error: ${error.message}`,
+          { cause: error },
+        );
+        this._exitError = this.recoverableStdinError;
+      }
+      this.requestChildProcessExit();
+    });
+
     this.childProcess.on('error', (error) => {
       this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
       } else {
-        this._exitError = new Error(`CLI process error: ${error.message}`);
-        logger.error(this._exitError.message);
+        const processError = new Error(`CLI process error: ${error.message}`);
+        this._exitError ??= processError;
+        logger.error(processError.message);
       }
+      // A separate process failure must survive even a later clean close.
+      this.finalizeStdinError(false);
     });
 
     this.childProcess.on('close', (code, signal) => {
@@ -298,11 +317,28 @@ export class ProcessTransport implements Transport {
       } else {
         const error = this.getProcessExitError(code, signal);
         if (error) {
-          this._exitError = error;
+          this._exitError ??= error;
           logger.error(error.message);
         }
       }
+      this.finalizeStdinError(code === 0 && signal === null);
     });
+  }
+
+  private finalizeStdinError(successfulExit: boolean): void {
+    const stdinError = this.recoverableStdinError;
+    this.recoverableStdinError = null;
+    if (stdinError === null || this._exitError !== stdinError) return;
+
+    if (successfulExit && !this.abortController.signal.aborted) {
+      // A successful child may close its pipe before buffered input drains.
+      this._exitError = null;
+      logger.debug(
+        `Discarding stdin error after successful child exit: ${stdinError.message}`,
+      );
+    } else {
+      logger.error(stdinError.message);
+    }
   }
 
   private getProcessExitError(
@@ -470,6 +506,7 @@ export class ProcessTransport implements Transport {
     if (!this.closed && this.childProcess) {
       const { exitCode, signalCode } = this.childProcess;
       if (exitCode !== null || signalCode !== null) {
+        this.finalizeStdinError(exitCode === 0 && signalCode === null);
         this._exitError ??= this.abortController.signal.aborted
           ? new AbortError('Operation aborted')
           : (this.getProcessExitError(exitCode, signalCode) ?? null);
@@ -510,6 +547,10 @@ export class ProcessTransport implements Transport {
       this.childProcess.exitCode !== null ||
       this.childProcess.signalCode !== null
     ) {
+      this.finalizeStdinError(
+        this.childProcess.exitCode === 0 &&
+          this.childProcess.signalCode === null,
+      );
       const error =
         this._exitError ??
         (this.abortController.signal.aborted
