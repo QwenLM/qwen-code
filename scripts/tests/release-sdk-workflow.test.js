@@ -67,18 +67,25 @@ describe('TypeScript SDK release workflow', () => {
     expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
-  it('keeps SDK releases out of CLI release consumers', () => {
-    // PAT-created SDK releases emit release:published. The CLI consumers must
-    // retain manual dispatch while ignoring the sdk-typescript-* family.
-    const guard = "startsWith(github.event.release.tag_name, 'v')";
-    for (const [path, jobName] of [
+  it('only fans release-published consumers out to CLI tags', () => {
+    // A GITHUB_TOKEN-created release emits no workflow-triggering event, so
+    // the SDK release never reached `on: release: published`. With CI_BOT_PAT
+    // it does, and `sdk-typescript-*` tags must stay invisible to the CLI
+    // consumers: finalize exits 1 on them, sync-release-to-oss holds its
+    // single concurrency lock to download assets they do not ship, and the DSW
+    // gate job burns a self-hosted runner to no-op. Keep the workflow_dispatch
+    // arm each one needs, and key on the tag prefix like the sibling workflows.
+    for (const [path, job] of [
       ['.github/workflows/finalize-release.yml', 'finalize'],
       ['.github/workflows/sync-release-to-oss.yml', 'sync'],
+      ['.github/workflows/dsw-swe-verified-release.yml', 'release_gate'],
     ]) {
-      const job = parse(readFileSync(path, 'utf8')).jobs[jobName];
-      expect(job.if, path).toContain(guard);
-      expect(job.if, path).toContain(
+      const ifClause = parse(readFileSync(path, 'utf8')).jobs[job].if;
+      expect(ifClause, path).toContain(
         "github.event_name == 'workflow_dispatch'",
+      );
+      expect(ifClause, path).toContain(
+        "startsWith(github.event.release.tag_name, 'v')",
       );
     }
   });

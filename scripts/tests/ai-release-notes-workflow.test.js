@@ -103,8 +103,11 @@ describe('stable release notes workflow', () => {
     expect(install).not.toContain('CI_BOT_PAT');
 
     expect(finalizeWorkflow).toContain("types: ['published']");
+    // Stable CLI tags only: SDK releases are now created with a PAT, which
+    // emits `release: published` where GITHUB_TOKEN did not, and finalize
+    // cannot finalize an `sdk-typescript-*` tag.
     expect(finalizeWorkflow).toContain(
-      'github.event.release.prerelease == false',
+      "github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')",
     );
     expect(finalizeWorkflow).toContain('workflow_dispatch:');
     expect(finalizeWorkflow).toContain(
