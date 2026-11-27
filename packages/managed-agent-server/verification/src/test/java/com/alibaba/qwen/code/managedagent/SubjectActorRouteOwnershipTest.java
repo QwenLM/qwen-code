@@ -3,20 +3,28 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.time.Duration;
 import java.util.List;
@@ -51,7 +59,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
 @AutoConfigureMockMvc
-@Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
+@Import({ManagedAgentServerIntegrationTest.FixtureConfiguration.class,
+        SubjectActorRouteOwnershipTest.SubjectConfiguration.class})
 class SubjectActorRouteOwnershipTest {
     private static final String PUBLIC = "/v1/agents/sessions";
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
@@ -71,6 +80,30 @@ class SubjectActorRouteOwnershipTest {
 
     @Autowired
     private JdbcManagedSessionStore journals;
+
+    @Autowired
+    private JdbcTemplate jdbc;
+
+    @TestConfiguration
+    static class SubjectConfiguration implements WebMvcConfigurer {
+        @Override
+        public void addInterceptors(InterceptorRegistry registry) {
+            registry.addInterceptor(new HandlerInterceptor() {
+                @Override
+                public boolean preHandle(HttpServletRequest request,
+                        HttpServletResponse response, Object handler) {
+                    if (request.getAttribute(TenantContextFilter.ATTRIBUTE)
+                            instanceof TenantContext context
+                            && request.getUserPrincipal() instanceof AuthenticatedTenantActor actor) {
+                        request.setAttribute(TenantContextFilter.ATTRIBUTE,
+                                new TenantContext(context.tenantId(), context.actorId(),
+                                        actor.actorSubjectId()));
+                    }
+                    return true;
+                }
+            });
+        }
+    }
 
     @AfterEach
     void restoreHarness() {
@@ -358,12 +391,16 @@ class SubjectActorRouteOwnershipTest {
 
     private String createPublic(String tenant, AuthenticatedTenantActor actor)
             throws Exception {
-        return body(mvc.perform(post(PUBLIC)
+        String session = body(mvc.perform(post(PUBLIC)
                 .header(TENANT, tenant).principal(actor)
                 .header("Idempotency-Key", UUID.randomUUID().toString())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted())).path("id").asText();
+        assertThat(jdbc.queryForObject(
+                "SELECT actor_subject_id FROM ma_session_principal WHERE session_id = ? AND actor_present = TRUE",
+                String.class, session)).isEqualTo(actor.actorSubjectId());
+        return session;
     }
 
     private void settle(String tenant, String session) {

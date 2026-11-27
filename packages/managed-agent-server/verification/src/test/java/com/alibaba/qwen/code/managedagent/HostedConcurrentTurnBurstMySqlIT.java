@@ -77,6 +77,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.runtime-broker.enabled=false",
+        "qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"})
@@ -84,6 +85,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(HostedConcurrentTurnBurstMySqlIT.BurstHarnessConfiguration.class)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedConcurrentTurnBurstMySqlIT {
+    private static final String ACTOR = "burst-owner";
     private static final Duration ROUND_DEADLINE = Duration.ofSeconds(150);
     private static final Duration SILENCE_LIMIT = Duration.ofSeconds(20);
     private static final int[] BURST_SIZES = {4, 8, 12};
@@ -204,6 +206,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             MvcResult created = mvc.perform(post(
                             "/api/agent/web-shell/v1/sessions/create")
                             .header(TenantContextFilter.HEADER, tenant)
+                            .header("X-Qwen-Actor-Id", ACTOR)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"idempotencyKey\":\""
                                     + UUID.randomUUID()
@@ -227,6 +230,7 @@ class HostedConcurrentTurnBurstMySqlIT {
             MvcResult submitted = mvc.perform(post(
                             "/api/agent/web-shell/v1/turns/submit")
                             .header(TenantContextFilter.HEADER, tenant)
+                            .header("X-Qwen-Actor-Id", ACTOR)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"idempotencyKey\":\""
                                     + UUID.randomUUID()

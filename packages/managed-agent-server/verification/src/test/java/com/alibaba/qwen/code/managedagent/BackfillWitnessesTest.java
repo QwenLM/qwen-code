@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedSchemaConfiguration;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -23,11 +24,7 @@ class BackfillWitnessesTest {
         activate(source);
         activate(source);
         ManagedSchema.validate(source);
-        // 49 = the 48 baseline tables plus flyway_schema_history. This merge
-        // unioned one table from each side of the split: the PR's
-        // ma_session_principal ownership row and the base's
-        // ma_pr_watch_binding. Replaying the activation above must not add any
-        // table beyond this pinned catalog.
+        // The baseline catalog plus the Flyway history table must survive replay unchanged.
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(
@@ -35,7 +32,7 @@ class BackfillWitnessesTest {
                                             + " table_schema = 'public' AND table_type='BASE"
                                             + " TABLE'",
                                         Integer.class))
-                .isEqualTo(49);
+                .isEqualTo(ManagedSchemaContract.TABLES.size() + 1);
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(
