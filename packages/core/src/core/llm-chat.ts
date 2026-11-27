@@ -1064,14 +1064,14 @@ function openAIChatPromptSource(
     tools: generatedTools ?? tools,
     // These overrides can change the tokens rendered from the same messages and tools.
     rendering: {
-      chat_template: body['chat_template'],
+      chat_template: body['chat_template'] ?? undefined,
       chat_template_kwargs: emptyTemplateKwargs ? undefined : templateKwargs,
-      documents: body['documents'],
+      documents: body['documents'] ?? undefined,
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,
-      mm_processor_kwargs: body['mm_processor_kwargs'],
-      truncate_prompt_tokens: body['truncate_prompt_tokens'],
+      mm_processor_kwargs: body['mm_processor_kwargs'] ?? undefined,
+      truncate_prompt_tokens: body['truncate_prompt_tokens'] ?? undefined,
     },
     systemInstruction: rawMessages ? undefined : generation?.systemInstruction,
     schemaCompliance: generatedTools

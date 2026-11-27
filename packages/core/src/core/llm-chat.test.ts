@@ -8715,6 +8715,37 @@ describe('LlmChat', async () => {
         body: { add_special_tokens: true },
         output: 4_000,
       },
+      {
+        name: 'a null chat template',
+        body: { chat_template: null },
+        output: 32_000,
+      },
+      {
+        name: 'null documents',
+        sampling: { documents: null },
+        output: 32_000,
+      },
+      {
+        name: 'null multimodal processor arguments',
+        body: { mm_processor_kwargs: null },
+        output: 32_000,
+      },
+      {
+        name: 'a null prompt truncation limit',
+        body: { truncate_prompt_tokens: null },
+        output: 32_000,
+      },
+      {
+        name: 'null truncation clearing the sampling limit',
+        sampling: { truncate_prompt_tokens: 20_000 },
+        body: { truncate_prompt_tokens: null },
+        output: 32_000,
+      },
+      {
+        name: 'an actual prompt truncation limit',
+        body: { truncate_prompt_tokens: 20_000 },
+        output: 4_000,
+      },
     ])(
       'matches warmed fallback usage against $name',
       async ({ primaryBody, body, sampling, output }) => {
