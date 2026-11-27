@@ -3110,6 +3110,7 @@ describe('local container recipe pins', () => {
         'zsh',
         'ksh',
         'dash',
+        'ash',
       ]);
       const rawShellCommands = new Set([
         'ls',
@@ -3220,6 +3221,8 @@ describe('local container recipe pins', () => {
         'ionice',
         'caffeinate',
         'rlwrap',
+        'busybox',
+        'toybox',
       ]);
       const astDangerCmds = new Set([
         'gh',
@@ -3233,6 +3236,7 @@ describe('local container recipe pins', () => {
         'wget',
         'bash',
         'sh',
+        'ash',
         'zsh',
         'ksh',
         'dash',
@@ -4359,7 +4363,7 @@ describe('local container recipe pins', () => {
         if (depth > 4) return true;
         if (
           !fenceBody &&
-          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
+          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|busybox|toybox|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|ash|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
             source,
           )
         ) {
@@ -4781,15 +4785,18 @@ describe('local container recipe pins', () => {
               } else if (astWrappers.has(name)) {
                 const firstClean = args[0] ? astCleanToken(args[0]) : '';
                 const evalLike = name === 'eval' || name === 'exec';
+                const multiCallWrapper =
+                  name === 'busybox' || name === 'toybox';
+                const proseCopula =
+                  rawLine &&
+                  !evalLike &&
+                  /^(?:is|are|was|were)$/i.test(args[0] ?? '');
                 if (
                   hasRedir ||
                   (evalLike && args.length > 0) ||
+                  (multiCallWrapper && args.length > 0 && !proseCopula) ||
                   (!(name === 'command' && /^-[vV]$/.test(firstClean)) &&
-                    !(
-                      rawLine &&
-                      !evalLike &&
-                      /^(?:is|are|was|were)$/i.test(args[0] ?? '')
-                    ) &&
+                    !proseCopula &&
                     args.some((arg) => astRealWrapperArg(arg)))
                 ) {
                   return remember(true);
@@ -5044,6 +5051,7 @@ describe('local container recipe pins', () => {
           }
         }
         const executionWrappers = new Set([
+          'busybox',
           'command',
           'env',
           'eval',
@@ -5055,6 +5063,7 @@ describe('local container recipe pins', () => {
           'python',
           'python3',
           'time',
+          'toybox',
         ]);
         const literalName = (value) =>
           value?.replaceAll('\\', '').replace(/["']/g, '').split('/').at(-1);
@@ -5095,7 +5104,7 @@ describe('local container recipe pins', () => {
           /^qwen\s+-/,
           /^["']?(?:\/[A-Za-z0-9_.-]+)*\/qwen["']?\s+-/,
           /^["']?(?:[A-Za-z0-9_.-]+\/)*qwen["']?\s+-/,
-          /^(?:bash|sh|zsh|ksh|dash)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash|zsh|ksh)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
+          /^(?:bash|sh|ash|zsh|ksh|dash)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash|ash|zsh|ksh)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
           /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
           /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|echo|touch|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
@@ -8619,6 +8628,51 @@ describe('local container recipe pins', () => {
       ['fenced unlabeled abs path no ext', '```\n/tmp/payload\n```'],
       ['fenced console extensionless path', '```console\n./payload\n```'],
       ['fenced text benign-path-name', '```text\n../escape\n```'],
+      ['bare null-builtin semicolon whoami (D1)', ':; whoami'],
+      ['inline null-builtin semicolon whoami (D1)', '`:; whoami`'],
+      [
+        'fenced text null-builtin semicolon whoami (D1)',
+        '```text\n:; whoami\n```',
+      ],
+      [
+        'inline busybox sh -c single-quoted (S11-1)',
+        "`busybox sh -c 'gh pr merge <n>'`",
+      ],
+      [
+        'inline busybox ash -c single-quoted (S11-1)',
+        "`busybox ash -c 'gh pr merge <n>'`",
+      ],
+      ['inline busybox env wrapper (S11-1)', '`busybox env gh pr merge <n>`'],
+      [
+        'inline busybox sh -c double-quoted (S11-1)',
+        '`busybox sh -c "gh pr merge <n>"`',
+      ],
+      [
+        'inline busybox sh -c backslash-escaped (S11-1)',
+        '`busybox sh -c gh\\ pr\\ merge\\ <n>`',
+      ],
+      [
+        'inline busybox nohup wrapper (S11-1)',
+        '`busybox nohup gh pr merge <n>`',
+      ],
+      ['inline busybox non-shell applet (S11-1)', '`busybox httpd -f`'],
+      ['inline busybox flagless applet (S11-1)', '`busybox id`'],
+      ['bare busybox flagless applet (S11-1)', 'busybox id'],
+      ['inline toybox sh -c (S11-1)', "`toybox sh -c 'gh pr merge <n>'`"],
+      ['inline direct ash -c (S11-1)', "`ash -c 'gh pr merge <n>'`"],
+      ['bare busybox sh -c (S11-1)', "busybox sh -c 'gh pr merge <n>'"],
+      [
+        'bare quoted busybox sh -c (S11-1)',
+        "'busybox' sh -c 'gh pr merge <n>'",
+      ],
+      [
+        'fenced text busybox sh -c (S11-1)',
+        "```text\nbusybox sh -c 'gh pr merge <n>'\n```",
+      ],
+      [
+        'fenced console busybox env (S11-1)',
+        '```console\nbusybox env gh pr merge <n>\n```',
+      ],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -8628,6 +8682,7 @@ describe('local container recipe pins', () => {
     for (const [label, block] of [
       ['inline benign marker citation', 'Check `/.dockerenv` before running.'],
       ['inline benign slash command', 'Invoke `/verify-pr <n>` locally.'],
+      ['bare busybox prose copula', 'busybox is not installed on macOS.'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
