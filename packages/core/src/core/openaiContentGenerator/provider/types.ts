@@ -6,6 +6,7 @@ import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js'
 export type OpenAIRequestContextOverrides = {
   splitToolMedia?: boolean;
   toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
+  useAudioDataUri?: boolean;
 };
 
 // Extended types to support cache_control for DashScope

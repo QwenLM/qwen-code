@@ -1893,6 +1893,80 @@ describe('OpenAIContentConverter', () => {
       }
     });
 
+    it('normalizes audio/x-wav and supports audio/aac with Data URI encoding by default', () => {
+      const messages = toMessagesWith(
+        {},
+        content(
+          'user',
+          inline('audio/x-wav', 'WAVDATA', 'clip.wav'),
+          inline('audio/x-aac', 'AACDATA', 'clip.aac'),
+        ),
+      );
+      const audioParts = wireParts(findRole(messages, 'user')).filter(
+        (p) => p.type === 'input_audio',
+      );
+      expect(audioParts).toEqual([
+        {
+          type: 'input_audio',
+          input_audio: {
+            data: 'data:audio/wav;base64,WAVDATA',
+            format: 'wav',
+          },
+        },
+        {
+          type: 'input_audio',
+          input_audio: {
+            data: 'data:audio/aac;base64,AACDATA',
+            format: 'aac',
+          },
+        },
+      ]);
+    });
+
+    it('sends raw base64 without data URI prefix when useAudioDataUri is false (standard OpenAI / SGLang)', () => {
+      const messages = toMessagesWith(
+        { useAudioDataUri: false },
+        content(
+          'user',
+          inline('audio/x-wav', 'data:audio/wav;base64,RAW_WAV', 'clip.wav'),
+          inline('audio/mpeg', 'RAW_MP3', 'clip.mp3'),
+        ),
+      );
+      const audioParts = wireParts(findRole(messages, 'user')).filter(
+        (p) => p.type === 'input_audio',
+      );
+      expect(audioParts).toEqual([
+        {
+          type: 'input_audio',
+          input_audio: { data: 'RAW_WAV', format: 'wav' },
+        },
+        {
+          type: 'input_audio',
+          input_audio: { data: 'RAW_MP3', format: 'mp3' },
+        },
+      ]);
+    });
+
+    it('normalizes uppercase and parameterized image, video, and audio MIME types consistently', () => {
+      const messages = toMessagesWith(
+        {},
+        content(
+          'user',
+          inline('image/JPEG; charset=utf-8', 'IMG', 'photo.jpg'),
+          inline('VIDEO/MP4; codecs=avc1', 'VID', 'clip.mp4'),
+          inline('audio/x-wav; codecs=1', 'WAV', 'clip.wav'),
+        ),
+      );
+      expect(wireParts(findRole(messages, 'user'))).toEqual([
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,IMG' } },
+        { type: 'video_url', video_url: { url: 'data:video/mp4;base64,VID' } },
+        {
+          type: 'input_audio',
+          input_audio: { data: 'data:audio/wav;base64,WAV', format: 'wav' },
+        },
+      ]);
+    });
+
     it.each([
       [
         'should render unsupported inlineData file types as a text block',

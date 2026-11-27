@@ -2377,6 +2377,11 @@ export class ContentGenerationPipeline {
         providerOverrides.toolResultContentFormat ??
         this.contentGeneratorConfig.toolResultContentFormat ??
         'parts',
+      useAudioDataUri:
+        providerOverrides.useAudioDataUri ??
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+          this.contentGeneratorConfig,
+        ),
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

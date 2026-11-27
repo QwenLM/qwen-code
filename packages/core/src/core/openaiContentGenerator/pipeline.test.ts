@@ -670,6 +670,46 @@ describe('ContentGenerationPipeline', () => {
             config: { toolResultContentFormat: 'parts' },
             expected: { toolResultContentFormat: 'string' },
           },
+        'should auto-select Data URI audio encoding on DashScope-compatible endpoints':
+          {
+            overrides: {},
+            config: {
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            },
+            expected: { useAudioDataUri: true },
+          },
+        'should auto-select raw base64 audio encoding on non-DashScope OpenAI-compatible endpoints':
+          {
+            overrides: {},
+            config: {
+              baseUrl: 'https://api.openai.com/v1',
+            },
+            expected: { useAudioDataUri: false },
+          },
+        'should auto-select raw base64 audio encoding on local SGLang/vLLM endpoints':
+          {
+            overrides: {},
+            config: {
+              baseUrl: 'http://127.0.0.1:8000/v1',
+            },
+            expected: { useAudioDataUri: false },
+          },
+        'should let provider useAudioDataUri overrides take precedence over endpoint detection':
+          {
+            overrides: { useAudioDataUri: false },
+            config: {
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            },
+            expected: { useAudioDataUri: false },
+          },
+        'should let provider useAudioDataUri=true override non-DashScope endpoints':
+          {
+            overrides: { useAudioDataUri: true },
+            config: {
+              baseUrl: 'https://api.openai.com/v1',
+            },
+            expected: { useAudioDataUri: true },
+          },
       }),
     )('%s', async (_title, { overrides, config, expected }) => {
       Object.assign(mockContentGeneratorConfig, config);
