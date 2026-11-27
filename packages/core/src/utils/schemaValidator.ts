@@ -521,11 +521,16 @@ function describeBrokenJsonStrings(
       const position = Number(/position (\d+)/.exec(reason)?.[1]);
       // Marking the exact spot lets the model fix that bracket; given only
       // the surrounding text, it mostly rewrote the same mistake.
+      // Drop half a surrogate pair at either edge rather than quote it.
       const near = Number.isInteger(position)
         ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
-            text.slice(Math.max(0, position - 80), position) +
+            text
+              .slice(Math.max(0, position - 80), position)
+              .replace(/^[\udc00-\udfff]/, '') +
               '<<HERE>>' +
-              text.slice(position, position + 20),
+              text
+                .slice(position, position + 20)
+                .replace(/[\ud800-\udbff]$/, ''),
           )}.`
         : '';
       notes +=

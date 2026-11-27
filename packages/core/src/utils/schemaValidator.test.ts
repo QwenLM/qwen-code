@@ -254,6 +254,29 @@ describe('SchemaValidator', () => {
       expect(error).toContain('send it as a JSON object, not as a string');
     });
 
+    it('points at the syntax error for a plain object field', () => {
+      const error = SchemaValidator.validate(obj({ config: obj({}) }), {
+        config: '{"key": 1,}',
+      });
+      expect(error).toMatch(
+        /^params\/config must be object; params\/config arrived as a string whose text is not valid JSON \(/,
+      );
+      expect(error).toContain('<<HERE>>}');
+      expect(error).toMatch(/send it as a JSON object, not as a string$/);
+    });
+
+    it('does not quote half of a surrogate pair at either edge', () => {
+      // The error sits at 86, so the window starts inside the first emoji and
+      // ends inside the second.
+      const docs = `["aaa😀${'b'.repeat(77)}" 1, "${'c'.repeat(15)}😀"]`;
+      const error = SchemaValidator.validate(obj({ docs: strings() }), {
+        docs,
+      });
+      expect(error).toContain(
+        `with <<HERE>> at that position: "${'b'.repeat(77)}\\" <<HERE>>1, \\"${'c'.repeat(15)}".`,
+      );
+    });
+
     it('adds nothing for strings that do not start like JSON', () => {
       expect(
         SchemaValidator.validate(obj({ urls: strings() }), {
