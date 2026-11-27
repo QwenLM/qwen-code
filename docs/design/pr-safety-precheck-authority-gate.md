@@ -271,9 +271,10 @@ documented gap, not claimed fixed and not a compensating control; no behavior wa
 changed at this head.
 
 Two further limits are explicit rather than silently widened. Leading indentation
-is recognized only through 192 columns (three 64-column runs); from column 193
-onward a dump command is admitted. Widening that bound would trade directly against
-the latency fix, so it is disclosed and pinned by a boundary test instead. The
+is recognized only through 192 columns for the no-list form, 128 columns before
+a subshell `(`, and 64 columns before a list marker; beyond each ceiling a dump
+command is admitted. Widening those bounds would trade directly against the
+latency fix, so they are disclosed and pinned by a boundary test instead. The
 `cat <(…)` restoration is limited to the historical `env` forms; `cat <(printenv)`,
 `cat <(set)`, `cat <(export -p)`, `cat <(declare -x)`, and non-cat commands remain
 admitted. Attached values and option combinations such as `cat <(env -uNAME)`,

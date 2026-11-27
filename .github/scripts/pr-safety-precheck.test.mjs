@@ -793,13 +793,17 @@ test('handles many 193-space lines without cubic rescanning', () => {
   );
 });
 
-test('pins the 192-column indentation recognition boundary', () => {
-  for (const [columns, decision] of [
-    [192, 'manual_required'],
-    [193, 'allow_triage'],
+test('pins the indentation recognition ceilings', () => {
+  for (const [columns, suffix, decision] of [
+    [64, '- env', 'manual_required'],
+    [65, '- env', 'allow_triage'],
+    [128, '(env', 'manual_required'],
+    [129, '(env', 'allow_triage'],
+    [192, 'env', 'manual_required'],
+    [193, 'env', 'allow_triage'],
   ]) {
     const result = assessPullRequestSafety({
-      pr: pr({ title: '', body: `${' '.repeat(columns)}env` }),
+      pr: pr({ title: '', body: `${' '.repeat(columns)}${suffix}` }),
       diff: diffFor('docs/note.md', '# Note'),
     });
 
