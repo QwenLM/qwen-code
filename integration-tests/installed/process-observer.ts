@@ -107,19 +107,44 @@ export function descriptors(row: Captured) {
     throw error;
   }
 }
+// Freshness bound for discovery. A child is found by walking the table only
+// while it is still parented to a captured process (the launcher's product
+// outlives its sh parent, npm exec wraps the product under a new process
+// group), so an unbounded sweep would have to catch that instant. Both models
+// re-walk every second or two anyway, so a 500ms stale snapshot never decides
+// what a test sees.
+const SWEEP_MS = 500;
+// Each probed process costs one fork, and every fork blocks the loop that
+// serves the PTY (and the runner adapter's flush) for its duration. The
+// launcher tree is 21 processes at its widest; the cap keeps the first sweep
+// over a wide npm install short and re-walks the rest on the next interval.
+const SWEEP_PROBES = 32;
+
 export function observe(pidFile: string) {
   const captured = new Map<number, Captured>();
   let error: string | undefined;
   const timing = { polls: 0, totalMs: 0, maxMs: 0 };
-  const poll = () => {
+  // The timer skips a tick whose predecessor has not returned, so a slow
+  // read never stacks forks behind itself.
+  let polling = false;
+  let lastSweep = -Infinity;
+  const tick = () => {
+    if (!fs.existsSync(pidFile)) return;
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (!Number.isInteger(pid) || pid < 2) return;
+    const root = captured.get(pid);
+    // A dead root cannot gain descendants; walking the table for it only
+    // costs forks on the poll that discovers the exit.
+    if (root && !sameProcess(root)) return;
+    if (performance.now() - lastSweep < SWEEP_MS) return;
+    lastSweep = performance.now();
+    for (const row of descendants(pid).slice(0, SWEEP_PROBES))
+      captured.set(row.pid, row);
+  };
+  const walk = (): void => {
     const started = performance.now();
     try {
-      if (!fs.existsSync(pidFile)) return;
-      const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
-      if (!Number.isInteger(pid) || pid < 2) return;
-      const root = captured.get(pid);
-      if (root && !sameProcess(root)) return;
-      for (const row of descendants(pid)) captured.set(row.pid, row);
+      tick();
     } catch (caught) {
       error = String(caught);
     } finally {
@@ -129,18 +154,28 @@ export function observe(pidFile: string) {
       timing.maxMs = Math.max(timing.maxMs, elapsed);
     }
   };
+  const poll = () => {
+    // A tick still forking would otherwise stack another walk behind itself.
+    if (polling) return;
+    polling = true;
+    try {
+      walk();
+    } finally {
+      polling = false;
+    }
+  };
   const timer = setInterval(poll, 100);
   timer.unref();
   return {
-    poll,
+    poll: walk,
     timing: () => ({ ...timing }),
     snapshot: () => {
-      poll();
+      walk();
       return [...captured.values()];
     },
     stop: () => {
       clearInterval(timer);
-      poll();
+      walk();
       return error;
     },
     cleanup: async () => {
