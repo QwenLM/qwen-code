@@ -3384,6 +3384,8 @@ describe('canArchiveSideTaskSummary', () => {
     [{ activeWorkState: 'active' as const }, false],
     [{ activeWorkState: 'unknown' as const }, false],
     [{ activeWorkState: 'unsupported' as const }, false],
+    [{ detachedBackgroundWork: 'running' as const }, false],
+    [{ detachedBackgroundWork: 'unknown' as const }, true],
   ])(
     'classifies completed work without guessing about live work',
     (input, expected) => {

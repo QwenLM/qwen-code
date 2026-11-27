@@ -357,10 +357,11 @@ describe('resolveDetachedBackgroundWork', () => {
     expect((await resolve(['s1'], verified)).get('s1')).toBeUndefined();
   });
 
-  it('caps matched status files, not directory entries', async () => {
-    // Dead verdicts force a full scan past every sidecar, so the entry cap
-    // is observable: noise files must not consume the budget, and only the
-    // 129th matched status file pushes the verdict to `unknown` (#17819).
+  it('caps probed status files, not directory entries', async () => {
+    // Dead verdicts force a full scan past every sidecar, so the probe cap
+    // is observable: noise files and completed records must not consume the
+    // budget, and only the 129th sidecar that reaches the process probe
+    // pushes the verdict to `unknown` (#17819).
     const noisy = path.join(tempRoot, 'background-shells', 'noisy');
     fs.mkdirSync(noisy, { recursive: true });
     for (let i = 0; i < 40; i += 1) {
@@ -385,6 +386,68 @@ describe('resolveDetachedBackgroundWork', () => {
       );
     }
     expect((await resolve(['crowded'], dead)).get('crowded')).toBe('unknown');
+  });
+
+  it('does not let accumulated completed sidecars exhaust the probe budget', async () => {
+    // Sidecars are never unlinked, so a session that has run hundreds of
+    // shells keeps every terminal record on disk. Those records are
+    // classified without a process probe and must not force the session
+    // into a permanent spurious `unknown` (R1-2); 200 terminal reads stay
+    // inside the 256-read budget too.
+    const settled = path.join(tempRoot, 'background-shells', 'settled');
+    fs.mkdirSync(settled, { recursive: true });
+    for (let i = 0; i < 200; i += 1) {
+      writeShellSidecar(
+        'settled',
+        `bg_${String(i).padStart(3, '0')}`,
+        TERMINAL,
+      );
+    }
+    writeShellSidecar('settled', 'bg_live', RUNNING(123));
+    expect((await resolve(['settled'], dead)).get('settled')).toBeUndefined();
+    resetDetachedWorkProbeCache();
+    expect((await resolve(['settled'], verified)).get('settled')).toBe(
+      'running',
+    );
+  });
+
+  it('caps status-file reads per session', async () => {
+    // The read budget bounds cold-cache disk traffic: a live shell just
+    // inside the cap is still found, but the 257th matched file gives up
+    // with `unknown` instead of opening every historical sidecar. History
+    // beyond the cap stays undiscovered until retention prunes it.
+    const bounded = path.join(tempRoot, 'background-shells', 'bounded');
+    fs.mkdirSync(bounded, { recursive: true });
+    for (let i = 0; i < 255; i += 1) {
+      writeShellSidecar(
+        'bounded',
+        `bg_${String(i).padStart(3, '0')}`,
+        TERMINAL,
+      );
+    }
+    writeShellSidecar('bounded', 'bg_live', RUNNING(123));
+    expect((await resolve(['bounded'], verified)).get('bounded')).toBe(
+      'running',
+    );
+    resetDetachedWorkProbeCache();
+
+    const capped = path.join(tempRoot, 'background-shells', 'capped');
+    fs.mkdirSync(capped, { recursive: true });
+    for (let i = 0; i < 257; i += 1) {
+      writeShellSidecar('capped', `bg_${String(i).padStart(3, '0')}`, TERMINAL);
+    }
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      expect((await resolve(['capped'], dead)).get('capped')).toBe('unknown');
+      // Pin the measured cap: exactly 256 status files opened, the 257th
+      // never read. A future regression that moves the budget check after
+      // the open would read one extra file and fail here.
+      expect(
+        openSpy.mock.calls.filter(([p]) => String(p).endsWith('.status')),
+      ).toHaveLength(256);
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 
   it('serves repeat probes from the TTL cache', async () => {

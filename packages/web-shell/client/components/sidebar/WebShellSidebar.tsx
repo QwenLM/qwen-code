@@ -4628,6 +4628,23 @@ export function WebShellSidebar({
       deleteCandidate;
     if (!canDeleteSession(latestRow)) {
       setDeleteCandidate(null);
+      // The row changed under the open dialog. Closing silently reads as a
+      // no-op press and invites a retry loop, so surface the refusal through
+      // the same error channel a failed delete uses (R1-7). Only a work
+      // blockage earns the "still running" copy; a workspace permission or
+      // capability change falls back to the generic delete-failure message.
+      const workBlocked = sessionBlocksDelete(
+        latestRow,
+        isCurrentSession(latestRow),
+      );
+      const refusal = !workBlocked
+        ? t('sidebar.deleteFailed')
+        : latestRow.detachedBackgroundWork === 'running'
+          ? t('delete.detachedRunningDisabled')
+          : isCurrentSession(latestRow)
+            ? t('delete.cannotCurrent')
+            : t('sidebar.deleteRunningDisabled');
+      onError(new Error(refusal), refusal);
       return;
     }
     // Captured before the request: the daemon's terminal `session_closed`

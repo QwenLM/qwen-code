@@ -161,10 +161,16 @@ The daemon resolves the signal best-effort while building the catalog:
   `hasRunningBackgroundTasks` while an older shell is still running, so the
   client preserves the detached observation until the catalog refreshes it.
 - Probe results are cached for 45 s (absent verdicts included). Each request
-  checks up to 100 uncached sessions, 128 directory entries per session, and
-  16 KiB per file. An open catalog with non-live rows or live rows carrying
-  a detached observation reconciles every 60 s even when the live catalog
-  version has not changed.
+  checks up to 100 uncached sessions and, per session, reads at most 256
+  shell sidecars (16 KiB each) and probes at most 128 of them. Completed
+  records, failed records without a process-start identity, and
+  current-lifetime records are classified without probing, so they do not
+  consume the probe budget; a cancelled record or a failed record carrying a
+  process-start identity may still map to a live process and is probed.
+  History beyond the read cap falls back to
+  `unknown` until retention prunes it. An open catalog with non-live rows or
+  live rows carrying a detached observation reconciles every 60 s even when
+  the live catalog version has not changed.
 
 The client treats the two grades differently, mirroring the existing
 `unknown` policy:
@@ -223,9 +229,13 @@ The client treats the two grades differently, mirroring the existing
   block delete on every row probed on a platform without a start-time source
   (macOS, Windows) — those failure modes are environmental, not evidence of
   work.
-- **Merge keeps live priority.** A session live in this daemon gets its
-  background state from the registries; stacking the sidecar signal on top
-  would double-report and could outlive the session's own state.
+- **Merge keeps live priority for current-lifetime shells.** A live
+  session's own shells are owned by the registries: the probe excludes
+  sidecars whose `startTime` is at or after the live entry's `createdAt`, so
+  registry state wins for current-lifetime work and is never double-reported.
+  A shell from an earlier lifetime keeps its sidecar verdict stacked on the
+  live row, so the delete guard survives new tasks starting and ending
+  between catalog refreshes.
 
 ## Constraints and risks
 

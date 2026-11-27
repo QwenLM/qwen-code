@@ -49,6 +49,10 @@ export type ProcessInspector = (
 const DEFAULT_CACHE_TTL_MS = 45_000;
 const MAX_SESSIONS_PER_REFRESH = 100;
 const MAX_DIRECTORY_ENTRIES = 128;
+// Reads exceed probes 2:1 so the verified "129 accumulated terminal records
+// before a live shell" shape stays fully classified; beyond this cap the
+// verdict falls back to `unknown` and the leak is retention's problem.
+const MAX_STATUS_FILE_READS = 256;
 const MAX_STATUS_BYTES = 16 * 1024;
 
 const defaultInspector: ProcessInspector = (pid, procStart, pidNs) => {
@@ -199,15 +203,22 @@ async function probeSession(
       : 'unknown';
   }
   let unknown = false;
-  let count = 0;
+  let reads = 0;
+  let probes = 0;
   try {
     for await (const entry of entries) {
       signal?.throwIfAborted();
-      // The cap bounds matched status files, not directory noise: unrelated
-      // entries (output files, temp droppings) must not push a real verdict
-      // to `unknown` (#17819).
+      // Directory noise (output files, temp droppings) never consumes either
+      // budget: unrelated entries must not push a real verdict to `unknown`
+      // (#17819).
       if (!SHELL_STATUS_PATTERN.test(entry.name)) continue;
-      if (++count > MAX_DIRECTORY_ENTRIES) return 'unknown';
+      // The read budget bounds cold-cache disk traffic per session, since
+      // sidecars are never unlinked and terminal records keep accumulating.
+      // The probe budget bounds process inspection. Both are conservative:
+      // exhausting one without a verdict reports `unknown`, never `idle`.
+      // A running shell beyond the read cap stays undiscovered — retention
+      // of historical sidecars must keep directories below this bound.
+      if (++reads > MAX_STATUS_FILE_READS) return 'unknown';
       const sidecar = entry.isFile()
         ? await readStatusFile(path.join(directory, entry.name)).catch(
             () => undefined,
@@ -244,6 +255,13 @@ async function probeSession(
         unknown = true;
         continue;
       }
+      // Charge the probe budget only where the probe happens. Records
+      // classified above as settled — completed, failed without a procStart,
+      // or started in the current live session — never reach a probe, so the
+      // sidecars a long-lived session accumulates cannot exhaust it and
+      // force a spurious permanent `unknown`. Cancelled records and failed
+      // records carrying a procStart still probe: they can predate exit.
+      if (++probes > MAX_DIRECTORY_ENTRIES) return 'unknown';
       const pidNs = sidecar?.['pidNs'];
       const probe = inspector(
         pid,

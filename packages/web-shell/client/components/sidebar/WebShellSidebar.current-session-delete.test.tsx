@@ -1329,7 +1329,8 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     connection.sessionId = 'session-current';
     const onSessionsDeleted = vi.fn();
 
-    renderSidebar({ onSessionsDeleted });
+    const onError = vi.fn();
+    renderSidebar({ onSessionsDeleted, onError });
     await flushSidebar();
 
     const deleteButton = findSessionDeleteButton('Other session');
@@ -1354,6 +1355,12 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
 
     expect(active.deleteSession).not.toHaveBeenCalled();
     expect(onSessionsDeleted).not.toHaveBeenCalled();
+    // The refusal must surface through the error channel instead of closing
+    // the dialog silently, or the retry loop repeats invisibly (R1-7).
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][1]).toBe(
+      'Detached background work is still running for this session. Wait for it to exit before deleting.',
+    );
     sessionCatalogController.peekSessionSummary.mockReset();
   });
 

@@ -2215,4 +2215,58 @@ describe('detached background-shell enrichment (#17819)', () => {
     const row = result.sessions.find((s) => s.sessionId === sessionId);
     expect(row?.detachedBackgroundWork).toBe('running');
   });
+
+  it('enriches a search hit with the detached verdict', async () => {
+    // Search hits fall back to the captured summary at delete-confirm time,
+    // so an unenriched hit lets an orphaned shell stay invisible to the
+    // delete guard (R1-8).
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, runningSidecar());
+    detachedHarness.inspector = () => 'alive-verified';
+
+    const result = await searchWorkspaceSessionsForResponse(
+      workspaceCwd,
+      'stored prompt',
+      {},
+      { runtimeBaseDir, liveRows: [] },
+    );
+
+    const hit = result.results.find((r) => r.session.sessionId === sessionId);
+    expect(hit?.session.detachedBackgroundWork).toBe('running');
+  });
+
+  it('scopes the search-path probe by the supplied live rows', async () => {
+    // A shell started by the live session is registry-owned: without the
+    // liveSince cutoff the probe would report its own shells as detached.
+    const sessionId = sessionIdFor(1);
+    await persistSession(sessionId);
+    await writeShellSidecar(sessionId, {
+      ...runningSidecar(),
+      startTime: '2026-01-02T00:00:01.000Z',
+    });
+    detachedHarness.inspector = () => 'alive-verified';
+
+    const result = await searchWorkspaceSessionsForResponse(
+      workspaceCwd,
+      'stored prompt',
+      {},
+      {
+        runtimeBaseDir,
+        liveRows: [
+          {
+            sessionId,
+            workspaceCwd,
+            createdAt: '2026-01-02T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            hasRunningBackgroundTasks: true,
+          } as BridgeSessionSummary,
+        ],
+      },
+    );
+
+    const hit = result.results.find((r) => r.session.sessionId === sessionId);
+    expect(hit?.session.detachedBackgroundWork).toBeUndefined();
+  });
 });

@@ -2286,6 +2286,8 @@ export const ZH_TW: Record<string, MessageValue> = {
     '這些聊天中正在進行的工作將停止。撤銷僅恢復聊天，不會重新啟動工作。',
   'activity.confirmArchive': '歸檔',
   'activity.confirmStopArchive': '停止並歸檔',
+  'activity.archiveSkippedDetached': (v) =>
+    `已跳過仍有分離的背景工作在執行的聊天：${v?.names ?? ''}。`,
   'activity.cancel': '取消',
   'activity.undo': '撤銷歸檔',
   'activity.result': (v) =>

@@ -491,6 +491,120 @@ describe('ActivityView', () => {
     expect(dialog?.textContent).toContain('Stop and archive');
   });
 
+  it('skips detached-running rows from a mixed bulk archive and names them', async () => {
+    // Archiving cannot stop a shell owned by a previous runtime, so the row
+    // is excluded exactly like the sidebar's canArchiveSession blocks it,
+    // while the rest of the batch still archives. The stop-work copy is
+    // scoped to the submitted rows: the detached row alone must not produce
+    // "Stop and archive" (R1-1).
+    const orphan = makeEntry('orphan');
+    const attached = makeEntry('attached');
+    props.entries = [
+      {
+        ...orphan,
+        session: {
+          ...orphan.session,
+          detachedBackgroundWork: 'running',
+        },
+      },
+      {
+        ...attached,
+        session: {
+          ...attached.session,
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        },
+      },
+    ];
+    await render();
+    await menuClick('Archive chats');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Skipped — detached background');
+    expect(dialog?.textContent).toContain('Chat orphan');
+    expect(dialog?.textContent).toContain('Stop and archive');
+    await click('Stop and archive');
+    expect(props.onArchive).toHaveBeenCalledTimes(1);
+    expect(props.onArchive).toHaveBeenCalledWith([props.entries[1]]);
+  });
+
+  it('drops a row that settles into detached-running after the dialog opened', async () => {
+    // The dialog stores only the selected keys, so a catalog refresh between
+    // open and confirm must re-resolve them: the row that settled into a
+    // detached-running shell is skipped, the rest still archives, and the
+    // stop-work copy follows the submitted rows (R1-8).
+    const orphan = makeEntry('orphan');
+    const attached = makeEntry('attached');
+    props.entries = [
+      { ...orphan, session: { ...orphan.session, activeWorkState: 'idle' } },
+      {
+        ...attached,
+        session: {
+          ...attached.session,
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        },
+      },
+    ];
+    await render();
+    await menuClick('Archive chats');
+    props.entries = [
+      {
+        ...orphan,
+        session: { ...orphan.session, detachedBackgroundWork: 'running' },
+      },
+      {
+        ...attached,
+        session: {
+          ...attached.session,
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        },
+      },
+    ];
+    await render();
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Skipped — detached background');
+    expect(dialog?.textContent).toContain('Chat orphan');
+    expect(dialog?.textContent).toContain('Stop and archive');
+    await click('Stop and archive');
+    expect(props.onArchive).toHaveBeenCalledTimes(1);
+    expect(props.onArchive).toHaveBeenCalledWith([props.entries[1]]);
+  });
+
+  it('drops selected rows that left the catalog before confirm', async () => {
+    const orphan = makeEntry('orphan');
+    props.entries = [orphan];
+    await render();
+    await menuClick('Archive chats');
+    props.entries = [];
+    await render();
+    const confirm = button('Archive');
+    expect(confirm.disabled).toBe(true);
+    await act(async () => confirm.click());
+    expect(props.onArchive).not.toHaveBeenCalled();
+  });
+
+  it('disables the bulk archive when every candidate has detached work', async () => {
+    const orphan = makeEntry('orphan');
+    props.entries = [
+      {
+        ...orphan,
+        session: {
+          ...orphan.session,
+          detachedBackgroundWork: 'running',
+        },
+      },
+    ];
+    await render();
+    await menuClick('Archive chats');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Skipped — detached background');
+    const confirm = button('Archive');
+    expect(confirm.disabled).toBe(true);
+    await act(async () => confirm.click());
+    expect(props.onArchive).not.toHaveBeenCalled();
+  });
+
   it('excludes separate pinned and recent sections from bulk operations', async () => {
     const recentStamp = new Date().toISOString();
     props.entries = [

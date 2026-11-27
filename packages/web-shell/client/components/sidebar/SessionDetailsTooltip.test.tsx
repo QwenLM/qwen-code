@@ -109,6 +109,20 @@ describe('SessionDetailsTooltip', () => {
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
     [
+      {
+        activeWorkState: 'active' as const,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Active work · Background tasks running',
+    ],
+    [
+      {
+        activeWorkState: 'unknown' as const,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Background activity unknown · Background tasks running',
+    ],
+    [
       { detachedBackgroundWork: 'running' as const },
       'Background tasks running',
     ],
@@ -146,7 +160,7 @@ describe('SessionDetailsTooltip', () => {
         const details = document.querySelector('[role="dialog"]');
         expect(details?.textContent).toContain(expected);
         expect(details?.textContent).not.toContain('Idle');
-        if (!flags.hasActivePrompt)
+        if (!expected.startsWith('Running'))
           expect(details?.textContent).not.toContain('Running');
         if (
           flags.hasRunningBackgroundTasks === false &&

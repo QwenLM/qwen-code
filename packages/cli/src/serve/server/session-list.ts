@@ -154,6 +154,13 @@ export interface ListWorkspaceSessionsReadOptions {
   signal?: AbortSignal;
   /** Optional retirement-fence probe for search results that lack a bridge parameter. */
   isSessionRetirementFenced?: (sessionId: string) => boolean;
+  /**
+   * Raw live summaries for the workspace. Search hits leave the catalog
+   * page, so without this source a detached-shell probe cannot tell
+   * current-lifetime shells (registry-owned) from earlier-lifetime orphans
+   * and would report the former as detached.
+   */
+  liveRows?: readonly BridgeSessionSummary[];
 }
 
 interface ResolvedListWorkspaceSessionsReadOptions {
@@ -2520,6 +2527,16 @@ export async function searchWorkspaceSessionsForResponse(
       bySessionId,
       sessionService,
       'active',
+      readOptions.signal,
+    );
+    // Search hits render through the same row renderer as catalog entries
+    // and fall back to the captured summary at delete-confirm time, so the
+    // detached signal must be enriched here too or an orphaned shell stays
+    // invisible to the delete guard (R1-8).
+    await enrichDetachedBackgroundWork(
+      bySessionId,
+      readOptions.liveRows ?? [],
+      workspaceCwd,
       readOptions.signal,
     );
     readOptions.signal?.throwIfAborted();
