@@ -27,6 +27,7 @@ import {
   isBinaryExpression,
   isBindingElement,
   isCallExpression,
+  isComputedPropertyName,
   isConstructorDeclaration,
   isFunctionDeclaration,
   isFunctionExpression,
@@ -417,11 +418,14 @@ const classifierDelegation = (text) => {
     const walk = (node) => {
       if (isBindingElement(node) && isIdentifier(node.name)) {
         const property = node.propertyName ?? node.name;
-        // `{ 'body': body }` binds the same property as `{ body }`; the quoted
-        // key parses as a string literal, so read it either way.
+        // `{ 'body': body }` and `{ ['body']: body }` bind the same property as
+        // `{ body }`; a quoted key parses as a string literal and a computed
+        // one wraps it, so read all three spellings.
         const key = isIdentifier(property)
           ? property.text
-          : literalText(property);
+          : literalText(
+              isComputedPropertyName(property) ? property.expression : property,
+            );
         if (key === 'body') names.add(node.name.text);
       }
       forEachChild(node, walk);
@@ -655,15 +659,21 @@ const classifierDelegation = (text) => {
   };
   collectDeclarations(file);
   collectWrite(file);
-  // Carry an unsafe write back along the alias chain to the array it names.
-  for (const [alias, source] of aliasOf) {
-    if (!unsafeWrites.has(alias)) continue;
-    let target = source;
-    const seen = new Set([alias]);
-    while (target !== undefined && !seen.has(target)) {
-      seen.add(target);
-      unsafeWrites.add(target);
-      target = aliasOf.get(target);
+  // An alias and its source name one array, so an unsafe write to either
+  // taints both — whichever of the two the answer is returned through. The
+  // walk runs to a fixpoint so a chain of aliases is covered in both
+  // directions.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [alias, source] of aliasOf) {
+      if (unsafeWrites.has(alias) && !unsafeWrites.has(source)) {
+        unsafeWrites.add(source);
+        changed = true;
+      }
+      if (unsafeWrites.has(source) && !unsafeWrites.has(alias)) {
+        unsafeWrites.add(alias);
+        changed = true;
+      }
     }
   }
   collectFakes(file);
@@ -4719,6 +4729,34 @@ describe('managed-agent-server e2e runner', () => {
             ");\nif (body['x']) return { toolCalls: calls };",
         ),
       ],
+      // The write lands on the array and the answer is returned through its
+      // alias: one array, two names, so the taint travels either way.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\nconst alias = calls;\ncalls.push(" +
+            HAND +
+            ");\nif (body['x']) return { toolCalls: alias };",
+        ),
+      ],
+      // An in-place writer whose added array carries a computed tool name: the
+      // element is unattributable even though the array itself is inline.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'c')];\nconst TOOL = 'respond_in_schema';\nObject.assign(calls, [fakeToolCall(TOOL, { shouldBlock: false }, 'x')]);\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      // A pushed scalar with a computed tool name is unattributable too.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [];\nconst TOOL = 'respond_in_schema';\ncalls.push(fakeToolCall(TOOL, { shouldBlock: false }, 'x'));\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
       // A destructuring declaration shadows the hoisted array with a source
       // the pin never enumerated, so the shorthand must not resolve to it.
       [
@@ -5063,6 +5101,26 @@ describe('managed-agent-server e2e runner', () => {
           SKILL +
             "\nconst calls = [];\ncalls.push(fakeToolCall('cron_list', {}, 'loop-cron-list'));\nif (body['x']) return { toolCalls: calls };",
         ),
+      ],
+      // Assigning a mapped array of literal-named calls replaces the value
+      // with an enumerable one, so the write is not unattributable.
+      [
+        'mapped assignment',
+        withSkill(
+          SKILL +
+            "\nlet calls = [];\nconst ids = ['c'];\ncalls = ids.map((id) => fakeToolCall('cron_list', {}, id));\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      // A computed literal key binds the same `body` property as a bare one.
+      [
+        'computed body key',
+        [
+          decision,
+          "if (loopSkill) {\nfake = await startFakeOpenAIServer(({ ['body']: body }) => {\n" +
+            SKILL +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
       ],
       // A quoted property key binds the same `body` property as a bare one.
       [
