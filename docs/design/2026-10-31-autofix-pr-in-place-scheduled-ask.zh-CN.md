@@ -183,15 +183,10 @@ Fix them in your checkout?  [Fix it] [Not now] [Stop watching]
 
 ### 6.2 `prepare`（`packages/cli/src/commands/autofix-pr/prepare.ts`）
 
-- 允许 `runInPlacePrepare` 恢复同一检出里的已有 in-place watch（带
-  `--take-over` 时接管其他会话的），重新校验 PR 资格（已合入/关闭时返回
-  `pr_closed`）、`authorCanPush`、remote、head 分支与 upstream 跟踪，fetch 到
-  私有引用 `paths.headRef` 以保证 `localCopy` 准确，且不触碰检出里的脏文件或
-  超前提交（留给 `sync` 安全处理）。
-- 继续拒绝：已有 worktree watch（禁止静默转换模式）、不同仓库、不同检出、以
-  及未带 `--take-over` 的他会话 watch（`watched_elsewhere`）。
-- 全新 `prepare --in-place` 保持 v1 全部前置条件（干净检出、位于或落后于 PR
-  head）。
+- 在 `runInPlacePrepare` 中通过 `redirectedAncestor` 拦住检出内被替换成符号链接的 `.qwen` 或 `.qwen/tmp`（与经典 worktree prepare 一致）。
+- 允许 `runInPlacePrepare` 恢复同一检出里的已有 in-place watch（按实际找到的 watch 根目录 `where` 校验，而非可能陈旧的 `state.worktreePath`，使克隆目录移动后也可正常恢复），并在带 `--take-over` 时接管其他会话的 watch；重新校验 PR 资格（已合入/关闭时返回 `pr_closed`）、`authorCanPush`、remote、head 分支与 upstream 跟踪，同步刷新 `headRefName`、`baseRefName`、`branch`、`worktreePath`、`authorCanPush`、`remote`、`pushTarget` 与 `sessionId` 并重新确认 trust anchor，fetch 到私有引用 `paths.headRef` 以保证 `localCopy` 准确，且不触碰检出里的脏文件或超前提交（留给 `sync` 安全处理）。
+- 继续拒绝：已有 worktree watch（禁止静默转换模式）、不同仓库、不同检出（兄弟 worktree）、以及未带 `--take-over` 的他会话 watch（`watched_elsewhere`）。
+- 全新 `prepare --in-place` 保持 v1 全部前置条件（干净检出、位于或落后于 PR head），并在持锁后通过 `findWatchRoot(prNumber)` 关闭兄弟 worktree 并发竞态窗口。
 
 ### 6.3 `autofix_pr` 工具（`packages/core/src/tools/autofix-pr.ts`）
 
@@ -237,6 +232,7 @@ push 预算——从 v1 与命令设计原样继承。
 
 - `packages/cli/src/commands/autofix-pr/schedule.ts` 与 `schedule.test.ts`
 - `packages/cli/src/commands/autofix-pr/prepare.ts` 与 `prepare.test.ts`
+- `packages/cli/src/commands/autofix-pr/snapshot.test.ts`
 - `packages/cli/src/commands/autofix-pr/chain.integration.test.ts`
 - `packages/core/src/tools/autofix-pr.ts` 与 `autofix-pr.test.ts`
 - `packages/core/src/skills/bundled/autofix-pr/SKILL.md` 与 `SKILL.test.ts`
@@ -267,15 +263,23 @@ push 预算——从 v1 与命令设计原样继承。
   无已记录任务时 `--again` 报错指引 `--in-place --watch`；`authorCanPush:
 false` 仍拒绝。
 - `prepare.test.ts`：恢复同检出已有 in-place watch 保留选项与历史且不触碰脏
-  或超前提交；他会话无 `--take-over` 报 `watched_elsewhere`、带 `--take-over`
-  接管成功；已关闭 PR 报 `pr_closed`；worktree watch、他仓库、他检出仍拒绝。
+  或超前提交；PR head 分支改名刷新 `headRefName` 与 `branch`；作者失权后刷新
+  `authorCanPush: false` 并阻止 `schedule`；兄弟 worktree 锁内并发竞态被拒绝；
+  移动克隆目录后重新确认 trust anchor 并刷新 `worktreePath`；`.qwen/tmp` 符号
+  链接被拒绝；他会话无 `--take-over` 报 `watched_elsewhere`、带 `--take-over`
+  接管成功；已关闭 PR 报 `pr_closed`；worktree watch、他仓库、兄弟检出仍拒绝。
+- `snapshot.test.ts`：钉住 `buildGateSnapshot` 推进游标越过评论和失败检查
+  （`"Not now"` 后后续 tick 安静）后，`buildSnapshot` 仍从原样保留的
+  `state.json` 完整呈现这些延后项，并在新事件到来时合并列出。
 - `chain.integration.test.ts`：定时 in-place watch 端到端链路（`prepare
 --in-place` → `schedule` → 带 `--task` 的 `sync`/`snapshot`/`push`/`reply`
   → 已处理后 gate 安静、新评论只触发一次且不重复打扰而 `snapshot` 仍保留未处
   理评论 → 换会话 `prepare --in-place --take-over` + `schedule --again` →
   `cleanup` 保留检出与分支）。
-- `autofix-pr.test.ts`：`prepare --in-place --take-over` 警告文案；in-place
-  watch 允许 `schedule` 但 `unattended` 仍被拒绝。
+- `autofix-pr.test.ts`：`prepare --in-place --take-over` 警告文案；经其假
+  helper（`FAKE_IN_PLACE=1`）验证 `AutofixPrTool` 包装层为 in-place watch 记
+  录 `schedule` 的 `watchTask` 同时继续拒绝 `unattended`（真实 helper 的
+  `schedule` 放行由 `schedule.test.ts` 钉住）。
 - `SKILL.test.ts`：`--watch`、`--once` 冲突、`--in-place --watch` /
   `--in-place --every`、逐轮 `ask_user_question` 提案、`resume` 传 `--in-place`
   且禁 `unattended`、禁 `--discard`。

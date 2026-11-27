@@ -569,5 +569,9 @@ describe('bundled autofix-pr skill', () => {
       'adding `--in-place` when the watch has `inPlace` true',
     );
     expect(resume).toContain('never for an `inPlace` watch');
+    // Step-3 take-over explicitly skips step 5's cancel cleanup.
+    expect(body).toContain(
+      "skipping step 5's question and cancel cleanup and running only its last paragraph",
+    );
   });
 });

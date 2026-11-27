@@ -223,17 +223,26 @@ true` continues to refuse (non-collaborator PRs are never watched in
 
 ### 6.2 `prepare` (`packages/cli/src/commands/autofix-pr/prepare.ts`)
 
+- Guard `runInPlacePrepare` against a symlinked `.qwen` or `.qwen/tmp`
+  inside the checkout via `redirectedAncestor` (matching classic worktree
+  prepare).
 - Allow `runInPlacePrepare` to resume an existing in-place watch in the
-  same checkout (and take it over with `--take-over` from another session),
-  re-checking PR eligibility (`pr_closed` if merged/closed), `authorCanPush`,
-  remotes, head branch, and upstream tracking, fetching into `paths.headRef`
-  so `localCopy` reports accurately, and leaving any dirty/ahead work in
-  the checkout untouched for `sync` to handle.
+  same checkout (matching the watch root `where` rather than a potentially
+  stale `state.worktreePath`, so a moved clone directory can resume too)
+  and take it over with `--take-over` from another session, re-checking PR
+  eligibility (`pr_closed` if merged/closed), `authorCanPush`, remotes,
+  head branch, and upstream tracking, refreshing `headRefName`,
+  `baseRefName`, `branch`, `worktreePath`, `authorCanPush`, `remote`,
+  `pushTarget`, and `sessionId` plus re-confirming the trust anchor,
+  fetching into `paths.headRef` so `localCopy` reports accurately, and
+  leaving any dirty/ahead work in the checkout untouched for `sync` to
+  handle.
 - Continue refusing: existing worktree watch (no silent mode conversion),
-  different repository, different checkout, and another session's watch
-  without `--take-over` (`watched_elsewhere`).
+  different repository, different checkout (sibling worktree), and another
+  session's watch without `--take-over` (`watched_elsewhere`).
 - Fresh `prepare --in-place` keeps every v1 precondition (clean checkout,
-  at or behind PR head).
+  at or behind PR head) and checks `findWatchRoot(prNumber)` under the
+  lock to close sibling-worktree races.
 
 ### 6.3 The `autofix_pr` tool (`packages/core/src/tools/autofix-pr.ts`)
 
@@ -288,6 +297,7 @@ carries over from v1 and the command design unchanged.
 
 - `packages/cli/src/commands/autofix-pr/schedule.ts` & `schedule.test.ts`
 - `packages/cli/src/commands/autofix-pr/prepare.ts` & `prepare.test.ts`
+- `packages/cli/src/commands/autofix-pr/snapshot.test.ts`
 - `packages/cli/src/commands/autofix-pr/chain.integration.test.ts`
 - `packages/core/src/tools/autofix-pr.ts` & `autofix-pr.test.ts`
 - `packages/core/src/skills/bundled/autofix-pr/SKILL.md` & `SKILL.test.ts`
@@ -324,18 +334,28 @@ Unit and integration tests (vitest):
   a recorded task names `--in-place --watch`; `authorCanPush: false` still
   refused.
 - `prepare.test.ts`: resuming an existing in-place watch preserves options
-  and history without touching dirty/ahead work; another session is refused
-  with `watched_elsewhere` and taken over with `--take-over`; closed PRs
-  refuse with `pr_closed`; worktree watches, other repos and other
-  checkouts stay refused.
+  and history without touching dirty/ahead work; head-branch rename
+  refreshes `headRefName` and `branch`; losing push access refreshes
+  `authorCanPush: false` and blocks `schedule`; sibling-worktree TOCTOU
+  race under lock is refused; moving the checkout directory re-confirms
+  the trust anchor and refreshes `worktreePath`; symlinked `.qwen/tmp` is
+  refused; another session is refused with `watched_elsewhere` and taken
+  over with `--take-over`; closed PRs refuse with `pr_closed`; worktree
+  watches, other repos and sibling checkouts stay refused.
+- `snapshot.test.ts`: pins that after `buildGateSnapshot` advances the
+  gate cursor past a comment and failing check (keeping subsequent ticks
+  quiet on `"Not now"`), `buildSnapshot` still surfaces both deferred
+  items from untouched `state.json` and combines them with later events.
 - `chain.integration.test.ts`: full helper chain for a scheduled in-place
   watch (`prepare --in-place` → `schedule` → `sync`/`snapshot`/`push`/
   `reply` with `--task` → gate quiet on handled, fires once on new comment
   without re-nagging while `snapshot` keeps the unhandled comment →
   take-over resume via `prepare --in-place --take-over` + `schedule --again`
   → `cleanup` keeping checkout and branch).
-- `autofix-pr.test.ts`: `prepare --in-place --take-over` warning;
-  `schedule` allowed on an in-place watch while `unattended` stays refused.
+- `autofix-pr.test.ts`: `prepare --in-place --take-over` warning; through
+  its fake helper (`FAKE_IN_PLACE=1`), verifies `AutofixPrTool` records
+  `watchTask` for `schedule` on an in-place watch while still refusing
+  `unattended` (the real `schedule` allow is pinned in `schedule.test.ts`).
 - `SKILL.test.ts`: `--watch`, `--once` conflicts, `--in-place --watch` /
   `--in-place --every`, per-round `ask_user_question` proposal, `resume`
   with `--in-place` and no `unattended`, no `--discard`.

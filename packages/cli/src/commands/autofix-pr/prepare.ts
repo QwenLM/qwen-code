@@ -489,6 +489,16 @@ function runInPlacePrepare(
     );
   }
 
+  const redirected = redirectedAncestor(
+    dirname(autofixPrPaths(checkout, prNumber).statePath),
+    checkout,
+  );
+  if (redirected !== null) {
+    throw new Error(
+      `refusing to prepare PR #${prNumber} in ${checkout}: ${redirected} is a symlink.`,
+    );
+  }
+
   const sameInPlaceWatch = (state: AutofixPrState, where: string) => {
     if (!state.inPlace) {
       throw new Error(
@@ -502,9 +512,9 @@ function runInPlacePrepare(
           `Run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
       );
     }
-    if (realpathNearestExisting(state.worktreePath) !== checkoutReal) {
+    if (realpathNearestExisting(where) !== checkoutReal) {
       throw new Error(
-        `PR #${prNumber} already has an in-place watch in ${state.worktreePath}; run from there or run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
+        `PR #${prNumber} already has an in-place watch in ${where}; run from there or run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
       );
     }
   };
@@ -520,7 +530,6 @@ function runInPlacePrepare(
     existingPaths === null ? null : readState(existingPaths.statePath);
   if (existing) {
     sameInPlaceWatch(existing, found!);
-    assertNoFixInFlight(existingPaths!, prNumber);
     if (!takesOver(existing)) assertOwnedBySession(existing);
   }
 
@@ -606,17 +615,18 @@ function runInPlacePrepare(
     const resumedState = withWatchLock(paths, prNumber, () => {
       const current = requireState(paths.statePath, prNumber);
       sameInPlaceWatch(current, found!);
-      assertNoFixInFlight(paths, prNumber);
       if (takesOver(current)) tookOver = true;
       else assertOwnedBySession(current);
-      const { ended: _resumed, ...rest } = current;
       const next: AutofixPrState = {
-        ...rest,
+        ...current,
         sessionId: currentSessionId(),
         authorCanPush: canPush,
         remote,
         pushTarget,
+        headRefName: pr.headRefName,
         baseRefName: pr.baseRefName,
+        branch: pr.headRefName,
+        worktreePath: checkout,
       };
       writeAnchor(current, current.prNumber, repoRoot());
       if (JSON.stringify(next) !== JSON.stringify(current)) {

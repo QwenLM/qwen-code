@@ -24,6 +24,7 @@ import {
   mkdtempSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -94,6 +95,7 @@ import {
   type PrView,
 } from './prepare.js';
 import { runCleanup } from './cleanup.js';
+import { runSchedule } from './schedule.js';
 import {
   anchorPath,
   autofixPrPaths,
@@ -2039,6 +2041,190 @@ describe('runPrepare (real git)', () => {
       } finally {
         process.chdir(clone);
       }
+    });
+
+    it('refreshes headRefName and branch when resuming after a PR head-branch rename', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      // Rename the PR head branch on remote and locally to feat2.
+      const bare = join(dir, 'bare.git');
+      run(bare, 'branch', '-m', 'feat', 'feat2');
+      run(clone, 'fetch', '-q', 'origin', '--prune');
+      run(clone, 'branch', '-m', 'feat', 'feat2');
+      run(clone, 'branch', '-u', 'origin/feat2', 'feat2');
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr') {
+          return JSON.stringify(
+            prView({
+              headRefName: 'feat2',
+              baseRefName: 'main2',
+              headRefOid: headSha,
+            }),
+          );
+        }
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(lastReport()).toMatchObject({
+        inPlace: true,
+        resumed: true,
+        headRefName: 'feat2',
+      });
+      const updated = readState(statePath())!;
+      expect(updated).toMatchObject({
+        inPlace: true,
+        headRefName: 'feat2',
+        baseRefName: 'main2',
+        branch: 'feat2',
+      });
+      // Subsequent worktree/branch verification matches the renamed branch.
+      expect(() =>
+        requireWorktree(
+          {
+            ...autofixPrPaths(clone, 7),
+            worktreePath: updated.worktreePath,
+            branch: updated.branch,
+          },
+          7,
+          clone,
+          false,
+          trustAnchor(updated),
+          true,
+        ),
+      ).not.toThrow();
+    });
+
+    it('refreshes authorCanPush on in-place resume and refuses scheduling after access is lost', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(readState(statePath())!.authorCanPush).toBe(true);
+      // PR author is now an external contributor without write access.
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr') {
+          return JSON.stringify(
+            prView({ author: { login: 'outsider' }, headRefOid: headSha }),
+          );
+        }
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        if (
+          args[0] === 'api' &&
+          args[1]?.includes('/collaborators/outsider/permission')
+        ) {
+          return JSON.stringify({ permission: 'read' });
+        }
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(lastReport()).toMatchObject({
+        inPlace: true,
+        resumed: true,
+        authorCanPush: false,
+      });
+      expect(readState(statePath())!.authorCanPush).toBe(false);
+      expect(() => runSchedule({ pr: 7, every: 5 })).toThrow(/only --once/);
+    });
+
+    it('refuses under the lock when a watch lands in a sibling worktree during in-place prepare', () => {
+      // Switch main checkout off feat so a linked worktree can hold feat.
+      run(clone, 'checkout', '-q', 'main');
+      const linked = join(dir, 'linked-race');
+      run(clone, 'worktree', 'add', '-q', linked, 'feat');
+      process.chdir(linked);
+      const mainStatePath = autofixPrPaths(clone, 7).statePath;
+      let planted = false;
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr') {
+          if (!planted) {
+            planted = true;
+            // Another process starts a watch in the main worktree mid-flight.
+            mkdirSync(dirname(mainStatePath), { recursive: true });
+            writeState(mainStatePath, {
+              version: 1,
+              sessionId: 'session-other',
+              host: 'github.com',
+              owner: 'o',
+              repo: 'r',
+              prNumber: 7,
+              remote: 'origin',
+              pushTarget: 'origin',
+              headRefName: 'feat',
+              baseRefName: 'main',
+              branch: 'qwen-autofix/pr-7',
+              worktreePath: autofixPrPaths(clone, 7).worktreePath,
+              viewer: 'me',
+              prAuthor: 'me',
+              authorCanPush: true,
+              lastKnownHeadSha: headSha,
+              pushedShas: [],
+              handledCommentIds: [],
+              postedCommentIds: [],
+            });
+          }
+          return JSON.stringify(prView({ headRefOid: headSha }));
+        }
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+      try {
+        expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+          /already has a watch/,
+        );
+        expect(existsSync(autofixPrPaths(linked, 7).statePath)).toBe(false);
+        expect(readState(mainStatePath)!.sessionId).toBe('session-other');
+      } finally {
+        process.chdir(clone);
+      }
+    });
+
+    it('re-confirms the trust anchor and refreshes worktreePath on resume after a clone move', () => {
+      const bare = join(dir, 'bare.git');
+      const movedBase = join(dir, 'clone-before-move');
+      const movedDest = join(dir, 'clone-after-move');
+      run(dir, 'clone', '-q', '-b', 'feat', bare, movedBase);
+      process.chdir(movedBase);
+      const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+      try {
+        runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+        expect(readAnchor(repository, 7)?.trustRoot).toBe(
+          realpathSync(movedBase),
+        );
+
+        // Move the checkout directory: the old anchor key no longer matches.
+        process.chdir(dir);
+        renameSync(movedBase, movedDest);
+        process.chdir(movedDest);
+        expect(readAnchor(repository, 7)).toBeNull();
+        const staleState = readState(autofixPrPaths(movedDest, 7).statePath)!;
+        expect(() => trustAnchor(staleState)).toThrow(
+          /no confirmed trust anchor/,
+        );
+
+        runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+        const expectedRoot = realpathSync(movedDest);
+        expect(lastReport()).toMatchObject({
+          inPlace: true,
+          resumed: true,
+          worktreePath: expectedRoot,
+        });
+        const refreshed = readState(autofixPrPaths(movedDest, 7).statePath)!;
+        expect(refreshed.worktreePath).toBe(expectedRoot);
+        expect(readAnchor(repository, 7)?.trustRoot).toBe(expectedRoot);
+        expect(trustAnchor(refreshed)).toBe(expectedRoot);
+      } finally {
+        process.chdir(clone);
+      }
+    });
+
+    it('refuses --in-place when .qwen/tmp inside the checkout is a symlink', () => {
+      const outside = join(dir, 'outside-tmp');
+      mkdirSync(outside, { recursive: true });
+      mkdirSync(join(clone, '.qwen'), { recursive: true });
+      symlinkSync(outside, join(clone, '.qwen', 'tmp'));
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /is a symlink/,
+      );
+      expect(readdirSync(outside)).toEqual([]);
     });
   });
 });
