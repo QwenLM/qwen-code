@@ -951,6 +951,7 @@ export type {
   RateSessionTurnResult,
   SetModelResult,
   DaemonSessionConfigOptionResult,
+  DaemonReasoningPersistenceOptions,
   ReasoningSelection,
   SessionStartupConfig,
   SessionStartupConfigApplied,

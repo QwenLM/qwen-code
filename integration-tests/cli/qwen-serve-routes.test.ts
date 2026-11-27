@@ -1012,6 +1012,77 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect(missing.status).toBe(404);
   });
 
+  it('scopes both chat effort entry points to the recorded task', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const settingsPath = path.join(homeDir, '.qwen', 'settings.json');
+    const tasks: Array<{ sessionId: string; clientId?: string }> = [];
+    const create = async () => {
+      const task = await client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: randomUUID(),
+        startupConfig: { modelServiceId },
+      });
+      tasks.push(task);
+      return task;
+    };
+    const expectChoice = async (
+      task: (typeof tasks)[number],
+      value: string,
+    ) => {
+      expect(
+        await client.sessionContext(task.sessionId, task.clientId),
+      ).toMatchObject({
+        state: {
+          configOptions: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'reasoning_effort',
+              currentValue: value,
+            }),
+          ]),
+        },
+      });
+    };
+
+    try {
+      const menu = await create();
+      const command = await create();
+      await expectChoice(menu, 'none');
+      await expectChoice(command, 'none');
+      const sharedSettings = readFileSync(settingsPath, 'utf8');
+      await expect(
+        client.setSessionConfigOption(
+          menu.sessionId,
+          'reasoning_effort',
+          'high',
+          {
+            clientId: menu.clientId,
+            persistToSession: true,
+          },
+        ),
+      ).resolves.toMatchObject({ persisted: true });
+      await expect(
+        client.prompt(
+          command.sessionId,
+          {
+            prompt: [{ type: 'text', text: '/effort high' }],
+            _meta: { 'qwenCode/persistSessionReasoning': true },
+          },
+          undefined,
+          command.clientId,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      await expectChoice(menu, 'high');
+      await expectChoice(command, 'high');
+      expect(readFileSync(settingsPath, 'utf8')).toBe(sharedSettings);
+      await expectChoice(await create(), 'none');
+    } finally {
+      await Promise.all(
+        tasks.map(({ sessionId }) => client.closeSession(sessionId)),
+      );
+    }
+  });
+
   it('rolls back rejected standalone startup so its caller id can be reused', async () => {
     const sessionId = randomUUID();
     const modelServiceId = 'qwen-startup-test(openai)';

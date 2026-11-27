@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+
 import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
@@ -132,6 +134,7 @@ export interface CommandContext {
     sessionShellAllowlist: Set<string>;
     /** Reset session metrics and prompt counters for a fresh session. */
     startNewSession?: (sessionId: string) => void;
+    setReasoningEffort?: (effort: ReasoningEffort) => Promise<void>;
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;

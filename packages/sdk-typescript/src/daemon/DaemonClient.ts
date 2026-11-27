@@ -65,6 +65,7 @@ import type {
   DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  DaemonReasoningPersistenceOptions,
   ReasoningSelection,
   SessionStartupConfig,
   BranchSessionRequest,
@@ -7409,7 +7410,9 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
-    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+    clientOrOptions?:
+      | string
+      | ({ clientId?: string } & DaemonReasoningPersistenceOptions),
   ): Promise<DaemonSessionConfigOptionResult>;
   setSessionConfigOption(
     sessionId: string,
@@ -7421,7 +7424,9 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort' | 'workflow_mode',
     value: ReasoningSelection | 'on' | 'off',
-    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+    clientOrOptions?:
+      | string
+      | ({ clientId?: string } & DaemonReasoningPersistenceOptions),
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
@@ -7429,7 +7434,9 @@ export class DaemonClient {
         : clientOrOptions;
     if (
       configId === 'workflow_mode' &&
-      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+      ((value !== 'on' && value !== 'off') ||
+        options?.persist !== undefined ||
+        options?.persistToSession !== undefined)
     ) {
       throw new Error(
         'Workflow mode requires on/off and does not accept persist',
@@ -7446,8 +7453,10 @@ export class DaemonClient {
           ...(options?.persist !== undefined
             ? { persist: options.persist }
             : {}),
+          ...(options?.persistToSession ? { persistToSession: true } : {}),
         },
         clientId: options?.clientId,
+        ...(options?.persistToSession ? { mode: 'rest' } : {}),
       },
     );
     // ACP returns configOptions only; a successful Workflow mode write has

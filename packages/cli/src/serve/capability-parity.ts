@@ -455,6 +455,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:SIDE_QUERY_CREATE',
   },
+  session_reasoning_persistence: LEGACY_ONLY(
+    'local task model records carry the selected reasoning configuration',
+  ),
   session_btw_stream: {
     standing: 'managed',
     evidence: 'surface:SIDE_QUERY_STREAM',

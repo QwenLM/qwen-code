@@ -1962,6 +1962,7 @@ export function ChatPane({
       actions
         .setReasoningEffort(value, {
           persist: connection.sessionContext?.kind !== 'standalone',
+          preferSessionPersistence: true,
         })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),

@@ -23224,6 +23224,7 @@ export function App({
       return sessionActions
         .setReasoningEffort(value, {
           persist: connectionRef.current.sessionContext?.kind !== 'standalone',
+          preferSessionPersistence: true,
         })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),

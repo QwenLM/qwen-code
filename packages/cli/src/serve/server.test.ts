@@ -891,6 +891,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
+  'session_reasoning_persistence',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -1021,6 +1022,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_worktree_restore_v1' &&
       f !== 'session_worktree_branch_v1' &&
       f !== 'session_worktree_handoff_v1' &&
+      f !== 'session_reasoning_persistence' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice' &&
       f !== 'realtime_voice_web',
@@ -1111,6 +1113,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
+  'session_reasoning_persistence',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -3988,6 +3991,11 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'session_reasoning_persistence') {
+          expect(predicate({})).toBe(true);
+          expect(predicate({ hostedHarness: true })).toBe(false);
           continue;
         }
         if (feature === 'session_btw_stream') {
