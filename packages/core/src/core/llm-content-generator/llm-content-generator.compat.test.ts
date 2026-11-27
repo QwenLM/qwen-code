@@ -486,17 +486,89 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
         const wireBody = capturedBodies[0]!.body;
         assertFunctionResponsePartsWireSchema(wireBody);
 
-        const sentFr = (
-          wireBody['contents'] as Array<{
-            parts: Array<{ functionResponse?: Record<string, unknown> }>;
-          }>
-        )[0]!.parts[1]!.functionResponse!;
+        const sentContents = wireBody['contents'] as Array<{
+          role: string;
+          parts: Array<{
+            text?: string;
+            inlineData?: Record<string, unknown>;
+            functionResponse?: Record<string, unknown>;
+          }>;
+        }>;
+        const sentFr = sentContents[0]!.parts[1]!.functionResponse!;
         expect(sentFr['response']).toEqual({
-          output: 'Unsupported media type for Gemini: VIDEO/WEBM (video.webm).',
+          output: 'Attached video/webm (video.webm) in following user message.',
         });
         expect(sentFr['parts']).toEqual([
           { inlineData: { mimeType: 'image/png', data: PNG_1X1 } },
         ]);
+        expect(sentContents[1]).toEqual({
+          role: 'user',
+          parts: [
+            { text: 'Attached media from tool output:' },
+            { inlineData: { mimeType: 'video/webm', data: 'GkXfo59C' } },
+          ],
+        });
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'keeps nested audio/video inside functionResponse.parts over real HTTP for Gemini 3+ (vertexai=%s)',
+    async (vertexai) => {
+      await withLocalGeminiServer(async (baseUrl, capturedBodies) => {
+        const generator = new LlmContentGenerator(
+          { apiKey: 'local-test-key', vertexai, httpOptions: { baseUrl } },
+          { model: 'gemini-3.0-flash' },
+        );
+        const contents: Content[] = [
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-g3',
+                  name: 'read_file',
+                  response: { output: '' },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'VIDEO/WEBM',
+                        data: 'GkXfo59C',
+                        displayName: 'video.webm',
+                      },
+                    },
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: PNG_1X1,
+                        displayName: 'shot.png',
+                      },
+                    },
+                  ] as NonNullable<
+                    NonNullable<Part['functionResponse']>['parts']
+                  >,
+                },
+              },
+            ],
+          },
+        ];
+        await generator.generateContent(
+          { model: 'gemini-3.0-flash', contents },
+          'wire-test-g3',
+        );
+        const wireBody = capturedBodies[0]!.body;
+        assertFunctionResponsePartsWireSchema(wireBody);
+        const sentContents = wireBody['contents'] as Array<{
+          parts: Array<{ functionResponse?: Record<string, unknown> }>;
+        }>;
+        expect(sentContents).toHaveLength(1);
+        expect(sentContents[0]!.parts[0]!.functionResponse).toMatchObject({
+          response: { output: '' },
+          parts: [
+            { inlineData: { mimeType: 'video/webm', data: 'GkXfo59C' } },
+            { inlineData: { mimeType: 'image/png', data: PNG_1X1 } },
+          ],
+        });
       });
     },
   );

@@ -20,8 +20,11 @@ import { GoogleGenAI } from '@google/genai';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../contentGenerator.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { REATTACH_BOUNDARY_METADATA } from '../../services/image-payload-references.js';
+import { normalizeMediaMimeType } from '../../utils/media-mime.js';
 import {
   reportLlmChunk,
   reportLlmRequest,
@@ -78,6 +81,54 @@ export function normalizeGeminiBaseUrl(baseUrl: string): string {
     .trim()
     .replace(/\/+$/, '')
     .replace(/(?:\/v1beta)+$/i, '');
+}
+
+/**
+ * Gemini 3+ models accept binary `audio/*` and `video/*` payloads directly
+ * inside `functionResponse.parts` (`FunctionResponsePart`), whereas Gemini 2.5
+ * and earlier return HTTP 400 `INVALID_ARGUMENT` for nested audio/video tool
+ * outputs and require them on a top-level `user` turn.
+ */
+export function supportsGeminiFunctionResponseAudioVideo(
+  model: string | undefined,
+): boolean {
+  if (!model) return false;
+  const leaf = model.trim().split('/').pop()?.toLowerCase() ?? '';
+  return /^gemini-([3-9]|\d{2,})(?:[.-]|$)/.test(leaf);
+}
+
+function getMediaModality(
+  mimeType: string | undefined,
+): keyof InputModalities | undefined {
+  if (!mimeType) {
+    return undefined;
+  }
+  const normalized = mimeType.trim().toLowerCase();
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('audio/')) return 'audio';
+  if (normalized.startsWith('video/')) return 'video';
+  if (normalized === 'application/pdf') return 'pdf';
+  return undefined;
+}
+
+function isUnsignedEmptyTextPart(part: Part | string): boolean {
+  if (typeof part !== 'object' || part === null) {
+    return false;
+  }
+  const definedKeys = Object.keys(part).filter(
+    (key) => (part as Record<string, unknown>)[key] !== undefined,
+  );
+  return (
+    definedKeys.length === 1 && definedKeys[0] === 'text' && part.text === ''
+  );
+}
+
+function isReattachBoundaryPart(part: Part | string): boolean {
+  return (
+    typeof part === 'object' &&
+    part !== null &&
+    part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true
+  );
 }
 
 /**
@@ -790,6 +841,7 @@ export class LlmContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     _userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    const effectiveModel = request.model || this.contentGeneratorConfig?.model;
     const callerSignal = request.config?.abortSignal;
     const abortScope = callerSignal
       ? createRequestAbortScope(callerSignal)
@@ -797,7 +849,7 @@ export class LlmContentGenerator implements ContentGenerator {
     const builtConfig = this.buildGenerateContentConfig(request);
     const finalRequest = {
       ...request,
-      contents: this.stripUnsupportedFields(request.contents),
+      contents: this.stripUnsupportedFields(request.contents, effectiveModel),
       config: abortScope
         ? { ...builtConfig, abortSignal: abortScope.signal }
         : builtConfig,
@@ -816,6 +868,7 @@ export class LlmContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     _userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const effectiveModel = request.model || this.contentGeneratorConfig?.model;
     const streamConfig = this.contentGeneratorConfig ?? {
       model: request.model,
     };
@@ -830,7 +883,7 @@ export class LlmContentGenerator implements ContentGenerator {
     };
     const finalRequest = {
       ...request,
-      contents: this.stripUnsupportedFields(request.contents),
+      contents: this.stripUnsupportedFields(request.contents, effectiveModel),
       config,
     };
     const telemetryAttempt = reportLlmRequest(finalRequest);
@@ -851,49 +904,232 @@ export class LlmContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Strip fields not supported by Gemini API (e.g., displayName in inlineData/fileData)
+   * Strip fields not supported by Gemini API (e.g., displayName in inlineData/fileData),
+   * normalize media MIME types, enforce configured InputModalities (presence-as-true),
+   * drop strictly unsigned empty-text parts, split trailing historical image
+   * reattachment bundles off functionResponse turns, and promote tool-returned
+   * audio/video to a follow-up user turn for Gemini 2.5 and earlier models.
    */
   private stripUnsupportedFields(
     contents: GenerateContentParameters['contents'],
+    model?: string,
   ): GenerateContentParameters['contents'] {
     if (!contents) return contents;
 
     if (typeof contents === 'string') return contents;
 
+    const allowNestedAudioVideo =
+      supportsGeminiFunctionResponseAudioVideo(model);
+
     if (Array.isArray(contents)) {
-      return contents.map((content) =>
-        this.stripContentFields(content),
+      return contents.flatMap((content) =>
+        this.stripContentFieldsList(content, allowNestedAudioVideo),
       ) as GenerateContentParameters['contents'];
     }
 
-    return this.stripContentFields(
+    const normalized = this.stripContentFieldsList(
       contents,
+      allowNestedAudioVideo,
+    );
+    return (
+      normalized.length === 1 ? normalized[0] : normalized
     ) as GenerateContentParameters['contents'];
   }
 
-  private stripContentFields(
+  private stripContentFieldsList(
     content: Content | Part | string,
-  ): Content | Part | string {
+    allowNestedAudioVideo: boolean,
+  ): Array<Content | Part | string> {
     if (typeof content === 'string') {
-      return content;
+      return [content];
     }
 
     // Handle Part directly (for arrays of parts)
     if (!('role' in content) && !('parts' in content)) {
-      return this.stripPartFields(content as Part);
+      return [this.stripPartFields(content as Part, allowNestedAudioVideo)];
     }
 
     // Handle Content object
     const contentObj = content as Content;
-    if (!contentObj.parts) return contentObj;
+    if (!contentObj.parts) return [contentObj];
 
+    const rawParts = contentObj.parts;
+    const reattachIndex = rawParts.findIndex(
+      (part, idx) => idx > 0 && isReattachBoundaryPart(part),
+    );
+    const shouldSplitReattach =
+      reattachIndex > 0 &&
+      rawParts
+        .slice(0, reattachIndex)
+        .some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            Boolean(part.functionResponse),
+        ) &&
+      !rawParts
+        .slice(reattachIndex)
+        .some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            Boolean(part.functionResponse),
+        );
+
+    const promotedMediaParts: Part[] = [];
+
+    if (shouldSplitReattach) {
+      const headParts = this.sanitizeTurnParts(
+        rawParts.slice(0, reattachIndex),
+        allowNestedAudioVideo,
+        promotedMediaParts,
+      );
+      const tailParts = this.sanitizeTurnParts(
+        rawParts.slice(reattachIndex),
+        allowNestedAudioVideo,
+      );
+      return [
+        {
+          ...contentObj,
+          parts: headParts,
+        },
+        {
+          role: 'user',
+          parts:
+            promotedMediaParts.length > 0
+              ? [...promotedMediaParts, ...tailParts]
+              : tailParts,
+        },
+      ];
+    }
+
+    const sanitizedParts = this.sanitizeTurnParts(
+      rawParts,
+      allowNestedAudioVideo,
+      promotedMediaParts,
+    );
+    if (promotedMediaParts.length > 0) {
+      return [
+        {
+          ...contentObj,
+          parts: sanitizedParts,
+        },
+        {
+          role: 'user',
+          parts: [
+            { text: 'Attached media from tool output:' },
+            ...promotedMediaParts,
+          ],
+        },
+      ];
+    }
+
+    return [
+      {
+        ...contentObj,
+        parts: sanitizedParts,
+      },
+    ];
+  }
+
+  private sanitizeTurnParts(
+    parts: Part[],
+    allowNestedAudioVideo: boolean,
+    promotedMediaParts?: Part[],
+  ): Part[] {
+    const stripped = parts.map((part) =>
+      this.stripPartFields(part, allowNestedAudioVideo, promotedMediaParts),
+    );
+    const filtered = stripped.filter((part) => !isUnsignedEmptyTextPart(part));
+    return filtered.length > 0 ? filtered : stripped;
+  }
+
+  private isMediaModalityDisabled(mimeType: string | undefined): boolean {
+    const modalities = this.contentGeneratorConfig?.modalities;
+    if (!modalities) {
+      return false;
+    }
+    const modality = getMediaModality(mimeType);
+    if (!modality) {
+      return false;
+    }
+    return !modalities[modality];
+  }
+
+  private formatDisabledMediaNote(
+    mimeType: string | undefined,
+    displayName?: string,
+  ): string {
+    const normalized = normalizeMediaMimeType(mimeType) ?? '';
+    const displayNameText = displayName ? ` (${displayName})` : '';
+    return `Unsupported media type for Gemini: ${normalized}${displayNameText}.`;
+  }
+
+  private formatPromotedMediaNote(
+    mimeType: string | undefined,
+    displayName?: string,
+  ): string {
+    const normalized = normalizeMediaMimeType(mimeType) ?? '';
+    const displayNameText = displayName ? ` (${displayName})` : '';
+    return `Attached ${normalized}${displayNameText} in following user message.`;
+  }
+
+  private sanitizeTopLevelMedia<
+    T extends { displayName?: string; mimeType?: string },
+  >(media: T, disabledNotes: string[]): Omit<T, 'displayName'> | undefined {
+    const { displayName, ...rest } = media;
+    if (this.isMediaModalityDisabled(rest.mimeType)) {
+      disabledNotes.push(
+        this.formatDisabledMediaNote(rest.mimeType, displayName),
+      );
+      return undefined;
+    }
+    const normalizedMime = normalizeMediaMimeType(rest.mimeType);
     return {
-      ...contentObj,
-      parts: contentObj.parts.map((part) => this.stripPartFields(part)),
+      ...rest,
+      ...(normalizedMime !== undefined ? { mimeType: normalizedMime } : {}),
     };
   }
 
-  private stripPartFields(part: Part): Part {
+  private processNestedFunctionResponseMedia(
+    rawMimeType: string | undefined,
+    displayName: string | undefined,
+    buildCleanPart: (mimeType: string | undefined) => FunctionResponsePart,
+    allowNestedAudioVideo: boolean,
+    retainedParts: FunctionResponsePart[],
+    extractedTexts: string[],
+    promotedMediaParts?: Part[],
+  ): void {
+    if (this.isMediaModalityDisabled(rawMimeType)) {
+      extractedTexts.push(
+        this.formatDisabledMediaNote(rawMimeType, displayName),
+      );
+      return;
+    }
+    const modality = getMediaModality(rawMimeType);
+    const isAudioOrVideo = modality === 'audio' || modality === 'video';
+    const cleanPart = buildCleanPart(normalizeMediaMimeType(rawMimeType));
+    if (isAudioOrVideo && !allowNestedAudioVideo) {
+      if (promotedMediaParts) {
+        promotedMediaParts.push(cleanPart);
+        extractedTexts.push(
+          this.formatPromotedMediaNote(rawMimeType, displayName),
+        );
+      } else {
+        extractedTexts.push(
+          this.formatDisabledMediaNote(rawMimeType, displayName),
+        );
+      }
+      return;
+    }
+    retainedParts.push(cleanPart);
+  }
+
+  private stripPartFields(
+    part: Part,
+    allowNestedAudioVideo: boolean,
+    promotedMediaParts?: Part[],
+  ): Part {
     if (typeof part === 'string') {
       return part;
     }
@@ -907,18 +1143,45 @@ export class LlmContentGenerator implements ContentGenerator {
     // so drop it before the SDK sees it.
     delete result.partMetadata;
 
-    // Strip displayName from inlineData
+    const disabledNotes: string[] = [];
+
     if (result.inlineData) {
-      const { displayName: _, ...inlineDataWithoutDisplayName } =
-        result.inlineData as { displayName?: string; [key: string]: unknown };
-      result.inlineData = inlineDataWithoutDisplayName as Part['inlineData'];
+      const sanitized = this.sanitizeTopLevelMedia(
+        result.inlineData as {
+          displayName?: string;
+          mimeType?: string;
+          [key: string]: unknown;
+        },
+        disabledNotes,
+      );
+      if (sanitized) {
+        result.inlineData = sanitized as Part['inlineData'];
+      } else {
+        delete result.inlineData;
+      }
     }
 
-    // Strip displayName from fileData
     if (result.fileData) {
-      const { displayName: _, ...fileDataWithoutDisplayName } =
-        result.fileData as { displayName?: string; [key: string]: unknown };
-      result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+      const sanitized = this.sanitizeTopLevelMedia(
+        result.fileData as {
+          displayName?: string;
+          mimeType?: string;
+          [key: string]: unknown;
+        },
+        disabledNotes,
+      );
+      if (sanitized) {
+        result.fileData = sanitized as Part['fileData'];
+      } else {
+        delete result.fileData;
+      }
+    }
+
+    if (disabledNotes.length > 0) {
+      const joinedNotes = disabledNotes.join('\n');
+      result.text = result.text
+        ? `${result.text}\n${joinedNotes}`
+        : joinedNotes;
     }
 
     // `thoughtSignature` carries no origin marker, so a Responses-API
@@ -932,12 +1195,13 @@ export class LlmContentGenerator implements ContentGenerator {
       delete result.thoughtSignature;
     }
 
-    // Gemini's FunctionResponsePart schema only permits `inlineData` and
-    // `fileData` (oneof data, without displayName or unknown fields) — never
-    // `text`. Convert unsupported audio/video to notes and move all text
-    // entries (including compaction placeholders / disclosures) into
-    // `functionResponse.response` so no invalid field reaches the wire in
-    // `function_response.parts`.
+    // Gemini's FunctionResponsePart schema permits `inlineData` and `fileData`
+    // (oneof data, without displayName or unknown fields) — never `text`.
+    // Retain native image/pdf payloads in `functionResponse.parts` on all
+    // models; retain audio/video natively on Gemini 3+ models, and promote
+    // audio/video to a follow-up `user` turn on Gemini 2.5 and earlier models
+    // (which reject nested audio/video inside FunctionResponsePart with 400).
+    // Disabled modalities and text entries move into `functionResponse.response`.
     if (result.functionResponse?.parts) {
       const retainedParts: FunctionResponsePart[] = [];
       const extractedTexts: string[] = [];
@@ -949,27 +1213,47 @@ export class LlmContentGenerator implements ContentGenerator {
           if (nestedPart.length > 0) extractedTexts.push(nestedPart);
           continue;
         }
-        const converted = this.convertUnsupportedMediaToText(nestedPart);
-        if (typeof converted.text === 'string' && converted.text.length > 0) {
-          extractedTexts.push(converted.text);
+        if (typeof nestedPart.text === 'string' && nestedPart.text.length > 0) {
+          extractedTexts.push(nestedPart.text);
         }
-        if (converted.inlineData) {
-          const { mimeType, data } = converted.inlineData;
-          retainedParts.push({
-            inlineData: {
-              ...(mimeType !== undefined ? { mimeType } : {}),
-              ...(data !== undefined ? { data } : {}),
-            },
-          });
+        if (nestedPart.inlineData) {
+          const { mimeType: rawMimeType, data } = nestedPart.inlineData;
+          const displayName = (
+            nestedPart.inlineData as { displayName?: string }
+          ).displayName;
+          this.processNestedFunctionResponseMedia(
+            rawMimeType,
+            displayName,
+            (mimeType) => ({
+              inlineData: {
+                ...(mimeType !== undefined ? { mimeType } : {}),
+                ...(data !== undefined ? { data } : {}),
+              },
+            }),
+            allowNestedAudioVideo,
+            retainedParts,
+            extractedTexts,
+            promotedMediaParts,
+          );
         }
-        if (converted.fileData) {
-          const { fileUri, mimeType } = converted.fileData;
-          retainedParts.push({
-            fileData: {
-              ...(fileUri !== undefined ? { fileUri } : {}),
-              ...(mimeType !== undefined ? { mimeType } : {}),
-            },
-          });
+        if (nestedPart.fileData) {
+          const { fileUri, mimeType: rawMimeType } = nestedPart.fileData;
+          const displayName = (nestedPart.fileData as { displayName?: string })
+            .displayName;
+          this.processNestedFunctionResponseMedia(
+            rawMimeType,
+            displayName,
+            (mimeType) => ({
+              fileData: {
+                ...(fileUri !== undefined ? { fileUri } : {}),
+                ...(mimeType !== undefined ? { mimeType } : {}),
+              },
+            }),
+            allowNestedAudioVideo,
+            retainedParts,
+            extractedTexts,
+            promotedMediaParts,
+          );
         }
       }
 
@@ -1018,44 +1302,6 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     return result;
-  }
-
-  /**
-   * Convert unsupported media types (audio, video) to explanatory text for Gemini API
-   */
-  private convertUnsupportedMediaToText(part: Part): Part {
-    if (typeof part === 'string') return part;
-
-    const inlineMimeType = (part.inlineData?.mimeType || '').trim();
-    const fileMimeType = (part.fileData?.mimeType || '').trim();
-    const normalizedInlineMime = inlineMimeType.toLowerCase();
-    const normalizedFileMime = fileMimeType.toLowerCase();
-
-    if (
-      normalizedInlineMime.startsWith('audio/') ||
-      normalizedInlineMime.startsWith('video/')
-    ) {
-      const displayName = (part.inlineData as { displayName?: string })
-        ?.displayName;
-      const displayNameText = displayName ? ` (${displayName})` : '';
-      return {
-        text: `Unsupported media type for Gemini: ${inlineMimeType}${displayNameText}.`,
-      };
-    }
-
-    if (
-      normalizedFileMime.startsWith('audio/') ||
-      normalizedFileMime.startsWith('video/')
-    ) {
-      const displayName = (part.fileData as { displayName?: string })
-        ?.displayName;
-      const displayNameText = displayName ? ` (${displayName})` : '';
-      return {
-        text: `Unsupported media type for Gemini: ${fileMimeType}${displayNameText}.`,
-      };
-    }
-
-    return part;
   }
 
   async embedContent(
