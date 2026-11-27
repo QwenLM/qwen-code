@@ -179,7 +179,6 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
       '.github/scripts/update-ecs-runner-qwen-workflow.test.mjs',
       '.github/workflows/qwen-pr-safety-precheck.yml',
       '.github/workflows/update-ecs-runner-qwen.yml',
-      'docs/users/configuration/settings.md',
       'docs/users/features/headless.md',
     ].sort(),
   );
@@ -188,27 +187,44 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   }
 });
 
-test('routes precheck-read docs pages to github_ci_only instead of docs_only', () => {
+test('routes test-read docs pages to full or github_ci_only instead of docs_only', () => {
+  // settings.md is read by both pr-safety-precheck.test.mjs and the full-only
+  // packages/cli/src/config/settings-docs-sync.test.ts suite.
   assert.equal(
     classifyChangedFiles(['docs/users/configuration/settings.md']),
-    'github_ci_only',
-  );
-  assert.equal(
-    classifyChangedFiles(['docs/users/features/headless.md']),
-    'github_ci_only',
+    'full',
   );
   assert.equal(
     classifyChangedFiles([
       'docs/users/configuration/settings.md',
       'docs/usage.md',
     ]),
-    'github_ci_only',
+    'full',
   );
   assert.equal(
     classifyChangedFiles([
       {
         filename: 'docs/users/configuration/settings-next.md',
         previous_filename: 'docs/users/configuration/settings.md',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
+  // headless.md is read only by the dep-free precheck helper suite.
+  assert.equal(
+    classifyChangedFiles(['docs/users/features/headless.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles(['docs/users/features/headless.md', 'docs/usage.md']),
+    'github_ci_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/users/features/headless-next.md',
+        previous_filename: 'docs/users/features/headless.md',
         status: 'renamed',
       },
     ]),
