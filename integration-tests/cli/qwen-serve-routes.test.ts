@@ -155,6 +155,7 @@ beforeAll(async () => {
             name: 'Startup test',
             baseUrl: 'http://127.0.0.1:9/v1',
             envKey: 'OPENAI_API_KEY',
+            generationConfig: { contextWindowSize: 200_000 },
             capabilities: {
               reasoning: {
                 thinking: true,
@@ -497,6 +498,7 @@ describe('qwen serve — capabilities envelope', () => {
       'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
+      'workspace_model_preferences',
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
@@ -958,6 +960,77 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
       ).toBe(modelServiceId);
     } finally {
       await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('applies saved route preferences to idle and newly created tasks', async () => {
+    const workspace = client.workspaceByCwd(REPO_ROOT);
+    const { models } = await workspace.modelPreferences();
+    const route = models.find((model) => model.name === 'Startup test');
+    expect(route?.contextLimit).toBe(200_000);
+
+    const key = route!.key;
+    const startupConfig = { modelServiceId: 'qwen-startup-test(openai)' };
+    const create = () =>
+      client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: randomUUID(),
+        startupConfig,
+      });
+
+    const first = await create();
+    let secondId: string | undefined;
+    try {
+      await workspace.updateModelPreferences({
+        scope: 'user',
+        changes: [
+          { key, contextWindow: 128_000, reasoning: { effort: 'high' } },
+        ],
+      });
+      const second = await create();
+      secondId = second.sessionId;
+      expect(await client.sessionContextUsage(first.sessionId)).toMatchObject({
+        usage: { contextWindowSize: 128_000 },
+      });
+      expect(await client.sessionContextUsage(second.sessionId)).toMatchObject({
+        usage: { contextWindowSize: 128_000 },
+      });
+      const firstConfig = await client.sessionContext(
+        first.sessionId,
+        first.clientId,
+      );
+      const secondConfig = await client.sessionContext(
+        second.sessionId,
+        second.clientId,
+      );
+      expect(firstConfig.state.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue: 'high',
+          }),
+        ]),
+      );
+      expect(secondConfig.state.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue: 'high',
+          }),
+        ]),
+      );
+      const readback = await workspace.modelPreferences();
+      expect(
+        readback.models.find(({ key: modelKey }) => modelKey === key)?.values
+          .user.reasoning?.effort,
+      ).toBe('high');
+    } finally {
+      await workspace.updateModelPreferences({
+        scope: 'user',
+        changes: [{ key, contextWindow: null, reasoning: { effort: null } }],
+      });
+      await client.closeSession(first.sessionId);
+      if (secondId) await client.closeSession(secondId);
     }
   });
 

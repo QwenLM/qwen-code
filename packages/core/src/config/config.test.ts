@@ -48,6 +48,7 @@ import {
   type AgentLoopSurface,
 } from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import { getModelPreferenceKey } from '../models/model-preferences.js';
 
 /** The surfaces the kernel is on for when nothing sets it. */
 const KERNEL_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
@@ -8907,6 +8908,62 @@ describe('Server Config (config.ts)', () => {
     expect(proxied.getContentGeneratorConfig().baseUrl).toBe(proxy);
     expect(proxied.getModelPreferenceKey()).not.toBe(firstKey);
     expect(proxied.getReasoningEffort()).toBe('low');
+  });
+
+  it('updates workspace model preferences without taking over command writes', async () => {
+    const authType = AuthType.USE_OPENAI;
+    const model = 'workspace-chat';
+    const baseUrl = 'https://workspace.example.com/v1';
+    const key = getModelPreferenceKey(authType, model, baseUrl);
+    const config = makeConfig({
+      authType,
+      model,
+      workspaceModelPreferences: true,
+      modelPreferences: {},
+      initialModelRegistryBaseUrl: baseUrl,
+      modelProvidersConfig: { openai: [route(model, baseUrl, 'API_KEY_A')] },
+    });
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+      (_config, selectedAuth, generationConfig, sources) => ({
+        config: {
+          ...generationConfig,
+          authType: selectedAuth,
+          model,
+          apiKey: 'test-key',
+          contextWindowSize: 200_000,
+        },
+        sources: { ...sources },
+      }),
+    );
+    stubContentGenerator();
+    await config.refreshAuth(authType);
+    expect(config.getModelPreferenceKey()).toBeUndefined();
+
+    config.setWorkspaceModelPreferences(
+      {
+        [key]: {
+          contextWindow: 128_000,
+          reasoning: { enabled: true, effort: 'high' },
+        },
+      },
+      undefined,
+    );
+    expect(config.getModel()).toBe(model);
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
+    expect(config.getReasoningEffort()).toBe('high');
+
+    config.setReasoningEffort('low');
+    config.setWorkspaceModelPreferences(
+      { [key]: { contextWindow: 100_000, reasoning: { enabled: false } } },
+      undefined,
+      true,
+    );
+    expect(config.getReasoningEffort()).toBe('low');
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(100_000);
+
+    config.setWorkspaceModelPreferences({}, undefined);
+    expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(200_000);
   });
 
   describe('model switching optimization (QWEN_OAUTH)', () => {

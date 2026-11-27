@@ -4840,6 +4840,68 @@ export interface DaemonModelConfiguration {
   advisorModel?: string;
 }
 
+export type DaemonModelPreferenceScope = 'user' | 'workspace';
+export type DaemonModelPreferenceEffort = Exclude<
+  ReasoningSelection,
+  'none' | 'default'
+>;
+export type DaemonModelPreferenceField = 'enabled' | 'effort' | 'contextWindow';
+export type DaemonModelPreferenceSource =
+  | DaemonModelPreferenceScope
+  | 'system'
+  | 'model';
+
+export interface DaemonModelPreference {
+  contextWindow?: number;
+  reasoning?: { enabled?: boolean; effort?: DaemonModelPreferenceEffort };
+}
+
+export interface DaemonModelPreferenceRow {
+  key: string;
+  modelId: string;
+  authType: string;
+  name: string;
+  provider?: string;
+  isCurrent: boolean;
+  contextLimit: number;
+  reasoning?: {
+    canEnable: boolean;
+    canDisable: boolean;
+    efforts: DaemonModelPreferenceEffort[];
+    effortEnablesThinking: boolean;
+  };
+  locked: DaemonModelPreferenceField[];
+  values: {
+    user: DaemonModelPreference;
+    workspace: DaemonModelPreference;
+    userEffective: DaemonModelPreference;
+    effective: DaemonModelPreference;
+    inherited: Record<DaemonModelPreferenceScope, DaemonModelPreference>;
+  };
+  sources: Record<DaemonModelPreferenceField, DaemonModelPreferenceSource>;
+  inheritedSources: Record<
+    DaemonModelPreferenceScope,
+    Record<DaemonModelPreferenceField, DaemonModelPreferenceSource>
+  >;
+}
+
+export interface DaemonModelPreferences {
+  workspaceWritable: boolean;
+  models: DaemonModelPreferenceRow[];
+}
+
+export interface DaemonModelPreferencesPatch {
+  scope: DaemonModelPreferenceScope;
+  changes: Array<{
+    key: string;
+    contextWindow?: number | null;
+    reasoning?: {
+      enabled?: boolean | null;
+      effort?: DaemonModelPreferenceEffort | null;
+    };
+  }>;
+}
+
 export interface DaemonModelConfigurationUpdateResult {
   updated: true;
   requiresRestart: boolean;

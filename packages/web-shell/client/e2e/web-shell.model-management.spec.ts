@@ -141,7 +141,7 @@ for (const allowAdd of [true, false]) {
       ).toHaveCount(allowDelete ? 1 : 0);
       await expect(
         page.getByRole('button', {
-          name: 'Edit context window Managed Test Model',
+          name: 'Provider window limit Managed Test Model',
           exact: true,
         }),
       ).toBeVisible();

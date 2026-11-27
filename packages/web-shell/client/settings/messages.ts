@@ -30,7 +30,33 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.experimental.generatedUi':
     'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default. Restart the owning session to apply changes.',
 
-  'settings.models.editWindow': 'Edit context window',
+  'settings.models.editWindow': 'Provider window limit',
+  'settings.modelPreferences.title': 'Model defaults',
+  'settings.modelPreferences.name': 'Model name',
+  'settings.modelPreferences.contextWindow': 'Context window',
+  'settings.modelPreferences.tokens': 'tokens',
+  'settings.modelPreferences.limit': (v) => `Limit ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `Enter a whole number from 1 to ${v?.tokens ?? ''}.`,
+  'settings.modelPreferences.alwaysOn': 'Always on',
+  'settings.modelPreferences.providerDefault': 'Model default',
+  'settings.modelPreferences.providerSettings': 'Provider configuration',
+  'settings.modelPreferences.inherit': 'Reset to inherited',
+  'settings.modelPreferences.source.model': 'Model default',
+  'settings.modelPreferences.source.system': 'Policy',
+  'settings.modelPreferences.source.user': 'User',
+  'settings.modelPreferences.source.workspace': 'Workspace',
+  'settings.modelPreferences.appliesNextTurn':
+    'These changes apply from the next turn in every task that follows the defaults, including existing tasks.',
+  'settings.modelPreferences.save': 'Save settings',
+  'settings.modelPreferences.saveFailed': 'Could not save model preferences',
+  'settings.modelPreferences.retry': 'Retry',
+  'settings.modelPreferences.catalogChanged':
+    'The model catalog changed. Reload models to review your edits.',
+  'settings.modelPreferences.reload': 'Reload models',
+  'settings.modelPreferences.unavailableModel': (v) =>
+    `${v?.model ?? ''} is no longer available. Discard its edits to continue.`,
+  'settings.modelPreferences.discardEdits': 'Discard edits',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
   'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
@@ -141,7 +167,33 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.experimental.generatedUi':
     '在 Web Shell 等受支持的本地会话中，用内置 Generated UI 展示交互视图。默认开启。重新创建所属会话后生效。',
 
-  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.editWindow': '供应商窗口上限',
+  'settings.modelPreferences.title': '模型默认设置',
+  'settings.modelPreferences.name': '模型名称',
+  'settings.modelPreferences.contextWindow': '上下文窗口',
+  'settings.modelPreferences.tokens': 'tokens',
+  'settings.modelPreferences.limit': (v) => `上限 ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `请输入 1 至 ${v?.tokens ?? ''} 之间的整数。`,
+  'settings.modelPreferences.alwaysOn': '始终开启',
+  'settings.modelPreferences.providerDefault': '模型默认',
+  'settings.modelPreferences.providerSettings': '供应商配置',
+  'settings.modelPreferences.inherit': '恢复继承',
+  'settings.modelPreferences.source.model': '模型默认',
+  'settings.modelPreferences.source.system': '管理策略',
+  'settings.modelPreferences.source.user': '用户设置',
+  'settings.modelPreferences.source.workspace': '工作区设置',
+  'settings.modelPreferences.appliesNextTurn':
+    '这些设置从下一轮起对所有跟随默认值的任务生效，包括已有任务。',
+  'settings.modelPreferences.save': '保存设置',
+  'settings.modelPreferences.saveFailed': '无法保存模型偏好',
+  'settings.modelPreferences.retry': '重试',
+  'settings.modelPreferences.catalogChanged':
+    '模型列表已变更，请重新加载模型并检查你的修改。',
+  'settings.modelPreferences.reload': '重新加载模型',
+  'settings.modelPreferences.unavailableModel': (v) =>
+    `${v?.model ?? ''} 已不可用。请放弃对该模型的修改后继续。`,
+  'settings.modelPreferences.discardEdits': '放弃修改',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
   'settings.models.windowSaved': '已保存，重启已有会话后生效。',
@@ -530,7 +582,34 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.description.experimental.mods':
     'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных, headless и ACP сессиях. Требуется перезапуск.',
 
-  'settings.models.editWindow': 'Изменить окно контекста',
+  'settings.models.editWindow': 'Лимит окна провайдера',
+  'settings.modelPreferences.title': 'Настройки моделей по умолчанию',
+  'settings.modelPreferences.name': 'Название модели',
+  'settings.modelPreferences.contextWindow': 'Окно контекста',
+  'settings.modelPreferences.tokens': 'токенов',
+  'settings.modelPreferences.limit': (v) => `Лимит: ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `Введите целое число от 1 до ${v?.tokens ?? ''}.`,
+  'settings.modelPreferences.alwaysOn': 'Всегда включено',
+  'settings.modelPreferences.providerDefault': 'По умолчанию для модели',
+  'settings.modelPreferences.providerSettings': 'Конфигурация провайдера',
+  'settings.modelPreferences.inherit': 'Восстановить унаследованное значение',
+  'settings.modelPreferences.source.model': 'По умолчанию для модели',
+  'settings.modelPreferences.source.system': 'Политика',
+  'settings.modelPreferences.source.user': 'Пользователь',
+  'settings.modelPreferences.source.workspace': 'Рабочая область',
+  'settings.modelPreferences.appliesNextTurn':
+    'Со следующего запроса изменения применяются ко всем задачам, использующим настройки по умолчанию, включая уже созданные.',
+  'settings.modelPreferences.save': 'Сохранить настройки',
+  'settings.modelPreferences.saveFailed':
+    'Не удалось сохранить настройки моделей',
+  'settings.modelPreferences.retry': 'Повторить',
+  'settings.modelPreferences.catalogChanged':
+    'Список моделей изменился. Обновите его и проверьте свои изменения.',
+  'settings.modelPreferences.reload': 'Обновить список моделей',
+  'settings.modelPreferences.unavailableModel': (v) =>
+    `Модель «${v?.model ?? ''}» больше недоступна. Отмените изменения для этой модели, чтобы продолжить.`,
+  'settings.modelPreferences.discardEdits': 'Отменить изменения',
   'settings.models.windowHint':
     'Оставьте пустым, чтобы вывести лимит из ID модели. Существующим сессиям нужен перезапуск, чтобы использовать новый лимит.',
   'settings.models.windowSaved':

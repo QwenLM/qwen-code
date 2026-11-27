@@ -261,6 +261,7 @@ import {
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
+import { registerWorkspaceModelPreferencesRoutes } from './routes/workspace-model-preferences.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
@@ -757,6 +758,7 @@ export interface ServeAppDeps {
     workspace: string,
     writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
+    snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
@@ -1246,6 +1248,10 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      modelPreferencesAvailable:
+        deps.persistSettings !== undefined &&
+        opts.profile !== 'hosted-harness' &&
+        !opts.experimentalPairedEngines,
       sessionRetireIfIdleAvailable: () =>
         workspaceRegistry
           .listAll()
@@ -3669,6 +3675,20 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
       syncModelProvidersRuntime: (writeScope, method) =>
         syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
+    });
+  }
+
+  if (
+    deps.persistSettings &&
+    opts.profile !== 'hosted-harness' &&
+    !opts.experimentalPairedEngines
+  ) {
+    registerWorkspaceModelPreferencesRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      getEnv: (runtime) =>
+        getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+      persistSettings: deps.persistSettings,
     });
   }
 

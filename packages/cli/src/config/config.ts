@@ -1720,6 +1720,7 @@ export async function loadCliConfig(
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
     modelPreferences?: ConfigParameters['modelPreferences'];
+    workspaceModelPreferences?: boolean;
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -2325,7 +2326,9 @@ export async function loadCliConfig(
           },
           settings,
           selectedAuthType,
-          deferReasoningEffort: modelPreferences !== undefined,
+          deferReasoningEffort:
+            modelPreferences !== undefined &&
+            !hostPolicy?.workspaceModelPreferences,
           env: process.env as Record<string, string | undefined>,
         });
 
@@ -2643,6 +2646,8 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     modelPreferences,
+    workspaceModelPreferences:
+      modelPreferences !== undefined && hostPolicy?.workspaceModelPreferences,
     modelPreferenceDefaultEffort:
       modelPreferences === undefined
         ? undefined
