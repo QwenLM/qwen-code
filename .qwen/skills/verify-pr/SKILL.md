@@ -247,6 +247,48 @@ requirement. The shapes:
   the host with no gate, no waiver, and no boundary line — the prose rule
   alone did not stop them.
 
+**Author trust selects the isolation class — it never removes the
+boundary.** `classifyPrTrust` in `scripts/verify-pr-prepare.mjs` classifies
+each round host-side into `(prTrust, executionClass)`. `prTrust` is
+`external` for a fork PR — this overrides every other signal, including
+`--local-owner` — `local-owner` with that prepare flag, and otherwise the
+author's collaborator permission
+(`gh api repos/<owner>/<repo>/collaborators/<login>/permission`):
+write/maintain/admin → `collaborator`, read/triage/none → `external`,
+failed lookup → `unknown`. `executionClass` is `trusted-shared-kernel`
+only for `local-owner`/`collaborator` with **zero mandatory escalations**;
+everything else fails closed to `hardware-isolated`. Escalations fire for
+any author when the diff touches dependency manifests or lockfiles, Maven
+build files, `.github/workflows|actions/`,
+`scripts/verify-pr-*|sandbox|lib/`, `.husky/`, agent-control config
+(`.qwen/`, `.claude/`), Dockerfile/docker-compose/Makefile/esbuild/eslint/
+vitest configs, `.gitattributes`/`.gitmodules`, executables (by extension,
+git mode 100755, or shebang/ELF/Mach-O/PE magic bytes), symlinks or
+submodules — and for `QWEN_VERIFY_FORCE_HARDWARE=1` or an unreadable
+changed-file list. A PR that changes the CI gate itself is therefore always
+hardware-isolated, however trusted its author. The class selects the VM
+lane's backend: `hardware-isolated` → firecracker/vfkit/provider-vm
+(boundary mode `microvm`/`vm`); `trusted-shared-kernel` → `container`
+(mode `container`). It never removes the boundary: a host round still
+needs the `mode:"waived"` maintainer approval above, whatever its author's
+trust level.
+
+**The classification reaches the checker only through the host-held
+snapshot.** prepare writes it into the same snapshot as
+`trustClassification`, beside the coordinates the recipe's `--context-out`
+step already binds; a local round that runs prepare itself adds
+`--local-owner` when the PR author is the operator. Pass
+`--context-root <PR clone root containing the round dir>` alongside
+`--context`/`--context-sha256` to name the PR-writable tree explicitly.
+With the snapshot the checker cross-checks `prTrust`/`executionClass`
+consistency — `external`/`unknown`, or any escalation reason, cannot pair
+with `trusted-shared-kernel` — and compares the waiver's approval
+permalink against this repo/PR; a bare run skips the classification
+entirely and only shape-checks the permalink. Measured case: PR 18370
+round 13 ran the checker bare, so the mechanism never participated even
+though the author was the maintainer — and the PR's own CI-workflow
+changes would have forced `hardware-isolated` anyway.
+
 The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
 Maven, so a Java-heavy _local_ round has no ready container in this recipe.
 Until the Java recipe lands (see
