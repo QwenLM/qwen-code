@@ -27,6 +27,7 @@ import {
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
+import { ModRowAskerContext } from '../../components/messages/mod-rows.js';
 import type { McpAppDisplay } from '../../components/messages/McpApp.js';
 import {
   GeneratedUiInstanceStore,
@@ -38,6 +39,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionContextStatus,
   NonBlockingPromptAccepted,
   DaemonSseConnectReason,
@@ -52,7 +55,9 @@ import {
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonStandaloneCreationOutcomeUnknownError,
+  createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
+  normalizeDaemonEvent,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -100,6 +105,7 @@ import { DaemonAvailabilityContext } from '../availability-context.js';
 
 interface MockSession {
   backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
+  restoredArtifacts?: import('@qwen-code/sdk/daemon').DaemonSessionArtifact[];
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
@@ -107,11 +113,13 @@ interface MockSession {
   hasActivePrompt?: boolean;
   historyHasMore?: boolean;
   historyAnchorRecordId?: string;
+  replayProjectionWatermark?: number;
   replayDegraded?: boolean;
   replaySnapshotComplete?: boolean;
   replayPartial?: boolean;
   replayError?: string;
   eventEpoch?: string;
+  askModRow?: (row: DaemonModRow) => Promise<DaemonModRowAnswer>;
   session?: Record<string, unknown>;
   client?: MockClient;
   lastEventId?: number;
@@ -378,6 +386,14 @@ const sdkMocks = vi.hoisted(() => {
         _clientId?: string,
       ): Promise<MockSession> => takeSession(client),
     );
+    static restoreWorktree = vi.fn(
+      async (
+        client: unknown,
+        _sessionId: string,
+        _opts?: unknown,
+        _clientId?: string,
+      ): Promise<MockSession> => takeSession(client),
+    );
     static createStandalone = vi.fn(
       async (client: unknown, _opts?: unknown): Promise<MockSession> =>
         takeSession(client),
@@ -598,6 +614,11 @@ const sdkMocks = vi.hoisted(() => {
         async (client: unknown, _sessionId: string): Promise<MockSession> =>
           takeSession(client),
       );
+      MockDaemonSessionClient.restoreWorktree.mockReset();
+      MockDaemonSessionClient.restoreWorktree.mockImplementation(
+        async (client: unknown, _sessionId: string): Promise<MockSession> =>
+          takeSession(client),
+      );
       MockDaemonSessionClient.createStandalone.mockReset();
       MockDaemonSessionClient.createStandalone.mockImplementation(
         async (client: unknown): Promise<MockSession> => takeSession(client),
@@ -676,6 +697,56 @@ describe('DaemonSessionProvider', () => {
       if (signal?.aborted) resolve();
       else signal?.addEventListener('abort', () => resolve(), { once: true });
     });
+
+  it('discards Mod row answers and unhooked state when a saved session reopens', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_mod_rows'],
+    });
+    const beforeClose = vi.fn(async () => ({ status: 'unhooked' as const }));
+    const afterReopen = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: 'Rewritten' },
+    }));
+    sdkMocks.sessions.push(createMockSession({ askModRow: beforeClose }));
+    let current: ContextType<typeof ModRowAskerContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      current = useContext(ModRowAskerContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const row: DaemonModRow = {
+      component: 'AssistantMessage',
+      props: { text: 'Original', isFirstOfReply: true },
+    };
+    const before = requireActions(current);
+    before.watch(row, () => {});
+    await flushPromises();
+    expect(beforeClose).toHaveBeenCalledWith(row);
+
+    await act(async () => requireActions(actions).clearSession());
+    expect(current).toBeUndefined();
+    sdkMocks.sessions.push(
+      createMockSession({ eventEpoch: 'epoch-2', askModRow: afterReopen }),
+    );
+    let reload!: Promise<void>;
+    act(() => {
+      reload = requireActions(actions).loadSession('session-1');
+    });
+    await act(async () => {
+      await reload;
+      await flushPromises();
+    });
+
+    const reopened = requireActions(current);
+    expect(reopened).not.toBe(before);
+    reopened.watch(row, () => {});
+    await flushPromises();
+    expect(afterReopen).toHaveBeenCalledWith(row);
+    expect(reopened.answer(row)).toEqual({ text: 'Rewritten' });
+  });
 
   it.each(['request', 'tool'] as const)(
     'bridges trajectory replay and metadata-only events on the existing subscription (%s)',
@@ -6584,6 +6655,115 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
+  it.each([
+    [
+      'a message from another client',
+      'user_message_chunk',
+      'waiting',
+      undefined,
+    ],
+    [
+      'an answer from another client',
+      'agent_message_chunk',
+      'responding',
+      undefined,
+    ],
+    [
+      'a /send message recorded here',
+      'user_message_chunk',
+      'idle',
+      {
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: [],
+          sentTo: { sessionId: 'kid', workspaceCwd: '/work/b' },
+        },
+      },
+    ],
+  ] as const)(
+    'reads %s (%s) as %s',
+    async (_name, sessionUpdate, expected, meta) => {
+      const hold = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* observedMessage(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          // This session's own earlier turn, settled: the page is idle.
+          yield {
+            v: 1,
+            id: 8,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 9,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'hi' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 10,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          };
+          yield {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate,
+                content: { type: 'text', text: 'look at this' },
+                ...(meta ? { _meta: meta } : {}),
+              },
+            },
+          };
+          await Promise.race([
+            hold.promise,
+            new Promise<void>((resolve) =>
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(streamingState).toBe(expected);
+      hold.resolve();
+    },
+  );
+
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();
@@ -8373,6 +8553,163 @@ describe('DaemonSessionProvider', () => {
 
     expect(states.some((s) => s.status === 'connected')).toBe(true);
     expect(states.every((s) => !s.catchingUp)).toBe(true);
+  });
+
+  it('commits the load-embedded artifact snapshot before the replay injects', async () => {
+    // The initial autoConnect session has an empty transcript; the load target
+    // carries the embedded snapshot plus a replay that must NOT be injected at
+    // the early commit. Ordering is the assertion: a test that only checks the
+    // settled connection state passes with the flushSync removed.
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Early artifact',
+            url: 'https://example.com/early',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
+      });
+      await flushPromises();
+    });
+
+    // The click-time hint rides the optimistic switch, keyed to the target.
+    const hinted = frames.find(
+      (frame) => frame.connection.artifactCountHint !== undefined,
+    );
+    expect(hinted?.connection.artifactCountHint).toBe(7);
+    expect(hinted?.connection.artifactCountHintSessionId).toBe('session-2');
+
+    const early = frames.find(
+      (frame) => frame.connection.restoredArtifacts !== undefined,
+    );
+    expect(early).toBeTruthy();
+    expect(early!.connection.sessionId).toBe('session-2');
+    expect(early!.connection.restoredArtifactsSessionId).toBe('session-2');
+    // Authoritative data landed: the early commit retires the hint.
+    expect(early!.connection.artifactCountHint).toBeUndefined();
+    expect(early!.connection.artifactCountHintSessionId).toBeUndefined();
+    // The replay has not injected yet at the early commit.
+    expect(
+      early!.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    ).toBe(false);
+    // …and it injects afterwards.
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+  });
+
+  it('does not early-commit the artifact key when the restore has no artifacts', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
+      });
+      await flushPromises();
+    });
+
+    // With no embedded snapshot the early commit must not run: no recorded
+    // connection state ever carries restoredArtifacts.
+    expect(
+      frames.every((frame) => frame.connection.restoredArtifacts === undefined),
+    ).toBe(true);
+    // The hint bridges the whole load window when no early commit runs, and
+    // the attach retires it once the session is bound.
+    expect(
+      frames.some(
+        (frame) =>
+          frame.connection.sessionId === 'session-2' &&
+          frame.connection.artifactCountHint === 7,
+      ),
+    ).toBe(true);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHintSessionId,
+    ).toBeUndefined();
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    // Ordering, not field absence: the attach update legitimately sets the key
+    // alongside an undefined snapshot, but only AFTER the replay injects. With
+    // the guard relaxed to `true`, flushSync would commit sessionId + key for
+    // session-2 in its own synchronous render before the store is reset, i.e.
+    // a frame carrying both before the replayed transcript appears.
+    const replayIdx = frames.findIndex((frame) =>
+      frame.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    );
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(
+      frames
+        .slice(0, replayIdx)
+        .some(
+          (frame) =>
+            frame.connection.sessionId === 'session-2' &&
+            frame.connection.restoredArtifactsSessionId === 'session-2',
+        ),
+    ).toBe(false);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
@@ -10468,7 +10805,9 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({
       hasActivePrompt: true,
       submitPrompt: vi.fn(() => accepted.promise),
-      events: async function* restoredPromptCompleteDuringLocalPrompt() {
+      events: async function* restoredPromptCompleteDuringLocalPrompt(
+        opts: { signal?: AbortSignal } = {},
+      ) {
         await releaseRestoredComplete.promise;
         yield {
           id: 6,
@@ -10485,6 +10824,7 @@ describe('DaemonSessionProvider', () => {
           data: { promptId: 'local-prompt', stopReason: 'end_turn' },
         } satisfies DaemonEvent;
         localCompleteDelivered.resolve();
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(session);
@@ -10902,7 +11242,7 @@ describe('DaemonSessionProvider', () => {
       hasActivePrompt: true,
       backgroundTurn,
       lastEventId: 5,
-      async *events() {
+      async *events(opts: { signal?: AbortSignal } = {}) {
         yield {
           id: 6,
           v: 1,
@@ -10918,6 +11258,7 @@ describe('DaemonSessionProvider', () => {
           data: { promptId: 'auto-1', stopReason: 'end_turn' },
         };
         finished.resolve();
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(session);
@@ -15266,6 +15607,170 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('consumes a hydrated worktree restore without another load or registration', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    let registrations = 0;
+    const restored = createMockSession({
+      sessionId: 'session-b',
+      workspaceCwd: '/secondary',
+      clientId: 'legacy-host',
+      state: { displayName: 'Restored worktree', mode: 'replay-ready' },
+      lastEventId: 27,
+      eventEpoch: 'epoch-restore',
+      replaySnapshot: createTextReplaySnapshot('restored replay'),
+      replayDegraded: true,
+      replayPartial: true,
+      historyHasMore: true,
+      historyAnchorRecordId: 'anchor-restore-1',
+      replayProjectionWatermark: 17,
+      restoredArtifacts: [
+        {
+          id: 'a1',
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Restored artifact',
+          url: 'https://example.com/restored',
+          retention: 'restorable',
+          clientRetained: true,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+      detach: vi.fn(async () => {
+        registrations -= 1;
+      }),
+    });
+    sdkMocks.MockDaemonSessionClient.restoreWorktree.mockImplementationOnce(
+      async (client: unknown) => {
+        registrations += 1;
+        restored.client = client as MockClient;
+        return restored;
+      },
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let trajectory: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let artifactHintSeen = false;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      history = useDaemonTranscriptHistory();
+      trajectory = useTrajectoryLiveSnapshot();
+      blocks = useDaemonTranscriptBlocks();
+      artifactHintSeen ||=
+        connection.artifactCountHint === 6 &&
+        connection.artifactCountHintSessionId === 'session-b';
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      clientId: 'legacy-host',
+      sessionSourceType: 'fixture-source',
+      historyPageSize: 50,
+      subagentTranscriptMode: 'summary',
+    });
+
+    await act(async () => {
+      const restoredSession = await requireActions(
+        actions,
+      ).restoreWorktreeSession('session-b', { workspaceCwd: '/secondary' });
+      expect(registrations).toBe(1);
+      await requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/secondary',
+        sessionContext: { kind: 'workspace', cwd: '/secondary' },
+        artifactCountHint: 6,
+        restoredSession,
+      });
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.restoreWorktree,
+    ).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      'session-b',
+      {
+        workspaceCwd: '/secondary',
+        timeoutMs: 70_000,
+        sourceType: 'fixture-source',
+        liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
+        historyPageSize: 50,
+      },
+      'legacy-host',
+    );
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(registrations).toBe(1);
+    expect(restored.detach).not.toHaveBeenCalled();
+    expect(artifactHintSeen).toBe(true);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'restored replay' },
+    ]);
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      clientId: 'legacy-host',
+      workspaceCwd: '/secondary',
+      displayName: 'Restored worktree',
+      restoredArtifacts: restored.restoredArtifacts,
+      restoredArtifactsSessionId: 'session-b',
+    });
+    expect(connection?.artifactCountHint).toBeUndefined();
+    expect(history?.hasMore).toBe(true);
+    expect(trajectory).toMatchObject({
+      epoch: 'epoch-restore',
+      lastEventId: 27,
+      incomplete: true,
+    });
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+
+    await act(async () => requireActions(actions).clearSession());
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(registrations).toBe(0);
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
+  it('releases a restored client when the provider unmounts before accepting it', async () => {
+    const restored = createMockSession({ sessionId: 'session-b' });
+    sdkMocks.MockDaemonSessionClient.restoreWorktree.mockResolvedValueOnce(
+      restored,
+    );
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: false });
+
+    let loading!: Promise<void>;
+    await act(async () => {
+      const restoredSession = await requireActions(
+        actions,
+      ).restoreWorktreeSession('session-b', {
+        workspaceCwd: '/mock-workspace',
+      });
+      loading = requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/mock-workspace',
+        sessionContext: { kind: 'workspace', cwd: '/mock-workspace' },
+        restoredSession,
+      });
+      root?.unmount();
+      await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
+    });
+    root = null;
+
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
   it('uses session-scoped client IDs when switching between loaded sessions', async () => {
     const firstSession = createMockSession({
       sessionId: 'session-a',
@@ -18514,6 +19019,363 @@ describe('DaemonSessionProvider', () => {
     expect(eventsCalls).toBe(1);
   });
 
+  it('stops reconnecting and surfaces the error on 413 transcript_too_large', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const tooLarge = new DaemonHttpError(
+      413,
+      {
+        error:
+          'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+        code: 'transcript_too_large',
+        sessionId: 'big-1',
+        snapshotSize: 1073741825,
+        maxBytes: 1073741824,
+      },
+      'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* tooLargeEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw tooLarge;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error:
+        'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+      errorStatus: 413,
+    });
+    expect(connection?.missingSession).not.toBe(true);
+    expect(connection?.sessionId).toBeUndefined();
+    expect(eventsCalls).toBe(1);
+  });
+
+  it('retries a memory-pressure 413 rather than dropping the session', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const memoryPressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'large-session',
+        dimension: 'index',
+        measuredBytes: 128 * 1024 * 1024,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* memoryPressureEvents() {
+          eventsCalls += 1;
+          if (eventsCalls === 1) throw memoryPressure;
+          yield* [];
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBeGreaterThan(1);
+    expect(connection?.missingSession).not.toBe(true);
+  });
+
+  it('caps retries on persistent retryable 413 responses instead of looping forever', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const persistentPressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-543m',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* persistentPressureEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw persistentPressure;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(120);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(4);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'Insufficient daemon heap to index the snapshot',
+      errorStatus: 413,
+    });
+    expect(connection?.missingSession).not.toBe(true);
+  });
+
+  it('resets the retryable 413 attempt counter after receiving a stream event', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const pressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-reset-event',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* resetAfterEvent() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          if (eventsCalls === 3) {
+            yield {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_thought_chunk',
+                  content: { type: 'text', text: 'ok' },
+                },
+              },
+            };
+          }
+          throw pressure;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(160);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(6);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      errorStatus: 413,
+    });
+  });
+
+  it('resets the retryable 413 attempt counter after a clean stream close', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const pressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-reset-close',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* resetAfterCleanClose() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          if (eventsCalls === 3) {
+            yield* [];
+            return;
+          }
+          throw pressure;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(160);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(7);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      errorStatus: 413,
+    });
+  });
+
+  it('does not reset the retryable 413 counter on intervening non-413 transport errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const pressure = new DaemonHttpError(
+      413,
+      {
+        error: 'Insufficient daemon heap to index the snapshot',
+        code: 'transcript_too_large',
+        sessionId: 'dense-alternating-502',
+        dimension: 'index',
+        measuredBytes: 326_447_504,
+        maxBytes: 326_446_972,
+        retryable: true,
+      },
+      'Insufficient daemon heap to index the snapshot',
+    );
+    const badGateway = new DaemonHttpError(
+      502,
+      { error: 'Bad Gateway' },
+      'Bad Gateway',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* alternatingErrors() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          // Odd calls return retryable 413, even calls return 502. The 4th 413
+          // (call 7) must still terminate instead of resetting on each 502.
+          throw eventsCalls % 2 === 1 ? pressure : badGateway;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(160);
+      await flushPromises();
+    });
+
+    expect(eventsCalls).toBe(7);
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      errorStatus: 413,
+    });
+  });
+
   it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
@@ -18522,6 +19384,7 @@ describe('DaemonSessionProvider', () => {
       modelServices: [],
       workspaceCwd: '/mock-workspace',
     });
+    const retryStarted = createDeferred<void>();
     let eventsCalls = 0;
     const conflict = new DaemonHttpError(
       409,
@@ -18534,8 +19397,14 @@ describe('DaemonSessionProvider', () => {
     );
     sdkMocks.sessions.push(
       createMockSession({
-        events: async function* conflictEvents() {
-          eventsCalls += 1;
+        events: async function* conflictEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          if (++eventsCalls > 1) {
+            retryStarted.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
           await Promise.resolve();
           yield* [];
           throw conflict;
@@ -18555,7 +19424,7 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(50);
+      await retryStarted.promise;
       await flushPromises();
     });
 
@@ -21600,7 +22469,9 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-ring-unaccepted-prompt',
       lastEventId: 10,
       submitPrompt: vi.fn(() => accepted.promise),
-      events: async function* ringEvictedEvents() {
+      events: async function* ringEvictedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
         await ringEvicted.promise;
         yield {
           v: 1,
@@ -21611,6 +22482,7 @@ describe('DaemonSessionProvider', () => {
             earliestAvailableId: 12,
           },
         };
+        await untilAborted(opts.signal);
       },
     });
     const reloadedSession = createMockSession({
@@ -21656,6 +22528,7 @@ describe('DaemonSessionProvider', () => {
           type: 'turn_complete',
           data: { promptId: 'prompt-new', stopReason: 'end_turn' },
         };
+        await untilAborted(opts.signal);
       },
     });
     sdkMocks.sessions.push(firstSession, reloadedSession);
@@ -22748,6 +23621,8 @@ describe('DaemonSessionProvider', () => {
   it.each(['idle_timeout', 'last_client_detached'] as const)(
     'does NOT stop reconnect on session_closed with reason "%s"',
     async (reason) => {
+      const onReconnect = createDeferred<void>();
+      let subscriptions = 0;
       // session_closed with idle_timeout or last_client_detached should
       // NOT prevent reconnection — these are server-initiated closes,
       // not user deletions. The provider should preserve the session
@@ -22756,13 +23631,17 @@ describe('DaemonSessionProvider', () => {
         events: async function* nonClientCloseEvents(
           opts: { signal?: AbortSignal } = {},
         ) {
+          if (subscriptions++ > 0) {
+            onReconnect.resolve();
+            await untilAborted(opts.signal);
+            return;
+          }
           yield {
             id: 1,
             v: 1,
             type: 'session_closed',
             data: { reason },
           };
-          if (opts.signal?.aborted) return;
         },
       });
       sdkMocks.sessions.push(session);
@@ -22784,7 +23663,7 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       await act(async () => {
-        await wait(50);
+        await onReconnect.promise;
         await flushPromises();
       });
 
@@ -22799,17 +23678,23 @@ describe('DaemonSessionProvider', () => {
     // Defensive: if the server sends session_closed without a reason
     // field (older daemon versions), treat it as non-client_close and
     // let the normal reconnect path handle it.
+    const onReconnect = createDeferred<void>();
+    let subscriptions = 0;
     const session = createMockSession({
       events: async function* noReasonEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
+        if (subscriptions++ > 0) {
+          onReconnect.resolve();
+          await untilAborted(opts.signal);
+          return;
+        }
         yield {
           id: 1,
           v: 1,
           type: 'session_closed',
           data: {},
         };
-        if (opts.signal?.aborted) return;
       },
     });
     sdkMocks.sessions.push(session);
@@ -22831,7 +23716,7 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     await act(async () => {
-      await wait(50);
+      await onReconnect.promise;
       await flushPromises();
     });
 
@@ -23976,6 +24861,144 @@ describe('DaemonSessionProvider', () => {
     expect(notices.at(-1)).toBeUndefined();
   });
 
+  it.each(['count', 'bytes'])(
+    'keeps loading older records by reclaiming replayed Mod log %s capacity',
+    async (limit) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      const sessionId = 'session-paged-with-mod-logs';
+      const modLogText = (id: number) => `log ${id} while generating an answer`;
+      const compactedReplay: DaemonEvent[] = [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Recent answer' },
+            _meta: {
+              'qwen.session.recordId': 'record-1',
+              qwenTranscript: { sourceRecordIds: ['record-1'] },
+            },
+          },
+        },
+        ...[1, 2, 3].map(
+          (id): DaemonEvent => ({
+            v: 1,
+            id,
+            type: 'mod_log',
+            data: { sessionId, plugin: 'mod', text: modLogText(id) },
+          }),
+        ),
+      ];
+      const replayStore = createDaemonTranscriptStore();
+      replayStore.dispatch(
+        compactedReplay.flatMap((event) => normalizeDaemonEvent(event)),
+      );
+      const replay = replayStore.getSnapshot();
+      const byteCap =
+        replay.retainedBytes -
+        estimateDaemonTranscriptBlockBytes(replay.blocks[1]!);
+      const session = createMockSession({
+        sessionId,
+        historyHasMore: true,
+        lastEventId: 3,
+        replaySnapshot: { compactedReplay, liveJournal: [] },
+      });
+      sdkMocks.sessions.push(session);
+      const page = (recordId: string, content: string, hasMore: boolean) => ({
+        v: 1,
+        sessionId,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: content },
+              _meta: {
+                'qwen.session.recordId': recordId,
+                qwenTranscript: { sourceRecordIds: [recordId] },
+              },
+            },
+          },
+        ],
+        hasMore,
+      });
+      sdkMocks.getSessionTranscriptPage
+        .mockResolvedValueOnce(page('record-0', 'Older prompt', true))
+        .mockResolvedValueOnce(page('record-before', 'Oldest prompt', false));
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      let state: ReturnType<typeof useDaemonTranscriptState> | undefined;
+
+      function Harness() {
+        history = useDaemonTranscriptHistory();
+        state = useDaemonTranscriptState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 25,
+        maxBlocks: limit === 'count' ? 3 : 8,
+        maxRetainedBytes: limit === 'bytes' ? byteCap : undefined,
+      });
+
+      expect(state?.blocks).toMatchObject([
+        { kind: 'assistant', text: 'Recent answer' },
+        { kind: 'status', text: `[Mod mod] ${modLogText(2)}` },
+        { kind: 'status', text: `[Mod mod] ${modLogText(3)}` },
+      ]);
+      if (limit === 'bytes') expect(state?.retainedBytes).toBe(byteCap);
+      expect(history).toMatchObject({ hasMore: true, capacityReached: false });
+
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+        1,
+        sessionId,
+        { beforeRecordId: 'record-1', limit: 25, clientId: session.clientId },
+      );
+      expect(state?.blocks).toMatchObject([
+        { kind: 'user', text: 'Older prompt' },
+        { kind: 'assistant', text: 'Recent answer' },
+        { kind: 'status', text: `[Mod mod] ${modLogText(3)}` },
+      ]);
+      expect(history).toMatchObject({ hasMore: true, capacityReached: false });
+
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+        2,
+        sessionId,
+        { beforeRecordId: 'record-0', limit: 25, clientId: session.clientId },
+      );
+      expect(state?.blocks).toMatchObject([
+        { kind: 'user', text: 'Oldest prompt' },
+        { kind: 'user', text: 'Older prompt' },
+        { kind: 'assistant', text: 'Recent answer' },
+      ]);
+      expect(state!.blockIndexById).toEqual(
+        Object.fromEntries(
+          state!.blocks.map((block, index) => [block.id, index]),
+        ),
+      );
+      expect(state!.retainedBytes).toBe(
+        state!.blocks.reduce(
+          (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+          0,
+        ),
+      );
+      expect(state?.lastEventId).toBe(3);
+      expect(history?.hasMore).toBe(false);
+    },
+  );
+
   it('trims an oversized initial replay to the block cap and re-anchors older pagination', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',
@@ -24262,7 +25285,11 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it.each(['same anchor', 'older prefix'] as const)(
+  it.each([
+    'same anchor',
+    'older prefix',
+    'same anchor with Mod logs',
+  ] as const)(
     'reopens a rejected history page after authoritative rewind with %s',
     async (replacement) => {
       sdkMocks.capabilities.mockResolvedValue({
@@ -24292,14 +25319,29 @@ describe('DaemonSessionProvider', () => {
         chunk(id, 'user_message_chunk', `${name}-user`),
         chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
       ];
+      const sessionId = 'rewind-capacity';
+      const withModLogs = replacement === 'same anchor with Mod logs';
+      const modLogs = (firstId: number): DaemonEvent[] =>
+        withModLogs
+          ? ['first', 'second'].map((text, index) => ({
+              v: 1,
+              id: firstId + index,
+              type: 'mod_log',
+              data: { sessionId, plugin: 'mod', text },
+            }))
+          : [];
       const rewind = createDeferred<void>();
-      const prefixName = replacement === 'same anchor' ? 'root' : 'earlier';
-      const prefix = turn(50, prefixName);
+      const prefixName = replacement === 'older prefix' ? 'earlier' : 'root';
+      const prefix = [...turn(50, prefixName), ...modLogs(52)];
       const session = createMockSession({
-        sessionId: 'rewind-capacity',
+        sessionId,
         historyHasMore: true,
         replaySnapshot: {
-          compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+          compactedReplay: [
+            ...turn(1, 'root'),
+            ...modLogs(3),
+            ...turn(5, 'target'),
+          ],
           liveJournal: [],
         },
         async *events(opts) {
@@ -24309,7 +25351,7 @@ describe('DaemonSessionProvider', () => {
             id: 100,
             type: 'session_rewound',
             data: {
-              sessionId: 'rewind-capacity',
+              sessionId,
               promptId: 'native-target',
               targetTurnIndex: 1,
               filesChanged: [],
@@ -24352,6 +25394,7 @@ describe('DaemonSessionProvider', () => {
       expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
         `${prefixName}-user`,
         `${prefixName}-answer`,
+        ...(withModLogs ? [undefined, undefined] : []),
       ]);
       expect(history).toMatchObject({ capacityReached: false, hasMore: true });
       await act(async () => {
@@ -24364,7 +25407,13 @@ describe('DaemonSessionProvider', () => {
           expect.objectContaining({ beforeRecordId: `${prefixName}-user` }),
         ]),
       );
-      expect(blocks).toHaveLength(4);
+      expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+        'older-page-user',
+        'older-page-answer',
+        `${prefixName}-user`,
+        `${prefixName}-answer`,
+        ...(withModLogs ? [undefined] : []),
+      ]);
     },
   );
 
@@ -26245,6 +27294,9 @@ describe('DaemonSessionProvider', () => {
           expect(container!.querySelector('[role="alert"]')).not.toBeNull();
         }
       } finally {
+        // Nothing observes the continuation promise once the banner unmounts,
+        // so the cleanup rejection needs its own handler.
+        admission.promise.catch(() => undefined);
         await act(async () => {
           root?.unmount();
           root = null;
@@ -27925,13 +28977,16 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
     backgroundTurn: opts.backgroundTurn,
+    restoredArtifacts: opts.restoredArtifacts,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
+    replayProjectionWatermark: opts.replayProjectionWatermark,
     replayDegraded: opts.replayDegraded ?? false,
     replaySnapshotComplete: opts.replaySnapshotComplete ?? true,
     replayPartial: opts.replayPartial ?? false,
     replayError: opts.replayError,
     eventEpoch: opts.eventEpoch ?? 'epoch-1',
+    askModRow: opts.askModRow,
     session:
       opts.session ??
       ({
@@ -28043,15 +29098,24 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
 
 function createIdleEvents(): MockSession['events'] {
   return async function* idleEvents(opts: { signal?: AbortSignal } = {}) {
-    await new Promise<void>((resolve) => {
-      if (opts.signal?.aborted) {
-        resolve();
-        return;
-      }
-      opts.signal?.addEventListener('abort', () => resolve(), { once: true });
-    });
+    await untilAborted(opts.signal);
     yield* [];
   };
+}
+
+// A fixture stream that returns as soon as it has delivered its events leaves
+// the provider's reconnect loop spinning at the fixture's reconnect delay, so a
+// `wait(50)` between assertions re-subscribes tens of thousands of times and
+// starves the rest of the worker. Stay-alive fixtures park on their own abort
+// signal instead, which the provider raises on unmount.
+function untilAborted(signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    signal?.addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 
 function createPendingEvents(
@@ -28059,13 +29123,7 @@ function createPendingEvents(
 ): MockSession['events'] {
   return async function* pendingEvents(opts: { signal?: AbortSignal } = {}) {
     started.resolve();
-    await new Promise<void>((resolve) => {
-      if (opts.signal?.aborted) {
-        resolve();
-        return;
-      }
-      opts.signal?.addEventListener('abort', () => resolve(), { once: true });
-    });
+    await untilAborted(opts.signal);
     yield* [];
   };
 }
@@ -28164,6 +29222,7 @@ function createTurnCompleteEvents(
       sessionId: 'session-1',
       data: { promptId, stopReason: 'end_turn' },
     };
+    await untilAborted(opts.signal);
   };
 }
 
@@ -28181,8 +29240,11 @@ function createClosableEvents(): {
 } {
   const closed = createDeferred<void>();
   return {
-    events: async function* closableEvents() {
+    events: async function* closableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
       await closed.promise;
+      await untilAborted(opts.signal);
       yield* [];
     },
     close: closed.resolve,

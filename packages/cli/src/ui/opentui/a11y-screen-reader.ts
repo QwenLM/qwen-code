@@ -170,14 +170,14 @@ export class ScreenReaderOutputWriter {
    * the writer itself enforces that: shell/tool output legitimately carries
    * captured escape bytes, and without stripping here a malicious model/tool
    * result could execute OSC 52 clipboard writes or title/cursor sequences
-   * with no renderer buffer in between. Bare C0 controls are dropped too,
+   * with no renderer buffer in between. Bare C0 and C1 controls are dropped too,
    * except TAB: it separates words in tool/model output (TSV blocks) and
    * deleting it fuses adjacent tokens — ink's screen-reader renderer keeps
    * tabs.
    */
   private sanitize(text: string): string {
     // eslint-disable-next-line no-control-regex
-    return stripAnsi(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+    return stripAnsi(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
   }
 
   /**
@@ -185,7 +185,7 @@ export class ScreenReaderOutputWriter {
    * dynamic block before appending static content and resets its height.
    */
   appendStatic(text: string): void {
-    const clean = this.sanitize(text);
+    const clean = hardWrap(this.sanitize(text), this.columns());
     // ink's hasStaticOutput guard skips the write entirely when the
     // sanitized content is empty or exactly '\n': the latter would erase
     // the dynamic block and emit a spurious blank line.

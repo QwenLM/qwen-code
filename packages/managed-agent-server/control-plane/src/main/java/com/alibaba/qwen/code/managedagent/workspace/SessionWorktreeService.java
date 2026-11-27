@@ -12,19 +12,22 @@ import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Row;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.LeaseRenewalRunner;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class SessionWorktreeService {
@@ -34,17 +37,14 @@ public class SessionWorktreeService {
     private final ManagedAgentSettings properties;
     private final TurnExecutionStore sessions;
     private final HarnessCoordinator coordinator;
-    private final String owner = "session-worktree-" + UUID.randomUUID();
-    private final ScheduledExecutorService renewals = Executors.newSingleThreadScheduledExecutor(task -> {
-        Thread thread = new Thread(task, "session-worktree-renewal");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("session-worktree-" + UUID.randomUUID(), "session-worktree-renewal");
+    private final String owner = runner.owner();
     private SessionWorktreeOperations git;
     private SessionWorktreeOperations.Factory gitFactory;
     private WorktreeFiles worktreeFiles;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public void configureWorktreeFiles(WorktreeFiles files, SessionWorktreeOperations.Factory factory) {
         worktreeFiles = files;
         gitFactory = factory;
@@ -81,7 +81,7 @@ public class SessionWorktreeService {
         return broker.isSessionWorktreesEnabled() && broker.isEnabled() && broker.isDurableLocalProcess()
                 && "local-process".equals(broker.getProvisioner())
                 && "session".equals(broker.getBoundSessionIsolationClass())
-                && java.nio.charset.StandardCharsets.UTF_8.name().equalsIgnoreCase(System.getProperty("sun.jnu.encoding", ""))
+                && StandardCharsets.UTF_8.name().equalsIgnoreCase(System.getProperty("sun.jnu.encoding", ""))
                 && !System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
@@ -166,21 +166,12 @@ public class SessionWorktreeService {
         if (row == null) {
             return;
         }
-        AtomicBoolean live = new AtomicBoolean(true);
-        var renewal = renewals.scheduleWithFixedDelay(() -> {
-            try {
-                if (!store.renew(row, owner, LEASE_MS)) {
-                    live.set(false);
-                }
-            } catch (RuntimeException exception) {
-                live.set(false);
-            }
-        }, LEASE_MS / 3, LEASE_MS / 3, TimeUnit.MILLISECONDS);
+        var renewal = runner.startFixedDelay(LEASE_MS / 3, () -> store.renew(row, owner, LEASE_MS), ignored -> {});
         boolean preparing = "PREPARING".equals(row.state());
-        try {
+        try (renewal) {
             if (preparing && !store.active(row) && row.identityJson() == null) {
-                if (java.nio.file.Files.exists(java.nio.file.Path.of(row.plan().root()).resolve(row.plan().worktreeRoot()),
-                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                if (Files.exists(Path.of(row.plan().root()).resolve(row.plan().worktreeRoot()),
+                        LinkOption.NOFOLLOW_LINKS)) {
                     store.complete(row, owner, "READY", worktreeFiles.verify(row.plan(), null), null);
                 } else {
                     store.complete(row, owner, "FAILED", null, "worktree_session_closed");
@@ -197,7 +188,7 @@ public class SessionWorktreeService {
             String identity = null;
             boolean stopped = true;
             try {
-                identity = git().runWhileLive(live::get, () -> {
+                identity = git().runWhileLive(renewal::isLive, () -> {
                     if (preparing) {
                         return git().prepare(row.plan());
                     }
@@ -229,7 +220,7 @@ public class SessionWorktreeService {
                 store.defer(row, owner, code);
             } else if (!"maintenance_stop_unverified".equals(code) && row.attempts() < 15
                     && (exception instanceof ChildWorkspaceException child && child.retryable()
-                    || exception instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException broker && broker.isRetryable())) {
+                    || exception instanceof RuntimeBrokerException broker && broker.isRetryable())) {
                 store.retry(row, owner, code);
             } else {
                 String state = "maintenance_stop_unverified".equals(code) || "worktree_identity_conflict".equals(code)
@@ -239,8 +230,6 @@ public class SessionWorktreeService {
                     sessions.failWorktreeInitialTurns(row.tenantId(), row.sessionId(), code);
                 }
             }
-        } finally {
-            renewal.cancel(false);
         }
     }
 
@@ -264,7 +253,7 @@ public class SessionWorktreeService {
                 default -> "worktree_git_failed";
             };
         }
-        if (exception instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException broker) {
+        if (exception instanceof RuntimeBrokerException broker) {
             return broker.getCode();
         }
         return "worktree_git_unavailable";
@@ -272,7 +261,7 @@ public class SessionWorktreeService {
 
     @PreDestroy
     void stop() {
-        renewals.shutdownNow();
+        runner.close();
         if (git != null) {
             git.close();
         }

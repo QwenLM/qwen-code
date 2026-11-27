@@ -4,18 +4,21 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFile
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles.FileTarget;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -28,6 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,7 +45,7 @@ import java.util.concurrent.Semaphore;
 @Component
 public class WorkspaceFileUploadStore {
     private LocalWorkspaceFiles localFiles;
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public void configureLocalFiles(LocalWorkspaceFiles value) { localFiles = value; }
 
     private static final Logger LOG = LoggerFactory.getLogger(WorkspaceFileUploadStore.class);
@@ -184,7 +188,7 @@ public class WorkspaceFileUploadStore {
     public void reconcile() {
         var due = jdbc.queryForList("SELECT tenant_id, operation_id FROM ma_operation WHERE operation_kind = ?"
                 + " AND state = 'RUNNING' AND available_at <= " + ManagedSchemaTime.SQL_NOW
-                + " ORDER BY available_at, operation_key LIMIT 4", KIND);
+                + " ORDER BY available_at, operation_ref LIMIT 4", KIND);
         for (var row : due) {
             String tenant = text(row.get("tenant_id"));
             String uploadId = text(row.get("operation_id"));
@@ -261,9 +265,11 @@ public class WorkspaceFileUploadStore {
                 throw new ManagedAgentException(409, "workspace_files_unsupported", "This Workspace storage does not support uploads.");
             }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
-            String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", String.class,
-                    RuntimeAdmissionFences.storageAliasKey(tenant, scope.binding().getStorageId()));
-            var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
+            String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage"
+                    + " WHERE tenant_id = ? AND storage_id = ? FOR UPDATE", String.class,
+                    tenant, scope.binding().getStorageId());
+            var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE",
+                    physical == null ? null : ManagedSchemaKeys.identity(physical));
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                     || !(owners.getFirst().get("mount_revision") instanceof Number mount)
                     || !Long.valueOf(mount.longValue()).equals(scope.mountRevision())) {
@@ -291,19 +297,18 @@ public class WorkspaceFileUploadStore {
             Frozen target = new Frozen(tenant, actor, workspace, cwd, revision, locator.sessionId(), uploadId, path, size, sha256, physical,
                     properties.getRuntimeBroker().getNodeExecutable(), properties.getRuntimeBroker().getWorkerEntry(), request, remote);
             String key = key(tenant, uploadId);
-            jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, workspace_id, session_id,"
-                    + " target_kind, target_key, target_id, storage_key, physical_key, actor_key, request_digest, request_json, state, phase,"
-                    + " available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
+            jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, workspace_id, session_id,"
+                    + " target_kind, target_id, storage_id, physical_id, actor_id, request_digest, request_json, state, phase,"
+                    + " available_at, gmt_create, gmt_modified) VALUES (?, 'TENANT', ?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
                     + ManagedSchemaTime.SQL_NOW + " + 60000, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    key, ManagedSchemaKeys.key(tenant), KIND, uploadId.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8),
-                    workspace.getBytes(StandardCharsets.UTF_8), locator.sessionId() == null ? null : locator.sessionId().getBytes(StandardCharsets.UTF_8),
-                    ManagedSchemaKeys.key(scope.binding().getStorageId()),
+                    ManagedSchemaKeys.identity(key), ManagedSchemaKeys.identity(tenant), KIND, uploadId, tenant,
+                    workspace, locator.sessionId(),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
-                    RuntimeAdmissionFences.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
-                    ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
-            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
+                    scope.binding().getStorageId(),
+                    ManagedSchemaKeys.identity(physical), actor, digest, encode(target));
+            if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE physical_id = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?",
-                    physical, scope.mountRevision()) != 1) {
+                    ManagedSchemaKeys.identity(physical), scope.mountRevision()) != 1) {
                 throw busy();
             }
             return new Operation(key, digest, target, null, true);
@@ -313,9 +318,9 @@ public class WorkspaceFileUploadStore {
     private UploadStatus exchange(Operation operation, byte[] bytes) {
         Frozen target = operation.target();
         String backend = target.remote() == null
-                ? com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS
-                : com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS;
-        if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties).includes(backend)) {
+                ? RuntimeProviderKinds.LOCAL_PROCESS
+                : RuntimeProviderKinds.SSH_PROCESS;
+        if (!RuntimeBackendSelection.from(properties).includes(backend)) {
             throw pending();
         }
         Map<String, Object> message = new LinkedHashMap<>();
@@ -360,7 +365,8 @@ public class WorkspaceFileUploadStore {
         return transaction.execute(status -> {
             // No tenant guard: lock the directory row before the operation row, as admission does.
             Frozen target = operation.target();
-            jdbc.queryForList("SELECT member_count FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", target.physical());
+            jdbc.queryForList("SELECT member_count FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE",
+                    ManagedSchemaKeys.identity(target.physical()));
             Operation current = find(target.tenant(), target.uploadId(), true);
             if (current == null || !current.digest().equals(operation.digest())) {
                 throw pending();
@@ -369,13 +375,13 @@ public class WorkspaceFileUploadStore {
                 return current.result();
             }
             if (!StorageOwnerMembership.membersAllowed(jdbc, target.physical())
-                    || jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE storage_key = ?"
-                    + " AND member_count > 0", target.physical()) != 1) {
+                    || jdbc.update("UPDATE ma_storage_owner SET member_count = member_count - 1 WHERE physical_id = ?"
+                    + " AND member_count > 0", ManagedSchemaKeys.identity(target.physical())) != 1) {
                 throw pending();
             }
             if (jdbc.update("UPDATE ma_operation SET state = ?, phase = ?, result_json = ?, completed_at = "
-                    + ManagedSchemaTime.SQL_NOW + ", gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_key = ? AND state = 'RUNNING'",
-                    result.state(), result.state(), encode(result), operation.key()) != 1) {
+                    + ManagedSchemaTime.SQL_NOW + ", gmt_modified = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_ref = ? AND state = 'RUNNING'",
+                    result.state(), result.state(), encode(result), ManagedSchemaKeys.identity(operation.key())) != 1) {
                 throw pending();
             }
             return result;
@@ -384,7 +390,8 @@ public class WorkspaceFileUploadStore {
 
     private Operation find(String tenant, String uploadId, boolean lock) {
         var rows = jdbc.queryForList("SELECT request_digest, request_json, result_json FROM ma_operation"
-                + " WHERE operation_key = ? AND operation_kind = ?" + (lock ? " FOR UPDATE" : ""), key(tenant, uploadId), KIND);
+                + " WHERE operation_ref = ? AND operation_kind = ?" + (lock ? " FOR UPDATE" : ""),
+                ManagedSchemaKeys.identity(key(tenant, uploadId)), KIND);
         if (rows.isEmpty()) {
             return null;
         }
@@ -414,13 +421,14 @@ public class WorkspaceFileUploadStore {
 
     private void defer(String key) {
         jdbc.update("UPDATE ma_operation SET available_at = " + ManagedSchemaTime.SQL_NOW
-                + " + 5000 WHERE operation_key = ? AND operation_kind = ? AND state = 'RUNNING'", key, KIND);
+                + " + 5000 WHERE operation_ref = ? AND operation_kind = ? AND state = 'RUNNING'",
+                ManagedSchemaKeys.identity(key), KIND);
     }
 
     private String encode(Object value) {
         try {
             return mapper.writeValueAsString(value);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -455,7 +463,7 @@ public class WorkspaceFileUploadStore {
         validateId(uploadId);
         if (revision == null || !revision.matches("[a-f0-9]{64}") || path == null || path.length() > 1024
                 || path.codePoints().anyMatch(value -> Character.isISOControl(value) || value >= 0xd800 && value <= 0xdfff)
-                || path.contains("\\") || java.util.Arrays.stream(path.split("/", -1)).anyMatch(part -> part.isEmpty()
+                || path.contains("\\") || Arrays.stream(path.split("/", -1)).anyMatch(part -> part.isEmpty()
                         || part.equals(".") || part.equals("..") || part.equals(".git") || part.equals(".qwen-child-workspaces")
                         || part.startsWith(".qwen-managed-"))) {
             throw invalid();
@@ -473,7 +481,7 @@ public class WorkspaceFileUploadStore {
     }
 
     private static String key(String tenant, String uploadId) {
-        return ManagedSchemaKeys.key(KIND, tenant, uploadId);
+        return ManagedIdentityRefs.tenantOperationRef(KIND, tenant, uploadId);
     }
 
     private static String text(Object value) {

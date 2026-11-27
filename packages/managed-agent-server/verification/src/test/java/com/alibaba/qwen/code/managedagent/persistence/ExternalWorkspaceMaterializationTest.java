@@ -154,7 +154,8 @@ class ExternalWorkspaceMaterializationTest {
         assertThat(summary.canCreateSession()).isFalse();
         assertThat(summary.canSelectDirectory()).isFalse();
         assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isFalse();
-        var discovery = new WorkspaceDiscoveryController(new WorkspaceDiscoveryService(registry, json), mock(WorkspaceCreationStore.class));
+        var discovery = new WorkspaceDiscoveryController(new WorkspaceDiscoveryService(registry, json), mock(WorkspaceCreationStore.class), properties,
+                mock(com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader.class));
         var tenant = new TenantContext("tenant", "owner");
         assertThat(discovery.publicList(tenant, null, null).getBody().data()).singleElement()
                 .satisfies(item -> assertThat(item.canCreateSession()).isFalse());
@@ -326,6 +327,34 @@ class ExternalWorkspaceMaterializationTest {
                             error -> assertThat(error.getCode()).isEqualTo("external_storage_registration_mismatch"));
             jdbc.update("UPDATE ma_storage SET registration_revision=1");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
+            // version-1 external-files: the read must accept the widened shape, and still refuse
+            // a version-1 child (parent set) — both directions of the widened predicate.
+            {
+                var admitted = transaction.execute(status -> sessions.insertWorkspaceSessionCommand(
+                        SessionCreationCommand.builder()
+                                .tenantId("tenant")
+                                .actorId("owner")
+                                .idempotencyKey("create-v1")
+                                .requestDigest("digest-v1")
+                                .agentId("qwen-code")
+                                .title("Files")
+                                .input(List.<java.util.Map<String, Object>>of())
+                                .selection(new WorkspaceSelection("workspace", "."))
+                                .build()));
+                jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
+                        "tenant", admitted.sessionId());
+                var privateStore = new JdbcManagedSessionStore(jdbc);
+                String writerToken = "external-approval-writer-token-0123456789";
+                var writer = transaction.execute(status -> privateStore.acquireWriter("tenant", admitted.sessionId(), writerToken,
+                        new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
+                var query = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", writer.writerGeneration());
+                var liveApproval = transaction.execute(status -> privateStore.approvalSelection("tenant", admitted.sessionId(), writerToken, query));
+                assertThat(liveApproval).containsExactlyInAnyOrderEntriesOf(java.util.Map.of("mode", "yolo", "revision", 0L));
+                jdbc.update("UPDATE ma_session SET parent_session_id=? WHERE tenant_id=? AND session_id=?",
+                        admitted.sessionId(), "tenant", admitted.sessionId());
+                var nullApproval = transaction.execute(status -> privateStore.approvalSelection("tenant", admitted.sessionId(), writerToken, query));
+                assertThat(nullApproval).isNull();
+            }
             jdbc.update("UPDATE ma_storage SET registration_state='RETIRED'");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
         }
@@ -554,7 +583,7 @@ class ExternalWorkspaceMaterializationTest {
             register("tenant", "healthy");
             store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
             jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
-                    "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    "workspace");
 
             assertThat(registry.listReadable("tenant", "owner", null, 10))
                     .hasSize(2)
@@ -607,13 +636,13 @@ class ExternalWorkspaceMaterializationTest {
 
     @Test
     void rejectsPersistedTupleDriftAndBusyOwnersWithoutPartialMaterialization() {
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage", String.class);
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage", String.class);
         for (String mutation : List.of("storage_kind = 'LOCAL'", "registration_state = 'RETIRING'",
-                "registration_revision = 2", "physical_key = 'wrong'")) {
+                "registration_revision = 2", "physical_id = 'wrong'")) {
             jdbc.update("UPDATE ma_storage SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
             jdbc.update("UPDATE ma_storage SET storage_kind = 'EXTERNAL', registration_state = 'REGISTERED',"
-                    + " registration_revision = 1, physical_key = ?", physical);
+                    + " registration_revision = 1, physical_id = ?", physical);
         }
         String registration = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration.replace("\"tenantWorkspaceId\":\"workspace\"",
@@ -629,10 +658,10 @@ class ExternalWorkspaceMaterializationTest {
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
         new TransactionTemplate(manager).executeWithoutResult(status ->
                 conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "workspace_unavailable"));
-        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_key = 'held'", "maintenance_id = 'maintenance'")) {
+        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_id = 'held'", "maintenance_id = 'maintenance'")) {
             jdbc.update("UPDATE ma_storage_owner SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
-            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_key = NULL, maintenance_id = NULL");
+            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_id = NULL, maintenance_id = NULL");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access", Integer.class)).isZero();
@@ -646,7 +675,7 @@ class ExternalWorkspaceMaterializationTest {
                 + " 'Existing', ?, ?, 'REMOVED')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         register("tenant", "second");
-        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind,"
                 + " storage_id, runtime_generation, binding_state, attestation_generation, is_drain_requested,"
                 + " operation_generation, record_version, last_active_at)"

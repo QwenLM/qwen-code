@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ChatCompressionRecordPayload,
   CustomTitleRecordPayload,
@@ -13,7 +13,11 @@ import type {
   SlashCommandRecordPayload,
   UiTelemetryRecordPayload,
 } from '../services/chatRecordingService.js';
-import { prepareTranscriptRecords } from './transcript-records.js';
+import {
+  prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
+  selectActiveSideArtifactRecordUuids,
+} from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
@@ -60,6 +64,8 @@ export function messageGroupsSnapshot(records: readonly ChatRecord[]): string {
     (record) =>
       record.type !== 'system' ||
       (record.subtype !== 'ui_telemetry' &&
+        // View state saves never belong to a message group.
+        record.subtype !== 'generated_ui_state' &&
         !(
           record.subtype === 'custom_title' &&
           (record.systemPayload as CustomTitleRecordPayload | undefined)
@@ -121,6 +127,7 @@ const GROUP_SYSTEM_SUBTYPES = new Set([
   // earlier turn on replay, restoring content the rewound session never
   // had; the next durable request re-appends the current catalog anyway.
   'memory_catalog_snapshot',
+  'permission_context_snapshot',
 ]);
 
 export function telemetryRecordIdentity(record: ChatRecord): {
@@ -605,6 +612,46 @@ export function deleteTranscriptMessageGroups(
     ...anchor,
     parentUuid: survivingParent(active.at(-1)?.uuid ?? null),
   });
+  const activeUuids = active.map((record) => record.uuid);
+  const activeSaves = selectActiveGeneratedUiStateRecordUuids(
+    records,
+    activeUuids,
+  );
+  if (activeSaves.length > 0) {
+    const retained = activeUuids.filter((uuid) => !removed.has(uuid));
+    const activeAfterDeletion = [...retained, anchor.uuid];
+    const retainedSaves = new Set(
+      selectActiveGeneratedUiStateRecordUuids(rewritten, activeAfterDeletion),
+    );
+    const orphanedSaves = new Set(
+      activeSaves.filter((uuid) => !retainedSaves.has(uuid)),
+    );
+    if (orphanedSaves.size > 0) {
+      const retainedArtifacts = new Set(
+        selectActiveSideArtifactRecordUuids(rewritten, activeAfterDeletion),
+      );
+      const root = {
+        ...anchor,
+        uuid: randomUUID(),
+        parentUuid: null,
+        timestamp: records[0]?.timestamp ?? anchor.timestamp,
+        cwd: records[0]?.cwd ?? anchor.cwd,
+        gitBranch: records[0]?.gitBranch,
+      };
+      const firstRetained = retained[0] ?? anchor.uuid;
+      // Preserve the saves before the first retained turn and the artifacts
+      // that previously belonged to the conversation root.
+      for (const record of rewritten) {
+        if (
+          record.uuid === firstRetained ||
+          orphanedSaves.has(record.uuid) ||
+          (record.parentUuid === null && retainedArtifacts.has(record.uuid))
+        )
+          record.parentUuid = root.uuid;
+      }
+      rewritten.unshift(root);
+    }
+  }
   return {
     records: rewritten,
     result: {

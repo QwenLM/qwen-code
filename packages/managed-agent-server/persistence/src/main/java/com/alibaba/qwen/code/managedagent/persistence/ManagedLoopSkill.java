@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -107,8 +108,12 @@ final class ManagedLoopSkill {
      * catalog, returning the validated catalog when the variant was injected, or
      * null when it was not (so the caller validates {@code merged} itself). The
      * returned catalog is the single validated/serialized pass — the admission
-     * reuses it instead of re-validating. {@code merged} already holds the pinned
-     * definition's skills; the caller skills are appended after them. The variant
+     * reuses it instead of re-validating. {@code merged} starts as the pinned
+     * definition's skills and {@code callerSkills} are appended after them;
+     * {@code definitionCount} says how many leading entries the definition owns.
+     * A lane whose creation pin already carries the caller catalog passes that
+     * catalog as the caller slice (count 0), so its bundled import is still the
+     * server's to replace or drop. The variant
      * replaces only the Web Shell's bundled {@code loop} import, carrying over
      * that entry's model_invocable / user_invocable flags; a user-authored or
      * definition-authored {@code loop} is preserved and suppresses the variant
@@ -123,9 +128,8 @@ final class ManagedLoopSkill {
      * admission class does not grow.
      */
     static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
-            List<Map<String, Object>> callerSkills, String profile,
-            boolean sessionSkillsSupported) {
-        int definitionCount = merged.size();
+            List<Map<String, Object>> callerSkills, int definitionCount, String profile,
+            boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
         merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
             return null;
@@ -163,7 +167,7 @@ final class ManagedLoopSkill {
         candidate.add(loop);
         List<Map<String, Object>> validated;
         try {
-            validated = AgentDefinitionExtensions.sessionSkills(candidate);
+            validated = AgentDefinitionExtensions.sessionSkills(candidate, packageSkills);
         } catch (ManagedAgentException overCapacity) {
             // Skip the injection and leave the bundled import dropped: restoring
             // it would push the catalog back over capacity and the admission

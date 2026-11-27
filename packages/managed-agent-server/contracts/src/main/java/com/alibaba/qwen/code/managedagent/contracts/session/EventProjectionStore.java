@@ -7,8 +7,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationResul
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -26,6 +28,12 @@ public interface EventProjectionStore {
 
     public List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);
+
+    /**
+     * The public event tail of each Session's stream, across tenants; a
+     * Session without a stream row is absent from the result.
+     */
+    Map<SessionKey, Long> findEventTails(Collection<SessionKey> sessions);
 
     public List<EventRecord> findControlEvents(String tenantId, String sessionId,
             long throughSequence);

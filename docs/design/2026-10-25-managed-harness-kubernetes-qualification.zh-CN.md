@@ -2,6 +2,8 @@
 
 [English](2026-10-25-managed-harness-kubernetes-qualification.md) | [简体中文](2026-10-25-managed-harness-kubernetes-qualification.zh-CN.md)
 
+> **已归档。** 本文描述的验收工具服务于已由 [#17415](https://github.com/QwenLM/qwen-code/pull/17415) 与 [#17427](https://github.com/QwenLM/qwen-code/issues/17427) 退役的 Kubernetes Harness 池部署；脚本、模板及其测试现位于 `packages/sdk-java/managed-kubernetes-archive/`。本文作为历史设计记录保留。
+
 ## 问题与现状
 
 共享 Harness 池已经实现，但部署模板仍需人工修改镜像、身份、配置和调度条件。现有 Java 镜像只有 Server JAR，缺少 local-process Runtime worker 所需的 Node 和完整 CLI。现有进程故障测试会自行启动 Java 和数据库，不能验收外部 Kubernetes 池。这些测试通过不代表两 Pod 上的公开多用户授权、物理工具效果或事件重连通过。

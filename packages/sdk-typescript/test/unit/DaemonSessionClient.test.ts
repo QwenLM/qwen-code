@@ -309,6 +309,34 @@ describe('DaemonSessionClient', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('binds rateSessionTurn to the session and client identity', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { recorded: true }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.rateSessionTurn('prompt-1', 'up')).resolves.toEqual({
+      recorded: true,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      promptId: 'prompt-1',
+      rating: 'up',
+    });
+  });
+
   it('binds agent, trace, and attachment reads to the session identity', async () => {
     const controller = new AbortController();
     const { signal } = controller;
@@ -1945,6 +1973,55 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.replayDegraded).toBe(true);
+  });
+
+  it('surfaces restoredArtifacts from workspace load/resume and standalone load/resume', async () => {
+    const artifacts = [{ id: 'a1', title: 'T' }];
+    const payload = (standalone: boolean) => ({
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      attached: true,
+      clientId: 'client-1',
+      state: {},
+      compactedReplay: [],
+      liveJournal: [],
+      artifacts,
+      ...(standalone
+        ? {
+            sourceType: 'standalone',
+            context: { kind: 'standalone' },
+            projectlessOutputDirectory: '/conversations/example',
+            workingDirectory: { state: 'ready' },
+          }
+        : {}),
+    });
+    const makeClient = (standalone: boolean) => {
+      const { fetch } = recordingFetch((req) => {
+        if (req.url.endsWith('/capabilities'))
+          return jsonResponse(200, { features: ['standalone_sessions_v1'] });
+        return jsonResponse(200, payload(standalone));
+      });
+      return new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    };
+
+    const ws = await DaemonSessionClient.load(makeClient(false), 's-1', {
+      workspaceCwd: '/work/a',
+    });
+    expect(ws.restoredArtifacts).toEqual(artifacts);
+    const wr = await DaemonSessionClient.resume(makeClient(false), 's-1', {
+      workspaceCwd: '/work/a',
+    });
+    expect(wr.restoredArtifacts).toEqual(artifacts);
+    const ls = await DaemonSessionClient.loadStandalone(
+      makeClient(true),
+      's-1',
+    );
+    expect(ls.restoredArtifacts).toEqual(artifacts);
+    const rs = await DaemonSessionClient.resumeStandalone(
+      makeClient(true),
+      's-1',
+    );
+    expect(rs.restoredArtifacts).toEqual(artifacts);
   });
 
   it.each([undefined, 0, 7])(

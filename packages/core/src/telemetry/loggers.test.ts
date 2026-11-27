@@ -36,7 +36,6 @@ import {
   EVENT_FLASH_FALLBACK,
   EVENT_GOAL_STATE,
   EVENT_TOOL_CALL,
-  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
@@ -65,8 +64,6 @@ import {
   logUserPrompt,
   logToolCall,
   logLoopDetected,
-  logLoopProtection,
-  logRepeatedToolFailureGuard,
   logFlashFallback,
   logGoalState,
   logChatCompression,
@@ -127,10 +124,7 @@ import {
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
-  LoopProtectionEvent,
-  LoopReason,
   LoopType,
-  RepeatedToolFailureGuardEvent,
   WorkflowRunEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
@@ -704,88 +698,6 @@ describe('loggers', () => {
     });
   });
 
-  describe('logRepeatedToolFailureGuard', () => {
-    it('emits a data-minimized transition log and low-cardinality metric', () => {
-      vi.spyOn(
-        metrics,
-        'recordRepeatedToolFailureGuardMetrics',
-      ).mockImplementation(() => undefined);
-      const event = new RepeatedToolFailureGuardEvent({
-        prompt_id: 'prompt-id',
-        route: 'acp_foreground',
-        mode: 'shadow',
-        phase_before: 'tracking',
-        phase_after: 'warned',
-        decision: 'would_warn',
-        failure_count_bucket: '8+',
-        batch_count_bucket: '2',
-        candidate_ordinal: 1,
-        terminal_status: 'error',
-        execution_status: 'error',
-        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
-        tool_type: 'mcp',
-      });
-
-      logRepeatedToolFailureGuard(event);
-
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: 'Repeated tool failure guard decision: would_warn.',
-        attributes: {
-          ...event,
-          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
-        },
-      });
-      expect(
-        metrics.recordRepeatedToolFailureGuardMetrics,
-      ).toHaveBeenCalledWith({
-        route: 'acp_foreground',
-        mode: 'shadow',
-        phase_before: 'tracking',
-        phase_after: 'warned',
-        decision: 'would_warn',
-        failure_count_bucket: '8+',
-        batch_count_bucket: '2',
-        terminal_status: 'error',
-        execution_status: 'error',
-        tool_type: 'mcp',
-      });
-      const serialized = JSON.stringify(mockLogger.emit.mock.calls.at(-1));
-      expect(serialized).not.toMatch(
-        /session.id|user.id|policyToolName|function_args|result|error_message|server_name/,
-      );
-    });
-
-    it('isolates transition log and metric sink failures', () => {
-      const event = new RepeatedToolFailureGuardEvent({
-        prompt_id: 'prompt-id',
-        route: 'acp_foreground',
-        mode: 'enforce',
-        phase_before: 'warned',
-        phase_after: 'latched',
-        decision: 'stopped',
-        failure_count_bucket: '8+',
-        batch_count_bucket: '3+',
-        candidate_ordinal: 1,
-      });
-      vi.spyOn(
-        metrics,
-        'recordRepeatedToolFailureGuardMetrics',
-      ).mockImplementationOnce(throwing('metric unavailable'));
-      mockLogger.emit.mockImplementationOnce(throwing('log unavailable'));
-
-      expect(() => logRepeatedToolFailureGuard(event)).not.toThrow();
-      for (const key of [
-        'reset_reason',
-        'terminal_status',
-        'execution_status',
-        'execution_error_type',
-        'tool_type',
-      ]) {
-        expect(event).not.toHaveProperty(key);
-      }
-    });
-  });
-
   describe('logLoopDetected', () => {
     // Runs `check` with QwenLogger.getInstance stubbed, restoring it after.
     const withLoopSink = (
@@ -797,7 +709,7 @@ describe('loggers', () => {
         .spyOn(QwenLogger, 'getInstance')
         .mockReturnValue({ logLoopDetectedEvent } as unknown as QwenLogger);
       const event = new LoopDetectedEvent(
-        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        LoopType.TURN_TOOL_CALL_CAP,
         'prompt-id',
       );
       try {
@@ -807,55 +719,16 @@ describe('loggers', () => {
       }
     };
 
-    it('does not infer telemetry destinations from the loop type', () =>
+    it('sends the event to QwenLogger and the log exporter', () =>
       withLoopSink((sink, event, config) => {
         logLoopDetected(config, event);
 
         expect(sink).toHaveBeenCalledWith(event);
-      }));
-
-    it('supports explicitly keeping a loop event out of QwenLogger', () =>
-      withLoopSink((sink, event, config) => {
-        logLoopDetected(config, event, { recordToQwenLogger: false });
-
-        expect(sink).not.toHaveBeenCalled();
         expect(mockLogger.emit).toHaveBeenCalledWith({
-          body: `Loop detected. Type: ${LoopType.REPEATED_TOOL_EXECUTION_FAILURE}.`,
+          body: `Loop detected. Type: ${LoopType.TURN_TOOL_CALL_CAP}.`,
           attributes: { 'session.id': 'test-session-id', ...event },
         });
       }));
-  });
-
-  describe('logLoopProtection', () => {
-    it('records the decision in QwenLogger and OTEL', () => {
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
-      const logLoopProtectionEvent = vi.fn();
-      const getInstanceSpy = vi
-        .spyOn(QwenLogger, 'getInstance')
-        .mockReturnValue({ logLoopProtectionEvent } as unknown as QwenLogger);
-      const event = new LoopProtectionEvent({
-        prompt_id: 'prompt-id',
-        loop_type: LoopType.TURN_TOOL_CALL_CAP,
-        decision: 'reminded',
-        mode: 'stop',
-        loop_reason: LoopReason.STUCK_REPETITION,
-      });
-      try {
-        logLoopProtection(config, event);
-      } finally {
-        getInstanceSpy.mockRestore();
-      }
-
-      expect(logLoopProtectionEvent).toHaveBeenCalledWith(event);
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: `Loop protection reminded. Type: ${LoopType.TURN_TOOL_CALL_CAP}.`,
-        attributes: {
-          'session.id': 'test-session-id',
-          ...event,
-          loop_reason: 'stuck_repetition',
-        },
-      });
-    });
   });
 
   describe('logUserPrompt', () => {
@@ -1028,7 +901,7 @@ describe('loggers', () => {
       expectRequestSessionId();
     });
 
-    it('keeps task identity local to UI telemetry', () => {
+    it('keeps task identity and the first visible offset local to UI telemetry', () => {
       const event = new ApiResponseEvent(
         'test-response-id',
         'test-model',
@@ -1039,6 +912,7 @@ describe('loggers', () => {
         undefined,
         'general-purpose',
       );
+      event.first_visible_offset_ms = 80;
 
       logApiResponse(mockConfig, event, undefined, {
         id: 'general-purpose-12345678',
@@ -1051,6 +925,7 @@ describe('loggers', () => {
           subagent_name: 'general-purpose',
           subagent_id: 'general-purpose-12345678',
           subagent_task_name: 'inspect customer records',
+          first_visible_offset_ms: 80,
         }),
         'test-session-id',
       );
@@ -1058,6 +933,7 @@ describe('loggers', () => {
       expect(attributes.subagent_name).toBe('general-purpose');
       expect(attributes).not.toHaveProperty('subagent_id');
       expect(attributes).not.toHaveProperty('subagent_task_name');
+      expect(attributes).not.toHaveProperty('first_visible_offset_ms');
     });
 
     const responseWithUsage = (promptId: string) =>
@@ -1075,9 +951,26 @@ describe('loggers', () => {
       'forked_query',
       'speculation',
       'side-query:session-title',
-    ])('does not record token usage for internal prompt_id %s', (promptId) => {
-      logApiResponse(mockConfig, responseWithUsage(promptId));
+    ])('records actual token usage for internal prompt_id %s', (promptId) => {
+      const event = responseWithUsage(promptId);
+      logApiResponse(mockConfig, event);
 
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record disabled internal token usage: %s', (promptId) => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      logApiResponse(configWithUsageStatsDisabled, responseWithUsage(promptId));
       expect(
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).not.toHaveBeenCalled();

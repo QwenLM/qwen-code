@@ -353,6 +353,10 @@ public final class StoreModels {
     public record ReplayFloorTarget(String tenantId, String sessionId) {
     }
 
+    /** A Session named across tenants. */
+    public record SessionKey(String tenantId, String sessionId) {
+    }
+
     public record DispatchTarget(String tenantId, String sessionId,
             String turnId) {
     }

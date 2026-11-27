@@ -461,7 +461,7 @@ export const MainContent = ({
   // Streaming-only state — including pending source-copy offsets — is read
   // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
-    ({ item }: { item: VpItem }) => {
+    ({ item, isInViewport }: { item: VpItem; isInViewport: boolean }) => {
       if (item.type === 'vp-banner') {
         return (
           <Box flexDirection="column">
@@ -510,6 +510,7 @@ export const MainContent = ({
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
           modSessionId={transcriptSessionId}
+          isInViewport={isInViewport}
         />
       );
     },
@@ -546,7 +547,8 @@ export const MainContent = ({
     const btwPanelOwnsViewport =
       uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
     const viewportInteractive =
-      !uiState.dialogsVisible &&
+      (!uiState.dialogsVisible ||
+        uiState.confirmationRequest?.allowHistoryScroll === true) &&
       contextMenuOpen === null &&
       !btwPanelOwnsViewport;
 

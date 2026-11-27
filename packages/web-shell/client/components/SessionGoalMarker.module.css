@@ -1,0 +1,45 @@
+.goalMarker {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+span.goalMarker {
+  cursor: default;
+}
+
+/* Only the interactive button variant highlights on hover/focus; the
+   archived-row span is a pure indicator and must not look clickable. */
+button.goalMarker:hover,
+button.goalMarker:focus-visible {
+  outline: none;
+  background: var(--muted);
+}
+
+button.goalMarker:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+/* Same lifecycle tones as the Goals page, from the shared execution-status
+   palette (App.module.css). The tint sits on the glyph so the hover
+   background never competes with the state colour. */
+.goalMarkerIcon[data-status='running'] {
+  color: var(--status-running-fg);
+}
+
+.goalMarkerIcon[data-status='attention'] {
+  color: var(--status-attention-fg);
+}
+
+.goalMarkerIcon[data-status='done'] {
+  color: var(--status-done-fg);
+}

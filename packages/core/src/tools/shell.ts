@@ -60,6 +60,7 @@ import {
 } from '../utils/github-prs.js';
 import { findGitRoot } from '../utils/gitUtils.js';
 import type {
+  ShellAbortReason,
   ShellExecutionConfig,
   ShellExecutionResult,
   ShellOutputEvent,
@@ -3494,7 +3495,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     updateOutput?: (output: ToolResultDisplay) => void,
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
-    setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+    setPromoteAbortControllerCallback?: (
+      ac: AbortController | undefined,
+    ) => void,
     canPromoteForegroundShell?: () => boolean,
     rawCapture?: ShellRawCaptureSink,
   ): Promise<ToolResult> {
@@ -3995,12 +3998,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     if (pid && setPidCallback) {
       setPidCallback(pid);
     }
-    // Hand the promote controller up to the scheduler so a future UI
-    // surface (PR-3 Ctrl+B keybind) can find it and trigger promote.
-    // Done unconditionally — the caller can ignore it if they don't
-    // implement promote yet, but exposing it now means PR-3 doesn't
-    // need to revisit shell.ts.
-    setPromoteAbortControllerCallback?.(promoteAbortController);
+    const exposePromotion = pid !== undefined && !combinedSignal.aborted;
+    if (exposePromotion) {
+      setPromoteAbortControllerCallback?.(promoteAbortController);
+    }
     armTimeoutWarning();
 
     // Bracket the execution-handle → settle wall-clock so the result builder below
@@ -4067,6 +4068,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelTimeoutWarning();
       cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
+      if (exposePromotion) setPromoteAbortControllerCallback?.(undefined);
     }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
@@ -4192,8 +4194,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
           ? []
           : [`Command: ${this.params.command}`]),
         `Directory: ${this.params.directory || '(root)'}`,
-        `Output: ${result.output || '(empty)'}`,
-        `Error: ${finalError}`, // Use the cleaned error string.
+        `Output (stdout and stderr combined): ${result.output || '(empty)'}`,
+        `Execution Error: ${finalError}`, // Use the cleaned error string.
         `Exit Code: ${result.exitCode ?? '(none)'}`,
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
@@ -4893,6 +4895,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw mkdirError;
     }
 
+    const promoteReason = abortController.signal.reason as
+      | Partial<Extract<ShellAbortReason, { kind: 'background' }>>
+      | undefined;
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
     // PR-2.5: open an append-mode write stream so the initial snapshot
@@ -5091,11 +5096,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       outputPath,
       abortController: entryAc,
     };
-    // Reference `abortController` so it's not unused — the parameter
-    // is kept on the signature so a future PR-2.5 that needs to
-    // double-link the original promote signal can read it without
-    // re-plumbing.
-    void abortController;
 
     // `registry.register` is internally safe today (Map.set + emit),
     // but if a future implementation throws, the promoted child is
@@ -5362,6 +5362,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       promoteArtifacts.settleQueued = null;
       promoteArtifacts.onSettleWired(queued);
     }
+    promoteReason?.onRegistered?.(shellId);
     // When the settle was already queued (a fast-settling promoted
     // command), the registration probe kicked off above is in flight —
     // await it so the exemption is in place by the time the ToolResult
@@ -5383,7 +5384,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
       : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
-      `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
+      promoteReason?.forUserMessage === true
+        ? `Foreground command "${commandToExecute}" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you.`
+        : `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
       statusFileLine,
@@ -5398,6 +5401,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: `Promoted to background: ${shellId}`,
+      ...(promoteReason?.forUserMessage === true && {
+        keptWhenCancelled: true,
+      }),
     };
   }
 

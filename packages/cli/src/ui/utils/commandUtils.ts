@@ -82,6 +82,17 @@ export const SLASH_COMMANDS_SKIP_RECORDING: ReadonlySet<string> = new Set([
 export const getSlashCommandFirstToken = (query: string): string =>
   query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
 
+export function isPrivateBuiltinSlashCommand(
+  query: string,
+  command: string,
+): boolean {
+  return (
+    command === 'advisor' ||
+    (command === 'memory' &&
+      /^[/?]\s*memory\s+migrate-worktree(?:\s|$)/u.test(query.trimStart()))
+  );
+}
+
 export const hasSlashCommandPathSeparator = (query: string): boolean =>
   SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
 

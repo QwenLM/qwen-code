@@ -30,7 +30,11 @@ import {
   WebShellThemeId,
   type WebShellTheme,
 } from './themeContext';
-import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
+import {
+  ArrowKeyHistoryProvider,
+  CompactModeContext,
+  TodoContextsProvider,
+} from './WebShellContexts';
 
 /**
  * 会话列表 portal 到宿主导航槽位所需的 props，直接从 ManagedSessionsPage 的
@@ -88,6 +92,8 @@ export interface ManagedAgentWebShellProps
   baseUrl?: string;
   /** Only open the existing Session explicitly selected by the host. */
   hostSessionOnly?: boolean;
+  /** Turn off Up/Down prompt recall for this shell, regardless of the browser preference. */
+  disableArrowKeyHistory?: boolean;
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
   language?: WebShellLanguage;
@@ -120,7 +126,9 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       resetKeys={[props.baseUrl, props.managedAgentProvider]}
       fallback={shellErrorFallback(normalizeLanguage(props.language))}
     >
-      <ManagedAgentWebShellRoot {...props} />
+      <ArrowKeyHistoryProvider disabledByHost={props.disableArrowKeyHistory}>
+        <ManagedAgentWebShellRoot {...props} />
+      </ArrowKeyHistoryProvider>
     </ErrorBoundary>
   );
 }

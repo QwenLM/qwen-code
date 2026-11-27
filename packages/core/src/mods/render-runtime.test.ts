@@ -6,7 +6,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModRuntime, type ModRenderHost } from './runtime.js';
-import type { ModAssistantMessageInput, ModBandInput } from './render-tree.js';
+import type {
+  ModAssistantMessageInput,
+  ModBandInput,
+  ModThinkingInput,
+} from './render-tree.js';
 import { MOD_MAX_BYTES, type ModLog } from './types.js';
 
 const signal = () => new AbortController().signal;
@@ -153,7 +157,7 @@ describe('ui.render through the real QuickJS worker', () => {
     });
   });
 
-  it('hands out a frozen table of the eleven terminal elements, two of them drawn', async () => {
+  it('hands out a frozen table of the twelve terminal elements, three of them drawn', async () => {
     const runtime = await create([
       mod(`on('ui.render', ($, e) => {
         const { Box, Button } = $.ui.resolve(e);
@@ -197,6 +201,7 @@ describe('ui.render through the real QuickJS worker', () => {
         'Link',
         'Code',
         'Markdown',
+        'Progress',
         'Client',
         'Raster',
         'Image',
@@ -475,6 +480,47 @@ describe('ui.render through the real QuickJS worker', () => {
       });
     });
 
+    it('rewrites a row a desktop host raises, handing out the desktop table', async () => {
+      const runtime = await ModRuntime.createGroup(
+        [
+          {
+            id: 'mod-0',
+            name: 'mod-0',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source:
+                mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+                let refused = '';
+                try { $.ui.resolve({ ...e, surface: 'mobile' }); } catch (error) { refused = String(error); }
+                return next({ ...e, props: { ...e.props, text: e.surface + ' '
+                  + Object.keys($.ui.resolve(e)).join(',') + ' ' + refused } });
+              });`),
+            },
+            options: {},
+          },
+        ],
+        '/workspace',
+        (log, plugin) => logs.push({ ...log, plugin }),
+        signal(),
+        undefined,
+        'desktop',
+        '1.0.0',
+        undefined,
+        undefined,
+        { sites: ['AssistantMessage'], invalidate: () => {} },
+      );
+      runtimes.push(runtime);
+      const drawn = await runtime.render(
+        { ...row(), surface: 'desktop' },
+        signal(),
+      );
+      expect(drawn.props).toEqual({
+        text: 'desktop Box,Text,Button,Input,Select,Svg,Link,Code,Markdown,Progress,Client,Shader TypeError: $.ui.resolve takes a ui.render event drawn on a surface this host draws',
+        isFirstOfReply: true,
+      });
+    });
+
     it('takes multi-line markdown, and an original text left as it is whatever it holds', async () => {
       const runtime = await create(
         [
@@ -567,6 +613,76 @@ describe('ui.render through the real QuickJS worker', () => {
         text: '工作进程一次只运行一个 dispatch。',
         isFirstOfReply: true,
       });
+    });
+  });
+
+  describe('Thinking rows', () => {
+    const rows: ModRenderHost = {
+      sites: ['AbovePrompt', 'AssistantMessage', 'Thinking'],
+      invalidate: (plugin) => invalidated.push(plugin),
+    };
+    const thought = (text = 'Check the worker first.'): ModThinkingInput => ({
+      surface: 'terminal',
+      component: 'Thinking',
+      requestId: '8',
+      props: { text },
+    });
+
+    it('is heard by hooks that name it or name no component', async () => {
+      const runtime = await create(
+        [
+          mod(
+            `on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => next(e));`,
+          ),
+          mod(
+            `on('ui.render', { component: 'Thinking' }, ($, e, next) => next(e));`,
+          ),
+          mod(`on('ui.render', ($, e, next) => next(e));`),
+        ],
+        rows,
+      );
+      expect(runtime.renderHooksFor('Thinking')).toEqual(['mod-1', 'mod-2']);
+      expect(runtime.renderHooksFor('AssistantMessage')).toEqual([
+        'mod-0',
+        'mod-2',
+      ]);
+    });
+
+    it('draws a rewritten text and keeps the row on a tree, a new prop or a control character', async () => {
+      const runtime = await create(
+        [
+          mod(`on('ui.render', { component: 'Thinking' }, ($, e, next) => {
+            if (e.props.text === 'tree') return $.ui.resolve(e).Text({ children: 'mine' });
+            if (e.props.text === 'extra')
+              return next({ ...e, props: { ...e.props, isFirstOfReply: true } });
+            if (e.props.text === 'escape')
+              return next({ ...e, props: { ...e.props, text: '\\u001b[31mred' } });
+            return next({ ...e, props: { ...e.props, text: '想：' + e.props.text } });
+          });`),
+        ],
+        rows,
+      );
+      expect((await runtime.render(thought(), signal())).props).toEqual({
+        text: '想：Check the worker first.',
+      });
+      const notes: string[] = [];
+      for (const text of ['tree', 'extra', 'escape']) {
+        const drawn = await runtime.render(thought(text), signal());
+        expect(drawn.tree).toEqual({ type: 'engine', ref: 0 });
+        expect(drawn.props).toEqual({ text });
+        notes.push(...drawn.notes);
+      }
+      expect(notes).toEqual([
+        "mod-0: ui.render (Thinking) answered a tree; this host draws only a rewrite of the row's props, so the row was left as it was",
+      ]);
+      expect(
+        logs
+          .filter((log) => log.text.startsWith('ui.render hook skipped'))
+          .map((log) => log.text),
+      ).toEqual([
+        expect.stringContaining('pinned'),
+        expect.stringContaining('props.text holds a control character'),
+      ]);
     });
   });
 });

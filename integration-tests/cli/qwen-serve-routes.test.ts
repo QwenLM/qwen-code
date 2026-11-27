@@ -20,10 +20,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -188,6 +191,9 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      // This fixture creates fresh children to exercise unrelated route
+      // contracts, whose setup must remain deterministic on loaded CI hosts.
+      '--no-load-admission',
       '--initialize-timeout-ms',
       String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
@@ -344,7 +350,7 @@ describe('qwen serve — capabilities envelope', () => {
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
-    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `packages/sdk-typescript/src/daemon/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
     //
     // Conditional tags absent under this suite's spawn flags (no
@@ -396,8 +402,10 @@ describe('qwen serve — capabilities envelope', () => {
       'session_info',
       'session_source_metadata',
       'session_side_task',
+      'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
+      'session_turn_feedback',
       'session_attachments',
       'session_attachment_chunk_upload',
       'session_attachment_list',
@@ -412,6 +420,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_artifact_library',
       'workspace_artifact_library_stream',
       'session_sources',
+      'generated_ui_state',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -496,10 +505,14 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
+      'workspace_github_pr_files',
+      'workspace_git_log_exclude_refs',
       'workspace_git_worktrees',
       'workspace_git_check_ignore',
+      'workspace_input_history',
       'workspace_mcp_restart',
       'session_recap',
+      'session_mod_rows',
       'session_generation',
       'workspace_generation',
       'session_btw',
@@ -548,9 +561,13 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_live_state_batch',
+      'restart_recovery',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
+      'session_worktree_restore_v1',
+      'session_worktree_branch_v1',
+      'session_worktree_handoff_v1',
       'voice_transcribe',
       'web_terminal',
     ]);
@@ -1498,5 +1515,96 @@ describe('qwen serve — prompt clientId admission', () => {
     // asynchronously; cancel so nothing lingers past the test.
     await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
     await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — archive coordinator over real HTTP', () => {
+  it('preserves original transcript records through real HTTP archive and unarchive', async () => {
+    const sessionIds = [randomUUID(), randomUUID()];
+    // Titles unique per attempt keep unarchive off its retitle-on-collision
+    // path, which legitimately appends a custom_title record to the restored
+    // transcript; a retried attempt would otherwise collide with the previous
+    // attempt's restored sessions.
+    const titles = sessionIds.map((sessionId) => `archive me ${sessionId}`);
+    const activePaths = sessionIds.map((sessionId, index) =>
+      writePersistedTranscript(sessionId, [
+        chatRecord(sessionId, 'u-1', null, titles[index]!),
+        chatRecord(sessionId, 'a-1', 'u-1', 'assistant reply to preserve'),
+        {
+          uuid: 'system-1',
+          parentUuid: 'a-1',
+          sessionId,
+          timestamp: '2026-07-08T00:00:02.000Z',
+          type: 'system',
+          subtype: 'custom_title',
+          cwd: REPO_ROOT,
+          version: '1.0.0',
+          systemPayload: {
+            customTitle: titles[index]!,
+            titleSource: 'auto',
+          },
+        },
+      ]),
+    );
+    const archivedPaths = activePaths.map((activePath) =>
+      path.join(path.dirname(activePath), 'archive', path.basename(activePath)),
+    );
+    const transcriptBytes = activePaths.map((activePath) =>
+      readFileSync(activePath),
+    );
+
+    const archived = await client.archiveSessionsData(sessionIds, {
+      requireIdle: false,
+    });
+    expect(archived.archived).toEqual(sessionIds);
+    expect(archived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(false);
+      expect(existsSync(archivedPaths[index]!)).toBe(true);
+      expect(readFileSync(archivedPaths[index]!)).toEqual(
+        transcriptBytes[index],
+      );
+    }
+
+    const unarchived = await client.unarchiveSessionsData(sessionIds);
+    expect(unarchived.unarchived).toEqual(sessionIds);
+    expect(unarchived.errors).toEqual([]);
+    for (const [index, activePath] of activePaths.entries()) {
+      expect(existsSync(activePath)).toBe(true);
+      expect(existsSync(archivedPaths[index]!)).toBe(false);
+      expect(readFileSync(activePath)).toEqual(transcriptBytes[index]);
+    }
+    expect(
+      (await fetch(`${base}/health`)).status,
+      'daemon remains healthy after both batches',
+    ).toBe(200);
+  });
+
+  it('refuses a dangling sidecar symlink over real HTTP and leaves the transcript active', async () => {
+    const sessionId = randomUUID();
+    const activePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u-1', null, 'do not archive'),
+    ]);
+    const sidecarPath = activePath.replace(/\.jsonl$/, '.worktree.json');
+    symlinkSync(path.join(homeDir, 'missing-sidecar-target'), sidecarPath);
+    const archivedPath = path.join(
+      path.dirname(activePath),
+      'archive',
+      path.basename(activePath),
+    );
+
+    const result = await client.archiveSessionsData([sessionId], {
+      requireIdle: false,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        sessionId,
+        error: expect.stringContaining('unsafe sidecar file type'),
+      }),
+    ]);
+    expect(existsSync(activePath)).toBe(true);
+    expect(existsSync(archivedPath)).toBe(false);
   });
 });

@@ -40,15 +40,15 @@ class ManagedClientFilesRetirementTest {
         }
         assertThat(deleted).isFalse();
         String retiringScope = ManagedSessionStore.sessionScopeKey("tenant", "retiring");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE session_scope_key = ?",
-                Long.class, retiringScope)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_binding WHERE session_scope_key = ?",
-                Long.class, retiringScope)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE tenant_id = ? AND session_id = ?",
+                Long.class, "tenant", "retiring")).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_binding WHERE tenant_id = ? AND session_id = ?",
+                Long.class, "tenant", "retiring")).isZero();
         // A session that is not retired keeps its relay rows.
         String protectedScope = ManagedSessionStore.sessionScopeKey("tenant", "protected");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE session_scope_key = ?",
-                Long.class, protectedScope)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_binding WHERE session_scope_key = ?",
-                Long.class, protectedScope)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_request WHERE tenant_id = ? AND session_id = ?",
+                Long.class, "tenant", "protected")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_client_files_binding WHERE tenant_id = ? AND session_id = ?",
+                Long.class, "tenant", "protected")).isEqualTo(1);
     }
 }

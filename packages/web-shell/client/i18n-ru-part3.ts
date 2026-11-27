@@ -16,7 +16,7 @@ export const RU_PART3: Record<
   'daemon.usage.dailyTokensTitle': 'токены',
   'daemon.usage.dailyTokensSub': 'сумма токенов за день',
   'daemon.usage.dailySessionsTitle': 'сессии',
-  'daemon.usage.dailySessionsSub': 'активные сессии по дням',
+  'daemon.usage.dailySessionsSub': 'завершённые запуски по дням',
   'delete.cannotCurrent':
     'Нельзя удалить текущую сессию, пока она выполняется.',
   'delete.action': 'Удалить',
@@ -348,6 +348,9 @@ export const RU_PART3: Record<
   'scheduledTasks.delivery.channel': 'Канал доставки',
   'scheduledTasks.delivery.configuredGroupHint':
     'Сообщения отправляются в группу, заданную для этого канала.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Сообщения отправляются на конечную точку, заданную для этого канала.',
+  'scheduledTasks.delivery.endpoint': 'Конечная точка',
   'scheduledTasks.delivery.configuredHint':
     'Сообщения отправляются по адресу, заданному для этого канала.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -633,6 +636,13 @@ export const RU_PART3: Record<
   'sidebar.pinnedSessions': 'Закреплённые',
   'sidebar.sessionSort': 'Сортировка сессий',
   'sidebar.sessionDisplay': 'Параметры отображения',
+  'sidebar.groupBy': 'Группировать по',
+  'sidebar.groupWorkspace': 'Рабочая область',
+  'sidebar.groupActivityDate': 'Дата активности',
+  'sidebar.groupThisWeek': 'На этой неделе',
+  'sidebar.groupLast30Days': 'За последние 30 дней',
+  'sidebar.groupOlder': 'Ранее',
+  'sidebar.recentConversations': 'Недавние разговоры',
   'sidebar.sortBy': 'Сортировать',
   'sidebar.sortActivity': 'Недавняя активность',
   'sidebar.sortQuestion': 'Последний вопрос',
@@ -778,6 +788,8 @@ export const RU_PART3: Record<
   'sidebar.openWorkspaceTerminalFailed': 'Не удалось открыть терминал',
   'sidebar.openWorkspaceTerminalOpened': 'Терминал открыт в рабочей области',
   'sidebar.manageWorkspace': 'Управление',
+  'sidebar.trustWorkspace': 'Доверять рабочей области',
+  'sidebar.trustingWorkspace': 'Установка доверия…',
   'sidebar.reloadWorkspace': 'Перезагрузить среду',
   'sidebar.reloadWorkspaceFailed':
     'Не удалось перезагрузить среду рабочей области',
@@ -821,6 +833,13 @@ export const RU_PART3: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')} (отключено)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')}, ${v?.untrusted ?? 0} не загружено (папка без доверия). Включите security.folderTrust.enabled и доверьтесь папке или запустите qwen интерактивно для проверки.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Управление «${v?.facet ?? ''}» для ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Загрузка хуков…',
+  'workspaceHooks.empty': 'Для этой рабочей области хуки не настроены.',
+  'workspaceHooks.enabled': 'Включено',
+  'workspaceHooks.disabled': 'Отключено',
   'sidebar.forceRemoveWorkspace': 'Принудительно удалить',
   'sidebar.removeWorkspaceTitle': 'Удалить рабочую область',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -867,6 +886,8 @@ export const RU_PART3: Record<
   'sidebar.scheduledTasks': 'Задачи по расписанию',
   'sidebar.workflows': 'Воркфлоу',
   'sidebar.goals': 'Цели',
+  'sidebar.sessionGoal': (v) =>
+    `Цель: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.prWatches': 'Наблюдение за PR',
   'sidebar.themeLight': 'Переключить на светлую тему',
   'sidebar.themeDark': 'Переключить на тёмную тему',

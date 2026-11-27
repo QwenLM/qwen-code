@@ -79,6 +79,13 @@ export interface SpawnDaemonOptions {
   extraArgs?: string[];
   /** Optional env additions for the spawned daemon. */
   env?: Record<string, string>;
+  /**
+   * Patterns of inherited `process.env` keys to drop before merging `env`.
+   * Hermetic rigs use this to strip host-session leakage (`QWEN_*`,
+   * `OPENAI_*`, proxy vars) that would otherwise redirect storage or
+   * credentials inside the daemon and its ACP children.
+   */
+  envDrop?: readonly RegExp[];
 }
 
 export interface SpawnedDaemon {
@@ -118,14 +125,26 @@ export async function spawnDaemon(
     '127.0.0.1',
     '--workspace',
     workspaceCwd,
+    // Session contracts, not host-load admission, are under test here.
+    // Keep a shared runner's real load out of every fixture's creation
+    // path; a caller that tests the gate itself passes --load-admission
+    // in extraArgs, which yargs resolves last.
+    '--no-load-admission',
     '--initialize-timeout-ms',
     '60000',
     ...extraArgs,
   ];
 
+  const inheritedEnv = opts.envDrop?.length
+    ? Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => !opts.envDrop!.some((pattern) => pattern.test(key)),
+        ),
+      )
+    : process.env;
   const daemon = spawn(process.execPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...opts.env },
+    env: { ...inheritedEnv, ...opts.env },
   });
 
   const stdoutBuf = { value: '' };

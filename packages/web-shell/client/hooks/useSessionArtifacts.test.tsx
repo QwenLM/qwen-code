@@ -848,4 +848,194 @@ describe('useSessionArtifacts', () => {
       'reconciled-artifact',
     ]);
   });
+
+  it('shows the load-embedded snapshot while catching up, then the live fetch wins', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('early-artifact')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    const liveLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(liveLoad.promise);
+
+    await renderHookHost();
+    // The gated fetch is blocked by catchingUp, but the embedded snapshot is
+    // already visible so a session-level entry can render before the replay.
+    expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    sdkMock.connection.catchingUp = false;
+    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+    // The snapshot still supplies the list while the gated fetch is in flight,
+    // so the panel must not flip to a skeleton (early-list -> spinner flicker).
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+    await act(async () => {
+      liveLoad.resolve({ artifacts: [artifact('live-artifact')] });
+      await liveLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'live-artifact',
+    ]);
+  });
+
+  it('does not leak the previous session snapshot after an optimistic switch to a session without artifacts', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('a-only')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual(['a-only']);
+
+    // Optimistic switch: sessionId moves to B while the snapshot still carries
+    // A's id (the provider spreads ...current). B has no artifacts, so no new
+    // snapshot lands and the gated fetch stays blocked by catchingUp.
+    sdkMock.connection = {
+      ...sdkMock.connection,
+      sessionId: 'session-b',
+    };
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toEqual([]);
+  });
+
+  it('keeps the load-embedded snapshot when the first gated fetch fails', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('early-artifact')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    const failedLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(failedLoad.promise);
+
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    // Catch-up clears and the gated fetch rejects once (a daemon restart or a
+    // transient 5xx at exactly the moment this feature exploits). The snapshot
+    // must keep showing: a cached [] would shadow it for the hook's whole life,
+    // since ?? does not fall through on a defined empty array.
+    sdkMock.connection.catchingUp = false;
+    await rerenderHookHost();
+    await act(async () => {
+      failedLoad.reject(new Error('Failed to fetch'));
+      await failedLoad.promise.catch(() => undefined);
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    // A *successful* fetch still wins over the snapshot — even an empty one,
+    // because success records a hydrated owner (the fix keys on that, not on
+    // the snapshot's presence alone).
+    const recoveryLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(recoveryLoad.promise);
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    await act(async () => {
+      recoveryLoad.resolve({ artifacts: [] });
+      await recoveryLoad.promise;
+    });
+    expect(latestState?.artifacts).toEqual([]);
+    expect(latestState?.hydrated).toBe(true);
+  });
+
+  describe('click-time artifact count hint', () => {
+    it('exposes the hint while no authoritative data exists', async () => {
+      sdkMock.connection = {
+        status: 'connecting',
+        sessionId: 'session-b',
+        capabilities: { features: ['session_artifacts'] },
+        artifactCountHint: 4,
+        artifactCountHintSessionId: 'session-b',
+      };
+      await renderHookHost();
+      expect(latestState?.artifactCountHint).toBe(4);
+      expect(latestState?.artifacts).toEqual([]);
+      expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
+    });
+
+    it('withholds the hint when it belongs to another session (optimistic switch)', async () => {
+      sdkMock.connection = {
+        status: 'connecting',
+        sessionId: 'session-b',
+        capabilities: { features: ['session_artifacts'] },
+        artifactCountHint: 4,
+        artifactCountHintSessionId: 'session-a',
+      };
+      await renderHookHost();
+      expect(latestState?.artifactCountHint).toBeUndefined();
+    });
+
+    it('ignores a zero hint (no entry to show)', async () => {
+      sdkMock.connection = {
+        status: 'connecting',
+        sessionId: 'session-b',
+        capabilities: { features: ['session_artifacts'] },
+        artifactCountHint: 0,
+        artifactCountHintSessionId: 'session-b',
+      };
+      await renderHookHost();
+      expect(latestState?.artifactCountHint).toBeUndefined();
+    });
+
+    it('retires the hint once the keyed restored snapshot lands', async () => {
+      sdkMock.connection = {
+        status: 'connected',
+        sessionId: 'session-b',
+        capabilities: { features: ['session_artifacts'] },
+        catchingUp: true,
+        artifactCountHint: 4,
+        artifactCountHintSessionId: 'session-b',
+      };
+      await renderHookHost();
+      expect(latestState?.artifactCountHint).toBe(4);
+
+      sdkMock.connection.restoredArtifacts = [artifact('restored')];
+      sdkMock.connection.restoredArtifactsSessionId = 'session-b';
+      await rerenderHookHost();
+      expect(latestState?.artifactCountHint).toBeUndefined();
+      expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+        'restored',
+      ]);
+    });
+
+    it('retires the hint once the gated fetch caches a list, even an empty one', async () => {
+      sdkMock.connection = {
+        status: 'connected',
+        sessionId: 'session-b',
+        capabilities: { features: ['session_artifacts'] },
+        catchingUp: false,
+        artifactCountHint: 4,
+        artifactCountHintSessionId: 'session-b',
+      };
+      const load = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+      sdkMock.actions.loadArtifacts.mockReturnValueOnce(load.promise);
+      await renderHookHost();
+      expect(latestState?.artifactCountHint).toBe(4);
+
+      await act(async () => {
+        load.resolve({ artifacts: [] });
+        await load.promise;
+      });
+      expect(latestState?.artifactCountHint).toBeUndefined();
+      expect(latestState?.artifacts).toEqual([]);
+    });
+  });
 });

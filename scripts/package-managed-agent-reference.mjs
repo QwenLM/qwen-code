@@ -62,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
@@ -409,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(
@@ -439,12 +444,19 @@ export async function createReferenceDistribution({
   }
   const lifecycleV2ProfilesDefault = uniqueMatch(
     withoutComments(hostedHarnessContract),
-    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
+    // The default may wrap across lines (Prettier splits a long `??`), so allow
+    // an optional newline between the operator and the literal.
+    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*\r?\n?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+  // D3: ordinary files closes on v2 too, so the reference distribution advertises
+  // files alongside canonical Shell by default; external-files keeps v1.
+  if (
+    lifecycleV2ProfilesDefault !==
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
+  ) {
     throw new Error(
-      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+      'Hosted lifecycle v2 profiles must default to canonical files and Shell.',
     );
   }
 

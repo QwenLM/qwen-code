@@ -5,15 +5,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
+import postcss from 'postcss';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
+import chatStyles from './ChatEditor.module.css';
 import {
   GitModePopover,
   type SessionGitIntent,
   validateBranchName,
 } from './GitModePopover';
+import popoverStyles from './GitModePopover.module.css';
+
+function compileComponentStyles(): string {
+  const sources: Array<{ file: string; styles: Record<string, string> }> = [
+    { file: './ChatEditor.module.css', styles: chatStyles },
+    { file: './GitModePopover.module.css', styles: popoverStyles },
+  ];
+  return sources
+    .map(({ file, styles }) => {
+      const root = postcss.parse(
+        readFileSync(resolve(__dirname, file), 'utf8'),
+      );
+      root.walkAtRules((atRule) => {
+        atRule.remove();
+      });
+      root.walkRules((rule) => {
+        rule.selector = rule.selector.replace(
+          /\.([A-Za-z_][A-Za-z0-9_-]*)/g,
+          (_, name: string) => `.${styles[name] ?? name}`,
+        );
+      });
+      return root.toString();
+    })
+    .join('\n');
+}
 
 describe('GitModePopover worktree selection', () => {
   let container: HTMLDivElement;
@@ -32,12 +62,20 @@ describe('GitModePopover worktree selection', () => {
     container.remove();
   });
 
-  async function render(intent: SessionGitIntent) {
+  async function render(
+    intent: SessionGitIntent,
+    status?: DaemonWorkspaceGitStatus,
+    compact = false,
+    showDetails = true,
+  ) {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
           <GitModePopover
             branch="main"
+            status={status}
+            compact={compact}
+            showDetails={showDetails}
             intent={intent}
             onIntentChange={onIntentChange}
           />
@@ -84,13 +122,145 @@ describe('GitModePopover worktree selection', () => {
     expect(worktreeOption().textContent).toContain('✓');
     expect(
       document.querySelector('[data-slot="popover-content"]')?.textContent,
-    ).toContain('$ git worktree add .qwen/worktrees/<slug>');
+    ).toContain('$ git worktree add --detach .qwen/worktrees/<slug>');
     expect(
       document.querySelector('[data-testid="git-mode-confirm-worktree"]'),
     ).toBeNull();
     expect(onIntentChange).toHaveBeenCalledExactlyOnceWith({
       mode: 'worktree',
     });
+  });
+
+  it('keeps compact status visible without changing intent actions', async () => {
+    await render(
+      { mode: 'current' },
+      {
+        v: 2,
+        workspaceCwd: '/tmp/test-project',
+        branch: 'main',
+        conflicted: 1,
+      },
+      true,
+    );
+    const chip = container.querySelector('[data-testid="git-mode-chip"]');
+    expect(chip?.getAttribute('aria-label')).toMatch(/^Git mode: main — /);
+    expect(container.querySelector('[data-tone="error"]')).not.toBeNull();
+    await openPopover();
+    await act(async () => worktreeOption().click());
+    expect(onIntentChange).toHaveBeenCalledExactlyOnceWith({
+      mode: 'worktree',
+    });
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    await render({ mode: 'current' });
+    expect(container.querySelector('[data-tone]')).toBeNull();
+  });
+
+  it('computes visible compact severity dots and hides label/chevron across status tones', async () => {
+    const style = document.createElement('style');
+    style.textContent = compileComponentStyles();
+    document.head.appendChild(style);
+    try {
+      const cases = [
+        {
+          status: {
+            v: 2 as const,
+            workspaceCwd: '/tmp/test-project',
+            branch: 'main',
+            conflicted: 1,
+          },
+          expectedTone: 'error',
+        },
+        {
+          status: {
+            v: 2 as const,
+            workspaceCwd: '/tmp/test-project',
+            branch: 'main',
+            operation: 'rebase' as const,
+          },
+          expectedTone: 'warning',
+        },
+        {
+          status: {
+            v: 2 as const,
+            workspaceCwd: '/tmp/test-project',
+            branch: null,
+            detached: true,
+          },
+          expectedTone: 'warning',
+        },
+        {
+          status: {
+            v: 2 as const,
+            workspaceCwd: '/tmp/test-project',
+            branch: 'main',
+            staged: 1,
+          },
+          expectedTone: 'accent',
+        },
+      ];
+
+      for (const { status, expectedTone } of cases) {
+        await render({ mode: 'current' }, status, true);
+        const dot = container.querySelector('[data-tone]');
+        expect(dot?.getAttribute('data-tone')).toBe(expectedTone);
+        expect(getComputedStyle(dot!).display).toBe('block');
+
+        const label = container.querySelector(`.${chatStyles.gitBranchText}`);
+        const chevron = container.querySelector(`.${popoverStyles.chevron}`);
+        expect(label).not.toBeNull();
+        expect(chevron).not.toBeNull();
+        expect(getComputedStyle(label!).display).toBe('none');
+        expect(getComputedStyle(chevron!).display).toBe('none');
+      }
+
+      await render({ mode: 'current' }, cases[0].status, false);
+      const expandedDot = container.querySelector('[data-tone]');
+      expect(expandedDot).not.toBeNull();
+      expect(getComputedStyle(expandedDot!).display).toBe('none');
+
+      await render(
+        { mode: 'current' },
+        {
+          v: 2,
+          workspaceCwd: '/tmp/test-project',
+          branch: 'main',
+          computedAt: 1,
+        },
+        true,
+      );
+      expect(container.querySelector('[data-tone]')).toBeNull();
+
+      await render(
+        { mode: 'current' },
+        {
+          v: 2,
+          workspaceCwd: '/tmp/test-project',
+          branch: 'main',
+          operation: 'rebase',
+          conflicted: 2,
+        },
+        false,
+        false,
+      );
+      const mediumDot = container.querySelector('[data-tone]');
+      const mediumLabel = container.querySelector(
+        `.${chatStyles.gitBranchText}`,
+      );
+      const mediumChevron = container.querySelector(
+        `.${popoverStyles.chevron}`,
+      );
+      const mediumIndicators = container.querySelector(
+        `.${chatStyles.gitBranchIndicators}`,
+      );
+      expect(mediumDot?.getAttribute('data-tone')).toBe('error');
+      expect(getComputedStyle(mediumDot!).display).toBe('block');
+      expect(getComputedStyle(mediumLabel!).display).not.toBe('none');
+      expect(getComputedStyle(mediumChevron!).display).not.toBe('none');
+      expect(mediumIndicators).toBeNull();
+    } finally {
+      style.remove();
+    }
   });
 });
 

@@ -26,7 +26,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkArtifacts,
   checkBoundary,
+  checkExecutionRecord,
   checkMutationCoverage,
+  checkTrustClassification,
+  containerNonceErrors,
   isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -35,6 +38,11 @@ const SCRIPT = fileURLToPath(
 );
 const HEAD = 'b'.repeat(40);
 
+// The container-local nonce plaintext and its hash. The gate record carries
+// only the hash (R16-1); a round log must echo a container-nonce line whose
+// value hashes to it for the checker to accept mode:"container".
+const NONCE = '0123456789abcdef0123456789abcdef';
+const NONCE_SHA256 = createHash('sha256').update(NONCE).digest('hex');
 const GATE_RECORD = JSON.stringify({
   gate: 'require-isolation',
   passed: true,
@@ -42,6 +50,7 @@ const GATE_RECORD = JSON.stringify({
   signals: ['container=qwen-verify', '/.dockerenv'],
   observed: ['/.dockerenv'],
   credentialFree: true,
+  nonceSha256: NONCE_SHA256,
 });
 const APPROVAL =
   'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1234567890';
@@ -84,6 +93,8 @@ function makeArtifactDir(files, evidence = []) {
   }
   if (files.boundaryGate !== undefined) {
     writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    // The battery echoes the container-local nonce into its logs (R16-1).
+    writeFileSync(join(dir, 'harness.log'), `container-nonce: ${NONCE}\n`);
   }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
@@ -755,7 +766,7 @@ describe('checkBoundary', () => {
   it('refuses an unknown mode', () => {
     expect(
       checkBoundary(JSON.stringify({ mode: 'host' })).errors.join('\n'),
-    ).toMatch(/mode must be one of container \| vm \| waived/);
+    ).toMatch(/mode must be one of container \| microvm \| vm \| waived/);
   });
 
   it('refuses a container declaration without a detail', () => {
@@ -1250,6 +1261,10 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       JSON.stringify({ mode: 'container', detail: 'test boundary' }),
     );
     writeFileSync(join(artifacts, 'boundary-gate.json'), GATE_RECORD);
+    writeFileSync(
+      join(artifacts, 'harness.log'),
+      `container-nonce: ${NONCE}\n`,
+    );
     writeFileSync(
       join(artifacts, 'report.md'),
       `merge-ready · 1 passed · 0 failed · 1 total · ${base}\n`,
@@ -2489,6 +2504,330 @@ describe('round-15 witnesses', () => {
   });
 });
 
+describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
+  const boundary = JSON.stringify({
+    mode: 'container',
+    detail: 'node:22-bookworm, --network none',
+  });
+  const gateWith = (extra = {}) =>
+    JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      observed: ['/.dockerenv'],
+      signals: ['/.dockerenv'],
+      credentialFree: true,
+      nonceSha256: NONCE_SHA256,
+      ...extra,
+    });
+  const dirWithLog = (line) => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-'));
+    tmpDirs.push(dir);
+    if (line !== null) writeFileSync(join(dir, 'harness.log'), line);
+    return dir;
+  };
+
+  it('accepts a container claim whose log line hashes to the record', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('finds the nonce line in a nested log directory', () => {
+    const dir = dirWithLog(null);
+    mkdirSync(join(dir, 'logs'));
+    writeFileSync(join(dir, 'logs', 'run.log'), `container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R1-2/R2-5: the checker is the single authoritative matcher and reads each
+  // file whole (aggregate-bounded), so a 17 MiB log with the nonce on line 1
+  // is accepted, and so is a marker sitting BEHIND >1 MiB of earlier output
+  // (a consolidated harness.log) — a per-file prefix cap would falsely refuse
+  // both. The aggregate budget, not a per-file cap, bounds the work.
+  it('accepts a nonce line at the start of a 17 MiB log', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'big.log'),
+      `container-nonce: ${NONCE}\n` + 'x'.repeat(17 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker behind more than 1 MiB of earlier output', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R2-6: pin the checker's own line semantics (the shell no longer mirrors
+  // them). The marker may sit anywhere on the line (not anchored), and the
+  // WHOLE first whitespace-delimited token is hashed (a suffix changes it).
+  it('matches a marker preceded by other text on the line', () => {
+    const dir = dirWithLog(`[12:04] container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('hashes the whole first token, so a suffix breaks the match', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}XYZ\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('matches a marker line split across read chunks', () => {
+    const dir = dirWithLog(null);
+    // Pad to just under a chunk so the marker line straddles the 1 MiB boundary.
+    const pad = 'x'.repeat(1024 * 1024 - 10);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `${pad}\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-1: the byte budget must not be charged against the binary evidence/
+  // subtree, or a compliant round with large evidence is refused even though
+  // harness.log carries the marker.
+  it('accepts a marker when evidence alone exceeds the byte budget', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    mkdirSync(join(dir, 'evidence'));
+    writeFileSync(
+      join(dir, 'evidence', 'big.png'),
+      'x'.repeat(65 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-3: a marker line with no trailing newline is still matched (final carry),
+  // including at the end of a multi-MiB no-newline file (capped carry, bounded).
+  it('matches a marker line with no trailing newline', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('matches a marker at the end of a no-newline multi-MiB file', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `container-nonce: ${NONCE}`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-2: the matcher's own CRLF / NUL witnesses (the shell no longer mirrors it).
+  it('accepts a CRLF-terminated marker line', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\r\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker in a log that also contains a NUL byte', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `PASS\x00cell\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-3: a compliant marker line straddling a chunk boundary with >256 B of
+  // itself before the boundary must still be found. A complete line precedes it
+  // so the chunk has a newline (lastNl >= 0): the marker sits in the partial
+  // line after that newline, which must be SCANNED before the carry is capped,
+  // or the marker at its head is dropped and the round falsely refused.
+  it('accepts a marker line straddling a chunk boundary with >256 B before it', () => {
+    const dir = dirWithLog(null);
+    const lineA = 'x'.repeat(1024 * 1024 - 500 - 1) + '\n';
+    const lineB = `container-nonce: ${NONCE} ` + 'y'.repeat(599);
+    writeFileSync(join(dir, 'harness.log'), lineA + lineB + '\n');
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R4-1: exhausting the byte budget before reaching the marker gives a
+  // bound-specific refusal, not the false "no matching line" diagnosis.
+  it('gives a bound-specific refusal when the marker is beyond the byte budget', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-4: directories count against the entry cap, so a planted forest of empty
+  // dirs trips the bound (bounded message) rather than walking unbounded.
+  it('counts directories against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) mkdirSync(join(dir, `d${i}`));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R5-3: regular files count against the entry cap too — the byte budget
+  // cannot bound zero-byte logs, so the file branch's visited++ is the only
+  // bound left. Deleting it must red this: the walk would otherwise traverse
+  // an unbounded number of empty files before answering (a hang, not a refusal).
+  it('counts files against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) writeFileSync(join(dir, `f${i}`), '');
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-5: only the TOP-LEVEL evidence/ subtree is exempt; a nested dir named
+  // evidence (under logs/) is still scanned, so a marker there is found.
+  it('scans a nested evidence dir that is not the top-level subtree', () => {
+    const dir = dirWithLog(null);
+    mkdirSync(join(dir, 'logs', 'evidence'), { recursive: true });
+    writeFileSync(
+      join(dir, 'logs', 'evidence', 'run.log'),
+      `container-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('refuses a plaintext-only legacy record with no nonceSha256', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    const legacy = JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      observed: ['/.dockerenv'],
+      signals: ['/.dockerenv'],
+      credentialFree: true,
+      nonce: NONCE,
+    });
+    expect(containerNonceErrors(boundary, legacy, dir).join('\n')).toMatch(
+      /records no nonceSha256/,
+    );
+  });
+
+  it('refuses a non-hex nonceSha256', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    expect(
+      containerNonceErrors(
+        boundary,
+        gateWith({ nonceSha256: 'xyz' }),
+        dir,
+      ).join('\n'),
+    ).toMatch(/records no nonceSha256/);
+  });
+
+  it('refuses when a log line hashes differently from the record', () => {
+    const dir = dirWithLog('container-nonce: deadbeef\n');
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('refuses when the round dir carries no nonce line at all', () => {
+    const dir = dirWithLog(null);
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('does not follow a symlinked log outside the round dir', () => {
+    const dir = dirWithLog(null);
+    const outside = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-src-'));
+    tmpDirs.push(outside);
+    writeFileSync(join(outside, 'src.log'), `container-nonce: ${NONCE}\n`);
+    symlinkSync(join(outside, 'src.log'), join(dir, 'link.log'));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('names maintainer approval for a waiver, not a free bypass (D17-2)', () => {
+    const dir = dirWithLog(null);
+    const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(message).toMatch(/maintainer's approval/);
+    expect(message).toMatch(/not a free bypass/);
+  });
+
+  it('exempts the ci-lane record and non-container modes', () => {
+    const dir = dirWithLog(null);
+    expect(
+      containerNonceErrors(
+        boundary,
+        JSON.stringify({ gate: 'ci-lane', passed: true }),
+        dir,
+      ),
+    ).toEqual([]);
+    expect(
+      containerNonceErrors(JSON.stringify({ mode: 'waived' }), gateWith(), dir),
+    ).toEqual([]);
+    expect(
+      containerNonceErrors(JSON.stringify({ mode: 'vm' }), gateWith(), dir),
+    ).toEqual([]);
+  });
+
+  it('leaves a missing or invalid gate to gateRecordErrors', () => {
+    const dir = dirWithLog(null);
+    expect(containerNonceErrors(boundary, null, dir)).toEqual([]);
+    expect(containerNonceErrors(boundary, '{bad', dir)).toEqual([]);
+    expect(
+      containerNonceErrors(boundary, gateWith({ passed: false }), dir),
+    ).toEqual([]);
+  });
+
+  it('the CLI refuses a container round whose logs lack the nonce line', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  // R1-7: the exemption is the record, not the flag. A local run that passes
+  // --publish-lane with a require-isolation record and no nonce line is still
+  // refused; the ci-lane record the publish job writes stays exempt.
+  it('refuses a no-nonce require-isolation round even under --publish-lane', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  it('exempts the ci-lane record under --publish-lane without a nonce line', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundaryGate: JSON.stringify({ gate: 'ci-lane', passed: true }),
+      }),
+    );
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(0);
+  });
+
+  // R2-7: $QWEN_VERIFY_CONTEXT non-empty must not switch the binding off for a
+  // require-isolation container claim — the exemption is the record, not a flag.
+  it('refuses a no-nonce require-isolation round even with QWEN_VERIFY_CONTEXT set', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '1' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+});
+
 describe('R17-1 / R2-1 trust-boundary witnesses', () => {
   // The trust refusal must fail closed on the layouts the path-string test
   // missed, and a hard link must not let a PR-writable snapshot judge its own
@@ -2505,6 +2844,7 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
     writeFileSync(join(dir, 'assertions.json'), files.assertions);
     writeFileSync(join(dir, 'boundary.json'), files.boundary);
     writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    writeFileSync(join(dir, 'harness.log'), `container-nonce: ${NONCE}\n`);
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
   };
   const snapshot = JSON.stringify({
@@ -2818,5 +3158,682 @@ describe('isFilesystemRoot', () => {
     expect(isFilesystemRoot('C:\\Users')).toBe(false);
     expect(isFilesystemRoot('C:')).toBe(false);
     expect(isFilesystemRoot('')).toBe(false);
+  });
+});
+
+describe('checkExecutionRecord and microvm/provider-vm gate', () => {
+  const BASE_OID = 'a'.repeat(40);
+  const SHA = (ch) => ch.repeat(64);
+  const sha256 = (text) =>
+    createHash('sha256').update(text, 'utf8').digest('hex');
+
+  const ANCHOR = {
+    expectedHead: HEAD,
+    coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+  };
+
+  function makeExecRecord(overrides = {}) {
+    return {
+      schemaVersion: 'verify-pr-exec-record-v1',
+      runId: 'fc-run-01',
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      contextDigest: SHA('0'),
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      backend: 'firecracker',
+      backendVersion: 'v1.18.0',
+      platform: 'linux-aarch64',
+      kernelDigest: SHA('1'),
+      rootfsDigest: SHA('2'),
+      trustedInputDigest: SHA('3'),
+      launchPolicyDigest: SHA('4'),
+      startedAt: '2026-11-23T11:00:00Z',
+      endedAt: '2026-11-23T11:00:08Z',
+      destroyedAt: '2026-11-23T11:00:09Z',
+      supervisorPid: 20001,
+      workerPid: 20002,
+      workerExe: '/firecracker-v1.18.0-aarch64',
+      workerExitEvidence: 'absent',
+      teardownStatus: 'destroyed',
+      diskDestroyed: true,
+      tokenRevoked: true,
+      outputStatus: 'complete',
+      ...overrides,
+    };
+  }
+
+  function makeMicrovmBoundary(record, recordText, overrides = {}) {
+    return {
+      mode: record.backend === 'provider-vm' ? 'vm' : 'microvm',
+      backend: record.backend,
+      executionClass: record.executionClass,
+      prTrust: record.prTrust,
+      runId: record.runId,
+      headRefOid: record.headRefOid,
+      executionRecordSha256: sha256(recordText),
+      writtenAfterTeardown: true,
+      ...overrides,
+    };
+  }
+
+  it('accepts a valid firecracker execution record and matching microvm boundary', () => {
+    const rec = makeExecRecord();
+    const recText = JSON.stringify(rec);
+    const recSha = sha256(recText);
+    const result = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Firecracker microVM (hardware-isolated).\n`,
+        boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      executionRecordText: recText,
+      executionRecordSha256: recSha,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('refuses an execution record presented without host-held anchoring coordinates', () => {
+    // A self-consistent forged record with no --context must NOT pass: repo and
+    // headRefOid would otherwise only be shape-checked (single-signal probe gap).
+    const recText = JSON.stringify(makeExecRecord({ repo: 'evil/repo' }));
+    const unanchored = checkExecutionRecord(recText);
+    expect(unanchored.errors.join('\n')).toMatch(
+      /requires a host-held --context to anchor repo, pr, and headRefOid/,
+    );
+    expect(unanchored.errors.join('\n')).toMatch(
+      /requires a host-held --context headRefOid/,
+    );
+
+    const wrongRepo = checkExecutionRecord(recText, { ...ANCHOR });
+    expect(wrongRepo.errors.join('\n')).toMatch(
+      /not this round's QwenLM\/qwen-code#17185/,
+    );
+
+    const movedHead = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ headRefOid: 'c'.repeat(40) })),
+      { ...ANCHOR },
+    );
+    expect(movedHead.errors.join('\n')).toMatch(/does not match expected head/);
+
+    const badSchema = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ schemaVersion: 'poc-exec-record-v1' })),
+      { ...ANCHOR },
+    );
+    expect(badSchema.errors.join('\n')).toMatch(/schemaVersion must be/);
+
+    const badSupervisor = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ supervisorPid: 0.5 })),
+      { ...ANCHOR },
+    );
+    expect(badSupervisor.errors.join('\n')).toMatch(
+      /supervisorPid must be an integer/,
+    );
+  });
+
+  it('accepts a valid provider-vm execution record and mode vm boundary', () => {
+    const rec = makeExecRecord({
+      backend: 'provider-vm',
+      backendVersion: 'aliyun-ecs-2014-05-26',
+      platform: 'aliyun-cn-hangzhou',
+      providerLifecycle: {
+        allocationId: 'i-bp1test001',
+        freshDiskId: 'd-bp1test001',
+        boundRunId: 'fc-run-01',
+        boundHeadRefOid: HEAD,
+        terminationState: 'terminated',
+        diskDeleted: true,
+      },
+    });
+    const recText = JSON.stringify(rec);
+    const result = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Disposable Aliyun provider-vm (hardware-isolated).\n`,
+        boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      executionRecordText: recText,
+      executionRecordSha256: sha256(recText),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('refuses mode microvm or backend provider-vm without a host execution record', () => {
+    const rec = makeExecRecord();
+    const recText = JSON.stringify(rec);
+    expect(
+      checkBoundary(
+        JSON.stringify(makeMicrovmBoundary(rec, recText)),
+      ).errors.join('\n'),
+    ).toMatch(/requires a host-held --execution-record/);
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'vm', backend: 'provider-vm' }),
+      ).errors.join('\n'),
+    ).toMatch(/requires a host-held --execution-record/);
+  });
+
+  it('refuses incomplete outputStatus, undestroyed teardown, live worker, and missing disk/token cleanup', () => {
+    for (const [override, pattern] of [
+      [{ outputStatus: 'truncated' }, /outputStatus must be "complete"/],
+      [{ outputStatus: 'timeout' }, /outputStatus must be "complete"/],
+      [{ teardownStatus: 'running' }, /teardownStatus must be "destroyed"/],
+      [{ teardownStatus: 'failed' }, /teardownStatus must be "destroyed"/],
+      [{ workerExitEvidence: 'alive' }, /workerExitEvidence must be "absent"/],
+      [{ diskDestroyed: false }, /diskDestroyed must be true/],
+      [{ tokenRevoked: false }, /tokenRevoked must be true/],
+    ]) {
+      const checkRes = checkExecutionRecord(
+        JSON.stringify(makeExecRecord(override)),
+        { ...ANCHOR },
+      );
+      expect(checkRes.errors.join('\n')).toMatch(pattern);
+    }
+  });
+
+  it('refuses external/unknown PRs on trusted-shared-kernel and container backends claiming hardware-isolated', () => {
+    for (const prTrust of ['external', 'unknown']) {
+      const res = checkExecutionRecord(
+        JSON.stringify(
+          makeExecRecord({
+            prTrust,
+            executionClass: 'trusted-shared-kernel',
+            backend: 'container',
+          }),
+        ),
+        { ...ANCHOR },
+      );
+      expect(res.errors.join('\n')).toMatch(
+        /requires executionClass=hardware-isolated/,
+      );
+    }
+    const fakeHw = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          executionClass: 'hardware-isolated',
+          backend: 'docker',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(fakeHw.errors.join('\n')).toMatch(
+      /executionClass=hardware-isolated requires backend in/,
+    );
+  });
+
+  it('refuses provider-vm records missing termination or disk deletion proof', () => {
+    const missing = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ backend: 'provider-vm' })),
+      { expectedHead: HEAD },
+    );
+    expect(missing.errors.join('\n')).toMatch(/providerLifecycle is required/);
+
+    const alive = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          backend: 'provider-vm',
+          providerLifecycle: {
+            allocationId: 'i-1',
+            freshDiskId: 'd-1',
+            boundRunId: 'fc-run-01',
+            boundHeadRefOid: HEAD,
+            terminationState: 'running',
+            diskDeleted: false,
+          },
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(alive.errors.join('\n')).toMatch(
+      /terminationState must be "terminated"/,
+    );
+    expect(alive.errors.join('\n')).toMatch(/diskDeleted must be true/);
+  });
+
+  it('refuses headRefOid mismatch and coordinate mismatch', () => {
+    const moved = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ headRefOid: 'c'.repeat(40) })),
+      { expectedHead: HEAD },
+    );
+    expect(moved.errors.join('\n')).toMatch(/does not match expected head/);
+
+    const wrongPr = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ pr: 12345 })),
+      {
+        expectedHead: HEAD,
+        coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      },
+    );
+    expect(wrongPr.errors.join('\n')).toMatch(
+      /not this round's QwenLM\/qwen-code#17185/,
+    );
+
+    const wrongCtxSha = checkExecutionRecord(JSON.stringify(makeExecRecord()), {
+      ...ANCHOR,
+      expectedContextSha256: SHA('9'),
+    });
+    expect(wrongCtxSha.errors.join('\n')).toMatch(
+      /contextDigest .* does not match host context sha256/,
+    );
+
+    const downgraded = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          prTrust: 'collaborator',
+          executionClass: 'trusted-shared-kernel',
+          backend: 'container',
+        }),
+      ),
+      {
+        ...ANCHOR,
+        requiredExecutionClass: 'hardware-isolated',
+      },
+    );
+    expect(downgraded.errors.join('\n')).toMatch(
+      /violates host context requirement executionClass=hardware-isolated/,
+    );
+
+    const badTime = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          startedAt: '1',
+          endedAt: '2026-11-23T10:00:00Z',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(badTime.errors.join('\n')).toMatch(
+      /valid ISO startedAt and endedAt/,
+    );
+
+    const reversedTime = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          startedAt: '2026-11-23T11:00:10Z',
+          endedAt: '2026-11-23T11:00:05Z',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(reversedTime.errors.join('\n')).toMatch(
+      /endedAt must not precede startedAt/,
+    );
+
+    const waivedConflict = checkBoundary(
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        reason: 'test',
+        approval: APPROVAL,
+      }),
+      null,
+      { executionRecord: makeExecRecord() },
+    );
+    expect(waivedConflict.errors.join('\n')).toMatch(
+      /mode waived contradicts a host --execution-record/,
+    );
+  });
+
+  it('CLI accepts a host-held --execution-record with matching --execution-record-sha256 and refuses tampered, linked, in-tree, or guest-planted records', () => {
+    const base = mkdtempSync(join(tmpdir(), 'verify-pr-exec-rec-'));
+    tmpDirs.push(base);
+    const clone = join(base, 'clone');
+    const dir = join(clone, 'tmp', 'pr17185-verify-20261123');
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+
+    const files = validFiles({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Firecracker microVM (hardware-isolated).\n`,
+      boundaryGate: undefined,
+    });
+    writeFileSync(join(dir, 'report.md'), files.report);
+    writeFileSync(join(dir, 'verdict.txt'), files.verdict);
+    writeFileSync(join(dir, 'assertions.json'), files.assertions);
+
+    const run = (args) =>
+      spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+
+    // Host-held context anchoring the record to this round (required since
+    // an execution record without --context cannot be anchored).
+    const hostCtx = join(base, 'host-context.json');
+    const ctxText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        escalationReasons: [],
+        headRefOid: HEAD,
+      },
+    });
+    writeFileSync(hostCtx, ctxText);
+    const ctxSha = sha256(ctxText);
+    const anchor = ['--context', hostCtx, '--context-sha256', ctxSha];
+
+    // Rebuild the record bound to the real context digest so the positive
+    // control exercises anchoring + contextDigest binding together.
+    const boundRec = makeExecRecord({ contextDigest: ctxSha });
+    const boundRecText = JSON.stringify(boundRec, null, 2);
+    const boundRecSha = sha256(boundRecText);
+    const hostRec = join(base, 'host-execution-record.json');
+    writeFileSync(hostRec, boundRecText);
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+
+    // 1. Valid host-held record with digest binding AND anchoring context exits 0
+    const ok = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toMatch(/ok: verdict=merge-ready/);
+
+    // 1b. An otherwise valid record presented WITHOUT a --context anchor is refused
+    const noAnchor = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(noAnchor.status).toBe(1);
+    expect(noAnchor.stdout).toMatch(
+      /requires a host-held --context to anchor repo, pr, and headRefOid/,
+    );
+
+    // 2. Wrong sha256 fails closed
+    const badSha = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      SHA('f'),
+      dir,
+    ]);
+    expect(badSha.status).toBe(1);
+    expect(badSha.stderr).toMatch(/does not match --execution-record-sha256/);
+
+    // 3. --execution-record-sha256 without --execution-record is usage error 2
+    const orphanSha = run(['--execution-record-sha256', boundRecSha, dir]);
+    expect(orphanSha.status).toBe(2);
+
+    // 4. Execution record placed inside PR-writable clone is refused
+    const inTreeRec = join(clone, 'in-tree-record.json');
+    writeFileSync(inTreeRec, boundRecText);
+    const inTree = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      inTreeRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(inTree.status).toBe(1);
+    expect(inTree.stderr).toMatch(
+      /must not point inside the PR-writable worktree/,
+    );
+
+    // 5. Symlink --execution-record is refused
+    const symRec = join(base, 'sym-record.json');
+    symlinkSync(hostRec, symRec);
+    const symRes = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      symRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(symRes.status).toBe(1);
+    expect(symRes.stderr).toMatch(/missing or unreadable/);
+
+    // 6. Hardlink alias on --execution-record is refused
+    const linkedSource = join(base, 'linked-record.json');
+    const linkedAlias = join(base, 'linked-alias.json');
+    writeFileSync(linkedSource, boundRecText);
+    linkSync(linkedSource, linkedAlias);
+    const linkRes = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      linkedAlias,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(linkRes.status).toBe(1);
+    expect(linkRes.stderr).toMatch(/is a hard link/);
+
+    // 7. Guest-planted execution-record.json inside artifact dir is refused
+    writeFileSync(join(dir, 'execution-record.json'), boundRecText);
+    const planted = run([
+      '--context-root',
+      clone,
+      ...anchor,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(planted.status).toBe(1);
+    expect(planted.stdout).toMatch(
+      /execution-record\.json must not reside inside the PR-writable artifact directory/,
+    );
+    unlinkSync(join(dir, 'execution-record.json'));
+
+    // 8. CLI wires host --context trustClassification & contextDigest / baseRefOid binding
+    const ctxObj = {
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        headRefOid: HEAD,
+      },
+    };
+    // 8a. Execution record with wrong contextDigest is rejected via CLI
+    const unboundRecText = JSON.stringify(makeExecRecord(), null, 2);
+    const unboundRecSha = sha256(unboundRecText);
+    const unboundHostRec = join(base, 'unbound-exec-record.json');
+    writeFileSync(unboundHostRec, unboundRecText);
+    const wrongCtxRes = run([
+      ...anchor,
+      '--context-root',
+      clone,
+      '--execution-record',
+      unboundHostRec,
+      '--execution-record-sha256',
+      unboundRecSha,
+      dir,
+    ]);
+    expect(wrongCtxRes.status).toBe(1);
+    expect(wrongCtxRes.stdout).toMatch(
+      /contextDigest .* does not match host context sha256/,
+    );
+
+    // 8b. The context-bound record from step 1 already exited 0 (ok.status above).
+    expect(boundRec.contextDigest).toBe(ctxSha);
+
+    // 8c. Stale trustClassification.headRefOid in --context is refused by CLI
+    const staleCtx = join(base, 'stale-ctx.json');
+    const staleText = JSON.stringify({
+      ...ctxObj,
+      trustClassification: {
+        ...ctxObj.trustClassification,
+        headRefOid: 'e'.repeat(40),
+      },
+    });
+    writeFileSync(staleCtx, staleText);
+    const staleRes = run([
+      '--context',
+      staleCtx,
+      '--context-sha256',
+      sha256(staleText),
+      '--context-root',
+      clone,
+      dir,
+    ]);
+    expect(staleRes.status).toBe(1);
+    expect(staleRes.stderr).toMatch(/stale trustClassification\.headRefOid/);
+
+    // 8d. Container boundary is refused by CLI when host --context requires hardware-isolated
+    const containerDir = join(
+      clone,
+      'tmp',
+      'pr17185-verify-container-downgrade',
+    );
+    mkdirSync(join(containerDir, 'evidence'), { recursive: true });
+    writeFileSync(join(containerDir, 'evidence', '01-ab.png'), 'png');
+    const cFiles = validFiles();
+    writeFileSync(join(containerDir, 'report.md'), cFiles.report);
+    writeFileSync(join(containerDir, 'verdict.txt'), cFiles.verdict);
+    writeFileSync(join(containerDir, 'assertions.json'), cFiles.assertions);
+    writeFileSync(join(containerDir, 'boundary.json'), cFiles.boundary);
+    writeFileSync(
+      join(containerDir, 'boundary-gate.json'),
+      cFiles.boundaryGate,
+    );
+    writeFileSync(join(containerDir, 'run.log'), `container-nonce: ${NONCE}\n`);
+    const downgradeRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--context-root',
+      clone,
+      containerDir,
+    ]);
+    expect(downgradeRes.status).toBe(1);
+    expect(downgradeRes.stdout).toMatch(
+      /mode container violates host context requirement executionClass=hardware-isolated/,
+    );
+
+    // 8e. Self-contradictory trustClassification (external/unknown or non-empty
+    // escalationReasons paired with trusted-shared-kernel) is refused by CLI & pure gate
+    for (const [label, contradictoryTc, expectedRe] of [
+      [
+        'external-shared',
+        {
+          prTrust: 'external',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: [],
+          headRefOid: HEAD,
+        },
+        /prTrust=external cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+      [
+        'unknown-shared',
+        {
+          prTrust: 'unknown',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: [],
+          headRefOid: HEAD,
+        },
+        /prTrust=unknown cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+      [
+        'escalated-shared',
+        {
+          prTrust: 'collaborator',
+          executionClass: 'trusted-shared-kernel',
+          escalationReasons: ['ci-workflow:.github/workflows/ci.yml'],
+          headRefOid: HEAD,
+        },
+        /non-empty escalationReasons cannot pair with executionClass="trusted-shared-kernel"/,
+      ],
+    ]) {
+      const pure = checkTrustClassification(contradictoryTc, HEAD);
+      expect(pure.errors.join('\n')).toMatch(expectedRe);
+      expect(pure.requiredExecutionClass).toBe('hardware-isolated');
+
+      const badCtx = join(base, `contradictory-${label}.json`);
+      const badCtxText = JSON.stringify({
+        ...ctxObj,
+        trustClassification: contradictoryTc,
+      });
+      writeFileSync(badCtx, badCtxText);
+      const cliBad = run([
+        '--context',
+        badCtx,
+        '--context-sha256',
+        sha256(badCtxText),
+        '--context-root',
+        clone,
+        containerDir,
+      ]);
+      expect(cliBad.status).toBe(1);
+      expect(cliBad.stderr).toMatch(expectedRe);
+    }
+
+    // 8f. Explicit trustClassification: null is rejected (unlike omitted legacy field)
+    expect(checkTrustClassification(undefined, HEAD).errors).toEqual([]);
+    expect(checkTrustClassification(null, HEAD).errors.join('\n')).toMatch(
+      /trustClassification must be a JSON object/,
+    );
+    const directNullArtifacts = checkArtifacts({
+      files: validFiles(),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      trustClassification: null,
+    });
+    expect(directNullArtifacts.errors.join('\n')).toMatch(
+      /trustClassification must be a JSON object/,
+    );
+    const directUndefArtifacts = checkArtifacts({
+      files: validFiles(),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      trustClassification: undefined,
+    });
+    expect(directUndefArtifacts.errors).toEqual([]);
+    const nullTcCtx = join(base, 'null-tc.json');
+    const nullTcText = JSON.stringify({ ...ctxObj, trustClassification: null });
+    writeFileSync(nullTcCtx, nullTcText);
+    const cliNullTc = run([
+      '--context',
+      nullTcCtx,
+      '--context-sha256',
+      sha256(nullTcText),
+      '--context-root',
+      clone,
+      containerDir,
+    ]);
+    expect(cliNullTc.status).toBe(1);
+    expect(cliNullTc.stderr).toMatch(
+      /trustClassification must be a JSON object/,
+    );
   });
 });

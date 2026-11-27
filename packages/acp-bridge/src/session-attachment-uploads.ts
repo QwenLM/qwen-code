@@ -73,6 +73,11 @@ export class SessionAttachmentUploads {
   private active = 0;
   private closed = false;
 
+  hasActiveUploads(): boolean {
+    sweep();
+    return this.active > 0;
+  }
+
   create(
     metadata: SessionAttachmentUploadMetadata,
     clientId?: string,

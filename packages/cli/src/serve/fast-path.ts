@@ -49,6 +49,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxTotalSessions', 'max-total-sessions'],
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
+  ['maxSseConnections', 'max-sse-connections'],
   ['eventRingSize', 'event-ring-size'],
   ['eventRingMaxBytes', 'event-ring-max-bytes'],
   ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
@@ -98,6 +99,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['experimental-lsp', 'experimentalLsp'],
   ['restore-ask-user-question', 'restoreAskUserQuestion'],
   ['rate-limit', 'rateLimit'],
+  ['load-admission', 'loadAdmission'],
 ]);
 
 function invertOptionMap<T extends string>(

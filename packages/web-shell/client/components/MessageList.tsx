@@ -18,7 +18,10 @@ import {
   type MutableRefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  measureElement as measureVirtualElement,
+  useVirtualizer,
+} from '@tanstack/react-virtual';
 import type {
   DaemonContextMemoryDetail,
   DaemonSessionArtifact,
@@ -53,6 +56,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { isAutomaticTriggerSource } from '../utils/automatic-trigger';
 import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
@@ -64,9 +68,12 @@ import {
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
 import { Checkbox } from './ui/checkbox';
+import { streamingTailUpdatePosition } from './streaming-tail';
 import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
+import { collectHookStatisticsTurns } from './messages/hook-statistics-turns';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -107,6 +114,7 @@ export interface MessageListProps {
   deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
+  hookStatisticsSessionId?: string;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -194,6 +202,7 @@ export interface MessageListProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   failedPromptMessageId?: string;
+  failedPromptStatus?: 'failed' | 'uncertain';
   onRetryFailedPrompt?: () => void;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
@@ -214,44 +223,6 @@ export interface MessageListProps {
   onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
-}
-
-function isStreamingTailContentOnlyUpdate(
-  previous: readonly Message[] | undefined,
-  current: readonly Message[],
-): boolean {
-  if (!previous || previous.length !== current.length || current.length === 0) {
-    return false;
-  }
-  for (let i = 0; i < current.length - 1; i += 1) {
-    if (previous[i] !== current[i]) return false;
-  }
-  const before = previous[previous.length - 1];
-  const after = current[current.length - 1];
-  if (
-    before.id !== after.id ||
-    before.role !== after.role ||
-    (after.role !== 'assistant' && after.role !== 'thinking') ||
-    (before.role !== 'assistant' && before.role !== 'thinking') ||
-    before.isStreaming !== true ||
-    after.isStreaming !== true
-  ) {
-    return false;
-  }
-  if (before.role === 'assistant' && after.role === 'assistant') {
-    if (
-      typeof before.content !== 'string' ||
-      typeof after.content !== 'string'
-    ) {
-      return false;
-    }
-    return (
-      before.branchRecordId === after.branchRecordId &&
-      before.usage === after.usage &&
-      Boolean(before.content.trim()) === Boolean(after.content.trim())
-    );
-  }
-  return before.role === 'thinking' && after.role === 'thinking';
 }
 
 function sameIdentities(
@@ -457,17 +428,17 @@ function mergeCompactToolGroups(
     // Each thought remembers the tool that follows it. Consecutive agents may
     // later render as one row anchored at the first agent; launch narration
     // bound to later agents follows that aggregate row.
-    const thoughts: Array<{
-      content: string;
-      isStreaming?: boolean;
-      beforeToolCallId?: string;
-    }> = [];
+    const thoughts: NonNullable<DaemonToolGroupMessage['thoughts']> = [];
     const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
     for (const item of run) {
       if (item.role === 'thinking') {
         const thought = {
+          id: item.id,
           content: item.content,
           ...(item.isStreaming === true ? { isStreaming: true } : {}),
+          ...(item.parentToolCallId
+            ? { parentToolCallId: item.parentToolCallId }
+            : {}),
         };
         thoughts.push(thought);
         thoughtsAwaitingTool.push(thought);
@@ -498,8 +469,9 @@ function mergeCompactToolGroups(
 function updateCompactStreamingThinkingTail(
   messages: readonly Message[],
   tail: DaemonThinkingMessage,
+  tailPosition: number,
 ): Message[] | undefined {
-  const group = messages[messages.length - 1];
+  const group = messages.at(tailPosition);
   if (
     group?.role !== 'tool_group' ||
     summaryRunFirstMemberId(group.id) === undefined ||
@@ -517,7 +489,7 @@ function updateCompactStreamingThinkingTail(
     isStreaming: true,
   };
   const result = messages.slice();
-  result[result.length - 1] = {
+  result[result.length + tailPosition] = {
     ...group,
     thoughts,
     ...(group.id === summaryRunId(tail.id)
@@ -861,6 +833,48 @@ function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+// A passive completion can split one streamed answer into several rows.
+// Keep those segments, but stop at work or an automatic execution marker.
+function findAnswerStartIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  answerIdx: number,
+): number {
+  let answerStartIdx = answerIdx;
+  if (answerIdx < 0 || !isFinalContentCandidate(items[answerIdx]!, false)) {
+    return answerStartIdx;
+  }
+  let crossedCompletion = false;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (item.type !== 'message') break;
+    if (item.message.role === 'system' && item.message.source === 'mod_log') {
+      continue;
+    }
+    if (
+      item.message.role === 'system' &&
+      item.message.source === 'background_task_completed'
+    ) {
+      crossedCompletion = true;
+    } else if (crossedCompletion && item.message.role === 'assistant') {
+      answerStartIdx = i;
+      crossedCompletion = false;
+    } else {
+      break;
+    }
+  }
+  return answerStartIdx;
+}
+
+function isTurnFromSession(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
+    return false;
+  }
+  const task = (data as { backgroundTask?: { fromSession?: unknown } })
+    .backgroundTask;
+  return !!task?.fromSession;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
  * non-final background notifications, and background result markers. Final
@@ -884,6 +898,13 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
+      }
+      // A turn another session's reply started keeps its source in view.
+      if (
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        return false;
       }
       return (
         item.message.source === 'background_notification_turn_started' ||
@@ -1074,10 +1095,7 @@ function isScheduledTaskMessage(message: {
   role: Message['role'];
   source?: string;
 }): boolean {
-  return (
-    message.role === 'user' &&
-    (message.source === 'cron' || message.source === 'loop')
-  );
+  return message.role === 'user' && isAutomaticTriggerSource(message.source);
 }
 
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
@@ -2094,27 +2112,39 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
-    let answerStartIdx = answerIdx;
-    // A passive completion can split one streamed answer into several rows.
-    // Keep those segments, but stop at work or an automatic execution marker.
-    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
-      let crossedCompletion = false;
-      for (let i = answerIdx - 1; i > start; i--) {
-        const item = items[i]!;
-        if (item.type !== 'message') break;
-        if (
-          item.message.role === 'system' &&
-          item.message.source === 'background_task_completed'
-        ) {
-          crossedCompletion = true;
-        } else if (crossedCompletion && item.message.role === 'assistant') {
-          answerStartIdx = i;
-          crossedCompletion = false;
-        } else {
-          break;
-        }
+    const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
+    const exchangeAnswers: Array<[number, number]> = [];
+    const keepExchangeAnswer = (from: number, to: number) => {
+      const idx = findFinalAnswerIndex(items, from, to);
+      if (idx >= 0) {
+        exchangeAnswers.push([findAnswerStartIndex(items, from, idx), idx]);
       }
+    };
+    let promptAnswerEnd: number | undefined;
+    let exchangeStart = start;
+    let exchangeFromSession = false;
+    for (let i = start + 1; i <= end; i++) {
+      const item = items[i]!;
+      if (
+        item.type !== 'message' ||
+        item.message.role !== 'system' ||
+        item.message.source !== 'background_notification_turn_started'
+      ) {
+        continue;
+      }
+      const nextFromSession = isTurnFromSession(item.message.data);
+      if (exchangeStart === start) promptAnswerEnd = i - 1;
+      if (nextFromSession && promptAnswerEnd !== undefined) {
+        keepExchangeAnswer(start, promptAnswerEnd);
+        promptAnswerEnd = undefined;
+      }
+      if (exchangeFromSession) keepExchangeAnswer(exchangeStart, i - 1);
+      exchangeStart = i;
+      exchangeFromSession = nextFromSession;
     }
+    const isAnswerAt = (i: number) =>
+      (i >= answerStartIdx && i <= answerIdx) ||
+      exchangeAnswers.some(([from, to]) => i >= from && i <= to);
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -2129,10 +2159,7 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(
-        item,
-        i >= answerStartIdx && i <= answerIdx,
-      );
+      const isStep = isHideableStep(item, isAnswerAt(i));
       if (isStep) {
         hiddenCount++;
       }
@@ -2311,8 +2338,7 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
-        result.push(item);
+      if (!isHideableStep(item, isAnswerAt(i))) result.push(item);
     }
   }
 
@@ -3039,6 +3065,7 @@ export const MessageList = memo(
       messages,
       deletion,
       frozenViewport = false,
+      hookStatisticsSessionId,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
@@ -3078,6 +3105,7 @@ export const MessageList = memo(
       showRetryHint = false,
       onRetryClick,
       failedPromptMessageId,
+      failedPromptStatus,
       onRetryFailedPrompt,
       onBranchSession,
       onCanScrollToBottomChange,
@@ -3108,7 +3136,7 @@ export const MessageList = memo(
       let lastId: string | undefined;
       let turnIndex = 0;
       for (const message of messages) {
-        if (message.role !== 'user') continue;
+        if (message.role !== 'user' || message.agentMessage?.sentTo) continue;
         turnIndexById.set(message.id, turnIndex);
         lastId = message.id;
         turnIndex += 1;
@@ -3126,7 +3154,7 @@ export const MessageList = memo(
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
     const previousMessagesRef = useRef<Message[] | undefined>(undefined);
-    const streamingTailContentOnly = isStreamingTailContentOnlyUpdate(
+    const streamingTailPosition = streamingTailUpdatePosition(
       previousMessagesRef.current,
       messages,
     );
@@ -3159,23 +3187,27 @@ export const MessageList = memo(
     );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
-      const tail = messages[messages.length - 1];
       let value: Message[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
         cached.pendingApproval === pendingApproval
       ) {
+        const tail = messages.at(streamingTailPosition);
         if (
           tail?.role === 'assistant' &&
-          cached.value[cached.value.length - 1]?.id === tail.id
+          cached.value.at(streamingTailPosition)?.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = tail;
+          value[value.length + streamingTailPosition] = tail;
         } else if (tail?.role === 'thinking') {
           value = compactMode
-            ? updateCompactStreamingThinkingTail(cached.value, tail)
+            ? updateCompactStreamingThinkingTail(
+                cached.value,
+                tail,
+                streamingTailPosition,
+              )
             : splitStandaloneToolGroups(messages);
         }
       }
@@ -3296,7 +3328,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       sessionKey,
-      streamingTailContentOnly,
+      streamingTailPosition,
     ]);
     useLayoutEffect(() => {
       const pending = pendingSettledMessagesRef.current;
@@ -3325,10 +3357,9 @@ export const MessageList = memo(
     >(undefined);
     const displayItems = useMemo(() => {
       const cached = displayItemsCache.current;
-      const tail = mergedMessages[mergedMessages.length - 1];
       let value: DisplayItem[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
@@ -3338,13 +3369,15 @@ export const MessageList = memo(
         cached.turnArtifacts === turnArtifacts &&
         cached.turnScheduledTasks === turnScheduledTasks
       ) {
-        const previousTail = cached.value[cached.value.length - 1];
+        const tail = mergedMessages.at(streamingTailPosition);
+        const previousTail = cached.value.at(streamingTailPosition);
         if (
+          tail &&
           previousTail?.type === 'message' &&
           previousTail.message.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = {
+          value[value.length + streamingTailPosition] = {
             ...previousTail,
             message: tail,
           };
@@ -3371,7 +3404,7 @@ export const MessageList = memo(
     }, [
       mergedMessages,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       compactMode,
       pendingApproval,
       isResponding,
@@ -3693,7 +3726,7 @@ export const MessageList = memo(
       const cached = finalAssistantTurnIdsCache.current;
       let value: ReadonlyMap<string, string>;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.isResponding === isResponding &&
@@ -3719,7 +3752,7 @@ export const MessageList = memo(
     }, [
       displayItems,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       gateBackgroundAgentStatus,
       isResponding,
       latestTurnAwaitsAgentSummary,
@@ -3739,8 +3772,12 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
-      useWebShellCustomization();
+    const {
+      collapseCompletedTurns,
+      sourceReferences,
+      assistantFeedback,
+      overscan = 15,
+    } = useWebShellCustomization();
     // `sourceSessionId` is the transcript's own session, which is what a mark
     // belongs to.
     const {
@@ -3758,6 +3795,17 @@ export const MessageList = memo(
       }
       return heads;
     }, [messages]);
+    const hookTurns = useMemo<ReadonlyMap<string, HookStatisticsTurn>>(() => {
+      const sessionId = hookStatisticsSessionId ?? sourceSessionId;
+      return sessionId && transcriptRenderMode !== 'document'
+        ? collectHookStatisticsTurns(messages, sessionId)
+        : new Map();
+    }, [
+      messages,
+      hookStatisticsSessionId,
+      sourceSessionId,
+      transcriptRenderMode,
+    ]);
     const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
       renderMode: transcriptRenderMode,
       sessionId: sourceSessionId,
@@ -3805,7 +3853,7 @@ export const MessageList = memo(
         sourceReferences,
       ] as const;
       const cached = sourcesByTurnCache.current;
-      return streamingTailContentOnly &&
+      return streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
@@ -3824,7 +3872,7 @@ export const MessageList = memo(
       workspaceCwd,
       sourceSessionId,
       sourceReferences,
-      streamingTailContentOnly,
+      streamingTailPosition,
       isResponding,
     ]);
     useLayoutEffect(() => {
@@ -3883,6 +3931,7 @@ export const MessageList = memo(
       null,
     );
     const pendingBottomFollowAfterCooldown = useRef(false);
+    const initialBottomFollowPending = useRef(true);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
@@ -3973,6 +4022,7 @@ export const MessageList = memo(
       }
       turnLayoutAnimations.current = [];
       followPausedByUserRef.current = false;
+      initialBottomFollowPending.current = true;
       pendingPaginationTurnCompares.current.clear();
       setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
       setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
@@ -4005,10 +4055,10 @@ export const MessageList = memo(
 
     const reportCanScrollToBottom = useCallback(() => {
       const el = containerRef.current;
-      const distanceFromBottom = el
-        ? el.scrollHeight - el.scrollTop - el.clientHeight
-        : 0;
-      const canScrollToBottom = !shouldFollow.current && distanceFromBottom > 1;
+      const canScrollToBottom =
+        !shouldFollow.current &&
+        el !== null &&
+        el.scrollHeight - el.scrollTop - el.clientHeight > 1;
       if (lastReportedCanScrollToBottom.current === canScrollToBottom) return;
       lastReportedCanScrollToBottom.current = canScrollToBottom;
       onCanScrollToBottomChange?.(canScrollToBottom);
@@ -4067,14 +4117,15 @@ export const MessageList = memo(
         paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
-      const currentTail = displayItems[displayItems.length - 1];
+      const currentTail = displayItems.at(streamingTailPosition ?? -1);
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
         sameIdentities(cached.dependencies, dependencies) &&
-        currentTail?.type === 'message'
+        currentTail?.type === 'message' &&
+        currentTail.message === mergedMessages.at(streamingTailPosition)
       ) {
         const key = getDisplayItemVirtualKey(currentTail);
         let index = -1;
@@ -4193,7 +4244,7 @@ export const MessageList = memo(
       return value;
     }, [
       displayItems,
-      streamingTailContentOnly,
+      streamingTailPosition,
       collapseOverrides,
       isResponding,
       activeTurnStartedAt,
@@ -4283,17 +4334,10 @@ export const MessageList = memo(
     //      visual flash when the model just started replying with a
     //      short first chunk.
     //
-    // Implementation: three refs, three effects, one scroll handler.
-    //
     //   - `shouldFollow`      — whether auto-scroll is active
     //   - `lastScrollTop`     — previous scrollTop for direction detection
     //   - `prevLastUserMsgId` — tracks when a new user message appears
     //   - `prevCatchingUp`    — tracks the catchingUp → ready transition
-    //
-    // The single auto-scroll driver is a `useLayoutEffect` on
-    // `totalVirtualSize` (the virtualizer's computed content height).
-    // Every height change — streaming text, card expand, approval
-    // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
     const hasTailContent = tailContent !== undefined && tailContent !== null;
@@ -4631,42 +4675,65 @@ export const MessageList = memo(
       ],
     );
 
+    const releaseScrollCooldown = useCallback(
+      (generation: number) => {
+        if (scrollCooldownCount.current !== generation) return;
+        scrollCooldown.current = false;
+        if (!pendingBottomFollowAfterCooldown.current) return;
+        pendingBottomFollowAfterCooldown.current = false;
+        if (
+          catchingUpRef.current ||
+          followPausedByUserRef.current ||
+          frozenViewportRef.current
+        ) {
+          return;
+        }
+        const el = getScrollElement();
+        if (!el) return;
+        const height = el.scrollHeight;
+        const bottom = height - el.clientHeight;
+        if (bottom <= 0) return;
+        lastScrollTop.current = bottom;
+        if (Math.abs(el.scrollTop - bottom) <= 1) return;
+        setShouldFollow(true);
+        el.scrollTop = height;
+        scheduleScrollOverflowReport();
+        reportCanScrollToBottom();
+      },
+      [
+        getScrollElement,
+        reportCanScrollToBottom,
+        scheduleScrollOverflowReport,
+        setShouldFollow,
+      ],
+    );
+
     // Rule 6: skip if content doesn't overflow (no scrollbar).
     const scrollToBottom = useCallback(
       (behavior: ScrollBehavior = 'auto') => {
         if (frozenViewportRef.current) return;
         const el = getScrollElement();
         if (!el) return;
-        if (el.scrollHeight <= el.clientHeight) return;
+        const scrollHeight = el.scrollHeight;
+        const bottom = scrollHeight - el.clientHeight;
+        if (bottom <= 0) return;
+        if (behavior === 'auto' && Math.abs(el.scrollTop - bottom) <= 1) {
+          lastScrollTop.current = bottom;
+          return;
+        }
         pendingBottomFollowAfterCooldown.current = false;
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
         if (behavior === 'smooth') {
-          el.scrollTo({ top: el.scrollHeight, behavior });
+          el.scrollTo({ top: scrollHeight, behavior });
         } else {
-          el.scrollTop = el.scrollHeight;
+          el.scrollTop = scrollHeight;
         }
         scheduleScrollOverflowReport();
-        lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+        lastScrollTop.current = bottom;
         reportCanScrollToBottom();
-        const releaseCooldown = () => {
-          if (scrollCooldownCount.current !== gen) return;
-          scrollCooldown.current = false;
-          if (!pendingBottomFollowAfterCooldown.current) return;
-          pendingBottomFollowAfterCooldown.current = false;
-          if (catchingUpRef.current || followPausedByUserRef.current) return;
-          const current = getScrollElement();
-          if (!current || current.scrollHeight <= current.clientHeight) return;
-          setShouldFollow(true);
-          current.scrollTop = current.scrollHeight;
-          scheduleScrollOverflowReport();
-          lastScrollTop.current = Math.max(
-            0,
-            current.scrollHeight - current.clientHeight,
-          );
-          reportCanScrollToBottom();
-        };
+        const releaseCooldown = () => releaseScrollCooldown(gen);
         if (behavior === 'smooth') {
           setTimeout(releaseCooldown, 350);
         } else {
@@ -4675,9 +4742,9 @@ export const MessageList = memo(
       },
       [
         getScrollElement,
+        releaseScrollCooldown,
         reportCanScrollToBottom,
         scheduleScrollOverflowReport,
-        setShouldFollow,
       ],
     );
 
@@ -4696,7 +4763,25 @@ export const MessageList = memo(
       getScrollElement,
       getItemKey,
       estimateSize: estimateItemSize,
-      overscan: 20,
+      measureElement: (element, entry, instance) => {
+        if (
+          entry ||
+          !shouldFollow.current ||
+          restoringOlderHistoryRef.current ||
+          frozenViewportRef.current ||
+          !element.ownerDocument.defaultView?.ResizeObserver
+        ) {
+          return measureVirtualElement(element, entry, instance);
+        }
+        // When following the tail, let the observer measure newly mounted
+        // rows after layout instead of reading each height during commit.
+        const index = instance.indexFromElement(element);
+        return (
+          instance.itemSizeCache.get(getItemKey(index)) ??
+          estimateItemSize(index)
+        );
+      },
+      overscan,
       anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
@@ -5033,7 +5118,7 @@ export const MessageList = memo(
         locateScrollTimer.current = setTimeout(() => {
           locateScrollTimer.current = null;
           if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
+            releaseScrollCooldown(gen);
             scheduleSessionTimelineRangeUpdate();
             scheduleScrollOverflowReport();
           }
@@ -5045,6 +5130,7 @@ export const MessageList = memo(
         useVirtualScroll,
         virtualizer,
         setShouldFollow,
+        releaseScrollCooldown,
         scheduleSessionTimelineRangeUpdate,
         scheduleScrollOverflowReport,
       ],
@@ -5587,10 +5673,23 @@ export const MessageList = memo(
     useEffect(() => {
       const el = getScrollElement();
       if (!el || typeof ResizeObserver === 'undefined') return;
-      const observer = new ResizeObserver(() => {
+      const observer = new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === el)) {
+          scheduleSessionTimelineRangeUpdate();
+        }
         scheduleScrollOverflowReport();
         loadOlderHistoryIfUnderfilled();
-        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        if (
+          catchingUpRef.current ||
+          followPausedByUserRef.current ||
+          pendingFollowRecheck.current
+        ) {
+          return;
+        }
+        if (scrollCooldown.current) {
+          pendingBottomFollowAfterCooldown.current = true;
+          return;
+        }
         setShouldFollow(true);
         scrollToBottom();
       });
@@ -5619,6 +5718,7 @@ export const MessageList = memo(
       getScrollElement,
       loadOlderHistoryIfUnderfilled,
       scheduleScrollOverflowReport,
+      scheduleSessionTimelineRangeUpdate,
       scrollToBottom,
       setShouldFollow,
     ]);
@@ -5640,28 +5740,6 @@ export const MessageList = memo(
         pendingSettledMessagesRef.current = undefined;
       }
     }, [messages.length, resetSessionScopedViewState, setShouldFollow]);
-
-    // Container-resize guard: when floating panels (e.g. TodoPanel)
-    // appear or disappear the scroll container's clientHeight changes.
-    // Snap back to bottom so the user doesn't lose their place while
-    // follow mode is active.
-    useEffect(() => {
-      const el = containerRef.current;
-      if (!el) return;
-      const observer = new ResizeObserver(() => {
-        scheduleSessionTimelineRangeUpdate();
-        if (catchingUpRef.current) return;
-        if (followPausedByUserRef.current) return;
-        setShouldFollow(true);
-        requestAnimationFrame(() => {
-          if (!catchingUpRef.current && !followPausedByUserRef.current) {
-            scrollToBottom();
-          }
-        });
-      });
-      observer.observe(el);
-      return () => observer.disconnect();
-    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
@@ -5965,6 +6043,7 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              hookTurn={hookTurns.get(displayItem.message.id)}
               onLocateBackgroundSource={
                 displayItem.message.role === 'system' &&
                 displayItem.message.source ===
@@ -6023,6 +6102,12 @@ export const MessageList = memo(
               sendFailed={
                 displayItem.message.role === 'user' &&
                 displayItem.message.id === failedPromptMessageId
+              }
+              sendFailedStatus={
+                displayItem.message.role === 'user' &&
+                displayItem.message.id === failedPromptMessageId
+                  ? failedPromptStatus
+                  : undefined
               }
               onRetrySend={onRetryFailedPrompt}
               onBranchSession={onBranchSession}
@@ -6124,6 +6209,7 @@ export const MessageList = memo(
         latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
+        hookTurns,
         assistantFeedbackRatings,
         handleAssistantFeedbackRate,
         frozenViewport,
@@ -6131,6 +6217,7 @@ export const MessageList = memo(
         showRetryHint,
         onRetryClick,
         failedPromptMessageId,
+        failedPromptStatus,
         onRetryFailedPrompt,
         onBranchSession,
         handleToggleCollapse,
@@ -6155,20 +6242,21 @@ export const MessageList = memo(
       ? totalVirtualSize
       : messages;
 
-    // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
-    // Fires whenever the virtualizer's total content height changes —
-    // this captures every scenario: streaming tokens appending, tool
-    // cards expanding/collapsing, approval cards appearing, etc.
-    //
-    // Rule 5: during replay (catchingUp) → skip, avoid fighting rapid
-    //         transcript replay. The catchingUp→ready transition effect
-    //         above handles the final scroll.
-    // Rule 1: when shouldFollow is true → scroll to bottom.
-    // Rule 6: scrollToBottom itself checks scrollHeight <= clientHeight
-    //         and is a no-op when there's no overflow.
+    // Passive updates follow the resize notification after layout. Keep
+    // the initial position and explicit new-prompt scroll before paint.
     useLayoutEffect(() => {
       if (catchingUp) return;
       const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      const isInitialContent =
+        initialBottomFollowPending.current && messages.length > 0;
+      if (isInitialContent) initialBottomFollowPending.current = false;
+      if (
+        !isNewUserMessage &&
+        !isInitialContent &&
+        typeof ResizeObserver !== 'undefined'
+      ) {
+        return;
+      }
       if (scrollCooldown.current && !isNewUserMessage) {
         if (!followPausedByUserRef.current) {
           pendingBottomFollowAfterCooldown.current = true;
@@ -6193,6 +6281,7 @@ export const MessageList = memo(
       autoScrollContentSignal,
       totalCount,
       catchingUp,
+      messages.length,
       scrollToBottom,
       setShouldFollow,
     ]);

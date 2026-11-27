@@ -1,9 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -31,7 +30,7 @@ class ActivationLeaseLookupMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
-            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc, null);
+            var rows = new JournalStoreRows(jdbc, null);
             // An earlier activation and its history, then the current one:
             // installed, renewed once by a later transaction, then history.
             var journal = new ArrayList<Object[]>();
@@ -71,9 +70,9 @@ class ActivationLeaseLookupMySqlIT {
     }
 
     private static JournalStoreRows.HeadRow head(long journalRevision) {
-        return new JournalStoreRows.HeadRow(TENANT, "workspace", SESSION, "ACTIVE", 1, 1, "worker", null, null,
+        return new JournalStoreRows.HeadRow(TENANT, "workspace", SESSION, "ACTIVE", false, 1, "worker", null, null,
                 journalRevision, journalRevision, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L,
-                EXPIRES_AT, journalRevision);
+                EXPIRES_AT, journalRevision, null);
     }
 
     private static String activation(String activationId, long epoch, long renewalSeq) {
@@ -84,14 +83,14 @@ class ActivationLeaseLookupMySqlIT {
 
     private static Object[] transaction(long revision, long epoch, String operation, String firstLine) {
         byte[] bytes = (firstLine + "\n").getBytes(StandardCharsets.UTF_8);
-        return new Object[] {revision, ManagedSchemaKeys.key("command", Long.toString(revision)),
+        return new Object[] {revision, ManagedIdentityRefs.commandRef(operation, "command-" + revision),
                 "transaction-" + revision, operation, "command-" + revision, epoch, bytes, bytes.length,
                 JournalStoreRows.sha256(bytes)};
     }
 
     private static void insert(CapturingJdbc jdbc, List<Object[]> rows) {
         jdbc.batchUpdate("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
                 + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                 + " record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant',"
                 + " 'workspace', 'session', ?, ?, ?, ?, ?, REPEAT('0', 64), 1, 1, 1, 1, 'worker', REPEAT('0', 64),"
