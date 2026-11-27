@@ -643,6 +643,13 @@ jobs:
       - *setup_release_node_hosted
       - *install_release_dependencies
 
+      # The harness imports workspace packages (@qwen-code/sdk, core); their
+      # dist must exist for vitest resolution. The CLI UNDER TEST is still the
+      # unpacked release archive, not this build.
+      - name: 'Build test-harness workspace deps'
+        shell: bash
+        run: 'corepack pnpm --filter @qwen-code/qwen-code-core --filter @qwen-code/sdk build'
+
       - name: 'Download release handoff'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
