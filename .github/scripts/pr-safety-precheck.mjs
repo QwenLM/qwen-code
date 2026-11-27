@@ -95,7 +95,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // signals documented in the design, not acceptance claims of this rule.
   [
     'ambient_credential:env_dump',
-    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))(?!\)\s*=>)|(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|`]|\$\()[ \t]{0,64}\(?[ \t]{0,64})printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$))(?!\)\s*=>))/m,
+    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))(?!\)\s*=>)|(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$))(?!\)\s*=>))/m,
   ],
   // `.credentials` needs a boundary that admits every spelling of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
@@ -182,7 +182,7 @@ const PROMPT_INJECTION_PATTERNS = [
     'prompt_injection:ignore_previous',
     /ignore (?:all )?(?:previous|above) instructions/i,
   ],
-  ['prompt_injection:system_prompt', /\bsystem prompt\b/i],
+  ['prompt_injection:system_prompt', /(?<!session )(?<![-\w])system prompt\b/i],
   ['prompt_injection:developer_message', /\bdeveloper message\b/i],
   [
     'prompt_injection:print_secrets',
