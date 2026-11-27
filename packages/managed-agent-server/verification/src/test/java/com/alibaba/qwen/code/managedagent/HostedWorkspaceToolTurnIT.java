@@ -4,11 +4,9 @@ import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
@@ -18,7 +16,6 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -347,7 +344,6 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=" + operatorRecovery,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -475,10 +471,11 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedProviderControlProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedProviderMediaProbe mediaProbe = providerMedia
                     ? new HostedProviderMediaProbe(jdbc, tenant, sessions, broker, gateServer,
-                            () -> new EmbeddedRuntimeBroker(spring.getBean(AgentStateStore.class),
-                                    spring.getBean(ManagedAgentProperties.class), spring.getBean(RuntimeBindingRepository.class),
-                                    spring.getBean(RuntimeSessionRepository.class), spring.getBean(ToolExecutionRepository.class),
-                                    spring.getBean(JdbcWorkspaceExecutionStore.class))) : null;
+                            () -> {
+                                spring.close();
+                                return (ServletWebServerApplicationContext) application.run(
+                                        arguments.toArray(String[]::new));
+                            }) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
@@ -506,7 +503,7 @@ class HostedWorkspaceToolTurnIT {
                         "secondarySessionId", secondarySessionId,
                         "resultFile", resultFile.toString(),
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
-                        "brokerUrl", broker.getBaseUri().toString(),
+                        "brokerUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "coldLoadUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/cold-load",
                         "statusGateUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/release"));
                 Path log = temporary.resolve("driver.log");

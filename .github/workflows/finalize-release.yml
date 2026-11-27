@@ -19,7 +19,7 @@ jobs:
     name: 'Finalize Stable Release'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false) }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))) }}
     environment:
       name: 'production-release'
     permissions:

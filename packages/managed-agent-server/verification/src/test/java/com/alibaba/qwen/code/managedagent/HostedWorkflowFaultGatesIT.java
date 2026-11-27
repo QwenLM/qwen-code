@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -131,7 +130,6 @@ class HostedWorkflowFaultGatesIT {
                 "--qwen.managed-agent.harness.capability-digest=sha256:"
                         + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -176,8 +174,6 @@ class HostedWorkflowFaultGatesIT {
                 arguments.toArray(String[]::new));
         JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
-        EmbeddedRuntimeBroker broker = spring.getBean(
-                EmbeddedRuntimeBroker.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
             var guard = spring.getBean(
                     com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
@@ -226,7 +222,8 @@ class HostedWorkflowFaultGatesIT {
             driverConfig.put("tenantId", tenant);
             driverConfig.put("storeUrl", "http://127.0.0.1:"
                     + spring.getWebServer().getPort());
-            driverConfig.put("brokerUrl", broker.getBaseUri().toString());
+            driverConfig.put("brokerUrl", "http://127.0.0.1:"
+                    + spring.getWebServer().getPort());
             driverConfig.put("statusGateUrl", "http://127.0.0.1:"
                     + gateServer.getAddress().getPort());
             driverConfig.put("storeProxyPort", storeProxyPort);

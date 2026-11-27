@@ -275,7 +275,12 @@ export function mountManagedLocalWeb(
     },
   );
   app.use(
-    ['/api/agent', '/v1/agents', '/internal/managed-session-store'],
+    [
+      '/api/agent',
+      '/v1/agents',
+      '/internal/managed-session-store',
+      '/internal/runtime-broker',
+    ],
     (_req, res) => {
       res.status(404).json({ error: 'not_found' });
     },

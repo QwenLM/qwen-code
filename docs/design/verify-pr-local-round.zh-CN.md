@@ -4,6 +4,8 @@
 
 状态：已实现；本次补充下方的计数、守卫、覆盖与署名页脚规则。
 
+兼容性说明（2026-11-22）：当前可执行的执行方式与批准契约见 [verify-pr-execution-preflight.zh-CN](verify-pr-execution-preflight.zh-CN.md)。本文保留基线历史，不再作为当前宿主/VM 命令配方。coordinate prepare 省略 `--execution` 时保留旧 **container** 行为；显式 host/VM 必须按新文档提供批准对象与宿主 context，只有 permalink 的旧 waiver 在没有 `executionApproval` 和匹配快照 digest 时无法通过发布。
+
 ## 问题
 
 `/verify-pr` 有两条入口。沙箱 lane 会提供 PR 元数据快照、同时含有两个 OID 的克隆，以及一个会拒绝「判定与自身断言计数矛盾」的发布步骤。维护者在自己机器上跑的轮次三者皆无，而 skill 给出的答案是散文式的：手写的 `gh pr view` 字段列表、「不要假设 `HEAD^1`/`HEAD^2`」、收集步骤用 glob 匹配的目录名，以及「自己把计数数清楚」。这些都是确定性的规则，却没有任何可执行形态，于是每一轮都要重新推导，出错时又是静默的：快照来自错误的仓库、把父提交当成基线、目录名不被发布步骤识别、计数与判定互相矛盾。

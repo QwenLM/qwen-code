@@ -56,6 +56,56 @@ describe('TypeScript SDK release workflow', () => {
     }
   });
 
+  it('creates the GitHub release with the CI bot PAT', () => {
+    // `gh release create` for this workflow requires the `workflow` scope, so
+    // the default GITHUB_TOKEN fails with "Failed to create release" after
+    // npm publish already succeeded (issue #18493).
+    const parsed = parse(workflow);
+    const step = parsed.jobs['release-sdk'].steps.find(
+      (s) => s.name === 'Create GitHub Release and Tag',
+    );
+    expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+  });
+
+  it('keeps sdk-typescript tags out of the release-published consumers', () => {
+    // A GITHUB_TOKEN-created release emits no workflow-triggering event, so
+    // the SDK release never reached `on: release: published`. With CI_BOT_PAT
+    // it does, and `sdk-typescript-*` tags must stay invisible to the CLI
+    // consumers: finalize exits 1 on them, and sync-release-to-oss holds its
+    // single concurrency lock to download assets they do not ship. Keep the
+    // workflow_dispatch arm each one needs, and key on the tag prefix like the
+    // sibling workflows.
+    // The DSW gate excludes the SDK family instead of allowing `v*`: it also
+    // owns its own `dsw-eas-*` release-event smokes, and the `Check release
+    // version` step maps those tags to `should_run=true`. Enumerating allowed
+    // families there would silently delete whatever family is added next.
+    // Pin each whole expression, not disjoint substrings: an operator flip
+    // (`||` -> `&&`) or a negated startsWith must fail here, the mechanism
+    // desktop-oss-workflow.test.js already uses.
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    const guards = [
+      [
+        '.github/workflows/finalize-release.yml',
+        'finalize',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))) }}",
+      ],
+      [
+        '.github/workflows/sync-release-to-oss.yml',
+        'sync',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}",
+      ],
+      [
+        '.github/workflows/dsw-swe-verified-release.yml',
+        'release_gate',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.release.tag_name, 'sdk-typescript-')) }}",
+      ],
+    ];
+    for (const [path, job, expected] of guards) {
+      const ifClause = parse(readFileSync(path, 'utf8')).jobs[job].if;
+      expect(norm(ifClause), path).toBe(expected);
+    }
+  });
+
   it('spaces PR creation out from the release to avoid secondary rate limits', () => {
     // `gh pr create` runs right after the branch push and release creation,
     // which can trip GitHub's "was submitted too quickly" GraphQL secondary

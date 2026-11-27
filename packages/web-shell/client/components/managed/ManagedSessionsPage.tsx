@@ -96,10 +96,13 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { managedDiagnosticStatsToUsageSnapshot } from './managed-usage-stats';
+import type { ManagedDiagnosticsTab } from './use-managed-diagnostics';
 import { ManagedTerminalPanel } from './ManagedTerminalPanel';
 import { newManagedTerminalId } from './managed-terminal-protocol';
 import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
+import { ComposerUsageStats } from '../ComposerUsageStats';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
 import { getShadowAwareActiveElement } from '../../utils/dom';
@@ -516,6 +519,8 @@ function ManagedSessionsContent({
     provider: ManagedAgentProvider;
     clientId: string;
     sessionId: string;
+    initialTab: ManagedDiagnosticsTab;
+    trigger: HTMLElement | null;
   }>();
   useEffect(
     () => setDiagnosticsOwner(undefined),
@@ -1743,25 +1748,53 @@ function ManagedSessionsContent({
         )}
       </>
     ) : null;
-  const diagnosticsButton =
+  const diagnosticsAvailable = Boolean(
     currentSummary?.capabilities.diagnostics &&
-    !detail.signals?.session &&
-    provider.diagnostics ? (
-      <Button
-        ref={diagnosticsTriggerRef}
-        variant="outline"
-        size="sm"
-        onClick={() =>
-          setDiagnosticsOwner({
-            provider,
-            clientId,
-            sessionId: currentSummary.sessionId,
-          })
-        }
-      >
-        {diagnosticsText('title')}
-      </Button>
-    ) : null;
+      !detail.signals?.session &&
+      provider.diagnostics,
+  );
+  const openDiagnostics = useCallback(
+    (initialTab: ManagedDiagnosticsTab, trigger?: HTMLElement | null) => {
+      if (!currentSummary || !diagnosticsAvailable) return;
+      const activeEl = getShadowAwareActiveElement(pageRef.current);
+      setDiagnosticsOwner({
+        provider,
+        clientId,
+        sessionId: currentSummary.sessionId,
+        initialTab,
+        trigger:
+          trigger ??
+          (activeEl instanceof HTMLElement
+            ? activeEl
+            : diagnosticsTriggerRef.current),
+      });
+    },
+    [clientId, currentSummary, diagnosticsAvailable, provider],
+  );
+  const loadManagedUsageStats = useCallback(
+    async (targetSessionId: string, signal?: AbortSignal) => {
+      const diagnostics = provider.diagnostics;
+      if (!diagnostics) {
+        return { sessionId: targetSessionId, promptCount: 0, models: {} };
+      }
+      const stats = await diagnostics.getStatistics(targetSessionId, {
+        clientId,
+        signal,
+      });
+      return managedDiagnosticStatsToUsageSnapshot(stats);
+    },
+    [clientId, provider],
+  );
+  const diagnosticsButton = diagnosticsAvailable ? (
+    <Button
+      ref={diagnosticsTriggerRef}
+      variant="outline"
+      size="sm"
+      onClick={() => openDiagnostics('context', diagnosticsTriggerRef.current)}
+    >
+      {diagnosticsText('title')}
+    </Button>
+  ) : null;
   const terminalPanelOpen =
     terminalOpen &&
     currentSummary?.capabilities.terminal === true &&
@@ -3116,6 +3149,9 @@ function ManagedSessionsContent({
                   contextUsageControls: interactive
                     ? compression.controls
                     : undefined,
+                  onOpenContextUsage: diagnosticsAvailable
+                    ? () => openDiagnostics('context')
+                    : undefined,
                   currentMode: summary?.approvalMode ?? '',
                   planMode: summary?.planMode === true,
                   planControlsDisabled:
@@ -3460,6 +3496,18 @@ function ManagedSessionsContent({
                     )}
                   </>
                 }
+                footerTrailing={
+                  diagnosticsAvailable && currentSummary ? (
+                    <ComposerUsageStats
+                      key={`${provider.storageKey}:${clientId}`}
+                      sessionId={currentSummary.sessionId}
+                      loadStats={loadManagedUsageStats}
+                      refreshSignal={`${currentSummary.compactionRevision}:${modelContext?.observedAt ?? ''}:${currentSummary.activeTurnId ?? ''}:${currentSummary.phase}`}
+                      running={isManagedSessionRunning(currentSummary.phase)}
+                      onOpen={() => openDiagnostics('statistics')}
+                    />
+                  ) : undefined
+                }
               />
             </ToolDetailsContext.Provider>
           )}
@@ -3558,9 +3606,9 @@ function ManagedSessionsContent({
             interactive={interactive}
           />
         )}
-        {provider.diagnostics &&
-          currentSummary?.capabilities.diagnostics &&
-          !detail.signals?.session &&
+        {diagnosticsAvailable &&
+          provider.diagnostics &&
+          currentSummary &&
           diagnosticsOwner?.provider === provider &&
           diagnosticsOwner.clientId === clientId &&
           diagnosticsOwner.sessionId === sessionId && (
@@ -3571,8 +3619,14 @@ function ManagedSessionsContent({
               clientId={clientId}
               running={isManagedSessionRunning(currentSummary.phase)}
               revision={`${currentSummary.compactionRevision}:${currentSummary.modelSelection?.revision}:${currentSummary.workspace?.contextRevision}:${currentSummary.phase}:${currentSummary.activeTurnId}`}
+              initialTab={diagnosticsOwner.initialTab}
               onClose={() => setDiagnosticsOwner(undefined)}
-              restoreFocus={() => diagnosticsTriggerRef.current?.focus()}
+              restoreFocus={() =>
+                (diagnosticsOwner.trigger?.isConnected
+                  ? diagnosticsOwner.trigger
+                  : diagnosticsTriggerRef.current
+                )?.focus()
+              }
               onOpenChild={(child) => {
                 setDiagnosticsOwner(undefined);
                 setChildView({
@@ -3580,7 +3634,9 @@ function ManagedSessionsContent({
                   clientId,
                   root: diagnosticsOwner.sessionId,
                   child,
-                  trigger: diagnosticsTriggerRef.current,
+                  trigger: diagnosticsOwner.trigger?.isConnected
+                    ? diagnosticsOwner.trigger
+                    : diagnosticsTriggerRef.current,
                 });
               }}
             />

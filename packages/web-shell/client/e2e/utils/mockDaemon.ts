@@ -898,6 +898,7 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace-order' ||
     path === '/brand' ||
     path === '/auth/subscription' ||
+    path === '/workspace/models' ||
     path === '/workspace/settings' ||
     path === '/workspace/hooks' ||
     path === '/workspace/providers' ||
@@ -983,6 +984,8 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/auth/subscription') return true;
+  if (method === 'GET' && path === '/workspace/models') return true;
+  if (method === 'DELETE' && path === '/workspace/models') return true;
   if (method === 'GET' && path === '/workspace-path-suggestions') return true;
   if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
     return true;
@@ -1599,6 +1602,10 @@ async function handleDaemonRoute(
       value: getRecordValue(body, 'value'),
       requiresRestart: false,
     });
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/models') {
+    await json(route, { models: [] });
     return;
   }
   if (method === 'DELETE' && path === '/workspace/models') {
@@ -3212,7 +3219,7 @@ function maxEventId(events: readonly DaemonEvent[]): number {
   return events.reduce((max, event) => Math.max(max, event.id ?? max), 0);
 }
 
-function promptIdFor(body: PromptRequest): string {
+export function promptIdFor(body: PromptRequest): string {
   const meta = body?._meta;
   if (meta && typeof meta['promptId'] === 'string') return meta['promptId'];
   return 'prompt-e2e';

@@ -701,6 +701,11 @@ public enum SurfaceRegistry {
                     + "/recovery:block",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_RECOVERY_BLOCK)),
+    INTERNAL_EVENT_INGEST(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/events:ingest",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_EVENT_INGEST)),
     INTERNAL_TRANSACTION_COMMIT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/transactions:commit",
@@ -1021,6 +1026,7 @@ public enum SurfaceRegistry {
         STORE_WRITER_RENEW,
         STORE_WRITER_SEAL,
         STORE_RECOVERY_BLOCK,
+        STORE_EVENT_INGEST,
         STORE_TRANSACTION_COMMIT,
         STORE_RESTORE,
         STORE_TOOL_RESULT_PUBLISH,

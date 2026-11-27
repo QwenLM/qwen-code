@@ -3282,8 +3282,8 @@ try {
   const mysqlPort = await freePort();
   dumpPort = mysqlPort;
   const springPort = await freePort();
+  const springUrl = `http://127.0.0.1:${springPort}`;
   const harnessPort = await freePort();
-  const brokerPort = await freePort();
   // C1/C2 replace the Harness's Session Store reply/write after the
   // payable checkpoint, so the store URL the control plane advertises
   // must point at this proxy from the first load onward. Other arms keep
@@ -3292,12 +3292,9 @@ try {
     approvalFault === 'terminal-reply-lost' ||
     approvalFault === 'terminal-write-failed'
   ) {
-    storeFaultProxy = await startStoreFaultProxy(
-      `http://127.0.0.1:${springPort}`,
-    );
+    storeFaultProxy = await startStoreFaultProxy(springUrl);
   }
-  const sessionStoreUrl =
-    storeFaultProxy?.baseUrl ?? `http://127.0.0.1:${springPort}`;
+  const sessionStoreUrl = storeFaultProxy?.baseUrl ?? springUrl;
 
   const initialized = spawnSync(
     mysqld,
@@ -3430,7 +3427,6 @@ try {
               QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -3441,7 +3437,6 @@ try {
             }
           : {
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-              QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(brokerPort),
               QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -3459,7 +3454,6 @@ try {
     },
     'Spring Managed Agent Server',
   );
-  const springUrl = `http://127.0.0.1:${springPort}`;
   await waitUntil(
     'Spring Managed Agent Server',
     async () => {
@@ -3525,9 +3519,7 @@ try {
       )
     : undefined;
   if (inflightFailover) {
-    heldStartProxy = await startHeldExecutionStartProxy(
-      `http://127.0.0.1:${brokerPort}`,
-    );
+    heldStartProxy = await startHeldExecutionStartProxy(springUrl);
   }
 
   const harness = start(
@@ -3546,7 +3538,7 @@ try {
       '--workspace',
       workspace,
       '--managed-runtime-broker-url',
-      heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
+      heldStartProxy?.baseUrl ?? springUrl,
       // Joined form: a base64url token can start with '-', which argv
       // would otherwise parse as another flag.
       `--managed-runtime-broker-token=${brokerToken}`,
@@ -3570,8 +3562,7 @@ try {
             }
           : {}),
         QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
-        QWEN_RUNTIME_BROKER_URL:
-          heldStartProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`,
+        QWEN_RUNTIME_BROKER_URL: heldStartProxy?.baseUrl ?? springUrl,
       },
     },
     hostedHarnessLabel,
@@ -4720,13 +4711,13 @@ try {
         approvalFault === 'cleanup-failed'
       ) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
-          `http://127.0.0.1:${brokerPort}`,
+          springUrl,
           approvalFault !== 'cleanup-failed',
           approvalFault === 'cleanup-failed',
         );
       }
       replacementBrokerUrl =
-        replacementBrokerProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`;
+        replacementBrokerProxy?.baseUrl ?? replacementSpringUrl;
     } else {
       // Under --freeze the original Spring is dead, but the frozen Harness
       // still holds the session-store URL the original Spring handed it at
@@ -4736,7 +4727,6 @@ try {
       // every post-wake assertion would hold by disconnection, not fencing.
       const replacementSpringPort = freeze ? springPort : await freePort();
       replacementHarnessPort = await freePort();
-      const replacementBrokerPort = await freePort();
       replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
       replacementSpring = start(
         java,
@@ -4790,9 +4780,6 @@ try {
             QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
             QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-            QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
-              replacementBrokerPort,
-            ),
             QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
             QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
             QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
@@ -4820,13 +4807,12 @@ try {
 
       if (inflightFailover) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
-          `http://127.0.0.1:${replacementBrokerPort}`,
+          replacementSpringUrl,
           false,
         );
       }
       replacementBrokerUrl =
-        replacementBrokerProxy?.baseUrl ??
-        `http://127.0.0.1:${replacementBrokerPort}`;
+        replacementBrokerProxy?.baseUrl ?? replacementSpringUrl;
     }
 
     // Every replacement generation answers on the same port with a fresh
@@ -5589,7 +5575,7 @@ try {
           } else {
             await replacementBrokerProxy.close();
             replacementBrokerProxy = undefined;
-            replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+            replacementBrokerUrl = replacementSpringUrl;
           }
         }
         // The crashed generation's disk is scrapped like every replaced

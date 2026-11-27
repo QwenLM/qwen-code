@@ -23,7 +23,7 @@ import type {
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
-  DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -1488,6 +1488,7 @@ export function createDaemonSessionActions({
         replayedTurnEvents: new Map(),
       });
       let admissionError = false;
+      let beforeDispatchFailed = false;
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1522,7 +1523,8 @@ export function createDaemonSessionActions({
         const optimisticMessageAppended =
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
-          displayedFiles.length === 0;
+          displayedFiles.length === 0 &&
+          !options?.beforeDispatch;
         let optimisticBlockId: string | undefined = options?.bindBlockId;
         if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -1560,7 +1562,11 @@ export function createDaemonSessionActions({
         }
         if (ctrl.signal.aborted) {
           await removeUploadedAttachments(session, uploaded.references);
-          if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+          if (
+            shouldAppendOptimisticMessage &&
+            !optimisticMessageAppended &&
+            !options?.beforeDispatch
+          ) {
             store.appendLocalUserMessage(
               text,
               displayedImages,
@@ -1593,23 +1599,46 @@ export function createDaemonSessionActions({
           promptRequest['suppressInputHistory'] = true;
         }
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        const guardedBeforeDispatch = options?.beforeDispatch
+          ? (clientId: string | undefined): void | Promise<void> => {
+              beforeDispatchFailed = false;
+              try {
+                const result = options.beforeDispatch!(clientId);
+                if (
+                  result &&
+                  typeof (result as Promise<void>).then === 'function'
+                ) {
+                  return (result as Promise<void>).catch((error: unknown) => {
+                    beforeDispatchFailed = true;
+                    throw error;
+                  });
+                }
+                return result;
+              } catch (error) {
+                beforeDispatchFailed = true;
+                throw error;
+              }
+            }
+          : undefined;
         try {
           const request = promptRequest as Parameters<
             typeof session.submitPrompt
           >[0];
           for (let attempt = 0; ; attempt += 1) {
+            beforeDispatchFailed = false;
             try {
-              accepted = options?.beforeDispatch
+              accepted = guardedBeforeDispatch
                 ? await session.submitPrompt(
                     request,
                     ctrl.signal,
-                    options.beforeDispatch,
+                    guardedBeforeDispatch,
                   )
                 : await session.submitPrompt(request, ctrl.signal);
               break;
             } catch (error) {
               const retryDelayMs = PROMPT_ADMISSION_RETRY_DELAYS_MS[attempt];
               if (
+                beforeDispatchFailed ||
                 !options?.idempotencyKey ||
                 retryDelayMs === undefined ||
                 ctrl.signal.aborted ||
@@ -1638,7 +1667,9 @@ export function createDaemonSessionActions({
           if (
             sessionRef.current === session &&
             shouldAppendOptimisticMessage &&
-            !optimisticMessageAppended
+            !optimisticMessageAppended &&
+            !beforeDispatchFailed &&
+            !(options?.beforeDispatch && isAbortError(error))
           ) {
             store.appendLocalUserMessage(
               text,
@@ -1666,7 +1697,11 @@ export function createDaemonSessionActions({
             return { ...current, clientId };
           });
         }
-        if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
+        if (
+          sessionRef.current === session &&
+          shouldAppendOptimisticMessage &&
+          !optimisticMessageAppended
+        ) {
           store.appendLocalUserMessage(
             text,
             displayedImages,
@@ -1710,6 +1745,12 @@ export function createDaemonSessionActions({
           }
           if (options?.source === 'mcp-app' && admissionError) throw error;
           return { stopReason: 'cancelled' };
+        }
+        if (beforeDispatchFailed) {
+          if (sessionRef.current?.sessionId === sessionId) {
+            store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
+          }
+          throw error;
         }
         if (isDaemonTurnError(error)) {
           throw error;
@@ -2131,9 +2172,15 @@ export function createDaemonSessionActions({
         options?.onAdmissionStarted?.();
         let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
         try {
-          accepted = await session.submitPrompt(
-            promptRequest as Parameters<typeof session.submitPrompt>[0],
-          );
+          accepted = options?.beforeDetachedDispatch
+            ? await session.submitPrompt(
+                promptRequest as Parameters<typeof session.submitPrompt>[0],
+                undefined,
+                options.beforeDetachedDispatch,
+              )
+            : await session.submitPrompt(
+                promptRequest as Parameters<typeof session.submitPrompt>[0],
+              );
         } catch (error) {
           if (isDefinitelyRejectedPromptAdmission(error)) {
             await removeUploadedAttachments(session, uploaded.references);
@@ -3974,7 +4021,8 @@ export function createDaemonSessionActions({
 
     async cancelTask(
       taskId: string,
-      kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+      kind: DaemonSessionCancelableTaskKind,
+      source?: 'cron' | 'wakeup',
     ) {
       const session = requireSessionForAction(
         addNotice,
@@ -3984,7 +4032,7 @@ export function createDaemonSessionActions({
       );
       try {
         return await withActionTimeout(
-          session.cancelTask(taskId, kind),
+          session.cancelTask(taskId, kind, source),
           'Cancel task timed out',
         );
       } catch (error) {

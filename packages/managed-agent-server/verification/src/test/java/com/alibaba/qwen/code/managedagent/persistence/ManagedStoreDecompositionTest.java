@@ -159,7 +159,7 @@ class ManagedStoreDecompositionTest {
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
-                hasLiveWriter/2::REQUIRED:DEFAULT:false
+                hasLiveWriter/2::REQUIRED:DEFAULT:false authenticateEventIngest/7::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }

@@ -378,6 +378,118 @@ describe('sendPrompt admission notices', () => {
     },
   );
 
+  it.each([true, false])(
+    'defers optimistic user bubble until beforeDispatch passes (reject=%s)',
+    async (shouldReject) => {
+      const session = createMockSession('session-a');
+      const guardError = new DOMException(
+        'Failed to record the run',
+        'AbortError',
+      );
+      session.submitPrompt.mockImplementationOnce(
+        async (_req, _signal, beforeDispatch) => {
+          await beforeDispatch?.('client-1');
+          return { promptId: 'p-guarded', lastEventId: 1 };
+        },
+      );
+      const onAdmitted = vi.fn();
+      const h = createActionsHarness({ session });
+
+      if (shouldReject) {
+        await expect(
+          h.actions.sendPrompt('Scheduled prompt', {
+            beforeDispatch: async () => {
+              throw guardError;
+            },
+            onAdmitted,
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        const pending = h.actions.sendPrompt('Scheduled prompt', {
+          beforeDispatch: async () => {},
+          onAdmitted,
+        });
+        await vi.waitFor(() =>
+          expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+            promptId: 'p-guarded',
+          }),
+        );
+        expect(h.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+        const active = h.activePromptsRef.current.get('session-a');
+        active?.resolve?.({ stopReason: 'end_turn' });
+        await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+      }
+    },
+  );
+
+  it('does not append an optimistic user bubble or emit a duplicate notice when beforeDispatch throws a non-AbortError', async () => {
+    const session = createMockSession('session-a');
+    const guardError = new Error('GET /scheduled-tasks failed: 503');
+    session.submitPrompt.mockImplementation(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-1');
+        return { promptId: 'unexpected', lastEventId: 1 };
+      },
+    );
+    const addNotice = vi.fn();
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session, addNotice });
+
+    await expect(
+      h.actions.sendPrompt('Scheduled prompt', {
+        idempotencyKey: 'idem-1',
+        beforeDispatch: async () => {
+          throw guardError;
+        },
+        onAdmitted,
+      }),
+    ).rejects.toBe(guardError);
+
+    expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(onAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('does not append a deferred optimistic user bubble after switching to another session before admission resolves', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const admission = createDeferred<{
+      promptId: string;
+      lastEventId: number;
+    }>();
+    sessionA.submitPrompt.mockImplementationOnce(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-a');
+        return admission.promise;
+      },
+    );
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session: sessionA });
+
+    const pending = h.actions.sendPrompt('Scheduled prompt for A', {
+      beforeDispatch: async () => {},
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(sessionA.submitPrompt).toHaveBeenCalledOnce(),
+    );
+
+    // User switches to session B before session A's POST /prompt returns 202.
+    h.sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    admission.resolve({ promptId: 'p-a', lastEventId: 1 });
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({ promptId: 'p-a' }),
+    );
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    h.activePromptsRef.current
+      .get('session-a')
+      ?.resolve?.({ stopReason: 'end_turn' });
+    await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
   it('keeps notices for MCP App errors before admission starts', async () => {
     const session = createMockSession('session-a');
     const error = new Error('Admission preparation failed');
@@ -434,6 +546,99 @@ describe('sendPrompt admission notices', () => {
       }),
     );
   });
+});
+
+describe('sendDetachedPrompt client registration recovery', () => {
+  it.each([true, false])(
+    'checks deletion during reattach before a second HTTP attempt ($deleted)',
+    async (deleteDuringReattach) => {
+      const resume = createDeferred<Response>();
+      const promptClientIds: Array<string | null> = [];
+      const guardedClientIds: Array<string | undefined> = [];
+      let resumeStarted = false;
+      let stale = false;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/resume')) {
+          resumeStarted = true;
+          return resume.promise;
+        }
+        if (url.endsWith('/prompt')) {
+          promptClientIds.push(
+            new Headers(init?.headers).get('X-Qwen-Client-Id'),
+          );
+          return new Response(
+            JSON.stringify(
+              promptClientIds.length === 1
+                ? { code: 'invalid_client_id', error: 'unknown client' }
+                : { promptId: 'detached-recovered', lastEventId: 0 },
+            ),
+            { status: promptClientIds.length === 1 ? 400 : 202 },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 'session-a',
+          clientId: 'client-a',
+          attached: true,
+          workspaceCwd: '/workspace',
+        },
+      });
+      const detach = vi.spyOn(session, 'detach').mockResolvedValue(undefined);
+      const { actions } = createActionsHarness();
+      const onAdmissionStarted = vi.fn();
+      const onAdmitted = vi.fn();
+      const beforeDetachedDispatch = vi.fn(async (clientId?: string) => {
+        guardedClientIds.push(clientId);
+        await Promise.resolve();
+        if (stale) {
+          throw new DOMException('Task deleted before retry', 'AbortError');
+        }
+      });
+
+      const settled = actions
+        .sendDetachedPrompt(session, 'manual run', {
+          onAdmissionStarted,
+          onAdmitted,
+          beforeDetachedDispatch,
+        })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(resumeStarted).toBe(true));
+      stale = deleteDuringReattach;
+      resume.resolve(
+        new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: 'client-recovered',
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+        ),
+      );
+
+      const result = await settled;
+      if (deleteDuringReattach) {
+        expect(result).toBeInstanceOf(Error);
+        expect(result.name).toBe('AbortError');
+        expect(promptClientIds).toEqual(['client-a']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        expect(result).toEqual({ promptId: 'detached-recovered' });
+        expect(promptClientIds).toEqual(['client-a', 'client-recovered']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+          promptId: 'detached-recovered',
+        });
+      }
+      expect(guardedClientIds).toEqual(['client-a', 'client-recovered']);
+      expect(detach).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe('sendPrompt client registration recovery', () => {

@@ -62,9 +62,10 @@ export function renderHarnessEnv(secrets) {
     '# server.env points QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE here.',
     `QWEN_SERVER_TOKEN=${secrets.token}`,
     `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=${secrets.digest}`,
-    '# The Runtime Broker. The Harness dials it only for tool-path Sessions,',
+    '# Runtime Broker routes share the control plane Spring listener and',
+    '# Session Store origin. The Harness dials them only for tool-path Sessions,',
     '# and the control plane reads the same token from this file.',
-    'QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:4182',
+    'QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:8080',
     `QWEN_MANAGED_RUNTIME_BROKER_TOKEN=${secrets.brokerToken}`,
     '',
   ].join('\n');
