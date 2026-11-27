@@ -35,7 +35,7 @@ const BROWSER_NOTIFICATION_KEYS = [
   'helpWaiting',
   'helpWhen',
   'helpSystem',
-  'helpSystemOther',
+  'helpIos',
   'helpMac',
   'helpWindows',
   'helpOther',
