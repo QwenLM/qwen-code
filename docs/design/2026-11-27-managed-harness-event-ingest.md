@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first slice in §10 is implemented in the same change. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
+Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first two slices in §10 are implemented. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
 
 ## 1. Problem and current state
 
@@ -134,14 +134,14 @@ Java decodes each envelope with the rules of the SDK stream decoder, so the proj
 
 The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false }`.
 
-| Reply                                                                        | Harness action                                                                                                    |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Success with `terminal: false`                                               | Continue from `cursor`; stop if the request carried an end marker                                                 |
-| `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                                      |
-| `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                                         |
-| `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                                   |
-| `managed_event_ingest_end_refused`                                           | Flush through the committed sequence and retry if the cursor was short; otherwise stop pushing for this admission |
-| Transport failure                                                            | Resend the same request                                                                                           |
+| Reply                                                                        | Harness action                                                                                        |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Success with `terminal: false`                                               | Continue from `cursor`; stop if the request carried an end marker                                     |
+| `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                          |
+| `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                             |
+| `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                       |
+| `managed_event_ingest_end_refused`                                           | Recheck the recovery-blocked marker on the next tick. For a refused park marker, let the lease lapse. |
+| Transport failure                                                            | Resend the same request                                                                               |
 
 ## 5. Dispatcher changes
 
@@ -157,12 +157,14 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 ## 6. Harness changes
 
 - **Capability.** `event-ingest/1` joins the contract features. A pool still requires identical features.
-- **Pusher.** A per-Session pusher runs while an ingest admission is active.
+- **Pusher.** One pusher runs for each ingest admission.
   - It reuses the `eventEnvelope` projection and `streamedDeltaIds` seeding of the events route, and reads `authority.readEvents` from its cursor at the same 250 ms cadence.
   - It starts at the admission's `lastEventId`.
   - It posts through a new `ingestEvents` method on the Session Store client.
   - It stops on a reply with `terminal: true`, on `not_owner`, a writer fence refusal, or an acknowledged end marker.
-- **Park.** After the seal is confirmed and before the placement is released (#18404), the pusher flushes through the committed sequence and posts `end: "parked"` with the sealed incarnation. If this fails, the suspension continues, and the lapsed lease leads to today's recovery.
+- **Admission.** A malformed `eventDelivery` is refused with 400 `invalid_hosted_event_delivery`. A Session without an HTTP Session Store refuses it with 409 `hosted_event_ingest_unavailable`, which the dispatcher retries instead of failing the Turn.
+- **Suspension and close.** A pusher counts as an open event stream: an ordinary idle suspension waits until it stops, and every close path stops it. An Action-parked suspension pauses every pusher before the seal.
+- **Park.** After pausing and while the writer is still live, the pusher flushes committed events in batches. The flush stops if the cursor makes no progress. After the seal is confirmed and before the placement is released (#18404), the pusher posts `end: "parked"` with the sealed incarnation if the marker can reach the committed sequence. If delivery fails, suspension continues and the Turn recovers when its lease lapses.
 - **Recovery block.** The condition is the one Java polls today: no active prompt for the Turn, `recoveryBlocked`, and the cursor at the committed sequence. When it holds, the pusher posts `end: "recovery_blocked"`.
 
 ## 7. Compatibility and rollout

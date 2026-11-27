@@ -292,3 +292,17 @@ export function describeLastRun(
     },
   );
 }
+
+export function scheduledTaskRuntimeKey(
+  task:
+    | { readonly id: string; readonly scope: 'durable' }
+    | {
+        readonly id: string;
+        readonly scope: 'session';
+        readonly source: 'cron' | 'wakeup';
+      },
+): string {
+  return task.scope === 'session'
+    ? JSON.stringify([task.scope, task.source, task.id])
+    : JSON.stringify([task.scope, task.id]);
+}

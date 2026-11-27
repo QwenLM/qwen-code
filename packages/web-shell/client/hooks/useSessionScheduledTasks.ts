@@ -20,6 +20,7 @@ import {
 } from '../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useI18n } from '../i18n';
+import { scheduledTaskRuntimeKey } from '../components/dialogs/scheduledTasksSchedule';
 import {
   runScheduledTaskManually,
   type ScheduledTaskRunPrompt,
@@ -67,15 +68,7 @@ export type SessionScheduledTask =
   | SessionDurableScheduledTask
   | SessionScopedScheduledTask;
 
-export function scheduledTaskRuntimeKey(
-  task:
-    | Pick<SessionDurableScheduledTask, 'id' | 'scope'>
-    | Pick<SessionScopedScheduledTask, 'id' | 'scope' | 'source'>,
-): string {
-  return task.scope === 'session'
-    ? JSON.stringify([task.scope, task.source, task.id])
-    : JSON.stringify([task.scope, task.id]);
-}
+export { scheduledTaskRuntimeKey };
 
 export type SessionScheduledTaskLiveState = 'active' | 'paused';
 
@@ -188,6 +181,8 @@ export function useSessionScheduledTasks(options: {
   durableSeeded?: boolean;
   /** Actual bound-session prompt admission, not the record-only /run route. */
   onRunPrompt: ScheduledTaskRunPrompt;
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
+  onOverloadRefused?: () => void;
   onError: ScheduledTaskActionErrorHandler;
   /**
    * App calls this hook above the `<I18nProvider>` it renders, where `useI18n()`
@@ -206,6 +201,8 @@ export function useSessionScheduledTasks(options: {
     activityKey,
     durableSeeded = false,
     onRunPrompt,
+    shouldRefuseManualRun,
+    onOverloadRefused,
     onError,
     translate,
     refreshTrigger = 0,
@@ -503,6 +500,8 @@ export function useSessionScheduledTasks(options: {
             onOneShotError: onError,
             isStale: () =>
               confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey),
+            shouldRefuseManualRun,
+            onOverloadRefused,
           },
         );
       } finally {
@@ -516,9 +515,11 @@ export function useSessionScheduledTasks(options: {
     [
       markBusy,
       onError,
+      onOverloadRefused,
       onRunPrompt,
       owner,
       refresh,
+      shouldRefuseManualRun,
       t,
       workspaceActions,
       workspaceCwd,

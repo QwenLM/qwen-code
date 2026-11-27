@@ -757,6 +757,180 @@ describe('createServeApp load admission factory injection', () => {
       reason: 'cpu_load',
     });
   });
+
+  describe('createServeApp load admission failure cleanup', () => {
+    it('disposes the monitor when the default bridge rejects an invalid ring', async () => {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+      const [intervalSpy, clearIntervalSpy] = [
+        vi.spyOn(globalThis, 'setInterval'),
+        vi.spyOn(globalThis, 'clearInterval'),
+      ];
+      const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+        await Promise.all([
+          import('./load-admission.js'),
+          import('./server.js'),
+        ]);
+      const monitor = createLoadAdmissionMonitor();
+      const dispose = vi.spyOn(monitor, 'dispose');
+      const factory = vi.fn(() => monitor);
+      try {
+        expect(() =>
+          createServeApp(
+            {
+              workspace: WS_BOUND,
+              hostname: '127.0.0.1',
+              eventRingSize: 0,
+            } as Parameters<typeof createServeApp>[0],
+            () => 0,
+            { createLoadAdmissionMonitor: factory },
+          ),
+        ).toThrow(/Invalid eventRingSize: 0/);
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(dispose).toHaveBeenCalledTimes(1);
+        const timer = intervalSpy.mock.results.find(
+          (result, index) => intervalSpy.mock.calls[index]?.[1] === 2000,
+        )?.value;
+        expect(timer).toBeDefined();
+        expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+      } finally {
+        monitor.dispose();
+      }
+    });
+
+    it('rejects unsafe origins before creating the default monitor', async () => {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+      const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+        await Promise.all([
+          import('./load-admission.js'),
+          import('./server.js'),
+        ]);
+      const monitor = createLoadAdmissionMonitor();
+      const dispose = vi.spyOn(monitor, 'dispose');
+      const factory = vi.fn(() => monitor);
+      try {
+        expect(() =>
+          createServeApp(
+            {
+              workspace: WS_BOUND,
+              hostname: '127.0.0.1',
+              allowOrigins: ['*'],
+            } as Parameters<typeof createServeApp>[0],
+            () => 0,
+            { createLoadAdmissionMonitor: factory },
+          ),
+        ).toThrow(/Refusing to start with --allow-origin/);
+        expect(factory).not.toHaveBeenCalled();
+        expect(dispose).not.toHaveBeenCalled();
+      } finally {
+        monitor.dispose();
+      }
+    });
+
+    it.each([
+      {
+        scenario: 'missing authentication',
+        requireAuth: false,
+        token: undefined,
+        javaUrl: 'http://127.0.0.1:1',
+        error: /requires an authenticated loopback daemon/,
+      },
+      {
+        scenario: 'invalid Java URL',
+        requireAuth: true,
+        token: 'test-token',
+        javaUrl: 'invalid-url',
+        error: /Invalid URL/,
+      },
+      {
+        scenario: 'non-loopback Java URL',
+        requireAuth: true,
+        token: 'test-token',
+        javaUrl: 'https://example.com',
+        error: /Managed local Java URL must be a loopback HTTP origin/,
+      },
+      {
+        scenario: 'Java URL with non-root path',
+        requireAuth: true,
+        token: 'test-token',
+        javaUrl: 'http://127.0.0.1:8080/prefix',
+        error: /Managed local Java URL must be a loopback HTTP origin/,
+      },
+    ])(
+      'rejects invalid managed local Web settings before creating a monitor: $scenario',
+      async ({ requireAuth, token, javaUrl, error }) => {
+        vi.doUnmock('./acp-session-bridge.js');
+        vi.resetModules();
+        const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+          await Promise.all([
+            import('./load-admission.js'),
+            import('./server.js'),
+          ]);
+        const monitor = createLoadAdmissionMonitor();
+        const dispose = vi.spyOn(monitor, 'dispose');
+        const factory = vi.fn(() => monitor);
+        try {
+          expect(() =>
+            createServeApp(
+              {
+                workspace: WS_BOUND,
+                hostname: '127.0.0.1',
+                requireAuth,
+                token,
+              } as Parameters<typeof createServeApp>[0],
+              () => 0,
+              {
+                managedLocalWeb: {
+                  javaUrl,
+                  signingKey: 'fixture-key',
+                  tenantId: 'fixture-tenant',
+                  actorId: 'fixture-actor',
+                  productScope: 'qwen-code',
+                  agentId: 'fixture-agent',
+                },
+                createLoadAdmissionMonitor: factory,
+              },
+            ),
+          ).toThrow(error);
+          expect(factory).not.toHaveBeenCalled();
+          expect(dispose).not.toHaveBeenCalled();
+        } finally {
+          monitor.dispose();
+        }
+      },
+    );
+
+    it('does not construct a monitor for an opted-out invalid bridge', async () => {
+      vi.doUnmock('./acp-session-bridge.js');
+      vi.resetModules();
+      const [{ createLoadAdmissionMonitor }, { createServeApp }] =
+        await Promise.all([
+          import('./load-admission.js'),
+          import('./server.js'),
+        ]);
+      const factory = vi.fn(() => createLoadAdmissionMonitor());
+      try {
+        expect(() =>
+          createServeApp(
+            {
+              workspace: WS_BOUND,
+              hostname: '127.0.0.1',
+              eventRingSize: 0,
+              loadAdmission: false,
+            } as Parameters<typeof createServeApp>[0],
+            () => 0,
+            { createLoadAdmissionMonitor: factory },
+          ),
+        ).toThrow(/Invalid eventRingSize: 0/);
+        expect(factory).not.toHaveBeenCalled();
+      } finally {
+        factory.mock.results.forEach((result) => {
+          if (result.type === 'return') result.value.dispose();
+        });
+      }
+    });
+  });
 });
 
 describe('createServeApp load admission with injected workspace registry', () => {

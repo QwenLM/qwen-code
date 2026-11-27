@@ -64,6 +64,7 @@ import type {
   HostedShellTurnOptions,
   HostedWorkspaceToolProfile,
 } from '../hosted-workspace-tool-turn.js';
+import type { HostedEventIngest } from './event-ingest.js';
 
 export interface HostedSession {
   placement?: HostedHarnessPlacement;
@@ -105,6 +106,8 @@ export interface HostedSession {
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
+  /** Event-ingest pushers by prompt; each also stops through `streams`. */
+  eventIngests?: Map<string, HostedEventIngest>;
   active?: { promptId: string; digest: string; abort: AbortController };
   deadlineTimer?: NodeJS.Timeout;
   admissions: Map<string, { digest: string; lastEventId: number }>;

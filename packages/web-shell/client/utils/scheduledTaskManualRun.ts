@@ -46,6 +46,11 @@ export interface ScheduledTaskManualRunErrorHandlers {
   onOneShotError?: (error: unknown, fallback: string) => void;
   /** True once this owner/task deletion has been confirmed. */
   isStale?: () => boolean;
+  /** Re-read live App state after refresh, before a manual run consumes a
+   * one-shot or dispatches a fresh-session attempt that must be refused. */
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
+  overloadDetail?: string;
+  onOverloadRefused?: () => void;
 }
 
 /** The scheduler runs a gated task's gate before each scheduled fire; a
@@ -85,6 +90,9 @@ export async function runScheduledTaskManually(
     isDirectDispatchCurrent,
     isOwnerCurrent,
     onOneShotError,
+    shouldRefuseManualRun,
+    overloadDetail,
+    onOverloadRefused,
   }: ScheduledTaskManualRunErrorHandlers,
 ): Promise<void> {
   let effectiveRecurring = task.recurring;
@@ -120,6 +128,20 @@ export async function runScheduledTaskManually(
     }
     await actions.assertScheduledTaskOwnerSelection(fresh.sessionId);
     if (!current(fresh.recurring)) return;
+    // Check before consuming a one-shot or recording a per-run attempt.
+    // The App predicate reads refs so overload that engaged during refresh or
+    // capability checks is caught before mutating the daemon task state.
+    if (shouldRefuseManualRun?.(fresh)) {
+      if (onOverloadRefused) {
+        onOverloadRefused();
+      } else {
+        onError(
+          new Error(overloadDetail ?? t('sidebar.overloadPaused')),
+          t('sidebar.overloadPaused'),
+        );
+      }
+      return;
+    }
     if (fresh.sessionMode === 'per_run') {
       if (isDirectDispatchCurrent?.() === false) return;
       // The daemon dispatches a fresh child session and records it on this
