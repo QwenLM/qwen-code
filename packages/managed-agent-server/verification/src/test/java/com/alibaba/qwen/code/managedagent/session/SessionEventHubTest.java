@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -228,6 +229,72 @@ class SessionEventHubTest {
             assertThat(waiter.isAlive()).isFalse();
             assertThat(interrupted).isTrue();
         }
+    }
+
+    @Test
+    void anotherInstancesCommitWakesAWaitingSubscriberToReadTheStore() throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        try (SessionEventHub.Subscription subscription = hub.subscribe(
+                "tenant", "session");
+                ExecutorService waiters = Executors
+                        .newVirtualThreadPerTaskExecutor()) {
+            Future<SessionEventHub.Delivery> delivery = waiters.submit(
+                    () -> subscription.await(0, Duration.ofSeconds(30)));
+            // Let the waiter park inside await before the notice.
+            Thread.sleep(500);
+
+            hub.notifyCommitted(new SessionKey("tenant", "session"), 3);
+
+            SessionEventHub.Delivery result = delivery.get(1, TimeUnit.SECONDS);
+            assertThat(result.overflowed()).isTrue();
+            assertThat(result.events()).isEmpty();
+        }
+    }
+
+    @Test
+    void aNoticeBeforeAwaitIsReadOnceAndNotLost() throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        try (SessionEventHub.Subscription subscription = hub.subscribe(
+                "tenant", "session")) {
+            // The stream was busy sending when the notice came, so its next
+            // await must still see it, and only once.
+            hub.notifyCommitted(new SessionKey("tenant", "session"), 3);
+
+            assertThat(subscription.await(0, Duration.ofMillis(10)).overflowed())
+                    .isTrue();
+            SessionEventHub.Delivery next = subscription.await(3, Duration.ofMillis(10));
+            assertThat(next.overflowed()).isFalse();
+            assertThat(next.events()).isEmpty();
+        }
+    }
+
+    @Test
+    void aNoticeForEventsTheHubAlreadyHoldsIsIgnored() throws Exception {
+        SessionEventHub hub = new SessionEventHub();
+        try (SessionEventHub.Subscription subscription = hub.subscribe(
+                "tenant", "session")) {
+            hub.publish(List.of(event(1), event(2)));
+            hub.notifyCommitted(new SessionKey("tenant", "session"), 2);
+
+            SessionEventHub.Delivery delivery = subscription.await(0, Duration.ofMillis(10));
+            assertThat(delivery.overflowed()).isFalse();
+            assertThat(delivery.events()).extracting(EventRecord::sequence)
+                    .containsExactly(1L, 2L);
+        }
+    }
+
+    @Test
+    void listsOnlySessionsWithAnOpenSubscription() {
+        SessionEventHub hub = new SessionEventHub();
+        SessionEventHub.Subscription open = hub.subscribe("tenant", "open");
+        hub.subscribe("tenant", "closed").close();
+
+        assertThat(hub.subscribedSessions())
+                .containsExactly(new SessionKey("tenant", "open"));
+        open.close();
+        assertThat(hub.subscribedSessions()).isEmpty();
+        // A notice for a Session nobody here follows is a no-op.
+        hub.notifyCommitted(new SessionKey("tenant", "open"), 1);
     }
 
     private static EventRecord event(long sequence) {

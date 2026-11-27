@@ -861,7 +861,6 @@ export default {
   'Screen Reader Mode': 'Screen Reader Mode',
   'Max Session Turns': 'Max Session Turns',
   'Skip Next Speaker Check': 'Skip Next Speaker Check',
-  'Skip Loop Detection': 'Skip Loop Detection',
   'Skip Startup Context': 'Skip Startup Context',
   'Enable OpenAI Logging': 'Enable OpenAI Logging',
   'OpenAI Logging Directory': 'OpenAI Logging Directory',
@@ -2631,6 +2630,8 @@ export default {
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Save the context window for the current model.':
+    'Save the context window for the current model.',
   'body loaded': 'body loaded',
   memory: 'memory',
   '{{region}} configuration updated successfully.':

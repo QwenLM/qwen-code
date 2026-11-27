@@ -250,7 +250,15 @@ final class AgentSessionAdmissions {
         }
         List<Map<String, Object>> merged = new ArrayList<>(pin.skills());
         List<StandaloneSkill> packageSkills = command.extensionSelection() == null ? List.of() : command.extensionSelection().standaloneSkills();
-        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported(), packageSkills);
+        // A creation pin can already carry the caller catalog. Compare that premise
+        // rather than the profile string: appending the catalog again would
+        // duplicate every name, and the pin slice has to be classified as caller
+        // content so the bundled loop is still the server's to replace or drop.
+        boolean pinCarriesCallerCatalog = pin.skills().equals(skills);
+        var injectedCatalog = ManagedLoopSkill.mergeInto(merged,
+                pinCarriesCallerCatalog ? List.<Map<String, Object>>of() : skills,
+                pinCarriesCallerCatalog ? 0 : merged.size(), pin.toolProfile(),
+                command.sessionSkillsSupported(), packageSkills);
         var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged, packageSkills);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");

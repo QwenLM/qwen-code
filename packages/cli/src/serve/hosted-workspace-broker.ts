@@ -93,6 +93,21 @@ export class HostedWorkspaceBrokerRejection extends Error {
   }
 }
 
+export class HostedWorkspaceBrokerTransportError extends Error {
+  constructor(cause: TypeError | DOMException) {
+    super(`Runtime Broker execution poll failed: ${cause.message}`, { cause });
+  }
+}
+
+function isBrokerTransportFailure(
+  cause: unknown,
+): cause is TypeError | DOMException {
+  return (
+    cause instanceof TypeError ||
+    (cause instanceof DOMException && cause.name === 'TimeoutError')
+  );
+}
+
 export function isHostedFileHistoryRefusal(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection {
@@ -758,7 +773,7 @@ export class HostedWorkspaceBroker {
         cancellationSent = true;
         response = await this.request(`${path}:cancel`, {});
       }
-      response ??= await this.request(path);
+      response ??= await this.pollExecution(path);
       if (response['executionCallId'] !== id)
         throw new Error('Tool v3 execution identity changed.');
       const status = object(response['status']);
@@ -845,13 +860,13 @@ export class HostedWorkspaceBroker {
           cancellationSent = true;
           response = await this.request(`${path}:cancel`, {});
         }
-        response ??= await this.request(
+        response ??= await this.pollExecution(
           waitForUnknown ? `${path}?reconcile=true` : path,
         );
       } catch (cause) {
         const transportFailed =
-          cause instanceof TypeError ||
-          (cause instanceof DOMException && cause.name === 'TimeoutError');
+          cause instanceof HostedWorkspaceBrokerTransportError ||
+          isBrokerTransportFailure(cause);
         if (cancelling && transportFailed) cancellationSent = false;
         const stillUnknown =
           cause instanceof HostedWorkspaceBrokerRejection &&
@@ -866,7 +881,7 @@ export class HostedWorkspaceBroker {
           // again.
           reconciledUnknown = true;
           try {
-            response = await this.request(`${path}?reconcile=true`);
+            response = await this.pollExecution(`${path}?reconcile=true`);
           } catch (asked) {
             if (
               asked instanceof HostedWorkspaceBrokerRejection &&
@@ -1364,6 +1379,16 @@ export class HostedWorkspaceBroker {
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     return this.request(path, body, true);
+  }
+
+  private async pollExecution(path: string): Promise<Record<string, unknown>> {
+    try {
+      return await this.request(path);
+    } catch (cause) {
+      if (isBrokerTransportFailure(cause))
+        throw new HostedWorkspaceBrokerTransportError(cause);
+      throw cause;
+    }
   }
 
   private async request(

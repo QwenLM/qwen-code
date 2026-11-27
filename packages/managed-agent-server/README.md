@@ -2168,7 +2168,7 @@ The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
 provider acceptance. The scope below does not extend those claims.
 
-The first Hosted release supports recovery for one Java control-plane instance
+First-release Hosted recovery acceptance covers one Java control-plane instance
 on one trusted Linux host. That control plane replaces reachable Hosted Harness
 process generations one after another, and a Runtime Session stays exclusive
 to its Session. Recovery covers only the profiles and parked states that are
@@ -2182,13 +2182,20 @@ durable engine ownership, capability and journal-contract checks and
 fail-closed recovery apply throughout. A refused recovery is never replayed
 through another Runtime or the Legacy engine.
 
-The frozen control-plane arm shows that a woken former control plane's stale
-claim is refused and changes nothing, and a store test pins the bind guards
-that claim never reaches. Neither makes two live control planes a supported
-deployment. Routing between them is out of scope: a new Turn could
-be claimed by either one. Cross-host takeover, physical-ownership handoff
-between hosts, real providers and mixed-version clusters still need their own
-acceptance before they are supported.
+The frozen control-plane arm verifies that a former control plane's stale
+claim is fenced. A store test verifies the binding guards independently.
+Separate MySQL integration tests use two Java control-plane instances with the
+same Session Store and Hosted Harness. They cover reusing an existing
+attachment for the first Turn, cancelling the original Turn, and delivering
+Shell approval decisions from a replica with no local attachment. See the
+[cross-instance attachment recovery design](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.md)
+([简体中文](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.zh-CN.md)).
+
+Multi-replica release acceptance needs routing evidence in the intended
+topology. When Workspace tools are enabled, acceptance also covers Runtime
+Broker and Workspace ownership. Cross-host takeover, physical-ownership
+handoff between hosts, real providers, and mixed-version clusters also need
+their own acceptance.
 
 The `--big-output` long-answer mode is also Workspace-bound:
 

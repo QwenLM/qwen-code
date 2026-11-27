@@ -2,9 +2,17 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.channel.PrWatchOperations;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.ImportMetadata;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Target;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
+import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,6 +22,7 @@ import com.sun.net.httpserver.HttpServer;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -47,6 +56,7 @@ import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -78,6 +88,9 @@ import static org.mockito.Mockito.verify;
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+    private static final String PARK_IMAGE =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRs8AAAAASUVORK5CYII=";
+    private static final String PARK_INPUT = "G0_PARK_ACTION";
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
     private final String tenant = UUID.randomUUID().toString();
@@ -90,6 +103,9 @@ class HostedPublicWorkspaceIT {
     private ServletWebServerApplicationContext spring;
     private HttpServer model;
     private Process harness;
+    private Process poolSuccessor;
+    private int poolSuccessorPort;
+    private IsolatedManagedSchemaMySqlTestDatabase poolDatabase;
     private JdbcTemplate jdbc;
     private int port;
     private Path decoy;
@@ -97,6 +113,9 @@ class HostedPublicWorkspaceIT {
     private boolean approvals;
     private boolean shell;
     private String parkedShellOutcome;
+    private String parkingSlice;
+    private IsolatedManagedSchemaMySqlTestDatabase parkingDatabase;
+    private Path hookRoot;
     private boolean definitionApproval;
     private String shellDecision = "allow";
     private boolean durableClose;
@@ -109,6 +128,7 @@ class HostedPublicWorkspaceIT {
     private boolean publicChildFallback;
     private boolean personalMemory;
     private boolean holdRuntimeStartup;
+    private boolean coldApprovalReplica;
     private final Map<String, Map<String, Object>> memoryEntries = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicInteger memoryRequests = new AtomicInteger();
     private final AtomicInteger memoryWrites = new AtomicInteger();
@@ -1031,7 +1051,81 @@ class HostedPublicWorkspaceIT {
     @ValueSource(strings = {"allow", "deny", "cancel", "mode-change", "expiry"})
     @Timeout(150)
     void publicChildrenShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(String outcome) throws Exception {
-        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, true, true);
+        shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(120)
+    void coldControlPlaneDeliversActionOnTheOriginalActiveHarness(String decision) throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        approvals = true;
+        shell = true;
+        shellDecision = decision;
+        definitionApproval = true;
+        shellLifecycleV2 = true;
+        publicChildren = true;
+        coldApprovalReplica = true;
+        List<Path> roots = boot();
+        register("workspace-0", "storage-0");
+        var settings = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        int harnessPort = URI.create(settings.getHarness().getBaseUrl()).getPort();
+        Path replicaBroker = Files.createDirectory(temporary.resolve("replica-broker"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        Path cli = Path.of(System.getProperty("qwen.cli.entry")).toAbsolutePath();
+        try (var replica = startControlPlane(cli, roots, harnessPort, reservePort(), 0, replicaBroker, "100ms")) {
+            var cold = replica.getBean(HarnessConnector.class);
+            int replicaPort = replica.getWebServer().getPort();
+            String session = request("POST", "/v1/agents/sessions", Map.of(
+                    "agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_SHELL")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "start-action", "actor", 202).path("id").asText();
+            String route = "/v1/agents/sessions/" + session;
+            var action = new AtomicReference<JsonNode>();
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))
+                        .isEqualTo("RUNNING");
+                JsonNode actions = request("GET", route + "/actions", null, null, "actor", 200).path("data");
+                assertThat(actions).hasSize(1);
+                action.set(actions.get(0));
+            });
+            assertThat(cold.attachedSessions()).isEmpty();
+            assertThat(writerGeneration(session)).isEqualTo(1L);
+            assertThat(modelRequests).hasSize(1);
+            Path proof = roots.getFirst().resolve("child/shell-proof.txt");
+            assertThat(proof).doesNotExist();
+
+            JsonNode pending = action.get();
+            String response = route + "/actions/" + pending.path("id").asText() + "/responses";
+            var body = Map.of("kind", "permission", "option_id", decision,
+                    "input_revision", pending.path("input_revision").asLong(),
+                    "policy_revision", pending.path("policy_revision").asText());
+            String operation = request(replicaPort, "POST", response, body, "cold-decision", "actor", 202)
+                    .path("id").asText();
+            assertThat(request(replicaPort, "POST", response, body, "cold-decision", "actor", 202)
+                    .path("id").asText()).isEqualTo(operation);
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(request(replicaPort, "GET", route + "/operations/" + operation, null, null, "actor", 200)
+                        .at("/action_resolution/outcome").asText()).isEqualTo("decided");
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(cold.attachedSessions()).anyMatch(ref -> session.equals(ref.sessionId()));
+            assertThat(writerGeneration(session)).isEqualTo(1L);
+            assertThat(modelRequests).hasSize(2);
+            if ("allow".equals(decision)) {
+                assertThat(Files.readString(proof)).isEqualTo("once\n");
+            } else {
+                assertThat(proof).doesNotExist();
+            }
+            assertThat(modelFailure.get()).isNull();
+        }
+    }
+
+    private long writerGeneration(String session) {
+        return jdbc.queryForObject("SELECT writer_generation FROM ma_session_head"
+                + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class, tenant, session);
     }
 
     @ParameterizedTest(name = "publication={0}, outcome={1}")
@@ -1039,11 +1133,447 @@ class HostedPublicWorkspaceIT {
     @Timeout(150)
     void versionZeroShellApprovalSettlesAfterParkingAndHarnessReplacementOnMySql(boolean publication, String outcome)
             throws Exception {
-        shellApprovalSettlesAfterParkingAndHarnessReplacement(outcome, false, publication);
+        shellApprovalSettlesAfterParking(outcome, false, publication);
     }
 
-    private void shellApprovalSettlesAfterParkingAndHarnessReplacement(
-            String outcome, boolean children, boolean publication) throws Exception {
+    @Test
+    @Timeout(120)
+    void imageOnlyApprovalSurvivesParkingAndHarnessReplacementOnMySql() throws Exception {
+        Path workspace = bootParkingSlice("image");
+        String session = createParkingSession();
+        String turn = submitParkingInput(session,
+                Map.of("type", "input_image", "data", PARK_IMAGE, "mime_type", "image/png"), "image-only");
+
+        settleParkedShell(session, turn, workspace);
+
+        String imageUrl = "data:image/png;base64," + PARK_IMAGE;
+        assertThat(modelRequests).hasSize(2).allSatisfy(body ->
+                assertThat(body.path("messages").findValuesAsText("url")).contains(imageUrl));
+    }
+
+    @Test
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @Timeout(120)
+    void extensionCommandApprovalSurvivesParkingAndHarnessReplacementOnMySql() throws Exception {
+        Path workspace = bootParkingSlice("command-step");
+        Pin extension = publishParkingExtension();
+        String session = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(), "extensionPins", List.of(extension),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "parking-session", "actor", 202).path("id").asText();
+        String turn = submitParkingText(session, "G0_PARK_COMMAND");
+        HostedParkedAction parked = awaitParkedTurn(session, turn);
+        assertThat(parked.actionId()).startsWith("command_approval_");
+        assertThat(workspace.resolve("park-proof.txt")).doesNotExist();
+
+        replaceParkingHarness();
+        allowParkedAction(session, parked, "run_shell_command");
+
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertParkingTurnCompleted(session, turn);
+            assertParkedActionIdentity(session, parked);
+            assertThat(Files.readString(workspace.resolve("park-proof.txt"))).isEqualTo("once\n");
+            JsonNode stage = HostedGateTestSupport.extensionRecord(jdbc, tenant, session, "tool_stage");
+            assertThat(stage.at("/run/state").asText()).isEqualTo("settled");
+        });
+    }
+
+    private Pin publishParkingExtension() throws Exception {
+        Path source = Files.createDirectory(temporary.resolve("extension-source"));
+        Files.writeString(source.resolve("qwen-extension.json"), """
+                {"name":"park-fixture","version":"1.0.0"}
+                """);
+        Path commands = Files.createDirectory(source.resolve("commands"));
+        Files.writeString(commands.resolve("run.md"), """
+                ---
+                description: Run the parked fixture command
+                ---
+                !{printf 'once\\n' >> park-proof.txt}
+                """);
+        Path archive = temporary.resolve("parking-extension.tar.gz");
+        ProcessBuilder archiveCommand = new ProcessBuilder("tar", "-czf", archive.toString(), "-C", source.toString(),
+                "qwen-extension.json", "commands");
+        archiveCommand.environment().put("COPYFILE_DISABLE", "1");
+        Process tar = archiveCommand.start();
+        try {
+            assertThat(tar.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(tar.exitValue()).isZero();
+        } finally {
+            if (tar.isAlive()) {
+                tar.destroyForcibly();
+                assertThat(tar.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+        String digest;
+        try (var input = Files.newInputStream(archive)) {
+            digest = DigestUtils.sha256Hex(input);
+        }
+        String platform = "Linux".equals(System.getProperty("os.name")) ? "linux" : "darwin";
+        String metadata = json.writeValueAsString(new ImportMetadata(
+                "extension", new Target(platform, "any"), digest, 1, null));
+        try (var input = Files.newInputStream(archive)) {
+            var published = spring.getBean(ManagedExtensionPackageService.class).importPackage(tenant, "actor",
+                    "workspace-0", null, "parking-extension", metadata, input, Files.size(archive));
+            assertThat(published.state()).isEqualTo("settled");
+            return new Pin(published.extensionId(), published.revision(), published.packageDigest(), null);
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(120)
+    void backgroundHoldAndApprovalSurviveParkingAndHarnessReplacementOnMySql() throws Exception {
+        Path workspace = bootParkingSlice("background");
+        String session = createParkingSession();
+        String background = submitParkingText(session, "G0_PARK_BACKGROUND");
+        allowStartAction(session);
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+            assertThat(workspace.resolve("park-background-started")).as("%s", parkingToolResults()).exists();
+            assertParkingTurnCompleted(session, background);
+        });
+        String turn = submitParkingText(session, PARK_INPUT);
+        HostedParkedAction parked = awaitParkedTurn(session, turn);
+        assertThat(jdbc.queryForObject("""
+                SELECT wake_seal_background FROM ma_session_head
+                WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                """, Integer.class, tenant, session)).isEqualTo(1);
+        Path finished = workspace.resolve("park-background-finished");
+        assertThat(finished).doesNotExist();
+
+        decideParkedShellAfterReplacement(session, turn, workspace, parked);
+
+        Files.createFile(workspace.resolve("park-background-release"));
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            assertThat(finished).exists();
+            assertThat(Files.readString(finished)).isEqualTo("once\n");
+            var run = HostedGateTestSupport.extensionRecord(jdbc, tenant, session, "child_run");
+            assertThat(run.at("/run/state").asText()).isEqualTo("settled");
+        });
+    }
+
+    @Test
+    @Timeout(120)
+    void childApprovalSurvivesParkingAndHarnessReplacementOnMySql() throws Exception {
+        Path workspace = bootParkingSlice("child");
+        String parent = createParkingSession();
+        String parentTurn = submitParkingText(parent, "G0_PARK_PARENT");
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+            answerPendingStartAction(parent);
+            assertParkingTurnCompleted(parent, parentTurn);
+        });
+        var childId = new AtomicReference<String>();
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+                assertThat(jdbc.queryForList("""
+                        SELECT session_id FROM ma_session WHERE tenant_id = ? AND parent_session_id = ?
+                        """, String.class, tenant, parent)).as("%s", parkingToolResults())
+                        .singleElement().satisfies(childId::set));
+        String child = childId.get();
+        String turn = await().atMost(Duration.ofSeconds(15)).until(() -> jdbc.queryForList("""
+                SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?
+                """, String.class, tenant, child), rows -> !rows.isEmpty()).getFirst();
+        HostedParkedAction parked = awaitParkedTurn(child, turn);
+        assertThat(jdbc.queryForMap("""
+                SELECT wake_seal_parked_approval_revision FROM ma_session_head
+                WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                """, tenant, child)).containsEntry("wake_seal_parked_approval_revision", null);
+
+        decideParkedShellAfterReplacement(child, turn, workspace, parked);
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(120)
+    void monitorApprovalSurvivesParkingAndHarnessReplacementOnMySql() throws Exception {
+        wakeApprovalSurvivesParkingAndHarnessReplacementOnMySql("monitor");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"channel", "pr_event"})
+    @Timeout(120)
+    void wakeApprovalSurvivesParkingAndHarnessReplacementOnMySql(String source) throws Exception {
+        Path workspace = bootParkingSlice(source);
+        String session = createParkingSession();
+        if ("monitor".equals(source)) {
+            String start = submitParkingText(session, "G0_PARK_MONITOR");
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+                answerPendingStartAction(session);
+                assertThat(workspace.resolve("park-monitor-started")).as("%s", parkingToolResults()).exists();
+                assertParkingTurnCompleted(session, start);
+            });
+            Files.createFile(workspace.resolve("park-monitor-release"));
+        } else {
+            spring.getBean(HarnessConnector.class).runChannelOperation(tenant, session, parkingChannelInput(source));
+        }
+
+        AtomicReference<Map<String, Object>> parked = new AtomicReference<>();
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            var heads = jdbc.queryForList("""
+                    SELECT writer_generation, wake_seal_parked_prompt_id, state, activation_phase,
+                           wake_seal_parked_owner, wake_seal_revision, journal_revision, is_wake_pending
+                    FROM ma_session_head
+                    WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, tenant, session);
+            assertThat(heads).hasSize(1);
+            var head = heads.getFirst();
+            assertThat(head).as("%s", parkingToolResults()).containsEntry("state", "SEALED")
+                    .containsEntry("activation_phase", "released")
+                    .containsEntry("wake_seal_parked_owner", "wake")
+                    .containsEntry("is_wake_pending", true);
+            assertThat(head.get("wake_seal_revision")).isEqualTo(head.get("journal_revision"));
+            parked.set(head);
+        });
+        String prompt = parked.get().get("wake_seal_parked_prompt_id").toString();
+        switch (source) {
+            case "monitor" -> assertThat(prompt).contains(":notify:");
+            case "channel", "pr_event" -> assertThat(prompt).isEqualTo(parkingWakeInputId(source));
+            default -> throw new AssertionError(source);
+        }
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND prompt_id = ?
+                """, Integer.class, tenant, session, prompt)).isZero();
+        String actionId = jdbc.queryForObject("""
+                SELECT action_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?
+                  AND prompt_id = ? AND record_kind = 'ACTION' AND state = 'requested'
+                """, String.class, tenant, session, prompt);
+        var action = new HostedParkedAction(prompt, actionId, ((Number) parked.get().get("writer_generation")).longValue());
+        Path effect = workspace.resolve("park-proof.txt");
+        assertThat(effect).doesNotExist();
+
+        replaceParkingHarness();
+        allowParkedAction(session, action, "run_shell_command");
+
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(effect).exists();
+            assertThat(Files.readString(effect)).isEqualTo("once\n");
+            assertParkedActionSettled(session, action);
+            assertWakeTurnCompleted(session, prompt);
+            if ("channel".equals(source)) {
+                var delivery = HostedGateTestSupport.extensionRecord(jdbc, tenant, session, "channel_delivery");
+                assertThat(delivery.path("sourceTurnId").asText()).isEqualTo(prompt);
+            }
+        });
+    }
+
+    private void assertWakeTurnCompleted(String session, String prompt) throws IOException {
+        List<String> outcomes = new ArrayList<>();
+        for (String records : jdbc.queryForList("""
+                SELECT CONVERT(record_bytes USING utf8mb4) FROM ma_session_journal_tx
+                WHERE tenant_id = ? AND session_id = ? AND record_bytes IS NOT NULL
+                """, String.class, tenant, session)) {
+            for (String line : records.lines().toList()) {
+                JsonNode event = json.readTree(line).path("managedSession");
+                if ("turn.settled".equals(event.path("kind").asText())
+                        && prompt.equals(event.at("/payload/turnId").asText())) {
+                    outcomes.add(event.at("/payload/outcome").asText());
+                }
+            }
+        }
+        assertThat(outcomes).containsExactly("completed");
+    }
+
+    private Path bootParkingSlice(String slice) throws Exception {
+        parkingSlice = slice;
+        parkingDatabase = new IsolatedManagedSchemaMySqlTestDatabase();
+        parkedShellOutcome = "allow";
+        shell = approvals = definitionApproval = shellLifecycleV2 = true;
+        publicChildren = "child".equals(slice);
+        if ("Linux".equals(System.getProperty("os.name"))
+                && List.of("background", "monitor", "command-step").contains(slice)) {
+            String delegated = System.getenv("QWEN_MANAGED_HOOK_CGROUP_ROOT");
+            assertThat(delegated).as("Run Maven inside a delegated Linux cgroup v2 subtree").isNotBlank();
+            hookRoot = Files.createDirectory(Path.of(delegated).resolve("parking-" + UUID.randomUUID()));
+        }
+        Path workspace = boot().getFirst().resolve("child");
+        register("workspace-0", "storage-0");
+        if ("background".equals(slice) || "monitor".equals(slice)) {
+            Files.writeString(workspace.resolve("parking.cjs"), """
+                    const fs = require('node:fs');
+                    const source = process.argv[2];
+                    fs.writeFileSync('park-' + source + '-started', '');
+                    const timer = setInterval(() => {
+                      if (!fs.existsSync('park-' + source + '-release')) return;
+                      clearInterval(timer);
+                      if (source === 'monitor') console.log('G0_PARK_ACTION');
+                      else fs.appendFileSync('park-background-finished', 'once\\n');
+                    }, 100);
+                    """);
+        }
+        return workspace;
+    }
+
+    private String createParkingSession() throws Exception {
+        return request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "parking-session", "actor", 202).path("id").asText();
+    }
+
+    private String submitParkingText(String session, String text) throws Exception {
+        return submitParkingInput(session, Map.of("type", "input_text", "text", text), text);
+    }
+
+    private String submitParkingInput(String session, Map<String, Object> input, String key) throws Exception {
+        return request("POST", "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.input.message", "input", List.of(input)), key,
+                "actor", 202).path("turn_id").asText();
+    }
+
+    private void assertParkingTurnCompleted(String session, String turn) {
+        assertThat(modelFailure.get()).isNull();
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
+                String.class, tenant, session, turn)).isEqualTo("COMPLETED");
+    }
+
+    private void allowStartAction(String session) {
+        await().atMost(Duration.ofSeconds(25)).untilAsserted(() ->
+                assertThat(answerPendingStartAction(session)).isTrue());
+    }
+
+    private boolean answerPendingStartAction(String session) throws Exception {
+        String route = "/v1/agents/sessions/" + session;
+        for (JsonNode action : request("GET", route + "/actions", null, null, "actor", 200).path("data")) {
+            String id = action.path("id").asText();
+            if ("requested".equals(action.path("state").asText()) && answered.add(id)) {
+                request("POST", route + "/actions/" + id + "/responses",
+                        Map.of("kind", "permission", "option_id", "allow",
+                                "input_revision", action.path("input_revision").asLong(),
+                                "policy_revision", action.path("policy_revision").asText()), id, "actor", 202);
+            }
+        }
+        return !answered.isEmpty();
+    }
+
+    private HostedParkedAction awaitParkedTurn(String session, String turn) {
+        AtomicReference<HostedParkedAction> parked = new AtomicReference<>();
+        await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            parked.set(HostedParkedAction.read(jdbc, tenant, session, turn));
+        });
+        return parked.get();
+    }
+
+    private void settleParkedShell(String session, String turn, Path workspace) throws Exception {
+        decideParkedShellAfterReplacement(session, turn, workspace, awaitParkedTurn(session, turn));
+    }
+
+    private void decideParkedShellAfterReplacement(String session, String turn, Path workspace,
+            HostedParkedAction parked) throws Exception {
+        assertThat(workspace.resolve("park-proof.txt")).doesNotExist();
+        replaceParkingHarness();
+        allowParkedAction(session, parked, "run_shell_command");
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(jdbc.queryForList("""
+                    SELECT turn_id, prompt_id, status FROM ma_turn
+                    WHERE tenant_id = ? AND session_id = ? AND prompt_id = ?
+                    """, tenant, session, parked.promptId())).singleElement().satisfies(row ->
+                    assertThat(row).containsEntry("turn_id", turn).containsEntry("status", "COMPLETED"));
+            assertThat(Files.readString(workspace.resolve("park-proof.txt"))).isEqualTo("once\n");
+            assertParkedActionSettled(session, parked);
+        });
+    }
+
+    private void assertParkedActionSettled(String session, HostedParkedAction parked) {
+        assertParkedActionIdentity(session, parked);
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM ma_tool_execution
+                WHERE harness_session_id = ? AND turn_id = ? AND execution_state = 'SETTLED'
+                """, Integer.class, session, parked.promptId().getBytes(StandardCharsets.UTF_8))).isEqualTo(1);
+    }
+
+    private void assertParkedActionIdentity(String session, HostedParkedAction parked) {
+        assertThat(jdbc.queryForObject("""
+                SELECT writer_generation FROM ma_session_head
+                WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                """, Long.class, tenant, session)).isGreaterThan(parked.writerGeneration());
+        assertThat(jdbc.queryForList("""
+                SELECT action_id, prompt_id, state FROM ma_session_record
+                WHERE tenant_id = ? AND session_id = ? AND prompt_id = ? AND record_kind = 'ACTION'
+                """, tenant, session, parked.promptId())).singleElement().satisfies(row -> {
+                    assertThat(row).containsEntry("action_id", parked.actionId()).containsEntry("prompt_id", parked.promptId());
+                    assertThat(row.get("state")).isNotNull().isNotEqualTo("requested");
+                });
+    }
+
+    private void allowParkedAction(String session, HostedParkedAction parked, String toolName) throws Exception {
+        String route = "/v1/agents/sessions/" + session;
+        String actionRoute = route + "/actions/" + parked.actionId();
+        JsonNode action = request("GET", actionRoute, null, null, "actor", 200);
+        assertThat(action.path("tool_name").asText()).isEqualTo(toolName);
+        var decision = parked.response(action, "allow");
+        String operation = request("POST", actionRoute + "/responses", decision, "park-decision", "actor", 202)
+                .path("id").asText();
+        await().atMost(Duration.ofSeconds(40)).untilAsserted(() ->
+                assertThat(request("GET", route + "/operations/" + operation, null, null, "actor", 200)
+                        .at("/action_resolution/outcome").asText()).isEqualTo("decided"));
+    }
+
+    private void replaceParkingHarness() throws Exception {
+        var settings = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
+        long oldPid = harness.pid();
+        harness.destroyForcibly();
+        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        startHarness(Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath(),
+                URI.create(settings.getHarness().getBaseUrl()).getPort(), settings.getRuntimeBroker().getPort());
+        assertThat(harness.pid()).isNotEqualTo(oldPid);
+    }
+
+    private Map<String, Object> parkingChannelInput(String source) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("text", PARK_INPUT);
+        if ("pr_event".equals(source)) {
+            body.put("kind", "submit_pr_event_input");
+            body.put("inputId", parkingWakeInputId(source));
+            body.put("owner", "Fixture");
+            body.put("repo", "Fixture");
+            body.put("prNumber", 7);
+            body.put("transition", "ci_failure");
+            body.put("headSha", "a".repeat(40));
+            body.put("episode", 1);
+            body.put("evidence", "The fixture build failed.");
+        } else {
+            body.put("kind", "submit_input");
+            body.put("inputId", parkingWakeInputId(source));
+            body.put("channelInstanceId", "mail-1");
+            body.put("accountId", "agent@example.com");
+            body.put("accountGeneration", 1);
+            body.put("platformEventId", "1700:90");
+            body.put("semanticRevision", 1);
+            body.put("senderId", "alice@example.com");
+            body.put("chatId", "alice@example.com");
+            body.put("threadId", "thread-1");
+            body.put("subject", "Notes");
+            body.put("attachments", List.of());
+            body.put("replyContext", Map.of("parent", "<a@example.com>", "references", List.of()));
+            body.put("scope", Map.of("kind", "chat_thread", "chatId", "alice@example.com", "threadId", "thread-1"));
+            body.put("policy", Map.of("adapter", "email", "senderPolicy", "allowlist",
+                    "allowedSenders", List.of("alice@example.com"), "dispatchMode", "followup"));
+        }
+        return body;
+    }
+
+    private String parkingWakeInputId(String source) {
+        if ("pr_event".equals(source)) {
+            return PrWatchOperations.prWatchInputId(tenant, "mail-1", "Fixture", "Fixture",
+                    7, "ci_failure", "a".repeat(40), 1);
+        }
+        return "chin-" + ChannelRouteRepository.routeKey(
+                tenant, "mail-1", 1, "1700:90", 1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "deny"})
+    @Timeout(120)
+    void healthyPoolHandsParkedShellActionToSuccessorBeforeLeaseExpiryOnMySql(String outcome) throws Exception {
+        poolDatabase = new IsolatedManagedSchemaMySqlTestDatabase();
+        poolSuccessorPort = reservePort();
+        shellApprovalSettlesAfterParking(outcome, true, true);
+    }
+
+    private void shellApprovalSettlesAfterParking(String outcome, boolean children, boolean publication) throws Exception {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         parkedShellOutcome = outcome;
         shell = true;
@@ -1082,18 +1612,34 @@ class HostedPublicWorkspaceIT {
         var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
         int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
         int brokerPort = properties.getRuntimeBroker().getPort();
-        long oldPid = harness.pid();
-        harness.destroyForcibly();
-        assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
-        Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
-        if (children && "allow".equals(outcome)) {
-            spring.close();
-            restarted = true;
-            startSpring(cli, roots, harnessPort, brokerPort);
-            assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
+        HarnessPlacementStore placements = poolDatabase == null ? null : spring.getBean(HarnessPlacementStore.class);
+        HarnessPlacementStore.Placement original = placements == null ? null : placements.get(tenant, session);
+        long oldLease = 0;
+        if (placements != null) {
+            assertThat(original).isNotNull();
+            assertThat(original.instanceId()).isEqualTo("pool-a");
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertThat(placements.get(tenant, session).state()).isEqualTo("RELEASED"));
+            oldLease = jdbc.queryForObject("""
+                    SELECT writer_lease_until FROM ma_session_head
+                    WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'
+                    """, Long.class, tenant, session);
+            assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+            assertPoolMembersAccepting(harnessPort);
+        } else {
+            long oldPid = harness.pid();
+            harness.destroyForcibly();
+            assertThat(harness.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
+            if (children && "allow".equals(outcome)) {
+                spring.close();
+                restarted = true;
+                startSpring(cli, roots, harnessPort, brokerPort);
+                assertThat(HostedParkedAction.read(jdbc, tenant, session, turn)).isEqualTo(parked);
+            }
+            startHarness(cli, harnessPort, brokerPort);
+            assertThat(harness.pid()).isNotEqualTo(oldPid);
         }
-        startHarness(cli, harnessPort, brokerPort);
-        assertThat(harness.pid()).isNotEqualTo(oldPid);
 
         String actionRoute = route + "/actions/" + parked.actionId();
         switch (outcome) {
@@ -1103,6 +1649,14 @@ class HostedPublicWorkspaceIT {
                 var decision = parked.response(action, outcome);
                 String operation = request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
                         .path("id").asText();
+                if (placements != null) {
+                    await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                        var successor = placements.get(tenant, session);
+                        assertThat(successor.instanceId()).isEqualTo("pool-b");
+                        assertThat(successor.epoch()).isEqualTo(original.epoch() + 1);
+                    });
+                    assertThat(oldLease).isGreaterThan(System.currentTimeMillis());
+                }
                 assertThat(request("POST", actionRoute + "/responses", decision, "decision", "actor", 202)
                         .path("id").asText()).isEqualTo(operation);
                 await().atMost(Duration.ofSeconds(40)).untilAsserted(() ->
@@ -1144,6 +1698,25 @@ class HostedPublicWorkspaceIT {
         }
         assertThat(modelFailure.get()).isNull();
         assertThat(modelRequests).hasSize(cancelled ? 1 : 2);
+        if (placements != null) {
+            assertPoolMembersAccepting(harnessPort);
+        }
+    }
+
+    private void assertPoolMembersAccepting(int harnessPort) {
+        assertThat(harness.isAlive()).isTrue();
+        assertThat(poolSuccessor.isAlive()).isTrue();
+        assertThat(harness.pid()).isNotEqualTo(poolSuccessor.pid());
+        assertPoolMemberAccepting(harnessPort, "pool-a");
+        assertPoolMemberAccepting(poolSuccessorPort, "pool-b");
+    }
+
+    private void assertPoolMemberAccepting(int memberPort, String instanceId) {
+        try (var client = HostedHarnessClient.builder().baseUri(URI.create("http://127.0.0.1:" + memberPort))
+                .bearerToken(TOKEN).capabilityDigest(DIGEST).heartbeatInterval(Duration.ZERO).build()) {
+            assertThat(client.capabilities().getInstanceId()).isEqualTo(instanceId);
+            assertThat(client.readInstance().get("state")).isEqualTo("ACCEPTING");
+        }
     }
 
     private void deleteShellAndAwaitCollection(String session, String workspace, boolean web, Path marker) throws Exception {
@@ -1543,6 +2116,11 @@ class HostedPublicWorkspaceIT {
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
+        if (poolDatabase != null) {
+            startHarness(cli, poolSuccessorPort, brokerPort, "pool-b");
+            assertPoolMembersAccepting(harnessPort);
+            ReflectionTestUtils.invokeMethod(connectorOwning(spring.getBean(HarnessConnector.class)), "refresh");
+        }
         return roots;
     }
 
@@ -1872,10 +2450,36 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
+        spring = startControlPlane(cli, roots, harnessPort, brokerPort, port, temporary.resolve("broker"),
+                coldApprovalReplica ? "120s" : null);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
+        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
+            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
+            for (int index = 0; index < roots.size(); index++) {
+                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
+                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+            }
+        }
+    }
+
+    private ServletWebServerApplicationContext startControlPlane(Path cli, List<Path> roots, int harnessPort,
+            int brokerPort, int httpPort, Path brokerDirectory, String scanDelay) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
-        List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
-                "--spring.datasource.url=" + System.getProperty("mysql.url",
-                        "jdbc:h2:mem:" + tenant + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"),
+        var isolatedDatabase = parkingDatabase == null ? poolDatabase : parkingDatabase;
+        String databaseUrl = isolatedDatabase != null ? isolatedDatabase.url() : System.getProperty("mysql.url",
+                "jdbc:h2:mem:" + tenant + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        boolean detachedParking = "background".equals(parkingSlice) || "monitor".equals(parkingSlice);
+        Path worker = cli;
+        if (detachedParking) {
+            worker = temporary.resolve("parking-worker.mjs");
+            Files.writeString(worker, "process.env.QWEN_MANAGED_RUNTIME_OBSERVATION='1'; "
+                    + "process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT="
+                    + json.writeValueAsString(hookRoot.toString())
+                    + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
+                    + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
+        }
+        List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + httpPort,
+                "--spring.datasource.url=" + databaseUrl,
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
@@ -1893,17 +2497,30 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
-                "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
+                "--qwen.managed-agent.runtime-broker.state-directory=" + brokerDirectory,
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable="
                         + (holdRuntimeStartup ? temporary.resolve("worker-barrier-node") : node),
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
+        if (poolDatabase != null) {
+            arguments.addAll(List.of(
+                    "--qwen.managed-agent.session-store.binding-key=pool-binding-key-0123456789abcdef0123456789abcdef",
+                    "--qwen.managed-agent.harness.heartbeat-interval=PT0S",
+                    "--qwen.managed-agent.harness.pool.enabled=true",
+                    "--qwen.managed-agent.harness.pool.instances[0].instance-id=pool-a",
+                    "--qwen.managed-agent.harness.pool.instances[0].base-url=http://127.0.0.1:" + harnessPort,
+                    "--qwen.managed-agent.harness.pool.instances[1].instance-id=pool-b",
+                    "--qwen.managed-agent.harness.pool.instances[1].base-url=http://127.0.0.1:" + poolSuccessorPort));
+        }
         if (holdRuntimeStartup) {
             arguments.addAll(List.of("--qwen.managed-agent.dispatch.scan-delay=10ms",
                     "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
                     "--qwen.managed-agent.dispatch.max-pre-admission-retries=2",
                     "--qwen.managed-agent.harness.load-timeout=20s"));
+        }
+        if (scanDelay != null) {
+            arguments.add("--qwen.managed-agent.dispatch.scan-delay=" + scanDelay);
         }
         if (approvals) {
             arguments.add("--qwen.managed-agent.harness.approval-mode="
@@ -1940,6 +2557,22 @@ class HostedPublicWorkspaceIT {
                 arguments.add("--qwen.managed-agent.harness.approval-timeout=15s");
             }
         }
+        if (detachedParking) {
+            arguments.add("--qwen.managed-agent.runtime-observation.enabled=true");
+        }
+        if ("command-step".equals(parkingSlice)) {
+            arguments.addAll(List.of("--qwen.managed-agent.extensions.enabled=true",
+                    "--qwen.managed-agent.extensions.self-service-enabled=true",
+                    "--qwen.managed-agent.extensions.allowed-actors[0]=actor",
+                    "--qwen.managed-agent.extensions.artifact-directory=" + temporary.resolve("extension-artifacts"),
+                    "--qwen.managed-agent.managed-extensions.enabled=true",
+                    "--qwen.managed-agent.managed-extensions.cache-directory=" + temporary.resolve("extension-cache")));
+            if (hookRoot != null) {
+                arguments.add("--qwen.managed-agent.managed-extensions.cgroup-root=" + hookRoot);
+            } else {
+                arguments.add("--qwen.managed-agent.managed-extensions.mode=developer-process-group");
+            }
+        }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval || personalMemory));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                 + (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
@@ -1949,7 +2582,7 @@ class HostedPublicWorkspaceIT {
             arguments.add(prefix + "storage-id=storage-" + i);
             arguments.add(prefix + "root=" + roots.get(i));
         }
-        spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
+        return (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
                     if (shellLifecycleV2) {
@@ -1961,14 +2594,6 @@ class HostedPublicWorkspaceIT {
                     }
                 })
                 .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
-            var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
-            for (int index = 0; index < roots.size(); index++) {
-                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
-                guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
-            }
-        }
     }
 
     private FilterRegistrationBean<Filter> authentication() {
@@ -2063,11 +2688,20 @@ class HostedPublicWorkspaceIT {
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {
-        Path home = Files.createDirectories(temporary.resolve("home"));
+        startHarness(cli, harnessPort, brokerPort, poolDatabase == null ? null : "pool-a");
+    }
+
+    private void startHarness(Path cli, int harnessPort, int brokerPort, String instanceId) throws Exception {
+        boolean successor = "pool-b".equals(instanceId);
+        Path home = Files.createDirectories(temporary.resolve(successor ? "pool-b-home" : "home"));
         Path config = Files.createDirectories(home.resolve(".qwen"));
         String modelUrl = "http://127.0.0.1:" + model.getAddress().getPort() + "/v1";
         List<Map<String, Object>> models = new ArrayList<>(List.of(Map.of(
                 "id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl)));
+        if ("image".equals(parkingSlice)) {
+            models.set(0, Map.of("id", "g0-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl,
+                    "generationConfig", Map.of("modalities", Map.of("image", true))));
+        }
         Map<String, Object> settings = new java.util.LinkedHashMap<>(Map.of(
                 "security", Map.of("auth", Map.of("selectedType", "openai")), "model", Map.of("name", publicChildFallback ? "g0-source" : "g0-fixture"),
                 "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", models)));
@@ -2078,7 +2712,7 @@ class HostedPublicWorkspaceIT {
                             "maxRetries", 0, "retryInitialDelayMs", 1, "retryMaxDelayMs", 1)));
         }
         Files.writeString(config.resolve("settings.json"), json.writeValueAsString(settings));
-        Path log = temporary.resolve("harness.log");
+        Path log = temporary.resolve(successor ? "pool-b.log" : "harness.log");
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
                 Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
@@ -2093,10 +2727,14 @@ class HostedPublicWorkspaceIT {
             }
         }
         environment.putAll(Map.of("HOME", home.toString(), "USERPROFILE", home.toString(), "QWEN_HOME", config.toString(),
-                "QWEN_RUNTIME_DIR", temporary.resolve("runtime").toString(), "OPENAI_API_KEY", "fake-local-key",
+                "QWEN_RUNTIME_DIR", temporary.resolve(successor ? "pool-b-runtime" : "runtime").toString(),
+                "OPENAI_API_KEY", "fake-local-key",
                 "OPENAI_BASE_URL", modelUrl, "QWEN_SERVER_TOKEN", TOKEN, "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", DIGEST));
+        if (instanceId != null) {
+            environment.put("QWEN_HOSTED_HARNESS_INSTANCE_ID", instanceId);
+        }
         if (parkedShellOutcome != null) {
-            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", "3000");
+            environment.put("QWEN_E2E_IDLE_SUSPEND_MS", successor ? "60000" : "3000");
         }
         if (shellLifecycleV2 || confined) {
             environment.remove("QWEN_HOSTED_LIFECYCLE_V2_PROFILES");
@@ -2110,9 +2748,14 @@ class HostedPublicWorkspaceIT {
                 "QWEN_CODE_TRUSTED_FOLDERS_PATH")) {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
-        harness = builder.start();
+        Process process = builder.start();
+        if (successor) {
+            poolSuccessor = process;
+        } else {
+            harness = process;
+        }
         await().atMost(Duration.ofSeconds(30)).ignoreExceptions().untilAsserted(() -> {
-            if (!harness.isAlive()) {
+            if (!process.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
@@ -2125,6 +2768,10 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (parkingSlice != null) {
+                parkingModelReply(exchange, body);
+                return;
+            }
             if (holdRuntimeStartup) {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
                                 + " AND event_type = 'environment.ready'", Integer.class, tenant)).isEqualTo(1);
@@ -2301,6 +2948,75 @@ class HostedPublicWorkspaceIT {
         }
     }
 
+    private void parkingModelReply(HttpExchange exchange, JsonNode request) throws IOException {
+        String prompt = "";
+        boolean toolResult = false;
+        for (JsonNode message : request.path("messages")) {
+            if ("user".equals(message.path("role").asText())) {
+                String content = message.path("content").toString();
+                if (content.contains("G0_PARK_") || content.contains(PARK_IMAGE)) {
+                    prompt = content;
+                    toolResult = false;
+                }
+            } else if ("tool".equals(message.path("role").asText())) {
+                toolResult = true;
+            }
+        }
+        String tool = null;
+        Map<String, Object> arguments = Map.of();
+        String marker = "action";
+        if (!toolResult && !prompt.isEmpty()) {
+            if (prompt.contains("G0_PARK_BACKGROUND")) {
+                marker = "background";
+                tool = "run_shell_command";
+                arguments = Map.of("command", quote(node) + " parking.cjs background",
+                        "is_background", true, "timeout", 90000);
+            } else if (prompt.contains("G0_PARK_MONITOR")) {
+                marker = "monitor";
+                tool = "monitor";
+                arguments = Map.of("command", quote(node) + " parking.cjs monitor",
+                        "max_events", 1, "idle_timeout_ms", 90000);
+            } else if (prompt.contains("G0_PARK_PARENT")) {
+                marker = "parent";
+                tool = "agent";
+                arguments = Map.of("description", "Start the fixture child", "prompt", "G0_PARK_CHILD",
+                        "run_in_background", true);
+            } else if (prompt.contains("G0_PARK_COMMAND")) {
+                tool = "skill";
+                arguments = Map.of("skill", "park-fixture:run");
+            } else {
+                tool = "run_shell_command";
+                arguments = Map.of("command", "printf 'once\\n' >> park-proof.txt");
+            }
+        }
+        var chunk = json.createObjectNode().put("id", "parking-fixture").put("object", "chat.completion.chunk")
+                .put("created", 0).put("model", "g0-fixture");
+        var choice = chunk.putArray("choices").addObject().put("index", 0);
+        var delta = choice.putObject("delta").put("role", "assistant");
+        if (tool == null) {
+            delta.put("content", "Parking fixture finished");
+        } else {
+            assertThat(request.path("tools").findValuesAsText("name")).contains(tool);
+            delta.putArray("tool_calls").addObject().put("index", 0).put("id", "park-" + marker).put("type", "function")
+                    .putObject("function").put("name", tool).put("arguments", json.writeValueAsString(arguments));
+        }
+        choice.putNull("finish_reason");
+        String first = "data: " + json.writeValueAsString(chunk) + "\n\n";
+        choice.putObject("delta");
+        choice.put("finish_reason", tool == null ? "stop" : "tool_calls");
+        byte[] response = (first + "data: " + json.writeValueAsString(chunk) + "\n\ndata: [DONE]\n\n")
+                .getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+        exchange.sendResponseHeaders(200, response.length);
+        exchange.getResponseBody().write(response);
+    }
+
+    private List<String> parkingToolResults() {
+        return modelRequests.stream().flatMap(body -> body.path("messages").valueStream())
+                .filter(message -> "tool".equals(message.path("role").asText()))
+                .map(message -> message.path("content").toString()).distinct().toList();
+    }
+
     private void memoryModelReply(HttpExchange exchange, JsonNode body) throws IOException {
         List<String> tools = new ArrayList<>();
         body.path("tools").forEach(tool -> tools.add(tool.at("/function/name").asText()));
@@ -2459,7 +3175,12 @@ class HostedPublicWorkspaceIT {
 
     private HttpResponse<String> rawRequest(String method, String path, Object body, String key, String actor)
             throws Exception {
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+        return rawRequest(port, method, path, body, key, actor);
+    }
+
+    private HttpResponse<String> rawRequest(int httpPort, String method, String path, Object body, String key, String actor)
+            throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + httpPort + path))
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", tenant)
                 .header("Accept", "application/json").header("Content-Type", "application/json")
                 .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
@@ -2475,7 +3196,12 @@ class HostedPublicWorkspaceIT {
 
     private JsonNode request(String method, String path, Object body, String key, String actor, int expected)
             throws Exception {
-        HttpResponse<String> response = rawRequest(method, path, body, key, actor);
+        return request(port, method, path, body, key, actor, expected);
+    }
+
+    private JsonNode request(int httpPort, String method, String path, Object body, String key, String actor, int expected)
+            throws Exception {
+        HttpResponse<String> response = rawRequest(httpPort, method, path, body, key, actor);
         assertThat(response.statusCode()).as("%s %s: %s", method, path, response.body()).isEqualTo(expected);
         return json.readTree(response.body());
     }
@@ -2501,6 +3227,13 @@ class HostedPublicWorkspaceIT {
                         harness.waitFor(10, TimeUnit.SECONDS);
                     }
                 },
+                () -> {
+                    if (poolSuccessor != null) {
+                        poolSuccessor.descendants().forEach(ProcessHandle::destroyForcibly);
+                        poolSuccessor.destroyForcibly();
+                        assertThat(poolSuccessor.waitFor(10, TimeUnit.SECONDS)).isTrue();
+                    }
+                },
                 () -> { if (shellProbe != null) {
                     shellProbe.close();
                 } },
@@ -2516,8 +3249,22 @@ class HostedPublicWorkspaceIT {
                 () -> { if (durableClose || definitionApproval || personalMemory) {
                     HostedDurableWorkers.stop(temporary.resolve("broker"), json);
                 } },
+                () -> { if (hookRoot != null) {
+                    Files.writeString(hookRoot.resolve("cgroup.kill"), "1");
+                    try (var entries = Files.walk(hookRoot)) {
+                        for (Path entry : entries.filter(Files::isDirectory).sorted(Comparator.reverseOrder()).toList()) {
+                            Files.delete(entry);
+                        }
+                    }
+                } },
                 () -> { if (model != null) {
                     model.stop(0);
+                } },
+                () -> { if (parkingDatabase != null) {
+                    parkingDatabase.close();
+                } },
+                () -> { if (poolDatabase != null) {
+                    poolDatabase.close();
                 } });
         for (var step : cleanup) {
             try {

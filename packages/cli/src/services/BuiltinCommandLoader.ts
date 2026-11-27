@@ -31,6 +31,7 @@ import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
+import { contextWindowCommand } from '../ui/commands/context-window-command.js';
 import { curatorCommand } from '../ui/commands/curator-command.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
@@ -152,6 +153,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressFastCommand,
       configCommand,
       contextCommand,
+      contextWindowCommand,
       curatorCommand,
       copyCommand,
       diffCommand,

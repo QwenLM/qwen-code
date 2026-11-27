@@ -1527,6 +1527,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      // Enter on a slash command that already names a real command and carries
+      // arguments is a submit, never a completion. The dropdown is
+      // render-derived and can still describe the bare command token after the
+      // arguments were typed — a slow host stretches that lag — and accepting
+      // there rewrites the command the person typed (`/defer-probe todo`
+      // became `/model todo`) while swallowing the Enter, so nothing is
+      // submitted at all.
+      const submitsSlashCommandWithArguments =
+        isSubmit &&
+        completion.completionMode === CompletionMode.SLASH &&
+        /^\/\S+\s/.test(buffer.text) &&
+        parseSlashCommand(buffer.text, slashCommands).commandToExecute !==
+          undefined;
+
       // Handle Tab for prompt suggestions (when buffer is empty and no completion/search active)
       // Use explicit key.name === 'tab' instead of ACCEPT_SUGGESTION matcher,
       // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
@@ -1593,7 +1607,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         if (
           keyMatchers[Command.ACCEPT_SUGGESTION](key) &&
           !key.paste &&
-          completion.suggestions.length > 0
+          completion.suggestions.length > 0 &&
+          !submitsSlashCommandWithArguments
         ) {
           // Capture the suggestion BEFORE acceptActiveCompletionSuggestion
           // mutates the buffer/index. When the suggestion's command opted

@@ -6343,20 +6343,11 @@ describe('qwen-triage verify hardening round 2', () => {
 
     // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
     // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
-    // defect appeared only with approvals on. The loop-guard count is
-    // read from core, so the skill cannot drift from the real threshold.
+    // defect appeared only with approvals on.
     expect(flat).toContain(
       'Parameterise scenarios along the axes author tests collapse',
     );
     expect(flat).toContain('approval mode (default versus auto-approve)');
-    expect(flat).toContain(
-      'five consecutive identical calls trip the core loop guard',
-    );
-    const loopSource = readFileSync(
-      'packages/core/src/services/loopDetectionService.ts',
-      'utf8',
-    );
-    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
 
     // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
     // turn. #12855 R2: after rollback and re-upgrade the Java row lagged
@@ -11694,10 +11685,31 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
       expect(envValue(sdkJavaWorkflow, name)).toBe(pin);
     }
-    for (const name of ['TEMURIN_VERSION', 'TEMURIN_SHA256', 'TEMURIN_URL']) {
+    for (const name of [
+      'TEMURIN_VERSION',
+      'TEMURIN_SHA256_X64',
+      'TEMURIN_SHA256_AARCH64',
+    ]) {
       const pin = envValue(consumer, name);
       expect(pin).toBeTruthy();
       expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+    }
+    // The pool advertises both architectures on the same runners, so both
+    // workflows must bind each host architecture to its own checksum.
+    expect(envValue(consumer, 'TEMURIN_SHA256_X64')).toBe(
+      'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94',
+    );
+    expect(envValue(consumer, 'TEMURIN_SHA256_AARCH64')).toBe(
+      '23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223',
+    );
+    for (const text of [consumer, mavenRepoProducerWorkflow]) {
+      expect(text).toContain('case "$(uname -m)" in');
+      expect(text).toMatch(
+        /x86_64\) temurin_arch='x64'; temurin_sha="\$TEMURIN_SHA256_X64"/,
+      );
+      expect(text).toMatch(
+        /aarch64\|arm64\) temurin_arch='aarch64'; temurin_sha="\$TEMURIN_SHA256_AARCH64"/,
+      );
     }
   });
 

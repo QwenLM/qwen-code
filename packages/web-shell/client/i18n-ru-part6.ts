@@ -262,6 +262,11 @@ export const RU_PART6: Record<
   'sessionsOverview.popupBlocked':
     'Всплывающие окна заблокированы. Разрешите их для этого сайта, чтобы открывать сессии в новых вкладках.',
   'sessionsOverview.refresh': 'Обновить',
+  'sessionsOverview.restoreWorktree': 'Восстановить снимок',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Снимок недоступен для этого рабочего пространства',
+  'sessionsOverview.restoringWorktree': 'Восстановление…',
+  'sessionsOverview.restoreWorktreeFailed': 'Не удалось восстановить снимок',
   'sessionsOverview.selectAll': 'Выбрать все',
   'sessionsOverview.titleColumn': 'Название',
   'sessionsOverview.actions': 'Действия',

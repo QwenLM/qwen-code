@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
-import java.util.List;
 import java.util.Set;
 
 /**
@@ -47,13 +46,17 @@ final class ExternalWorkspaceSessionPolicies {
             if (!externalFilesAllowedOrRefuse(workspaces, binding)
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
-                    || Boolean.TRUE.equals(command.requestedPlanMode()) || !command.skills().isEmpty() || command.extensionPins() != null
+                    || Boolean.TRUE.equals(command.requestedPlanMode()) || command.extensionPins() != null
                     || command.memoryStoreId() != null
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
+            // Session skills are content declarations persisted into the immutable creation
+            // receipt; the external Worker consumes them as installed files, so admission may
+            // carry them. Extension pins stay refused: package execution requires the native
+            // Shell/MCP lifecycle that external profiles never negotiate.
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false, List.of());
+                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false, command.skills());
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }
