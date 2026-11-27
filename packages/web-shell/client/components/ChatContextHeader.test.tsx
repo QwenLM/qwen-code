@@ -6,21 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider, type WebShellLanguage } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
-// The QR entry reads the workspace connection from context.
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import('@qwen-code/web-shell/daemon-react-sdk')
-    >();
-  return {
-    ...actual,
-    useWorkspace: () => ({
-      baseUrl: 'http://127.0.0.1:8080/',
-      token: 'test-token',
-    }),
-  };
-});
-
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 let container: HTMLDivElement | null = null;
@@ -216,15 +201,30 @@ describe('ChatContextHeader', () => {
     expect(view.querySelector('[aria-label="Context Usage"]')).toBeNull();
   });
 
-  it('shows the Local Control QR entry ahead of the other actions', () => {
+  it('renders the leading action slot ahead of the other actions with the shared action class', () => {
+    let receivedClassName: string | undefined;
     const view = mount({
       rightPanelAvailable: true,
-      onOpenLocalControlSettings: vi.fn(),
+      renderLeadingAction: (actionClassName) => {
+        receivedClassName = actionClassName;
+        return (
+          <button
+            type="button"
+            className={actionClassName}
+            aria-label="Mobile access"
+          />
+        );
+      },
     });
     const actions = Array.from(
       view.querySelectorAll<HTMLButtonElement>('button'),
     );
+    const environmentButton = view.querySelector<HTMLButtonElement>(
+      '[aria-label="Toggle environment information"]',
+    );
 
+    expect(environmentButton?.className).toBeTruthy();
+    expect(receivedClassName).toBe(environmentButton?.className);
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Mobile access',
       'Toggle environment information',

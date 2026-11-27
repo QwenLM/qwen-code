@@ -5,7 +5,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
-import { scheduledTaskRuntimeKey } from '../../hooks/useSessionScheduledTasks';
+import { scheduledTaskRuntimeKey } from '../dialogs/scheduledTasksSchedule';
 import { isSamePath, normalizePath, stripWorkspacePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {

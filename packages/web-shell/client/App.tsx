@@ -27215,9 +27215,14 @@ export function App({
                           : undefined
                       }
                       {...artifactsHeaderEntry}
-                      onOpenLocalControlSettings={
+                      renderLeadingAction={
                         showMobileAccess && workspaceContextActive
-                          ? handleOpenLocalControlSettings
+                          ? (actionClassName) => (
+                              <LocalControlQrButton
+                                onOpenSettings={handleOpenLocalControlSettings}
+                                className={actionClassName}
+                              />
+                            )
                           : undefined
                       }
                     />
