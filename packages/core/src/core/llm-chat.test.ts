@@ -8290,6 +8290,24 @@ describe('LlmChat', async () => {
       { name: 'the same window', primaryWindow: 65_536, keepUsage: true },
       { name: 'a larger window', primaryWindow: 61_000, keepUsage: true },
       {
+        name: 'shadowed sampling tools',
+        primaryWindow: 65_536,
+        keepUsage: true,
+        shadowedTools: true,
+      },
+      {
+        name: 'fixed raw messages',
+        primaryWindow: 65_536,
+        keepUsage: true,
+        staticPrompt: true,
+      },
+      {
+        name: 'restored dense history',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        resumed: true,
+      },
+      {
         name: 'different prepared media',
         primaryWindow: 65_536,
         keepUsage: false,
@@ -8303,8 +8321,21 @@ describe('LlmChat', async () => {
       },
     ])(
       'fits a warmed same-wire fallback with $name',
-      async ({ primaryWindow, keepUsage, image, messages }) => {
+      async ({
+        primaryWindow,
+        keepUsage,
+        image,
+        messages,
+        shadowedTools,
+        staticPrompt,
+        resumed,
+      }) => {
         const fallbackModel = 'another-minimax-account';
+        const fixedMessages = staticPrompt
+          ? [{ role: 'user', content: 'Use this fixed prompt' }]
+          : undefined;
+        const fallbackMessages = messages ?? fixedMessages;
+        const promptTokenCount = resumed ? 41_000 : 35_000;
         const fallback = vi
           .fn()
           .mockImplementation(async () => textStream('fallback answer'));
@@ -8314,13 +8345,24 @@ describe('LlmChat', async () => {
             fallbackRoute(fallbackModel, fallback, {
               ...narrowPrimary,
               model: fallbackModel,
+              ...(shadowedTools && {
+                samplingParams: {
+                  tools: [
+                    { type: 'function', function: { name: 'shadowed_tool' } },
+                  ],
+                },
+              }),
               extra_body: {
                 model: digitalOceanModel,
-                ...(messages && { messages }),
+                ...(fallbackMessages && { messages: fallbackMessages }),
               },
             }),
           ),
-          { ...narrowPrimary, contextWindowSize: primaryWindow },
+          {
+            ...narrowPrimary,
+            contextWindowSize: primaryWindow,
+            ...(fixedMessages && { extra_body: { messages: fixedMessages } }),
+          },
         );
         vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
           (model = digitalOceanModel) => model,
@@ -8328,25 +8370,36 @@ describe('LlmChat', async () => {
         vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
           image: true,
         });
+        if (shadowedTools) {
+          chat.setTools([
+            { functionDeclarations: [{ name: 'generated_tool' }] },
+          ]);
+        }
         mockCompress(noop());
         streamMock().mockResolvedValueOnce(
           textStream('acknowledged', {
-            promptTokenCount: 35_000,
+            promptTokenCount,
             candidatesTokenCount: 3,
-            totalTokenCount: 35_003,
+            totalTokenCount: promptTokenCount + 3,
           }),
         );
         await drain(
           await chat.sendMessageStream(
             digitalOceanModel,
             {
-              message: '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
+              message: resumed
+                ? '嗰陣'.repeat(16_000)
+                : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
               config: { maxOutputTokens: 1_000 },
             },
             'warm-fallback-first',
           ),
         );
-        expect(chat.getLastPromptTokenCount()).toBe(35_000);
+        expect(chat.getLastPromptTokenCount()).toBe(promptTokenCount);
+        if (resumed) {
+          chat = newChat({ history: chat.getHistory() });
+          chat.seedResumeTokenCounts(promptTokenCount, 3);
+        }
         streamMock().mockRejectedValueOnce(tpmCapacityError());
 
         await drain(
@@ -8355,7 +8408,8 @@ describe('LlmChat', async () => {
             {
               message: image
                 ? [{ text: 'What happened next?' }, inline('image/png', 'abc')]
-                : 'What happened next?',
+                : 'What happened next?' +
+                  (staticPrompt ? ' cat'.repeat(2_000) : ''),
             },
             'warm-fallback-second',
           ),
@@ -8363,7 +8417,17 @@ describe('LlmChat', async () => {
 
         const primaryRequest = streamMock().mock.calls[1][0];
         const fallbackRequest = fallback.mock.calls[0][0];
-        if (keepUsage) {
+        if (staticPrompt) {
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            65_536 - 35_000 - 10_000,
+          );
+        } else if (resumed) {
+          expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          expect(
+            fallbackRequest.config.maxOutputTokens + promptTokenCount,
+          ).toBeLessThanOrEqual(65_536);
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(4_000);
+        } else if (keepUsage) {
           expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
           expect(fallbackRequest.config.maxOutputTokens).toBe(
             primaryRequest.config!.maxOutputTokens! + 65_536 - primaryWindow,

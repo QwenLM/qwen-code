@@ -46,6 +46,20 @@ export function estimateContextTextTokens(text: string): number {
   return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
 }
 
+export function estimateDenseTextTokens(
+  text: string,
+  estimateBase = estimateContextTextTokens,
+): number {
+  let estimate = estimateBase(text);
+  // Numbers and ASCII delimiters commonly tokenize in shorter runs than prose.
+  for (const [run] of text.matchAll(
+    /[0-9]+|[!-/:-@\u005b-\u0060{-~]+|\r?\n/g,
+  )) {
+    estimate += Math.ceil(run.length / 2) - run.length / 4;
+  }
+  return Math.ceil(estimate);
+}
+
 /**
  * Estimate the token count of a list of Content objects via char/4.
  *

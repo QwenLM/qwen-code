@@ -165,9 +165,11 @@ import {
 import {
   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
+  estimateDenseTextTokens,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
+import { estimateTextTokens } from '../utils/request-tokenizer/textTokenizer.js';
 import {
   microcompactHistory,
   getFunctionCallIdentity,
@@ -1008,10 +1010,21 @@ function getConfiguredHuggingFaceChatOutputBudget(
   });
 }
 
+interface HuggingFaceChatPromptSource {
+  model: string;
+  messages?: unknown[];
+  tools: unknown;
+  systemInstruction: GenerateContentConfig['systemInstruction'];
+  schemaCompliance?: ContentGeneratorConfig['schemaCompliance'];
+}
+
 function huggingFaceChatPromptSource(
   config: ContentGeneratorConfig | undefined,
   model: string | undefined,
-): { model: string; messages: unknown; tools: unknown } | undefined {
+  generation:
+    | Pick<GenerateContentConfig, 'systemInstruction' | 'tools'>
+    | undefined,
+): HuggingFaceChatPromptSource | undefined {
   if (
     !model ||
     config?.authType !== AuthType.USE_OPENAI ||
@@ -1023,7 +1036,47 @@ function huggingFaceChatPromptSource(
     ...config.samplingParams,
     ...config.extra_body,
   };
-  return { model, messages, tools };
+  const rawMessages = Array.isArray(messages) ? messages : undefined;
+  // The Chat pipeline installs generated tools after sampling params and before
+  // the provider applies extra_body. Only compare the tools that survive.
+  const generatedTools =
+    generation?.tools?.length &&
+    !Object.hasOwn(config.extra_body ?? {}, 'tools')
+      ? generation.tools
+      : undefined;
+  return {
+    model,
+    messages: rawMessages,
+    tools: generatedTools ?? tools,
+    systemInstruction: rawMessages ? undefined : generation?.systemInstruction,
+    schemaCompliance: generatedTools
+      ? (config.schemaCompliance ?? 'auto')
+      : undefined,
+  };
+}
+
+function estimateHuggingFaceFallbackTextTokens(text: string): number {
+  return estimateDenseTextTokens(text, estimateTextTokens);
+}
+
+function estimateRawChatMessagesTokens(
+  messages: unknown[],
+  imageTokenEstimate: number,
+): number {
+  let imageTokens = 0;
+  const text = JSON.stringify(messages, (_key, value: unknown) => {
+    if (
+      value &&
+      typeof value === 'object' &&
+      'type' in value &&
+      value.type === 'image_url'
+    ) {
+      imageTokens += imageTokenEstimate;
+      return undefined;
+    }
+    return value;
+  });
+  return estimateHuggingFaceFallbackTextTokens(text) + imageTokens;
 }
 
 /**
@@ -2649,6 +2702,7 @@ export class LlmChat {
    */
   private toolBudgetUsageAnchor?: {
     routeKey: string;
+    promptTokens: number;
     tokens: number;
     history: Content[];
   };
@@ -3818,7 +3872,13 @@ export class LlmChat {
 
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
-    let usageBackedRequestContents: Content[] | undefined;
+    let usageBackedPrompt:
+      | {
+          source: HuggingFaceChatPromptSource;
+          contents: Content[];
+          tokens: number;
+        }
+      | undefined;
     let userContentAdded = false;
     let manualPlanExitNoticeVersion: number | undefined;
     let manualPlanExitNoticeText: string | undefined;
@@ -3853,10 +3913,6 @@ export class LlmChat {
       cgConfigForThresholds && primaryUsesHuggingFace
         ? getRequestModel(cgConfigForThresholds, model)
         : model;
-    const primaryPromptSource = huggingFaceChatPromptSource(
-      cgConfigForThresholds,
-      budgetModel,
-    );
     const hfRoute = getHuggingFaceRoute(
       budgetModel,
       cgConfigForThresholds?.baseUrl,
@@ -4585,7 +4641,7 @@ export class LlmChat {
         );
         const usageAnchor = this.toolBudgetUsageAnchor;
         if (
-          primaryPromptSource &&
+          primaryUsesHuggingFace &&
           !promptCountIsEstimated &&
           usageAnchor?.routeKey === requestRouteKey &&
           usageAnchor.history.every(
@@ -4595,25 +4651,30 @@ export class LlmChat {
           // Session counts may be attributed to the primary even when a different
           // model or prompt supplied the usage. Check the successful dispatch.
           const usageRequest = this.dispatchedRequest;
-          const primaryConfig = { ...this.generationConfig, ...params.config };
+          const primaryPromptSource = huggingFaceChatPromptSource(
+            cgConfigForThresholds,
+            budgetModel,
+            { ...this.generationConfig, ...params.config },
+          );
           if (
+            primaryPromptSource &&
             isDeepStrictEqual(
               primaryPromptSource,
               huggingFaceChatPromptSource(
                 usageRequest?.runtimeView?.contentGeneratorConfig,
                 usageRequest?.model,
+                usageRequest?.generationConfig,
               ),
-            ) &&
-            isDeepStrictEqual(
-              primaryConfig.systemInstruction,
-              usageRequest?.generationConfig.systemInstruction,
-            ) &&
-            isDeepStrictEqual(
-              primaryConfig.tools,
-              usageRequest?.generationConfig.tools,
             )
           ) {
-            usageBackedRequestContents = requestContents;
+            // Fixed raw messages replace the history, pending input, and system prompt.
+            usageBackedPrompt = {
+              source: primaryPromptSource,
+              contents: requestContents,
+              tokens: primaryPromptSource.messages
+                ? usageAnchor.promptTokens
+                : promptTokensForClamp,
+            };
           }
         }
       }
@@ -6288,28 +6349,26 @@ export class LlmChat {
                   );
                   const reclampOutput =
                     primaryUsesHuggingFace || fallbackUsesHuggingFace;
-                  const minimumPromptTokens =
-                    usageBackedRequestContents &&
-                    isDeepStrictEqual(
-                      primaryPromptSource,
-                      huggingFaceChatPromptSource(
+                  const promptSource = fallbackUsesHuggingFace
+                    ? huggingFaceChatPromptSource(
                         fallbackConfig,
                         getRequestModel(
                           fallbackConfig ?? {},
                           resolvedFallbackModel,
                         ),
-                      ),
-                    ) &&
-                    isDeepStrictEqual(
-                      params.config?.systemInstruction,
-                      fallbackParams.config?.systemInstruction,
-                    ) &&
-                    isDeepStrictEqual(
-                      usageBackedRequestContents,
-                      fallbackRequestContents,
-                    )
-                      ? promptTokensForClamp
-                      : 0;
+                        { ...self.generationConfig, ...fallbackParams.config },
+                      )
+                    : undefined;
+                  const usagePromptTokens =
+                    usageBackedPrompt &&
+                    isDeepStrictEqual(usageBackedPrompt.source, promptSource) &&
+                    (promptSource?.messages ||
+                      isDeepStrictEqual(
+                        usageBackedPrompt.contents,
+                        fallbackRequestContents,
+                      ))
+                      ? usageBackedPrompt.tokens
+                      : undefined;
                   // Stamp the fallback-served counts under the REQUEST route
                   // key: a fallback serves on behalf of the same session
                   // request (the session model never changes), and the
@@ -6333,7 +6392,11 @@ export class LlmChat {
                     fallbackConfig,
                     options?.onModelRequestDispatched,
                     reclampOutput
-                      ? { explicitOutputCeiling, minimumPromptTokens }
+                      ? {
+                          explicitOutputCeiling,
+                          promptSource,
+                          usagePromptTokens,
+                        }
                       : undefined,
                   )) {
                     const emittedUserVisibleOutput =
@@ -6774,7 +6837,8 @@ export class LlmChat {
     onModelRequestDispatched?: () => void,
     outputClamp?: {
       explicitOutputCeiling: number | undefined;
-      minimumPromptTokens: number;
+      promptSource?: HuggingFaceChatPromptSource;
+      usagePromptTokens?: number;
     },
   ): AsyncGenerator<StreamEvent> {
     if (outputClamp) {
@@ -6804,19 +6868,49 @@ export class LlmChat {
         ...this.generationConfig,
         ...params.config,
       };
-      const systemTokens = Math.ceil(
-        getCustomSystemPrompt(systemInstruction).length / TOKEN_TO_CHAR_RATIO,
+      const systemPrompt = getCustomSystemPrompt(systemInstruction);
+      const { imageTokenEstimate } = resolveSlimmingConfig(
+        this.config.getChatCompression(),
       );
-      // Keep the usage-backed estimate when the fallback sends the same prompt
-      // to the same model. A character estimate can undercount dense history.
-      promptTokensForClamp = Math.max(
-        outputClamp.minimumPromptTokens,
-        estimateContentTokens(
-          requestContents,
-          resolveSlimmingConfig(this.config.getChatCompression())
-            .imageTokenEstimate,
-        ) + Math.max(ESTIMATE_CLAMP_OVERHEAD_PAD, systemTokens),
-      );
+      const { promptSource, usagePromptTokens } = outputClamp;
+      const toolTokens =
+        promptSource && usagePromptTokens === undefined
+          ? estimateHuggingFaceFallbackTextTokens(
+              JSON.stringify(promptSource.tools) ?? '',
+            )
+          : 0;
+      if (promptSource?.messages) {
+        promptTokensForClamp =
+          usagePromptTokens ??
+          estimateRawChatMessagesTokens(
+            promptSource.messages,
+            imageTokenEstimate,
+          ) + toolTokens;
+      } else {
+        const systemTokens = Math.ceil(
+          systemPrompt.length / TOKEN_TO_CHAR_RATIO,
+        );
+        const estimatedPromptTokens =
+          estimateContentTokens(requestContents, imageTokenEstimate) +
+          Math.max(ESTIMATE_CLAMP_OVERHEAD_PAD, systemTokens);
+        // A resumed or different route lacks a matching usage anchor. Price the
+        // destination's text, system instruction and tools without double counting the pad.
+        const densePromptTokens =
+          promptSource && usagePromptTokens === undefined
+            ? estimateContentTokens(
+                requestContents,
+                imageTokenEstimate,
+                estimateHuggingFaceFallbackTextTokens,
+              ) +
+              estimateHuggingFaceFallbackTextTokens(systemPrompt) +
+              toolTokens
+            : 0;
+        promptTokensForClamp = Math.max(
+          estimatedPromptTokens,
+          usagePromptTokens ?? 0,
+          densePromptTokens,
+        );
+      }
       const maxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
         window,
@@ -8572,6 +8666,7 @@ export class LlmChat {
       usageMetadata.promptTokenCount > 0
         ? {
             routeKey,
+            promptTokens: usageMetadata.promptTokenCount,
             tokens:
               usageMetadata.promptTokenCount +
               getUsageOutputTokenCountForPromptEstimate(usageMetadata),
