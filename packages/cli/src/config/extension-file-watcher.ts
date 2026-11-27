@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { getExtensionContextFileNames } from '@qwen-code/qwen-code-core/extension/context-files.js';
 import type { ExtensionMutationEvent } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
@@ -167,14 +168,7 @@ export class ExtensionFileWatcher {
       for (const filePath of extension.contextFiles) {
         files.add(path.resolve(filePath));
       }
-      const configured = extension.config.contextFileName;
-      const names =
-        configured === undefined
-          ? ['QWEN.md']
-          : Array.isArray(configured)
-            ? configured
-            : [configured];
-      for (const name of names) {
+      for (const name of getExtensionContextFileNames(extension)) {
         files.add(path.resolve(extension.path, name));
       }
       this.addManifestFileReference(

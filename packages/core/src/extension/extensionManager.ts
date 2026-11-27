@@ -26,6 +26,8 @@ import * as os from 'node:os';
 
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { AGENT_CONTEXT_FILENAME } from '../utils/memory-constants.js';
+import { getExtensionContextFileNames } from './context-files.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
   EXTENSION_SETTINGS_FILENAME,
@@ -459,15 +461,6 @@ function filterMcpConfig(original: MCPServerConfig): MCPServerConfig {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { trust, ...rest } = original;
   return Object.freeze(rest);
-}
-
-function getContextFileNames(config: ExtensionConfig): string[] {
-  if (!config.contextFileName || config.contextFileName.length === 0) {
-    return ['QWEN.md'];
-  } else if (!Array.isArray(config.contextFileName)) {
-    return [config.contextFileName];
-  }
-  return config.contextFileName;
 }
 
 async function loadCommandsFromDir(dir: string): Promise<string[]> {
@@ -2079,11 +2072,27 @@ export class ExtensionManager {
           loadCommandsFromDir(`${effectiveExtensionPath}/commands`).then(
             (commands) => {
               head.extension.commands = commands;
-              head.extension.contextFiles = getContextFileNames(config)
-                .map((contextFileName) =>
-                  path.join(effectiveExtensionPath, contextFileName),
-                )
-                .filter((contextFilePath) => fs.existsSync(contextFilePath));
+              head.extension.contextFiles = getExtensionContextFileNames(
+                head.extension,
+              ).flatMap((name) => {
+                const file = path.join(effectiveExtensionPath, name);
+                if (!fs.existsSync(file)) return [];
+                if (
+                  name !== AGENT_CONTEXT_FILENAME ||
+                  config.contextFileName?.length
+                ) {
+                  return [file];
+                }
+                try {
+                  const resolved = resolveContainedExistingPath(
+                    effectiveExtensionPath,
+                    file,
+                  );
+                  return fs.statSync(resolved).isFile() ? [file] : [];
+                } catch {
+                  return [];
+                }
+              });
             },
           ),
           loadSkillsFromDir(

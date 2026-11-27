@@ -453,6 +453,40 @@ describe('ExtensionFileWatcher', () => {
     expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['omitted', {}, ['QWEN.md', 'AGENTS.md']],
+    ['empty array', { contextFileName: [] }, ['QWEN.md', 'AGENTS.md']],
+    ['string override', { contextFileName: 'GUIDE.md' }, ['GUIDE.md']],
+    ['array override', { contextFileName: ['GUIDE.md'] }, ['GUIDE.md']],
+  ])(
+    'marks newly added context files as stale (contextFileName: %s)',
+    (_label, config, staleFiles) => {
+      const extensionPath = path.join(extensionsDir, 'alpha');
+      const refreshState = createRefreshState();
+      const watcher = new ExtensionFileWatcher(
+        configWithExtensions([
+          { path: extensionPath, config, contextFiles: [] },
+        ]),
+        extensionsDir,
+        refreshState,
+      );
+      try {
+        watcher.startWatching();
+
+        for (const name of ['QWEN.md', 'AGENTS.md', 'GUIDE.md']) {
+          vi.mocked(refreshState.markExtensionsChanged).mockClear();
+          fireAllEvent(0, 'add', path.join(extensionPath, name));
+          expect(refreshState.markExtensionsChanged).toHaveBeenCalledTimes(
+            staleFiles.includes(name) ? 1 : 0,
+          );
+        }
+        expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
+      } finally {
+        watcher.stopWatching();
+      }
+    },
+  );
+
   it('marks refresh needed for linked source changes and context files', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
