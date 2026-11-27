@@ -471,8 +471,31 @@ export function useProviderUpdates(
                   modelIds: [id],
                   wireApi: existing?.wireApi,
                 }).modelProviders![0]!.models.map((model) => ({
-                  ...existing,
                   ...model,
+                  ...(existing
+                    ? {
+                        // Keep user-tuned generation settings that are not
+                        // supplied by the refreshed provider template. A
+                        // template value still wins when it is present.
+                        generationConfig:
+                          existing.generationConfig || model.generationConfig
+                            ? {
+                                ...existing.generationConfig,
+                                ...model.generationConfig,
+                                ...(existing.generationConfig
+                                  ?.contextWindowSize !== undefined &&
+                                model.generationConfig?.contextWindowSize ===
+                                  undefined
+                                  ? {
+                                      contextWindowSize:
+                                        existing.generationConfig
+                                          .contextWindowSize,
+                                    }
+                                  : {}),
+                              }
+                            : undefined,
+                      }
+                    : {}),
                   ...(existing?.wireApi ? { wireApi: existing.wireApi } : {}),
                   envKey: existing?.envKey ?? model.envKey,
                 })),
