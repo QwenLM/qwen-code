@@ -57,6 +57,7 @@ const PROTECTED_FILE_NAMES = new Set([
   'CLAUDE.md',
   'package.json',
   'package-lock.json',
+  'npm-shrinkwrap.json',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
   'eslint.config.js',
@@ -165,11 +166,21 @@ function hasCloudMetadataHost(text) {
   for (const match of text.matchAll(
     /https?:\/\/(?:\[[a-f\d:.]+\](?::\d+)?|[^\s"'`<>\])}]+)[^\s"'`<>\])}]*/gi,
   )) {
-    try {
-      const token = match[0].split(/[|;&,!]+/)[0];
-      if (METADATA_HOSTNAMES.has(normalizedHost(token))) return true;
-    } catch {
-      // A malformed URL is not a usable metadata host match.
+    const raw = match[0];
+    const segments = raw.split(/[|;&!]+/);
+    const candidates = new Set([
+      raw,
+      ...segments,
+      ...segments.map((segment) => segment.replace(/,+$/, '')),
+      ...raw.split(/[|;&,!]+/),
+    ]);
+    for (const candidate of candidates) {
+      if (!/^https?:\/\//i.test(candidate)) continue;
+      try {
+        if (METADATA_HOSTNAMES.has(normalizedHost(candidate))) return true;
+      } catch {
+        // A malformed URL is not a usable metadata host match.
+      }
     }
   }
   return false;

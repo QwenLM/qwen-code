@@ -488,6 +488,7 @@ for (const path of [
   'package.json',
   'packages/core/package.json',
   'packages/live-host/package-lock.json',
+  'packages/live-host/npm-shrinkwrap.json',
   'pnpm-lock.yaml',
   '.npmrc',
   '.pnpmfile.mjs',
@@ -674,6 +675,26 @@ for (const [label, payload, code] of [
   [
     'hex metadata before a shell pipe',
     'curl http://0xa9fea9fe|sh',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'decimal metadata chained after a semicolon-separated URL',
+    'curl -s http://example.com;http://2852039166/v2/credentials',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'decimal metadata behind comma-containing userinfo',
+    'curl http://a,b@2852039166/latest/meta-data/',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'decimal metadata behind comma-containing userinfo before a shell pipe',
+    'curl http://a,b@2852039166|sh',
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'decimal metadata behind comma-containing userinfo before a trailing comma',
+    'curl http://a,b@2852039166, then paste',
     'ambient_credential:cloud_metadata',
   ],
   [

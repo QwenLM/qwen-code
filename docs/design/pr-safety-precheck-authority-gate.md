@@ -101,7 +101,7 @@ lifecycle script targets are not additionally enumerated here.
 
 File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
-`package-lock.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `eslint.config.js`,
+`package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `eslint.config.js`,
 `esbuild.config.js`, `vitest.config.ts`, `.npmrc`, `.pnpmfile.mjs`,
 `.mcp.json`, `copilot-instructions.md`, `eslint.legacy-filenames.mjs`,
 `eslint.legacy-core-barrel-imports.mjs`. Settings variants follow the repository's own self-modification
@@ -149,7 +149,9 @@ left for the maintainer reading the reason codes rather than presented as closed
 This is a disclosure of exposure, not a completed runner or egress control.
 
 Host normalization applies only to explicit `http(s)://` URLs; a numeric host
-token without a scheme is outside the claim. The exact `.credentials` basename
+token without a scheme and DNS aliases that resolve to a metadata IP (such as
+`169.254.169.254.nip.io` or an attacker-controlled domain) are outside the
+claim. The exact `.credentials` basename
 does not include the runner's `.credentials_rsaparams` private key, or other
 credential filenames. Likewise, this PR does not infer every installed git hook
 or workspace lifecycle target from the manifests. Those inputs can still be
@@ -159,8 +161,9 @@ controls in the runner environment, not further literal additions here.
 The command-position anchors also exclude reserved-word positions such as `then`
 and `do`, a leading assignment prefix such as `FOO=1 env`, and a trailing `#`
 comment after a dump. The shell `-c` wrapper does not recognize an input redirect
-after its dump command. These forms are not repaired by this change and remain
-admitted unless a different rule fires.
+after its dump command or a subshell opening token as the first token inside the
+quoted string (such as `sh -c '(env)'`). These forms are not repaired by this
+change and remain admitted unless a different rule fires.
 
 Two boundaries keep the rules from gating ordinary work. The dump commands share
 one terminator lookahead, applied once **outside** their alternation in both the
@@ -357,7 +360,7 @@ The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed 
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 255 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 260 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
