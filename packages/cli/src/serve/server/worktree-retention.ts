@@ -969,6 +969,25 @@ async function sweepWorktreeRetentionOnceInStorage(
         report.skipped.push(`${plan.sessionId}: runtime drained`);
         continue;
       }
+      // Re-read the limit for every candidate: a capture is minutes of work
+      // on a large checkout, so retention may have been disabled
+      // (`worktree.maxRetained: 0`) since this sweep started. Without this
+      // re-check the sweep kept capturing-and-discarding snapshots for every
+      // remaining candidate, only to reject removal in beforePhysicalRemoval
+      // after the capture had already run.
+      let sweepLimit: number;
+      try {
+        sweepLimit = retentionLimit(runtime);
+      } catch (error) {
+        report.issues.push(
+          error instanceof Error ? error.message : String(error),
+        );
+        break;
+      }
+      if (sweepLimit === 0) {
+        report.skipped.push('retention disabled during sweep');
+        break;
+      }
       try {
         const removed = await removeRetainedCheckout(
           runtime,

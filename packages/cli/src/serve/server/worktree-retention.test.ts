@@ -2937,6 +2937,52 @@ describe('worktree retention with real repositories', () => {
     },
   );
 
+  it('stops an in-flight sweep when maxRetained becomes 0 instead of capturing every remaining candidate', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    configureRetention(primary, 1);
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-oldest',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const middle = await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-middle',
+      dirty: true,
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'disabled-mid-sweep-newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    // Disabling retention is the reported emergency mitigation. It must take
+    // effect before the NEXT candidate's capture: on a large checkout each
+    // capture is minutes of compression and hashing, and the sweep used to
+    // run it only to refuse removal afterwards in beforePhysicalRemoval.
+    const snapshotService = await import(
+      '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+    );
+    let captures = 0;
+    vi.spyOn(snapshotService, 'captureWorktreeSnapshot').mockImplementation(
+      async () => {
+        captures += 1;
+        if (captures >= 1) configureRetention(primary, 0);
+        return {
+          snapshotPath: path.join(root, `injected-${captures}.tar.gz`),
+          metaPath: path.join(root, `injected-${captures}.json`),
+          checkoutMatchesCapture: true,
+        };
+      },
+    );
+
+    const report = await sweep(primary);
+
+    expect(captures).toBe(1);
+    expect(report.removed).toEqual([]);
+    expect(report.skipped).toContain('retention disabled during sweep');
+    expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+    expect(fs.existsSync(middle.worktreePath)).toBe(true);
+  });
+
   it.each([false, null, 'off', []] as const)(
     'pauses retention instead of falling back to default when worktree settings is %j',
     async (invalidSection) => {

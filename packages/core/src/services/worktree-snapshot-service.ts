@@ -135,7 +135,29 @@ function isProtectedRel(norm: string): boolean {
 interface DisposableIgnoredMatcher {
   dirs: string[];
   files: ReadonlySet<string>;
+  /**
+   * Subtrees excluded regardless of the ignore listing: Qwen's own
+   * regenerable caches and a nested checkout's managed worktree directory.
+   * Every exclusion here is unconditional for the archive AND the
+   * post-capture checkout check, so the two geometries cannot disagree.
+   */
+  neverDirs: readonly string[];
 }
+
+/**
+ * Regenerable Qwen cache subtrees under `.qwen/`. They hold per-workspace
+ * scratch data (agent tmp files) and hook logs whose value is bounded by age,
+ * not by the session that produced them, and a long-running workspace can
+ * accumulate hundreds of thousands of entries there. A snapshot is the
+ * session's restorable work, so archiving this cache makes one checkout
+ * produce a multi-GB archive for data no restore needs. Only these exact
+ * descendants are dropped; every other `.qwen/` path (skills, commands,
+ * settings, drafts, nested worktrees) stays a stated, gated snapshot subject.
+ */
+const REGENERABLE_QWEN_CACHE_DIRS: readonly string[] = [
+  '.qwen/tmp/',
+  '.qwen/logs/',
+];
 
 /**
  * Whether a worktree-relative path is excluded from the snapshot. `.git`
@@ -145,7 +167,9 @@ interface DisposableIgnoredMatcher {
  * the same geometry the has-work gate waives — so a tracked or non-ignored
  * file under `dist/` (or `node_modules/`, `coverage/`) is archived rather than
  * silently dropped, while nested ignored output (`packages/app/node_modules/`)
- * is excluded exactly as the gate waives it.
+ * is excluded exactly as the gate waives it. A nested checkout's own managed
+ * worktree directory is a separate checkout, not this session's work, and is
+ * excluded likewise.
  */
 function isExcludedFromSnapshot(
   relativePath: string,
@@ -155,6 +179,13 @@ function isExcludedFromSnapshot(
   if (norm.length === 0) return false;
   if (norm === '.git' || norm.startsWith('.git/')) return true;
   if (norm === WORKTREE_SESSION_FILE) return true;
+  if (
+    matcher.neverDirs.some(
+      (dir) => norm === dir.replace(/\/$/, '') || norm.startsWith(dir),
+    )
+  ) {
+    return true;
+  }
   if (matcher.files.has(norm)) return true;
   const withSlash = `${norm}/`;
   return matcher.dirs.some((dir) => withSlash.startsWith(dir));
@@ -509,11 +540,18 @@ async function checkoutMatchesCapture(
   };
   await collect();
 
+  // Membership is a Set lookup, never a linear scan per entry: on a checkout
+  // with hundreds of thousands of files, `regularFiles.includes(...)` inside
+  // this loop ran O(N^2) comparisons in one synchronous microtask (the hashing
+  // it follows is async, but this loop is not) and pinned the daemon event
+  // loop for minutes. Order does not matter here, so the same Set also feeds
+  // the hashing (its stable insertion order keeps the batches deterministic).
+  const regularFileSet = new Set(regularFiles);
   for (const entry of await computeCarriedIdentities(
     worktreePath,
-    regularFiles,
+    regularFileSet,
   )) {
-    if (entry.hash === null || !regularFiles.includes(entry.path)) {
+    if (entry.hash === null || !regularFileSet.has(entry.path)) {
       throw new Error('Worktree snapshot: contents changed during capture');
     }
     current.set(
@@ -707,9 +745,33 @@ async function readSnapshotExclusions(
         (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
       ),
     ),
+    neverDirs: boundedSnapshotExclusions(worktreePath),
   };
   await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
   return matcher;
+}
+
+/**
+ * Subtrees excluded from every capture of this checkout because they bound
+ * the archive rather than describe the session's work. A checkout can itself
+ * be a repository whose managed worktrees live under its own
+ * `.qwen/worktrees/`: those are OTHER checkouts, and archiving them here both
+ * multiplies the archive by every nested worktree and can nest this same
+ * capture inside itself. The set is path-derived, not `.qwen/`-wide: a
+ * workspace's `.qwen/skills`, `commands`, `settings.json` and drafts remain
+ * snapshot subjects because they are not regenerable.
+ */
+function boundedSnapshotExclusions(worktreePath: string): readonly string[] {
+  const exclusions = [...REGENERABLE_QWEN_CACHE_DIRS];
+  const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
+  const relative = path
+    .relative(path.resolve(worktreePath), path.resolve(managedDir))
+    .split(path.sep)
+    .join('/');
+  if (relative.length > 0 && !relative.startsWith('..')) {
+    exclusions.push(`${relative.replace(/\/$/, '')}/`);
+  }
+  return exclusions;
 }
 
 export async function verifyRestoredWorktreeSnapshot(options: {

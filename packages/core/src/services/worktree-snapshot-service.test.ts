@@ -257,6 +257,110 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
   });
 
+  it('excludes the checkout’s own managed worktree directory and regenerable .qwen caches only', async () => {
+    // The reported production archive was 93% nested `.qwen/` content: this
+    // checkout's own managed worktrees (other checkouts) and its scratch tmp
+    // tree. Both are excluded; a stated `.qwen/` subject stays archived so the
+    // fix does not silently drop a workspace's skills/commands.
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/\n');
+    const nestedWorktree = path.join(
+      worktree,
+      '.qwen',
+      'worktrees',
+      'inner',
+      'src',
+    );
+    await fs.mkdir(nestedWorktree, { recursive: true });
+    await fs.writeFile(path.join(nestedWorktree, 'inner.ts'), 'export {};\n');
+    const tmp = path.join(worktree, '.qwen', 'tmp', 'blobs');
+    await fs.mkdir(tmp, { recursive: true });
+    await fs.writeFile(path.join(tmp, 'scratch.bin'), 'tmp\n');
+    const logs = path.join(worktree, '.qwen', 'logs');
+    await fs.mkdir(logs, { recursive: true });
+    await fs.writeFile(path.join(logs, 'hook.log'), 'log\n');
+    const skill = path.join(worktree, '.qwen', 'skills', 'demo');
+    await fs.mkdir(skill, { recursive: true });
+    await fs.writeFile(path.join(skill, 'SKILL.md'), '# demo\n');
+
+    const { snapshotPath, metaPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+    expect(checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: snapshotPath,
+      onReadEntry: (entry) => {
+        members.push(entry.path);
+      },
+    });
+    expect(
+      members.filter((member) => member.startsWith('./.qwen/worktrees/')),
+    ).toEqual([]);
+    expect(
+      members.filter((member) => member.startsWith('./.qwen/tmp/')),
+    ).toEqual([]);
+    expect(
+      members.filter((member) => member.startsWith('./.qwen/logs/')),
+    ).toEqual([]);
+    expect(members).toEqual(
+      expect.arrayContaining(['./.qwen/skills/demo/SKILL.md']),
+    );
+
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-bounded',
+    );
+    await expect(
+      fs.access(path.join(restored, '.qwen', 'skills', 'demo', 'SKILL.md')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(
+        path.join(restored, '.qwen', 'worktrees', 'inner', 'src', 'inner.ts'),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(restored, '.qwen', 'tmp', 'blobs', 'scratch.bin')),
+    ).rejects.toThrow();
+  });
+
+  it('verifies a large capture without an O(N^2) synchronous membership scan', async () => {
+    // The post-capture check used `regularFiles.includes(entry.path)` per
+    // entry: O(N^2) inside one microtask with no yield point, which froze the
+    // daemon event loop for minutes on a 300k-file checkout. Keep one timer
+    // ticking across the capture and require it to run while the membership
+    // check is pending; a linear scan of N entries would starve it.
+    const bulk = path.join(worktree, 'bulk');
+    await fs.mkdir(bulk);
+    const FILES = 3000;
+    for (let i = 0; i < FILES; i += 250) {
+      await Promise.all(
+        Array.from({ length: Math.min(250, FILES - i) }, (_, offset) =>
+          fs.writeFile(path.join(bulk, `f${i + offset}`), 'x'),
+        ),
+      );
+    }
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 20);
+    try {
+      const result = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+      expect(result.checkoutMatchesCapture).toBe(true);
+    } finally {
+      clearInterval(timer);
+    }
+    expect(ticks).toBeGreaterThan(0);
+  });
+
   it.skipIf(process.platform === 'win32').each([
     { committedMode: 0o644, capturedMode: 0o755 },
     { committedMode: 0o755, capturedMode: 0o644 },
