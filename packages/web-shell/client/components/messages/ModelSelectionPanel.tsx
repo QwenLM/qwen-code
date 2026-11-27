@@ -646,7 +646,7 @@ export function ModelSelectionPanel({
             disabled={disabled}
             onValueChange={setSelectedType}
           >
-            <SelectTrigger aria-label="Filter by type">
+            <SelectTrigger aria-label={t('auth.modelSelection.filterByType')}>
               <SelectValue placeholder={t('auth.modelSelection.allTypes')} />
             </SelectTrigger>
             <SelectContent>
@@ -670,7 +670,7 @@ export function ModelSelectionPanel({
             disabled={disabled}
             onValueChange={setSelectedQuant}
           >
-            <SelectTrigger aria-label="Filter by quantization">
+            <SelectTrigger aria-label={t('auth.modelSelection.filterByQuant')}>
               <SelectValue placeholder={t('auth.modelSelection.allQuant')} />
             </SelectTrigger>
             <SelectContent>
@@ -690,18 +690,30 @@ export function ModelSelectionPanel({
             disabled={disabled}
             onValueChange={(val) => setMinContext(Number(val))}
           >
-            <SelectTrigger aria-label="Filter by context window">
+            <SelectTrigger
+              aria-label={t('auth.modelSelection.filterByContext')}
+            >
               <SelectValue placeholder={t('auth.modelSelection.anyContext')} />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="0">
                 {t('auth.modelSelection.anyContext')}
               </SelectItem>
-              <SelectItem value="32000">≥ 32k tokens</SelectItem>
-              <SelectItem value="64000">≥ 64k tokens</SelectItem>
-              <SelectItem value="128000">≥ 128k tokens</SelectItem>
-              <SelectItem value="200000">≥ 200k tokens</SelectItem>
-              <SelectItem value="1048576">≥ 1024k tokens</SelectItem>
+              <SelectItem value="32000">
+                {t('auth.modelSelection.minContextTokens', { tokens: '32k' })}
+              </SelectItem>
+              <SelectItem value="64000">
+                {t('auth.modelSelection.minContextTokens', { tokens: '64k' })}
+              </SelectItem>
+              <SelectItem value="128000">
+                {t('auth.modelSelection.minContextTokens', { tokens: '128k' })}
+              </SelectItem>
+              <SelectItem value="200000">
+                {t('auth.modelSelection.minContextTokens', { tokens: '200k' })}
+              </SelectItem>
+              <SelectItem value="1048576">
+                {t('auth.modelSelection.minContextTokens', { tokens: '1024k' })}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -714,7 +726,7 @@ export function ModelSelectionPanel({
             onClick={() => setFeaturedOnly((prev) => !prev)}
             disabled={disabled}
             aria-pressed={featuredOnly}
-            title="Filter featured models"
+            title={t('auth.modelSelection.filterFeaturedTitle')}
           >
             <SparklesIcon className={styles.buttonIconFeatured} />
             <span>{t('auth.modelSelection.featured')}</span>
@@ -726,7 +738,7 @@ export function ModelSelectionPanel({
             onClick={() => setDiscountOnly((prev) => !prev)}
             disabled={disabled}
             aria-pressed={discountOnly}
-            title="Filter discounted models"
+            title={t('auth.modelSelection.filterDiscountTitle')}
           >
             <TagIcon className={styles.buttonIconDiscount} />
             <span>{t('auth.modelSelection.discount')}</span>
@@ -738,7 +750,7 @@ export function ModelSelectionPanel({
             onClick={() => setPriorityOnly((prev) => !prev)}
             disabled={disabled}
             aria-pressed={priorityOnly}
-            title="Filter models supporting priority service tier"
+            title={t('auth.modelSelection.filterPriorityTitle')}
           >
             <ZapIcon className={styles.buttonIconPriority} />
             <span>{t('auth.modelSelection.priority')}</span>
@@ -750,7 +762,7 @@ export function ModelSelectionPanel({
             onClick={() => setFlexOnly((prev) => !prev)}
             disabled={disabled}
             aria-pressed={flexOnly}
-            title="Filter models supporting flex service tier"
+            title={t('auth.modelSelection.filterFlexTitle')}
           >
             <ClockIcon className={styles.buttonIconFlex} />
             <span>{t('auth.modelSelection.flex')}</span>
@@ -872,7 +884,7 @@ export function ModelSelectionPanel({
                     type="button"
                     className={styles.sortableHeader}
                     onClick={() => handleSort('priceIn')}
-                    title="Sort by input price per million tokens"
+                    title={t('auth.modelSelection.sortInPriceTitle')}
                   >
                     <span>{t('auth.modelSelection.thInPrice')}</span>
                     {sortField === 'priceIn' ? (
@@ -897,7 +909,7 @@ export function ModelSelectionPanel({
                     type="button"
                     className={styles.sortableHeader}
                     onClick={() => handleSort('priceOut')}
-                    title="Sort by output price per million tokens"
+                    title={t('auth.modelSelection.sortOutPriceTitle')}
                   >
                     <span>{t('auth.modelSelection.thOutPrice')}</span>
                     {sortField === 'priceOut' ? (
@@ -925,7 +937,9 @@ export function ModelSelectionPanel({
                         checked={isSelected}
                         disabled={disabled}
                         onCheckedChange={() => toggleModel(model.id)}
-                        aria-label={`Select ${model.name}`}
+                        aria-label={t('auth.modelSelection.selectModel', {
+                          name: model.name,
+                        })}
                       />
                     </td>
                     <td>
@@ -934,12 +948,14 @@ export function ModelSelectionPanel({
                           <span className={styles.modelName}>{model.name}</span>
                           {model.isFeatured && (
                             <span
-                              title="Featured model"
+                              title={t('auth.modelSelection.featuredBadge')}
                               className="inline-flex items-center"
                             >
                               <SparklesIcon
                                 className={styles.featuredIcon}
-                                aria-label="Featured model"
+                                aria-label={t(
+                                  'auth.modelSelection.featuredBadge',
+                                )}
                               />
                             </span>
                           )}
@@ -947,36 +963,45 @@ export function ModelSelectionPanel({
                             <span
                               title={
                                 model.discountPercent != null
-                                  ? `Discounted (${model.discountPercent}% off)`
-                                  : 'Discounted pricing available'
+                                  ? t(
+                                      'auth.modelSelection.discountedPercentTitle',
+                                      { percent: model.discountPercent },
+                                    )
+                                  : t(
+                                      'auth.modelSelection.discountedPricingTitle',
+                                    )
                               }
                               className="inline-flex items-center"
                             >
                               <TagIcon
                                 className={styles.discountIcon}
-                                aria-label="Discount available"
+                                aria-label={t(
+                                  'auth.modelSelection.discountAvailable',
+                                )}
                               />
                             </span>
                           )}
                           {model.hasPriority && (
                             <span
-                              title="Supports Priority Service Tier"
+                              title={t('auth.modelSelection.priorityTitle')}
                               className="inline-flex items-center"
                             >
                               <ZapIcon
                                 className={styles.priorityIcon}
-                                aria-label="Priority tier"
+                                aria-label={t(
+                                  'auth.modelSelection.priorityBadge',
+                                )}
                               />
                             </span>
                           )}
                           {model.hasFlex && (
                             <span
-                              title="Supports Flex Service Tier"
+                              title={t('auth.modelSelection.flexTitle')}
                               className="inline-flex items-center"
                             >
                               <ClockIcon
                                 className={styles.flexIcon}
-                                aria-label="Flex tier"
+                                aria-label={t('auth.modelSelection.flexBadge')}
                               />
                             </span>
                           )}
@@ -1062,7 +1087,7 @@ export function ModelSelectionPanel({
                 <button
                   type="button"
                   className={styles.chipRemove}
-                  aria-label={`Remove ${id}`}
+                  aria-label={t('auth.modelSelection.removeModel', { id })}
                   disabled={disabled}
                   onClick={(e) => {
                     e.stopPropagation();
