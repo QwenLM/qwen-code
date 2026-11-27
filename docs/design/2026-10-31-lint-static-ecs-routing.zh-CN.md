@@ -37,7 +37,8 @@ scripts/prepare.js）——但按构造零密钥：集成门禁清空所有模�
 （fork 代码在约 14 个步骤之前就开始执行），因此该车道现在完全镜像 lint：
 首步通过 GITHUB_ENV 发布 run 唯一的 HOME 并把 COREPACK_HOME 放在其内
 （corepack 缓存命中不重验条目——共享 home 是跨 job 投毒通道），XDG_CACHE_HOME
-留在共享的可校验 tool cache 上，末尾 always() 清理步骤回收该 HOME。路由电池
+与 XDG_DATA_HOME 留在共享的内容可校验 tool cache 上，末尾 always() 清理步骤
+回收该 HOME。路由电池
 钉住车道集合、首步隔离、清理步骤，以及按值强制（非按名）的零密钥 env 契约
 （非路径 key 必须为空——包括 `ANTHROPIC_AUTH_TOKEN`（Anthropic SDK 的鉴权解析器会从 env 回填它）、gate 不得引用任何 secrets.\*）。
 
@@ -69,15 +70,23 @@ job 级 `env` 读不到 `runner` 上下文（GitHub 会拒绝整个 workflow 文
 `~`/`$HOME` 解析的配置。它拦不住用绝对路径写账号真实 home 的 job；那仍在下文
 已接受的残余暴露面里。仍然接受的限制：
 
-- **包缓存是冷的。** npm 与 pnpm store 落在 per-run HOME 下，每次运行都要从
-  registry 安装；yamllint 每次重新 pip 到 `$HOME/.local`，corepack shim 每次
-  重新下载。实测冷装约 900 s，90/45 的时限本来就是按这个口径定的。只有
-  linter 归档缓存保持共享温热：`XDG_CACHE_HOME` 指向
-  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`，lint.js 在每次缓存命中时、解压之前
-  对归档做 SHA-256 校验，被篡改的条目会被拒绝并重新拉取。`COREPACK_HOME`
-  留在 run 唯一的 HOME 内：corepack 缓存命中时不会重新校验已解压的条目
-  （在 0.34.6 与 0.36.0 上复现——记录的 hash 不变，被篡改的 pnpm 入口照样
-  执行），共享 corepack home 是一条跨 job 投毒通道。
+- **npm 缓存是冷的；pnpm store 共享温热。** `NPM_CONFIG_CACHE` 落在 per-run
+  HOME 下、随 job 消亡，yamllint 每次重新 pip 到 `$HOME/.local`，corepack shim
+  每次重新下载。有两个缓存保持共享，依据都是「每次命中都校验内容」：
+  `XDG_CACHE_HOME` 指向 `${RUNNER_TOOL_CACHE}/qwen-ci-cache`，lint.js 在每次
+  缓存命中时、解压之前对归档做 SHA-256 校验，被篡改的条目会被拒绝并重新拉取；
+  `XDG_DATA_HOME` 指向 `${RUNNER_TOOL_CACHE}/qwen-ci-data`，pnpm 由此解析它的
+  内容寻址 store。pnpm 在每次温命中时重新校验每个 store 条目——在 11.24.0 上
+  实测：等长篡改会被拒绝并重新拉取，而 `verify-store-integrity=false` 会静默
+  采纳，所以该设置必须保持默认值（由路由回归矩阵钉住）。
+  2026-11-27 之前 store 落在 per-run HOME 下，每次运行都要重新拉取全部约 2300
+  个包。该成本按约 900 s 被接受，但分布有长尾：当天五条绿色 lint 在安装步花了
+  6m32s–24m35s，而 PR #18543 的 run（job 140553347054，`ecs-qwen-hz7-14`）在还差
+  两个包时撞上该步 30 分钟上限，其后 20 个 lint 步骤全部跳过。registry 出口是
+  另一个因子——同一个 12 MB tarball，杭州直连实测 86 KB/s，经 fleet 的 HK
+  出口 19 MB/s。`COREPACK_HOME` 留在 run 唯一的 HOME 内：corepack 缓存命中时
+  不会重新校验已解压的条目（在 0.34.6 与 0.36.0 上复现——记录的 hash 不变，
+  被篡改的 pnpm 入口照样执行），共享 corepack home 是一条跨 job 投毒通道。
 - **`$GITHUB_WORKSPACE` 仍然共享。** 检出前的 "Restore workspace ownership" 与
   检出本身只能减轻、不能消除同机并行 job 留下的残留。该车道唯一的凭证是只读
   `GITHUB_TOKEN`（`contents: read`、`pull-requests: read`），绑定在 freshness、
@@ -171,7 +180,10 @@ lane。
   恰恰是没人会接走门禁的时候。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
-- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
-  指向内容可校验的共享路径），找回约 900 s 的冷装成本；磁盘下限门覆盖 `/tmp`
-  inode；fleet metadata 加固；`test` 车道固定 `qwen-ci-home` 的持久化问题；
-  若重新审视已接受的残余暴露面，则建隔离 fleet。
+- 另行拥有的后续：磁盘下限门覆盖 `/tmp` inode；fleet metadata 加固；`test`
+  车道固定 `qwen-ci-home` 的持久化问题；若重新审视已接受的残余暴露面，则建
+  隔离 fleet。2026-11-27 已落地：两条 ungated 车道的热共享 pnpm store，通过
+  `XDG_DATA_HOME` 指向内容可校验的共享路径（见上文隔离边界）。它现在依赖两条
+  性质：store 目录在 registration 上持久，因此跨运行增长、由磁盘下限门而非
+  per-run 回收约束；且只有同 UID 的非容器化 job 会写它——容器化车道若在其中
+  留下 root 所有的条目，就需要 workspace 已有的那套属主恢复。

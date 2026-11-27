@@ -725,11 +725,14 @@ describe('ci.yml lint HOME isolation', () => {
   // The `$GITHUB_ENV` writers, by value. It is last-write-wins, so an added
   // HOME/USERPROFILE writer (or a dropped `HOME=%s`) must break equality;
   // COREPACK_HOME stays inside the run-unique home (corepack does not
-  // re-verify entries on cache hit — a shared home is a poisoning channel)
-  // and XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache.
+  // re-verify entries on cache hit — a shared home is a poisoning channel),
+  // XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache, and
+  // XDG_DATA_HOME carries pnpm's content-addressable store, which pnpm
+  // re-verifies on every warm hit (the property asserted separately below).
   const ENV_WRITES = [
     'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
     'printf \'XDG_CACHE_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"',
+    'printf \'XDG_DATA_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-data" >> "${GITHUB_ENV}"',
     'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"',
   ];
 
@@ -850,7 +853,7 @@ describe('ci.yml lint HOME isolation', () => {
       assert.deepEqual(
         lines.filter((line) => line.includes('${GITHUB_ENV}')),
         ENV_WRITES,
-        `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME and COREPACK_HOME via GITHUB_ENV`,
+        `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME, XDG_DATA_HOME and COREPACK_HOME via GITHUB_ENV`,
       );
       // GITHUB_ENV is last-write-wins, so the guard cannot stop at step 0: a
       // later step that republishes an isolated key silently reverts the home
@@ -860,7 +863,7 @@ describe('ci.yml lint HOME isolation', () => {
       // `[^\w]`, not `\s`: the realistic form is `printf 'HOME=%s\n'` inside
       // quotes, which a whitespace-only prefix let through.
       const ISOLATED_KEY =
-        /(^|[^\w])(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)=/;
+        /(^|[^\w])(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME|XDG_DATA_HOME)=/;
       for (const [index, step] of steps.entries()) {
         if (index === 0) continue;
         for (const line of String(step.run ?? '')
@@ -873,10 +876,99 @@ describe('ci.yml lint HOME isolation', () => {
         }
         for (const key of Object.keys(step.env ?? {})) {
           assert.ok(
-            !/^(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)$/.test(key),
+            !/^(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME|XDG_DATA_HOME)$/.test(
+              key,
+            ),
             `${id} step ${index} (${step.name}) must not override ${key} for a single step`,
           );
         }
+      }
+    }
+  });
+
+  it('shares a content-verified pnpm store outside the run-unique HOME', () => {
+    // pnpm resolves its store through XDG_DATA_HOME. Inside the per-run home
+    // the store is reclaimed with it, so every run refetched ~2300 packages;
+    // the tail of that distribution overran the install step's 30-minute cap
+    // (PR #18543, lint job 140553347054: 30m13s, killed two packages short).
+    // Sharing is only safe because pnpm re-verifies each store entry on a warm
+    // hit — measured on 11.24.0: an equal-length tamper is rejected and
+    // refetched, while verify-store-integrity=false adopts it silently. Both
+    // halves of that argument are pinned here: the path, and the setting.
+    for (const [id, job] of ungated) {
+      const run = String((job.steps ?? [])[0]?.run ?? '');
+      const writer = run.match(/printf 'XDG_DATA_HOME=%s\\n' "([^"]+)"/);
+      assert.ok(writer, `${id} must publish XDG_DATA_HOME`);
+      assert.equal(
+        writer[1],
+        '${RUNNER_TOOL_CACHE}/qwen-ci-data',
+        `${id} pnpm store must ride the persistent tool cache, not the per-run home`,
+      );
+      // By value above, and structurally here: any `$home`-relative form (or a
+      // later `${HOME}/...` drift) puts the store back inside the directory the
+      // cleanup step deletes.
+      assert.ok(
+        !writer[1].includes('home'),
+        `${id} XDG_DATA_HOME must not resolve inside the run-unique home`,
+      );
+      // Scope this to the mkdir line: a whole-step `includes` is satisfied by
+      // the printf that publishes the same path, so dropping the directory
+      // from mkdir alone left that form green (measured).
+      const mkdirLine = run
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.startsWith('mkdir -p'));
+      assert.ok(mkdirLine, `${id} must create its directories with mkdir -p`);
+      assert.ok(
+        mkdirLine.includes('"${RUNNER_TOOL_CACHE}/qwen-ci-data"'),
+        `${id} must create the shared data directory it publishes`,
+      );
+      // The contrast that makes this a boundary rather than a blanket unshare:
+      // corepack does NOT re-verify on hit, so it stays per-run.
+      assert.ok(
+        run.includes(
+          'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack"',
+        ),
+        `${id} COREPACK_HOME must stay inside the run-unique home`,
+      );
+    }
+
+    // The store's integrity check is what licenses sharing it. Turning it off
+    // in repo config would hand every later job on the registration whatever a
+    // previous fork job wrote into the shared store.
+    const npmrc = readFileSync(
+      new URL('../../.npmrc', import.meta.url),
+      'utf8',
+    );
+    assert.ok(
+      !/verify[-_]store[-_]integrity\s*=\s*false/i.test(npmrc),
+      '.npmrc must not disable pnpm store integrity verification while the store is shared',
+    );
+  });
+
+  it('every path the lanes publish is reaper-selectable', () => {
+    // reap-isolated-home.sh selects this run's daemons by the home-bearing env
+    // keys it knows about, then removes the home. A published path missing from
+    // that list is a daemon the reaper cannot see: `rm -rf` then races it and
+    // fails with ENOTEMPTY, reddening a job whose tests all passed (the failure
+    // that script exists to remove, measured on job 130495062334). The two
+    // files are coupled, so pin the coupling rather than each side alone.
+    const reap = readFileSync(
+      new URL(
+        '../../.github/scripts/ci/reap-isolated-home.sh',
+        import.meta.url,
+      ),
+      'utf8',
+    );
+    const declared = reap.match(/^HOME_KEYS='([^']+)'/m);
+    assert.ok(declared, 'reaper must declare HOME_KEYS');
+    const known = declared[1].split(/\s+/);
+    for (const writer of ENV_WRITES) {
+      for (const match of writer.matchAll(/([A-Z_]+)=%s/g)) {
+        assert.ok(
+          known.includes(match[1]),
+          `reaper HOME_KEYS must cover ${match[1]}, which the lanes publish via GITHUB_ENV`,
+        );
       }
     }
   });

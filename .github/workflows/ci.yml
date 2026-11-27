@@ -1675,12 +1675,22 @@ jobs:
         run: |-
           home="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf -- "$home"
-          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache" "${RUNNER_TOOL_CACHE}/qwen-ci-data"
           printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
           # Linter archives are SHA-256-verified on every cache hit, so sharing
           # them is safe; corepack does NOT re-verify extracted entries on hit,
           # so its home stays per-run (a shared one is a poisoning channel).
           printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          # pnpm resolves its store through XDG_DATA_HOME. Under the run-unique
+          # HOME that store was empty every run, so each run refetched all
+          # ~2300 packages and the tail of that distribution overran the install
+          # step's 30-minute cap (PR #18543, job 140553347054). Sharing it is
+          # safe on the same grounds as the linter cache: the store is
+          # content-addressable and pnpm re-verifies every entry on a warm hit.
+          # Measured on pnpm 11.24.0 — an equal-length tamper is rejected and
+          # refetched; only verify-store-integrity=false adopts it, so that
+          # setting must stay at its default (pinned in the routing battery).
+          printf 'XDG_DATA_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-data" >> "${GITHUB_ENV}"
           printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
 
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
@@ -3148,9 +3158,12 @@ jobs:
         run: |-
           home="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf -- "$home"
-          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache" "${RUNNER_TOOL_CACHE}/qwen-ci-data"
           printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
           printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          # Same content-verified shared pnpm store as lint_and_static; see the
+          # rationale there. HOME stays run-unique.
+          printf 'XDG_DATA_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-data" >> "${GITHUB_ENV}"
           printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
 
       - name: 'Restore workspace ownership'
@@ -3303,9 +3316,10 @@ jobs:
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      # HOME is per-run (isolated above), so this cache dies with the job —
-      # the name must not promise persistence. The cold install is the
-      # accepted cost (review round-3); a shared pnpm store is a follow-up.
+      # HOME is per-run (isolated above), so this npm cache dies with the job —
+      # the name must not promise persistence. The install no longer pays a
+      # cold registry fetch: pnpm's store is shared through XDG_DATA_HOME (see
+      # the isolation step above), which is what actually holds the packages.
       - name: 'Configure per-run npm cache (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
