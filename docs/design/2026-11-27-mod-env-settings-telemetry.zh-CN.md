@@ -61,6 +61,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 按名字判断凭据。把变量名或设置键按 `_`、`-` 和驼峰拆开，含有 `TOKEN`、`SECRET`、`API_KEY`、`ACCESS_KEY`、`PRIVATE_KEY`、`CREDENTIAL`、`PASSWORD`、`PASSPHRASE`、`AUTHORIZATION`、`DSN` 或 `CONNECTION_STRING` 等词的，就是凭据。完整列表就是 daemon 遮蔽 worker 诊断信息时已有的那条规则，这次抽出来共用。
   - 任一来源的设置里 `envKey`、`credentialEnv` 或 `apiKeyEnv` 指向的变量也算凭据，因为供应商的 key 可以放在任何名字下。
   - 对凭据以及值包含至少四个字符的已识别凭据的变量，`$.env.get` 都回答 `undefined`，包括通过设置复制凭据的别名。变量未设置时也得到同样的回答。
+  - 已写入进程环境的凭据别名会保持遮蔽，直到其环境变量值发生变化。仅重载设置或 CLI 以继承的环境重新启动时也保留此遮蔽。
   - `$.settings.read` 去掉任意层级下凭据键对应的字符串，包括顶层 `env` 里的这些变量。每个 MCP 服务器的 `env` 和 `headers` 整个去掉，因为它们的名字没有规律可循。
   - 设置在加载时会解析 `$VAR` 和 `${VAR}`，所以凭据的值可能出现在普通键下，比如一条命令或 MCP 服务器的 `args`。因此 `$.settings.read` 还会去掉任意层级下包含被遮住变量的值（四个字符及以上）的字符串。宿主同时检查当前环境和展开时实际使用的值。加载工作区环境或重新加载设置时，两者可能不同。
   - 只去掉字符串。这类名字下的数字或开关（比如 `model.sessionTokenLimit`）是限额，不是秘密。
@@ -77,7 +78,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 运行 hook；
   - 把 entry 写进调试日志，形如 `telemetry.log (not sent): …` 或 `telemetry.mark (not sent): …`。
 
-  这样 Mod 作者能看到自己的 Mod 会上报什么。这些行与同一次加载里 `$.ui.log` 的行共用 100,000 字符的额度；超过额度后 entry 仍然接受，只是不再写日志。
+  这样 Mod 作者能看到自己的 Mod 会上报什么。telemetry 与 `$.ui.log` 共用 100,000 字符的额度。条目超出剩余额度时仍然接受调用。只有写入调试日志的条目才扣减额度。
 
 - **`env.get` 不做字面名字检查。** Claude Code 要求名字必须是字符串字面量，好让它的校验器列出模块读了哪些变量。Qwen Code 没有这样的校验器。凭据靠上面的规则挡住，规则不依赖读取模块源码。
 - **`isColorless` 跟随 `NO_COLOR`。** 设置了 `NO_COLOR` 时两种终端 UI 都不显示颜色，Qwen Code 也没有 `--no-color` 参数。终端在每条命令运行时读取这个变量，所以这个字段反映的是命令运行时看到的环境。
@@ -95,6 +96,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - `$.session.version()` 里不列出它们；
   - 它们的 hook 被跳过。
 - worker 发送 `{ type: 'read', id, read }`，运行时回复 `{ type: 'read-result', id, value?, error? }`。值大到放不进宿主消息时，只让这次调用失败，不影响会话。
+- 设置读取可包含已校验的来源。指定来源时，运行时只发送该层。该来源没有设置时发送空的层列表。
 - CLI 的宿主对 `process.env` 和会话已加载的设置应用凭据规则。将来的 Harness 宿主用它自己的环境和设置提供这两个函数即可。
 - telemetry 和 `isColorless` 不需要宿主提供新东西。telemetry 走现有的日志通道；`isColorless` 随终端本来就传递的 `presentation` 一起传。
 

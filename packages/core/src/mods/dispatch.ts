@@ -10,6 +10,7 @@ import {
   MOD_MAX_BYTES,
   MOD_MAX_DEPTH,
   MOD_MODEL_EFFORTS,
+  type ModSettingsSource,
 } from './types.js';
 import {
   validateToolInput,
@@ -514,25 +515,13 @@ export const MOD_SETTINGS_SOURCES: readonly string[] = [
   'policy',
 ];
 
-/**
- * The event input a `$.settings.read(args)` call raises once the host has
- * read its layers: what a caller passes as `layers` is replaced, and a read
- * of one source holds that source's layer alone.
- */
-export function settingsReadCall(
+export function settingsReadSource(
   value: unknown,
-  layers: readonly ModInput[],
-): ModInput {
+): ModSettingsSource | undefined {
   if (!record(value) || !only(value, ['source', 'layers']))
     throw new Error('Mod settings.read takes { source?, key? }.');
-  const source = value['source'];
-  return {
-    ...(source !== undefined && { source }),
-    layers:
-      source === undefined
-        ? layers
-        : layers.filter((layer) => layer['source'] === source),
-  };
+  validateInput('settings.read', { source: value['source'], layers: [] }, {});
+  return value['source'] as ModSettingsSource | undefined;
 }
 
 // A property of a row or a mark: a number, a boolean, or a value chosen

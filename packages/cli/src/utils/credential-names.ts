@@ -19,3 +19,28 @@ export function isCredentialName(name: string): boolean {
     )
   );
 }
+
+const CREDENTIAL_VARIABLE_FIELD = /^envKey$|Env$/;
+export const MIN_CREDENTIAL_VALUE_LENGTH = 4;
+
+function collectCredentialVariables(value: unknown, names: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectCredentialVariables(item, names);
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof item === 'string' && CREDENTIAL_VARIABLE_FIELD.test(key)) {
+        names.add(item.toUpperCase());
+      } else {
+        collectCredentialVariables(item, names);
+      }
+    }
+  }
+}
+
+export function credentialNameFilter(
+  scopes: unknown[],
+): (name: string) => boolean {
+  const names = new Set<string>();
+  collectCredentialVariables(scopes, names);
+  return (name) => isCredentialName(name) || names.has(name.toUpperCase());
+}

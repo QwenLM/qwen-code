@@ -41,6 +41,10 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  credentialNameFilter,
+  MIN_CREDENTIAL_VALUE_LENGTH,
+} from '../utils/credential-names.js';
+import {
   deleteNestedPropertySafe,
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
@@ -62,6 +66,7 @@ import {
   getHomeEnvFallbackVars,
   loadEnvironment,
   preResolveHomeEnvOverrides,
+  registerSettingsCredentialAliases,
 } from './environment.js';
 import {
   DEFAULT_DARK_THEME_NAME,
@@ -283,6 +288,34 @@ function resolveSettingsEnvironment(
   });
   if (substitutions.size) settingsEnvSubstitutions.set(resolved, substitutions);
   return resolved;
+}
+
+function registerEnvironmentAliases(
+  merged: Settings,
+  scopes: Settings[],
+): void {
+  if (!merged.env) return;
+  const substitutions = scopes.flatMap((scope) => [
+    ...(getSettingsEnvSubstitutions(scope) ?? []),
+  ]);
+  if (!substitutions.length) return;
+  const hidden = credentialNameFilter([merged, ...scopes]);
+  const secretValues = substitutions
+    .filter(
+      ([name, value]) =>
+        value.length >= MIN_CREDENTIAL_VALUE_LENGTH && hidden(name),
+    )
+    .map(([, value]) => value);
+  const aliases = new Set<string>();
+  for (const [key, value] of Object.entries(merged.env)) {
+    if (
+      typeof value === 'string' &&
+      secretValues.some((secret) => value.includes(secret))
+    ) {
+      aliases.add(key);
+    }
+  }
+  registerSettingsCredentialAliases(merged, aliases);
 }
 
 const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
@@ -809,6 +842,7 @@ function mergeSettings(
       catalogRefresh: operatorCatalogRefresh,
     } as Settings['model'];
   }
+  registerEnvironmentAliases(merged, [systemDefaults, user, workspace, system]);
   return merged;
 }
 

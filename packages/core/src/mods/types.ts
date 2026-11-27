@@ -222,9 +222,16 @@ export interface ModTurnComplete {
   isAnswerTruncated?: true;
 }
 
+export type ModSettingsSource =
+  | 'user'
+  | 'project'
+  | 'local'
+  | 'flag'
+  | 'policy';
+
 /** One layer of a settings read: what one source holds, as it loaded. */
 export interface ModSettingsLayer {
-  source: 'user' | 'project' | 'local' | 'flag' | 'policy';
+  source: ModSettingsSource;
   settings: Record<string, unknown>;
 }
 
@@ -241,7 +248,7 @@ export interface ModHostReads {
 
 export type ModHostRead =
   | { method: 'env.get'; name: string }
-  | { method: 'settings.read' };
+  | { method: 'settings.read'; source?: ModSettingsSource };
 
 /** A `$.store` call the host answers for the plugin that made it. */
 export type ModStoreOperation =

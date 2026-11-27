@@ -51,6 +51,7 @@ import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
+import { modHostReads } from '../services/mod-host-reads.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -5437,6 +5438,58 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it('keeps installed credential aliases hidden across settings-only reloads', () => {
+      const homeEnv = path.join(path.dirname(USER_SETTINGS_PATH), '.env');
+      const workspaceEnv = path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env');
+      let userContent = JSON.stringify({
+        env: {
+          REVIEW_ALIAS: '${REVIEW_FIXTURE_TOKEN}',
+          REVIEW_LABEL: 'public',
+        },
+      });
+      vi.stubEnv('REVIEW_FIXTURE_TOKEN', undefined);
+      vi.stubEnv('REVIEW_ALIAS', undefined);
+      vi.stubEnv('REVIEW_LABEL', undefined);
+      onTestFinished(() => vi.unstubAllEnvs());
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === homeEnv || p === workspaceEnv,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return userContent;
+          if (p === homeEnv) return 'REVIEW_FIXTURE_TOKEN=synthetic-home';
+          if (p === workspaceEnv)
+            return 'REVIEW_FIXTURE_TOKEN=synthetic-project';
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const reads = modHostReads(settings);
+      expect(process.env['REVIEW_ALIAS']).toBe('synthetic-home');
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      expect(reads.env('REVIEW_LABEL')).toBe('public');
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(settings.user.settings.env?.['REVIEW_ALIAS']).toBe(
+        'synthetic-project',
+      );
+      expect(process.env['REVIEW_ALIAS']).toBe('synthetic-home');
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      expect(modHostReads(settings).env('REVIEW_ALIAS')).toBeUndefined();
+
+      userContent = JSON.stringify({ env: { REVIEW_ALIAS: 'ordinary-label' } });
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
+      reloadEnvironment(settings.merged, MOCK_WORKSPACE_DIR, true);
+      expect(reads.env('REVIEW_ALIAS')).toBe('ordinary-label');
+    });
+
     it.each([
       SettingScope.User,
       SettingScope.System,

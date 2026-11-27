@@ -12,25 +12,14 @@ import {
   getSettingsEnvSubstitutions,
   type LoadedSettings,
 } from '../config/settings.js';
-import { isCredentialName } from '../utils/credential-names.js';
+import { getInstalledSettingsCredentialValues } from '../config/environment.js';
+import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../config/shared-env-keys.js';
+import {
+  credentialNameFilter,
+  MIN_CREDENTIAL_VALUE_LENGTH,
+} from '../utils/credential-names.js';
 
 type Json = Record<string, unknown>;
-
-// `envKey`, `credentialEnv`, `apiKeyEnv`: a key naming the variable that
-// holds a credential.
-const NAMES_A_VARIABLE = /^envKey$|Env$/;
-
-function credentialVariables(value: unknown, names: Set<string>): Set<string> {
-  if (Array.isArray(value))
-    for (const item of value) credentialVariables(item, names);
-  else if (value && typeof value === 'object')
-    for (const [key, item] of Object.entries(value)) {
-      if (typeof item === 'string' && NAMES_A_VARIABLE.test(key))
-        names.add(item.toUpperCase());
-      else credentialVariables(item, names);
-    }
-  return names;
-}
 
 // A string the rule drops goes, and an MCP server's environment and headers
 // go whole: their names follow no rule.
@@ -85,20 +74,28 @@ export function modHostReads(
       settings.workspace.settings,
       settings.system.settings,
     ];
-    const variables = credentialVariables(
-      [settings.merged, ...scopes],
-      new Set(),
-    );
+    const matchesCredential = credentialNameFilter([
+      settings.merged,
+      ...scopes,
+    ]);
     const hidden = (name: string) =>
-      isCredentialName(name) || variables.has(name.toUpperCase());
+      matchesCredential(name) ||
+      name.toUpperCase() === PRIVATE_RELAUNCH_ENV_PROVENANCE;
     // A resolved value can differ from the environment after startup or reload.
-    const secrets = new Set<string>();
+    const secrets = new Set(
+      env === process.env ? getInstalledSettingsCredentialValues() : [],
+    );
     for (const entries of [
       Object.entries(env),
       ...scopes.map(getSettingsEnvSubstitutions),
     ]) {
       for (const [name, value] of entries ?? []) {
-        if (value && value.length >= 4 && hidden(name)) secrets.add(value);
+        if (
+          value &&
+          value.length >= MIN_CREDENTIAL_VALUE_LENGTH &&
+          hidden(name)
+        )
+          secrets.add(value);
       }
     }
     return (name: string, value: string) => {

@@ -846,10 +846,20 @@ export class ModRuntime {
     try {
       if (!this.reads)
         throw new Error('This host gives Mods no environment or settings.');
-      value =
-        reply.read.method === 'env.get'
-          ? this.reads.env(reply.read.name)
-          : this.reads.settings();
+      if (reply.read.method === 'env.get') {
+        value = this.reads.env(reply.read.name);
+      } else {
+        const { source } = reply.read;
+        const settings = this.reads.settings();
+        value =
+          source === undefined
+            ? settings
+            : {
+                layers: settings.layers.filter(
+                  (layer) => layer.source === source,
+                ),
+              };
+      }
     } catch (caught) {
       error = (caught instanceof Error ? caught.message : String(caught)).slice(
         0,

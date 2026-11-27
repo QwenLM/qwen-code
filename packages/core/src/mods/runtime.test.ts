@@ -3119,6 +3119,41 @@ describe('ModRuntime with the real QuickJS worker', () => {
       expect(await go(runtime)).toEqual(['/home/someone', { a: 2 }]);
     });
 
+    it('reads small or empty sources without sending an unrelated large layer', async () => {
+      const project = {
+        permissions: {
+          allow: Array.from(
+            { length: 4000 },
+            (_, index) => `Read(fixture/project/path-${index}.md)`,
+          ),
+        },
+      };
+      const runtime = await create(
+        [
+          command(`return [
+            await $.settings.read({ source: 'user', key: 'ui' }),
+            await $.settings.read({ source: 'policy' }),
+            await $.settings.read({ source: 'local' }),
+          ];`),
+        ],
+        {
+          env: reads.env,
+          settings: () => {
+            const settings = reads.settings();
+            return {
+              layers: [
+                ...settings.layers,
+                { source: 'project', settings: project },
+              ],
+              merged: { ...settings.merged, ...project },
+            };
+          },
+        },
+      );
+
+      expect(await go(runtime)).toEqual([{ theme: 'dark' }, { a: 2 }, {}]);
+    });
+
     it('refuses a source or key it does not know', async () => {
       const runtime = await create(
         [
@@ -3198,6 +3233,24 @@ describe('ModRuntime with the real QuickJS worker', () => {
         'telemetry.mark',
       ]);
       expect(events).toEqual(methods);
+    });
+
+    it('keeps room for a transcript line after dropping a telemetry entry', async () => {
+      const runtime = await create([
+        command(`
+          for (let i = 0; i < 50; i++)
+            await $.telemetry.log({ event: 'x'.repeat(2050) });
+          $.ui.log('still fits');
+          await $.clock.now();
+          return 'complete';
+        `),
+      ]);
+
+      expect(await go(runtime)).toBe('complete');
+      expect(logs.filter((log) => log.to === 'debug')).toHaveLength(49);
+      expect(logs.filter((log) => log.to === 'transcript')).toEqual([
+        { text: 'still fits', to: 'transcript' },
+      ]);
     });
   });
 });

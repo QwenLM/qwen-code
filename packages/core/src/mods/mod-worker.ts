@@ -53,7 +53,7 @@ import {
   modelCompleteCall,
   promptSubmitCall,
   record,
-  settingsReadCall,
+  settingsReadSource,
   validateInput,
   validateResult,
   validModelResult,
@@ -792,11 +792,13 @@ async function hostCall(
     throw new Error('This host gives Mods no environment or settings.');
   // A settings read carries the layers the host read, and answers their
   // merge beneath every hook.
+  const source =
+    method === 'settings.read' ? settingsReadSource(value) : undefined;
   const settings =
     method === 'settings.read'
-      ? ((await hostRead({ method })) as {
+      ? ((await hostRead({ method, source })) as {
           layers: ModInput[];
-          merged: ModInput;
+          merged?: ModInput;
         })
       : undefined;
   // A submitted prompt raises prompt.submit as a typed one does, through
@@ -809,7 +811,7 @@ async function hostCall(
     : model
       ? modelCompleteCall(value)
       : settings
-        ? settingsReadCall(value, settings.layers)
+        ? { ...(source !== undefined && { source }), layers: settings.layers }
         : value;
   if (!submits) validateInput(method, input, {});
   // No hook hears a prompt the host would not run, or one with no words.
@@ -942,9 +944,11 @@ async function hostCall(
         // Rows and marks go nowhere; the debug log shows what was asked.
         if (method === 'telemetry.log' || method === 'telemetry.mark') {
           const text = `${method} (not sent): ${JSON.stringify(e).slice(0, 2000)}`;
-          logChars += text.length + 1;
-          if (logChars <= 100_000)
+          const cost = text.length + 1;
+          if (logChars + cost <= 100_000) {
+            logChars += cost;
             send({ type: 'log', plugin: plugin.name, text, to: 'debug' });
+          }
           return { value: undefined };
         }
         if (model && modelScope)

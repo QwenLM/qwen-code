@@ -426,6 +426,42 @@ describe('operator container requirement across environment reload', () => {
 });
 
 describe('relaunch environment provenance', () => {
+  it('carries the alias name across relaunch and clears it when overwritten', async () => {
+    vi.resetModules();
+    const parent = await import('./environment.js');
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: { RUNTIME_SETTINGS: 'synthetic-alias' },
+    });
+    parent.registerSettingsCredentialAliases(
+      settings,
+      new Set(['RUNTIME_SETTINGS']),
+    );
+    parent.loadEnvironment(settings, workspace);
+    expect(parent.getInstalledSettingsCredentialValues()).toEqual([
+      'synthetic-alias',
+    ]);
+    const provenance =
+      parent.getRelaunchEnvProvenance()[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+    expect(JSON.parse(provenance!)).toMatchObject({
+      credentialAliases: ['RUNTIME_SETTINGS'],
+    });
+    expect(provenance).not.toContain('synthetic-alias');
+
+    vi.resetModules();
+    const child = await import('./environment.js');
+    expect(child.getInstalledSettingsCredentialValues()).toEqual([
+      'synthetic-alias',
+    ]);
+    child.reloadEnvironment(
+      testSettings({ env: { RUNTIME_SETTINGS: 'ordinary-label' } }),
+      workspace,
+    );
+    expect(child.getInstalledSettingsCredentialValues()).toEqual([]);
+    child.resetEnvironmentTrackingForTesting();
+    parent.resetEnvironmentTrackingForTesting();
+  });
+
   it('preserves ancestor-only values and provenance across child reloads', async () => {
     vi.resetModules();
     const parent = await import('./environment.js');
