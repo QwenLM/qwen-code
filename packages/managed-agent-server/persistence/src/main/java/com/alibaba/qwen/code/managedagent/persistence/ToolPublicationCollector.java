@@ -142,7 +142,7 @@ public final class ToolPublicationCollector {
                     + " AND o.operation_kind = 'CAPTURE_GC' LIMIT 1) THEN 1 ELSE 0 END AS needs_operation"
                     + " FROM (SELECT id, scope_ref, publication_id, tenant_id, workspace_id,"
                     + " session_id, retention_state FROM ma_output_capture /*! FORCE INDEX (PRIMARY) */"
-                    + " WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") c LIMIT " + SCAN_ROWS,
+                    + " WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") c ORDER BY c.id",
                 (row, index) -> ManagedSchemaRows.read(row), operationScanId, operationScanRoundEnd);
         long now = ToolPublicationRetentionStore.now(jdbc);
         for (var capture : page) {

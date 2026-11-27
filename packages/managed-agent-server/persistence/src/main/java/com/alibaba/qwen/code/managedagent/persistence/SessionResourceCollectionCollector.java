@@ -156,7 +156,7 @@ public final class SessionResourceCollectionCollector {
                     + " LIMIT 1) THEN 1 ELSE 0 END AS needs_ledger FROM"
                     + " (SELECT id, tenant_id, session_id, retired_at"
                     + " FROM ma_session /*! USE INDEX (uk_ma_session_id) */ WHERE id > ? AND id <= ? ORDER BY id LIMIT "
-                    + SCAN_ROWS + ") s LIMIT " + SCAN_ROWS,
+                    + SCAN_ROWS + ") s ORDER BY s.id",
                 (row, index) -> ManagedSchemaRows.read(row), due, ledgerScanId, ledgerScanRoundEnd);
         for (var row : page) {
             if (!ToolPublicationRetentionStore.flag(row, "needs_ledger")) {
