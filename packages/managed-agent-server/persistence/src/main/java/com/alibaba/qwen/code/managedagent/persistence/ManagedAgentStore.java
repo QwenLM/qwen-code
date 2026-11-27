@@ -475,6 +475,14 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     }
 
     @Override
+    @Transactional
+    public OperationAdmission beginRetiredWorkspaceDelete(String tenantId, String sessionId, String actorId,
+            String actorDigest, String key, String digest, boolean supported, int protocolVersion, RetiredWorkspace retired) {
+        return lifecycleOperations.beginLifecycle(tenantId, sessionId, OperationKind.DELETE, actorDigest, key, digest,
+                actorId, supported, protocolVersion, true, false, java.util.Objects.requireNonNull(retired));
+    }
+
+    @Override
     public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId) {
         return sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId);
     }

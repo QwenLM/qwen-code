@@ -16,3 +16,10 @@ The SQL-backed creation and placement checks run in `ExternalWorkspaceMaterializ
 2. Warm the first Workspace and hold its original binding in drain awaiting the outstanding operation in step 5 above. Keep its binding ID and generation.
 3. Warm the second Workspace. Verify that it gets its own binding and Worker while the first drain is still pending. A new generation for the first Workspace must remain fenced.
 4. Settle the first operation. Retire each owned Worker and verify its own stop receipt. The H2 and MySQL placement tests also cover an unregistered alias, which cannot use the shared path to bypass recovery.
+
+## Deleting a Session after its instance retires
+
+1. Create two Sessions on one registered external instance. Initialize the target Session's journal and record its original binding and generation.
+2. Permanently delete the instance and verify that generation's stop receipt. As the owner, read the target Session's retained history. Ordinary HTTP DELETE still observes the storage fence.
+3. Use the trusted embedding's single-Session delete. Wait for the exact native DELETE operation to complete, verify its tombstone, and replay the same key. The sibling history remains readable. The Worker receives no call and no new generation is allocated.
+4. Check the negative cases with an unmatched fence owner, a live generation, a released generation missing its stop evidence and another user. Each attempt must preserve the Session.
