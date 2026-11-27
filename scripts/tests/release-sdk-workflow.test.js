@@ -74,19 +74,33 @@ describe('TypeScript SDK release workflow', () => {
     // consumers: finalize exits 1 on them, sync-release-to-oss holds its
     // single concurrency lock to download assets they do not ship, and the DSW
     // gate job burns a self-hosted runner to no-op. Keep the workflow_dispatch
-    // arm each one needs, and key on the tag prefix like the sibling workflows.
-    for (const [path, job] of [
-      ['.github/workflows/finalize-release.yml', 'finalize'],
-      ['.github/workflows/sync-release-to-oss.yml', 'sync'],
-      ['.github/workflows/dsw-swe-verified-release.yml', 'release_gate'],
-    ]) {
+    // arm each one needs, and key on the tag prefix like the sibling
+    // workflows; the DSW gate also keeps its own `dsw-eas-*` release-event
+    // smokes, whose tags are outside the `v*` family.
+    // Pin each whole expression, not disjoint substrings: an operator flip
+    // (`||` -> `&&`) or a negated startsWith must fail here, the mechanism
+    // desktop-oss-workflow.test.js already uses.
+    const norm = (s) => s.replace(/\s+/g, ' ').trim();
+    const guards = [
+      [
+        '.github/workflows/finalize-release.yml',
+        'finalize',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))) }}",
+      ],
+      [
+        '.github/workflows/sync-release-to-oss.yml',
+        'sync',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}",
+      ],
+      [
+        '.github/workflows/dsw-swe-verified-release.yml',
+        'release_gate',
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') || startsWith(github.event.release.tag_name, 'dsw-eas-')) }}",
+      ],
+    ];
+    for (const [path, job, expected] of guards) {
       const ifClause = parse(readFileSync(path, 'utf8')).jobs[job].if;
-      expect(ifClause, path).toContain(
-        "github.event_name == 'workflow_dispatch'",
-      );
-      expect(ifClause, path).toContain(
-        "startsWith(github.event.release.tag_name, 'v')",
-      );
+      expect(norm(ifClause), path).toBe(expected);
     }
   });
 
