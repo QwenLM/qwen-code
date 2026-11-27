@@ -219,7 +219,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * embedding individual private gateway hostnames in provider detection.
    */
   static isDashScopeProvider(
-    contentGeneratorConfig: ContentGeneratorConfig,
+    contentGeneratorConfig: Pick<
+      ContentGeneratorConfig,
+      'authType' | 'baseUrl'
+    >,
   ): boolean {
     const { authType, baseUrl } = contentGeneratorConfig;
 

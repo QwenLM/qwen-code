@@ -37,39 +37,60 @@ export function isOpenAIReasoningThoughtPart(part: Part): boolean {
   );
 }
 
+export type ResponsesReasoningSignaturePayload =
+  | { id: string; encrypted_content: string }
+  | { id: string; plaintext: true };
+
 /**
- * Recognizes the OpenAI Responses reasoning-replay payload that
+ * Parses the OpenAI Responses reasoning-replay payload that
  * `openaiResponsesContentGenerator` stashes in the shared
- * `Part.thoughtSignature` field (`JSON.stringify({ id, encrypted_content })`).
+ * `Part.thoughtSignature` field: either `JSON.stringify({ id, encrypted_content })`
+ * (encrypted replay) or `JSON.stringify({ id, plaintext: true })` (verified
+ * plaintext replay on endpoints without encrypted reasoning blobs).
  *
- * `thoughtSignature` carries no origin marker, so every wire that reads it has
- * to decide for itself whether the value is one of its own. A native Anthropic
- * `thinking.signature` or Gemini `thoughtSignature` is an opaque token that
- * never takes this JSON shape, so recognizing the payload is enough to keep it
- * off a foreign wire without putting a legitimate native signature at risk.
- *
- * Mirrors `decodeReasoningSignature` in `responses-converter.ts`, which also
- * tolerates leading whitespace. `llm-chat.ts`'s
- * `isCompleteResponsesReasoningSignature` is the same check without that
- * tolerance.
+ * Shared by `isResponsesReasoningSignature` and `responses-converter.ts` so
+ * foreign-wire recognition and Responses replay decoding never drift.
  * See https://github.com/QwenLM/qwen-code/issues/9453
  */
-export function isResponsesReasoningSignature(signature: unknown): boolean {
-  if (typeof signature !== 'string') return false;
-  if (!signature.trimStart().startsWith('{')) return false;
+export function parseResponsesReasoningSignature(
+  signature: unknown,
+): ResponsesReasoningSignaturePayload | undefined {
+  if (typeof signature !== 'string') return undefined;
+  if (!signature.trimStart().startsWith('{')) return undefined;
   try {
     const payload: unknown = JSON.parse(signature);
-    return (
-      payload !== null &&
-      typeof payload === 'object' &&
-      'id' in payload &&
-      typeof payload.id === 'string' &&
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      !('id' in payload) ||
+      typeof payload.id !== 'string'
+    ) {
+      return undefined;
+    }
+    if (
       'encrypted_content' in payload &&
       typeof payload.encrypted_content === 'string'
-    );
+    ) {
+      return { id: payload.id, encrypted_content: payload.encrypted_content };
+    }
+    if ('plaintext' in payload && payload.plaintext === true) {
+      return { id: payload.id, plaintext: true };
+    }
   } catch {
-    return false;
+    return undefined;
   }
+  return undefined;
+}
+
+/**
+ * Recognizes the OpenAI Responses reasoning-replay payload stashed in
+ * `Part.thoughtSignature`. A native Anthropic `thinking.signature` or Gemini
+ * `thoughtSignature` is an opaque token that never takes this JSON shape, so
+ * recognizing the payload keeps it off foreign wires without risking native
+ * signatures.
+ */
+export function isResponsesReasoningSignature(signature: unknown): boolean {
+  return parseResponsesReasoningSignature(signature) !== undefined;
 }
 
 /**

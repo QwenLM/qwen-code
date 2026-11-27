@@ -94,7 +94,7 @@ export const AUTH_ENV_MAPPINGS = {
   'openai-responses': {
     apiKey: ['OPENAI_API_KEY'],
     baseUrl: ['OPENAI_BASE_URL'],
-    model: ['OPENAI_MODEL'],
+    model: ['OPENAI_MODEL', 'QWEN_MODEL'],
   },
   anthropic: {
     apiKey: ['ANTHROPIC_API_KEY'],

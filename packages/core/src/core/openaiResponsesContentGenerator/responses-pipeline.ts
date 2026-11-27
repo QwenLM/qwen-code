@@ -12,6 +12,7 @@ import {
   getEffectiveReasoning,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
+import { clampReasoningEffort } from '../reasoning-effort.js';
 import type {
   ResponsesApiInputItem,
   ResponsesApiRequest,
@@ -55,6 +56,11 @@ import {
   withDashScopeSourceConfig,
   withoutDashScopeSourceConfig,
 } from '../dashscope-source-config.js';
+import {
+  resolveResponsesWireDialect,
+  type ResponsesWireDialect,
+} from './responses-dialect.js';
+import { isQwenFamilyWireModel } from '../modalityDefaults.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
@@ -62,6 +68,33 @@ import { retryContext } from '../../utils/retryContext.js';
 import { filterIsolatedModelOverrides } from '../openaiContentGenerator/provider/utils.js';
 import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import { applyResponsesPromptCaching } from './prompt-caching.js';
+
+const OSS_RESOURCE_RESOLVE_HEADER = 'x-dashscope-ossresourceresolve';
+
+function hasOssResourceUri(items: ResponsesApiInputItem[]): boolean {
+  const partHasOss = (part: unknown): boolean => {
+    if (typeof part !== 'object' || part === null) return false;
+    const rec = part as Record<string, unknown>;
+    for (const key of ['image_url', 'audio_url', 'video_url'] as const) {
+      const value = rec[key];
+      if (typeof value === 'string' && value.trim().startsWith('oss://')) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const item of items) {
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      if (item.content.some(partHasOss)) return true;
+    } else if (
+      item.type === 'function_call_output' &&
+      Array.isArray(item.output)
+    ) {
+      if (item.output.some(partHasOss)) return true;
+    }
+  }
+  return false;
+}
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -264,6 +297,9 @@ export class ResponsesPipeline {
   // way the embed client does, via resolveRequestTimeout: undefined -> default,
   // `0`/negative -> disabled.
   private readonly connectTimeoutMs: number;
+  // Resolved once from immutable config.baseUrl so buildRequest() and
+  // connect() reuse the same frozen wire-capability descriptor.
+  private readonly dialect: ResponsesWireDialect;
 
   constructor(config: ContentGeneratorConfig, cliConfig: Config) {
     this.config = config;
@@ -271,6 +307,7 @@ export class ResponsesPipeline {
     this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(config);
     this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(config);
     this.connectTimeoutMs = resolveRequestTimeout(config.timeout);
+    this.dialect = resolveResponsesWireDialect(config.baseUrl);
   }
 
   async *executeStream(
@@ -416,7 +453,11 @@ export class ResponsesPipeline {
   ): ResponsesApiRequest {
     const freeformExec = this.cliConfig.getFreeform();
     const { instructions, input, cacheBoundary } =
-      convertGeminiContentsToResponsesInput(request, freeformExec);
+      convertGeminiContentsToResponsesInput(request, freeformExec, {
+        modalities: this.config.modalities,
+        imageDetail: this.config.imageDetail,
+        dialect: this.dialect,
+      });
     const tools = convertGeminiToolsToResponsesTools(request, freeformExec);
 
     // History is always re-derived in full from this app's own Content[]
@@ -424,7 +465,8 @@ export class ResponsesPipeline {
     // continued via previous_response_id, so context editing, compaction, and
     // mid-session model switching all keep working the same way they already
     // do for the other wires.
-    const reasoning = this.buildReasoning(request);
+    const { reasoning, thinkingActive, explicitThinkingMandatory } =
+      this.buildReasoning(request);
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
@@ -517,6 +559,15 @@ export class ResponsesPipeline {
         // into `reasoning.effort` when present, so forwarding it verbatim
         // would only add an undefined field to the wire body.
         if (key === 'enable_thinking') continue;
+        // `thinking_budget` is a Chat Completions top-level parameter rejected
+        // by OpenAI Responses and DashScope-compatible Responses endpoints
+        // alike (which configure reasoning via `reasoning.effort` instead).
+        if (key === 'thinking_budget') {
+          debugLogger.debug(
+            'Dropping unsupported extra_body.thinking_budget on Responses API',
+          );
+          continue;
+        }
         if (
           singleAttempt &&
           (key === 'max_tokens' ||
@@ -545,6 +596,25 @@ export class ResponsesPipeline {
       }
     }
 
+    // DashScope/Qwen models reject `tool_choice: 'required'` while thinking
+    // is enabled (including toggle-only models with reasoning active and
+    // mandatory-thinking models where `apiRequest.reasoning` may be omitted);
+    // keep `tool_choice: 'auto'` for mandatory-thinking models or Qwen-family
+    // models with active thinking on DashScope-compatible endpoints, while
+    // non-Qwen models on multi-model gateways retain `tool_choice: 'required'`.
+    const requestReasoningActive =
+      thinkingActive ||
+      (apiRequest.reasoning?.effort !== undefined &&
+        apiRequest.reasoning.effort !== 'none');
+    if (
+      apiRequest.tool_choice === 'required' &&
+      this.dialect.downgradeRequiredToolChoiceOnReasoning &&
+      (explicitThinkingMandatory ||
+        (isQwenFamilyWireModel(apiRequest.model) && requestReasoningActive))
+    ) {
+      apiRequest.tool_choice = 'auto';
+    }
+
     const cachedRequest = applyResponsesPromptCaching(
       apiRequest,
       this.config,
@@ -556,30 +626,44 @@ export class ResponsesPipeline {
     };
   }
 
-  private buildReasoning(
-    request: GenerateContentParameters,
-  ): ResponsesApiReasoning | undefined {
+  private buildReasoning(request: GenerateContentParameters): {
+    reasoning?: ResponsesApiReasoning;
+    thinkingActive: boolean;
+    explicitThinkingMandatory: boolean;
+  } {
+    const resolvedReasoning = resolveReasoningForModel(
+      this.cliConfig,
+      this.config,
+      request.model,
+    );
+    const explicitThinkingMandatory =
+      this.config.thinkingMandatory === true ||
+      resolvedReasoning?.canDisable === false;
+
     // A per-send opt-out, mirroring the sibling Chat wire's
     // buildReasoningConfig: `includeThoughts:false` is the caller saying this
     // particular request wants no thinking, and it outranks any static
     // configuration. Only the explicit `false` opts out -- no other value of
     // thinkingConfig is given a meaning on this wire.
     if (request.config?.thinkingConfig?.includeThoughts === false) {
-      return undefined;
+      return {
+        reasoning: undefined,
+        thinkingActive: explicitThinkingMandatory,
+        explicitThinkingMandatory,
+      };
     }
     const r =
       this.config.reasoning === undefined &&
       this.config.extra_body?.['reasoning'] !== undefined
         ? undefined
-        : getEffectiveReasoning(
-            this.config,
-            resolveReasoningForModel(
-              this.cliConfig,
-              this.config,
-              request.model,
-            ),
-          );
-    if (r === false) return undefined;
+        : getEffectiveReasoning(this.config, resolvedReasoning);
+    if (r === false) {
+      return {
+        reasoning: undefined,
+        thinkingActive: explicitThinkingMandatory,
+        explicitThinkingMandatory,
+      };
+    }
     // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
     // toggle (predates the unified reasoning-effort ladder). It has no
     // meaning as a literal field on the Responses API and is stripped before
@@ -587,14 +671,22 @@ export class ResponsesPipeline {
     // that only set it -- e.g. a settings.json carried over from another
     // wire -- would otherwise silently lose reasoning entirely on this wire.
     const legacyEnableThinking = this.config.extra_body?.['enable_thinking'];
-    if (r === undefined && legacyEnableThinking !== true) return undefined;
+    if (r === undefined && legacyEnableThinking !== true) {
+      return {
+        reasoning: undefined,
+        thinkingActive: explicitThinkingMandatory,
+        explicitThinkingMandatory,
+      };
+    }
 
     const reasoning: ResponsesApiReasoning = {};
-    // The Responses API reasoning.effort enum (none, minimal, low, medium,
-    // high, xhigh, max) is a superset of the unified ladder, so every tier
-    // passes through verbatim with no clamping.
     if (r?.effort) {
-      reasoning.effort = r.effort;
+      reasoning.effort =
+        resolvedReasoning &&
+        !resolvedReasoning.toggleOnly &&
+        resolvedReasoning.efforts.length > 0
+          ? clampReasoningEffort(r.effort, resolvedReasoning.efforts)
+          : r.effort;
     } else if (legacyEnableThinking === true) {
       reasoning.effort = 'medium';
     }
@@ -604,7 +696,22 @@ export class ResponsesPipeline {
       reasoning.summary = 'auto';
     }
 
-    return Object.keys(reasoning).length > 0 ? reasoning : undefined;
+    const builtReasoning =
+      Object.keys(reasoning).length > 0 ? reasoning : undefined;
+    const toggleThinkingActive = Boolean(
+      resolvedReasoning?.toggleOnly && r !== undefined,
+    );
+    const thinkingActive =
+      explicitThinkingMandatory ||
+      toggleThinkingActive ||
+      (builtReasoning?.effort !== undefined &&
+        builtReasoning.effort !== 'none');
+
+    return {
+      reasoning: builtReasoning,
+      thinkingActive,
+      explicitThinkingMandatory,
+    };
   }
 
   /**
@@ -646,6 +753,16 @@ export class ResponsesPipeline {
       for (const [name, value] of Object.entries(this.config.customHeaders)) {
         headers[name.toLowerCase()] = value;
       }
+    }
+
+    // DashScope-compatible endpoints require `x-dashscope-ossresourceresolve:
+    // enable` to resolve `oss://` media URIs (mirroring DashScopeProvider).
+    const shouldSendOssResolve =
+      this.dialect.supportsOssResourceResolveHeader &&
+      (hasOssResourceUri(apiRequest.input) ||
+        Boolean(this.cliConfig.isOmniEnabled?.()));
+    if (shouldSendOssResolve && !(OSS_RESOURCE_RESOLVE_HEADER in headers)) {
+      headers[OSS_RESOURCE_RESOLVE_HEADER] = 'enable';
     }
 
     const body = JSON.stringify(apiRequest);
@@ -1071,7 +1188,15 @@ export class ResponsesPipeline {
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
 
-        for (const line of lines) {
+        for (const rawLine of lines) {
+          const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+          // SSE comments (e.g. `:HTTP_STATUS/200` on DashScope-compatible
+          // gateways) are non-semantic keep-alives/markers per the W3C SSE
+          // spec; skip without perturbing buffered event/data fields.
+          if (line.startsWith(':')) {
+            continue;
+          }
+
           if (line.startsWith('event:')) {
             currentEventType = line.slice(6).trim() as ResponsesSSEEventType;
             dataAccumulator = '';

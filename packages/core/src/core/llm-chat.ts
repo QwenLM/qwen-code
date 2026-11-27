@@ -14,6 +14,7 @@ import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
 import { createHash } from 'node:crypto';
 import { AuthType } from '../utils/auth-type.js';
+import { isResponsesReasoningSignature } from '../utils/thoughtUtils.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 
@@ -555,7 +556,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
       openEpisodeText += partText;
       if (part.thoughtSignature) {
         openEpisodeSignature += part.thoughtSignature;
-        if (isCompleteResponsesReasoningSignature(part.thoughtSignature)) {
+        if (isResponsesReasoningSignature(part.thoughtSignature)) {
           flushThoughtEpisode();
         }
       }
@@ -1615,23 +1616,6 @@ function dropDanglingUnsignedTrailingThought(
   const lastPart = parts[parts.length - 1];
   if (lastPart?.thought && lastPart.text && !lastPart.thoughtSignature) {
     parts.pop();
-  }
-}
-
-function isCompleteResponsesReasoningSignature(signature: string): boolean {
-  if (!signature.startsWith('{')) return false;
-  try {
-    const payload: unknown = JSON.parse(signature);
-    return (
-      payload !== null &&
-      typeof payload === 'object' &&
-      'id' in payload &&
-      typeof payload.id === 'string' &&
-      'encrypted_content' in payload &&
-      typeof payload.encrypted_content === 'string'
-    );
-  } catch {
-    return false;
   }
 }
 

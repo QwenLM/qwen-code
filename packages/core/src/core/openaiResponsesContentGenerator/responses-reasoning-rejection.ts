@@ -290,7 +290,7 @@ export function downgradeRejectedReasoningItems(
       continue;
     }
     changed = true;
-    const summary = readSummaryTexts(item);
+    const fallbackTexts = extractReasoningFallbackTexts(item);
     // The endpoint pairs the reasoning item with the call group that follows
     // it, so removing the reasoning removes the whole group and its outputs.
     // Keeping any member would retry into a call without its required
@@ -309,7 +309,7 @@ export function downgradeRejectedReasoningItems(
     }
     // A signature-only item has nothing human-readable to preserve; keeping
     // it as an empty assistant message would add a blank turn.
-    if (summary.length === 0) {
+    if (fallbackTexts.length === 0) {
       if (unitCalls.length > 0) {
         unitDroppedOriginals.add(item);
       }
@@ -318,7 +318,7 @@ export function downgradeRejectedReasoningItems(
     rewritten.push({
       type: 'message',
       role: 'assistant',
-      content: summary.join('\n'),
+      content: fallbackTexts.join('\n'),
     });
   }
   // A kept reasoning item can still end up bare: two episodes replay
@@ -343,12 +343,12 @@ export function downgradeRejectedReasoningItems(
         : undefined;
     if (successor !== undefined && unitDroppedOriginals.has(successor)) {
       changed = true;
-      const summary = readSummaryTexts(item);
-      if (summary.length > 0) {
+      const fallbackTexts = extractReasoningFallbackTexts(item);
+      if (fallbackTexts.length > 0) {
         finalized.push({
           type: 'message',
           role: 'assistant',
-          content: summary.join('\n'),
+          content: fallbackTexts.join('\n'),
         });
       } else {
         unitDroppedOriginals.add(item);
@@ -385,18 +385,41 @@ function isReasoningItem(
   );
 }
 
-function readSummaryTexts(item: ResponsesApiReasoningItem): string[] {
-  if (!Array.isArray(item.summary)) return [];
+/**
+ * Extracts human-readable fallback text when a rejected or orphaned `reasoning`
+ * item is downgraded into a plain assistant message. Prefers `summary_text`
+ * entries (encrypted OpenAI reasoning items) and falls back to plaintext
+ * `reasoning_text` entries in `item.content` when `summary` is empty so
+ * plaintext reasoning items preserve their context instead of being dropped.
+ */
+function extractReasoningFallbackTexts(
+  item: ResponsesApiReasoningItem,
+): string[] {
   const texts: string[] = [];
-  for (const entry of item.summary) {
-    if (
-      typeof entry === 'object' &&
-      entry !== null &&
-      entry.type === 'summary_text' &&
-      typeof entry.text === 'string' &&
-      entry.text.length > 0
-    ) {
-      texts.push(entry.text);
+  if (Array.isArray(item.summary)) {
+    for (const entry of item.summary) {
+      if (
+        typeof entry === 'object' &&
+        entry !== null &&
+        entry.type === 'summary_text' &&
+        typeof entry.text === 'string' &&
+        entry.text.length > 0
+      ) {
+        texts.push(entry.text);
+      }
+    }
+  }
+  if (texts.length === 0 && Array.isArray(item.content)) {
+    for (const entry of item.content) {
+      if (
+        typeof entry === 'object' &&
+        entry !== null &&
+        entry.type === 'reasoning_text' &&
+        typeof entry.text === 'string' &&
+        entry.text.length > 0
+      ) {
+        texts.push(entry.text);
+      }
     }
   }
   return texts;

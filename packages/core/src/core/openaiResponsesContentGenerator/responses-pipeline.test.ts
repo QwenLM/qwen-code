@@ -2359,4 +2359,338 @@ describe('ResponsesPipeline', () => {
       ],
     ])('%s', expectBody);
   });
+
+  describe('Responses API path-prefix routing, capability-driven effort clamping, OSS header, and SSE comments', () => {
+    const captureNext = (events = DONE) => {
+      const calls: Array<{
+        url: string;
+        body: Record<string, unknown>;
+        headers: Record<string, string>;
+      }> = [];
+      const mockFetch = vi.fn().mockImplementation((url, init) => {
+        calls.push({
+          url: String(url),
+          body: JSON.parse(String(init.body)) as Record<string, unknown>,
+          headers: init.headers as Record<string, string>,
+        });
+        return Promise.resolve(
+          new Response(sseStream(events), {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          }),
+        );
+      });
+      buildRuntimeFetchOptionsMock.mockReturnValue({ fetch: mockFetch });
+      return calls;
+    };
+
+    const requiredToolReq = (model: string) => ({
+      model,
+      contents: [userText('use a tool')],
+      config: {
+        tools: [
+          {
+            functionDeclarations: [{ name: 'read_file', description: 'read' }],
+          },
+        ],
+        toolConfig: {
+          functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+        },
+      },
+    });
+
+    it('preserves /compatible-mode prefix when constructing /v1/responses URL', async () => {
+      expect(
+        normalizeOpenAiWireBaseUrl(
+          'https://proxy.example.com/gateway/compatible-mode/v1',
+        ),
+      ).toBe('https://proxy.example.com/gateway/compatible-mode');
+
+      const calls = captureNext([...deltaEvent('ok'), ...DONE]);
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'company-alias',
+          baseUrl: 'https://proxy.example.com/gateway/compatible-mode/v1',
+        }),
+        makeCliConfig(),
+      );
+      await drain(pipeline.executeStream(textRequest('hi'), 'p1'));
+      expect(calls[0]?.url).toBe(
+        'https://proxy.example.com/gateway/compatible-mode/v1/responses',
+      );
+    });
+
+    it.each([
+      ['high', 'xhigh'],
+      ['max', 'xhigh'],
+      ['medium', 'medium'],
+      ['low', 'low'],
+    ] as const)(
+      'clamps reasoning.effort %s -> %s via declared capabilities, strips thinking_budget, and downgrades tool_choice for Qwen on DashScope',
+      async (requested, expected) => {
+        const calls = captureNext();
+        const cliConfig = makeCliConfig();
+        cliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+          capabilities: {
+            reasoning: {
+              profile: 'openai-reasoning',
+              efforts: ['low', 'medium', 'xhigh'],
+              defaultEffort: 'medium',
+            },
+          },
+        });
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig({
+            model: 'qwen3.8-omni-flash',
+            authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            reasoning: { effort: requested },
+            extra_body: { thinking_budget: 4096 },
+          }),
+          cliConfig,
+        );
+        await drain(
+          pipeline.executeStream(requiredToolReq('qwen3.8-omni-flash'), 'p1'),
+        );
+        expect(calls[0]?.body).toMatchObject({
+          reasoning: { effort: expected, summary: 'auto' },
+          tool_choice: 'auto',
+          store: false,
+        });
+        expect(calls[0]?.body['thinking_budget']).toBeUndefined();
+      },
+    );
+
+    it('keeps tool_choice required for non-Qwen models on DashScope gateways and strips thinking_budget even with reasoning off', async () => {
+      const calls = captureNext();
+      const nonQwen = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'gpt-5',
+          authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'high' },
+          extra_body: { thinking_budget: 2048 },
+        }),
+        makeCliConfig(),
+      );
+      await drain(nonQwen.executeStream(requiredToolReq('gpt-5'), 'p1'));
+      expect(calls[0]?.body['tool_choice']).toBe('required');
+      expect(calls[0]?.body['thinking_budget']).toBeUndefined();
+
+      const noReasoning = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'qwen3.8-omni-flash',
+          reasoning: false,
+          extra_body: { thinking_budget: 2048 },
+        }),
+        makeCliConfig(),
+      );
+      await drain(noReasoning.executeStream(textRequest('hi'), 'p2'));
+      expect(calls[1]?.body['reasoning']).toBeUndefined();
+      expect(calls[1]?.body['thinking_budget']).toBeUndefined();
+    });
+
+    it('downgrades tool_choice=required only when toggle-only reasoning is enabled or thinking is mandatory', async () => {
+      const calls = captureNext();
+      const toggleCli = makeCliConfig();
+      toggleCli.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      });
+      const baseToggleCfg = {
+        model: 'qwen3-vl-plus',
+        authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      };
+
+      // No reasoning signal on the wire -> keep tool_choice='required'.
+      const toggleUnsetPipeline = new ResponsesPipeline(
+        makeGeneratorConfig(baseToggleCfg),
+        toggleCli,
+      );
+      await drain(
+        toggleUnsetPipeline.executeStream(
+          requiredToolReq('qwen3-vl-plus'),
+          'p1',
+        ),
+      );
+      expect(calls[0]?.body['reasoning']).toBeUndefined();
+      expect(calls[0]?.body['tool_choice']).toBe('required');
+
+      // Explicit toggle-on (`reasoning: {}`) -> downgrade even though reasoning
+      // has no effort field on the wire.
+      const toggleOnPipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ ...baseToggleCfg, reasoning: {} }),
+        toggleCli,
+      );
+      await drain(
+        toggleOnPipeline.executeStream(requiredToolReq('qwen3-vl-plus'), 'p2'),
+      );
+      expect(calls[1]?.body['reasoning']).toBeUndefined();
+      expect(calls[1]?.body['tool_choice']).toBe('auto');
+
+      // Legacy extra_body.enable_thinking=true -> translates to reasoning.effort
+      // and downgrades tool_choice.
+      const toggleLegacyPipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          ...baseToggleCfg,
+          extra_body: { enable_thinking: true },
+        }),
+        toggleCli,
+      );
+      await drain(
+        toggleLegacyPipeline.executeStream(
+          requiredToolReq('qwen3-vl-plus'),
+          'p3',
+        ),
+      );
+      expect(calls[2]?.body['reasoning']).toEqual({
+        effort: 'medium',
+        summary: 'auto',
+      });
+      expect(calls[2]?.body['tool_choice']).toBe('auto');
+
+      // Explicit opt-out (`reasoning: false`) -> keep tool_choice='required'.
+      const toggleOffPipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ ...baseToggleCfg, reasoning: false }),
+        toggleCli,
+      );
+      await drain(
+        toggleOffPipeline.executeStream(requiredToolReq('qwen3-vl-plus'), 'p4'),
+      );
+      expect(calls[3]?.body['tool_choice']).toBe('required');
+
+      // Mandatory-thinking model (`canDisable: false`) -> always downgrades
+      // even when reasoning=false and reasoning field is omitted.
+      const mandatoryCli = makeCliConfig();
+      mandatoryCli.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            canDisable: false,
+            disableField: 'enable_thinking',
+          },
+        },
+      });
+      const mandatoryPipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          model: 'qwq-plus',
+          authType: 'openai-responses' as ContentGeneratorConfig['authType'],
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: false,
+        }),
+        mandatoryCli,
+      );
+      await drain(
+        mandatoryPipeline.executeStream(requiredToolReq('qwq-plus'), 'p5'),
+      );
+      expect(calls[4]?.body['reasoning']).toBeUndefined();
+      expect(calls[4]?.body['tool_choice']).toBe('auto');
+    });
+
+    it.each([
+      [
+        'DashScope + omni',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        true,
+        undefined,
+        'enable',
+      ],
+      [
+        'DashScope + oss://',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        false,
+        'oss://bucket/clip.mp4',
+        'enable',
+      ],
+      [
+        'OpenAI + oss://',
+        'https://api.openai.com/v1',
+        false,
+        'oss://bucket/frame.jpg',
+        undefined,
+      ],
+    ] as const)(
+      'gates lowercase x-dashscope-ossresourceresolve for %s',
+      async (_label, baseUrl, omniEnabled, ossUri, expectedHeader) => {
+        const calls = captureNext();
+        const cliConfig = omniEnabled
+          ? ({
+              ...makeCliConfig(),
+              isOmniEnabled: () => true,
+            } as unknown as Config)
+          : makeCliConfig();
+        const model = baseUrl.includes('openai')
+          ? 'gpt-5'
+          : 'qwen3.8-omni-flash';
+        const req = ossUri
+          ? {
+              model,
+              contents: [
+                content('user', {
+                  fileData: {
+                    mimeType: ossUri.endsWith('.mp4')
+                      ? 'video/mp4'
+                      : 'image/jpeg',
+                    fileUri: ossUri,
+                  },
+                }),
+              ],
+            }
+          : textRequest('hi');
+        const pipeline = new ResponsesPipeline(
+          makeGeneratorConfig({
+            model,
+            baseUrl,
+            modalities: { image: true, audio: true, video: true },
+          }),
+          cliConfig,
+        );
+        await drain(pipeline.executeStream(req, 'p1'));
+        expect(calls[0]?.headers['x-dashscope-ossresourceresolve']).toBe(
+          expectedHeader,
+        );
+      },
+    );
+
+    it('ignores SSE :HTTP_STATUS/200 comment lines and handles CRLF framing', async () => {
+      const rawSse = [
+        ':HTTP_STATUS/200',
+        'event: response.reasoning_text.delta',
+        'data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"plan"}',
+        '',
+        ':HTTP_STATUS/200',
+        'event: response.output_text.delta',
+        'data: {"type":"response.output_text.delta","output_index":1,"delta":"answer"}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"id":"r_plain","status":"completed"}}',
+        '',
+      ].join('\r\n');
+      buildRuntimeFetchOptionsMock.mockReturnValue({
+        fetch: vi.fn().mockResolvedValue(
+          new Response(byteStream(rawSse), {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+          }),
+        ),
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ model: 'qwen3.8-omni-flash' }),
+        makeCliConfig(),
+      );
+      const chunks = await collect(
+        pipeline.executeStream(textRequest('hi'), 'p1'),
+      );
+      expect(
+        chunks.flatMap((c) => c.candidates?.[0]?.content?.parts ?? []),
+      ).toEqual([{ text: 'plan', thought: true }, { text: 'answer' }]);
+    });
+  });
 });

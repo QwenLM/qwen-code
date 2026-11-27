@@ -238,6 +238,26 @@ describe('modelConfigUtils', () => {
       expect(result.apiKey).toBe('responses-key');
     });
 
+    it('resolves QWEN_MODEL fallback end-to-end when OPENAI_WIRE_API=responses infers USE_OPENAI_RESPONSES', () => {
+      const env = {
+        OPENAI_API_KEY: 'responses-key',
+        QWEN_MODEL: 'qwen3.8-omni-flash',
+        OPENAI_WIRE_API: 'responses',
+      };
+      const inferredAuthType = getAuthTypeFromEnv(env);
+      expect(inferredAuthType).toBe(AuthType.USE_OPENAI_RESPONSES);
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: {},
+        selectedAuthType: inferredAuthType,
+        env,
+      });
+      expect(result.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(result.model).toBe('qwen3.8-omni-flash');
+      expect(result.apiKey).toBe('responses-key');
+    });
+
     it('filters a mixed provider bucket by each effective API', () => {
       const providers = { openai: [responses, chat] };
       expect(
@@ -293,6 +313,25 @@ describe('modelConfigUtils', () => {
       process.env['OPENAI_BASE_URL'] = 'https://api.openai.com';
 
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('should return USE_OPENAI_RESPONSES when OPENAI_WIRE_API=responses is set (with or without OPENAI_BASE_URL)', () => {
+      expect(
+        getAuthTypeFromEnv({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_MODEL: 'qwen3.8-omni-flash',
+          OPENAI_BASE_URL:
+            'https://proxy.example.com/gateway/compatible-mode/v1',
+          OPENAI_WIRE_API: 'responses',
+        }),
+      ).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(
+        getAuthTypeFromEnv({
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_MODEL: 'gpt-5',
+          OPENAI_WIRE_API: 'responses',
+        }),
+      ).toBe(AuthType.USE_OPENAI_RESPONSES);
     });
 
     it('uses an injected env instead of process.env when provided', () => {
