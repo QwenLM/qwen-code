@@ -6597,6 +6597,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       'echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"',
     );
     expect(configure.env?.MYSQL_CONTAINER).toBeUndefined();
+    // The shell test below cannot execute the step-level env, so the O4
+    // password the Maven line relies on is pinned here.
+    expect(verify.env?.QWEN_O4_MYSQL_PASSWORD).toBe('runtime-broker');
     expect(configure.run).toContain('for fork in 1 2');
     expect(configure.run).toContain(
       'docker exec "${MYSQL_CONTAINER}-${fork}" sh -c',
@@ -6741,7 +6744,6 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             'MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43219/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false>',
           );
           expect(result.stdout).toContain('MAVEN<-Dqwen.o4.mysql.user=root>');
-          expect(result.stdout).toContain('QWEN_O4_MYSQL_PASSWORD=runtime-broker');
           expect(result.stdout).not.toContain(
             `MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43220/qwen_o4_ci`,
           );
