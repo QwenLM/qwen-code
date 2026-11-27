@@ -13,7 +13,6 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { SessionExecutionEngineError } from './session-execution-engine.js';
 import { SessionWriterUnavailableError } from './session-writer-lease.js';
-import { MANAGED_SESSION_LIMITS } from '../utils/managed-session-format.js';
 
 const EXECUTION_ENGINE_SUBTYPE = 'session_execution_engine';
 const MANAGED_HEADER_SUBTYPE = 'managed_session_header_v1';
@@ -24,6 +23,9 @@ const APPEND_READ_WRITE =
 const APPEND_CREATE =
   APPEND_READ_WRITE | nodeConstants.O_CREAT | nodeConstants.O_EXCL;
 const OWNERSHIP_HEAD_BYTES = 64 * 1024;
+// Full-line JSON inspection allocates several copies; refuse lines over 32 MiB
+// rather than infer ownership from a prefix or allow unbounded memory use.
+const MAX_INSPECTED_LINE_BYTES = 32 * 1024 * 1024;
 const OPEN_CREATE_ATTEMPTS = 8;
 
 const fileLocks = new Map<string, Mutex>();
@@ -103,7 +105,7 @@ function readFromFd(fd: number, length: number, position: number): Buffer {
   return buffer.subarray(0, offset);
 }
 
-type FirstLineShape = 'owner' | 'ordinary' | 'unknown';
+type LineShape = 'ordinary' | 'torn-user' | 'owner' | 'unknown';
 
 const OWNER_SUBTYPES = new Set([
   EXECUTION_ENGINE_SUBTYPE,
@@ -182,57 +184,140 @@ function skipJsonWhitespace(text: string, start: number): number {
   return i;
 }
 
-/**
- * Classifies a record whose first line is too large to scan in full.
- *
- * Only top-level keys are inspected. Engine-written records serialize `type`
- * and, for owner records, `subtype` before any large payload (`message` or
- * `systemPayload`), so the decision fits inside the head window even when the
- * record body does not. A marker substring inside a message body or a nested
- * object is never ownership evidence.
- */
-function classifyTruncatedFirstLine(prefix: string): FirstLineShape {
-  // `\s` consumes a leading byte-order mark as well.
-  let index = skipJsonWhitespace(prefix, 0);
-  if (prefix[index] !== '{') return 'unknown';
-  index = skipJsonWhitespace(prefix, index + 1);
-  while (index < prefix.length) {
-    const char = prefix[index];
-    if (char === '}') return 'ordinary';
-    if (char === ',') {
-      index = skipJsonWhitespace(prefix, index + 1);
-      continue;
+/* Accept only the observed user-message truncation shape, never an arbitrary
+ * bounded prefix: a later key or glued record could still carry ownership.
+ * A future field in the original record cannot be inferred from torn bytes. */
+function classifyLine(line: string): LineShape {
+  let index = skipJsonWhitespace(line, 0);
+  if (line[index++] !== '{') return 'unknown';
+  const firstKey = skipJsonWhitespace(line, index);
+  let user = false;
+  let seenSubtype = false;
+  const keys = new Set<string>();
+  for (;;) {
+    index = skipJsonWhitespace(line, index);
+    if (line[index] === '}' && index === firstKey) {
+      return skipJsonWhitespace(line, index + 1) === line.length
+        ? 'ordinary'
+        : 'unknown';
     }
-    if (char !== '"') return 'unknown';
-    const key = readJsonStringAt(prefix, index);
+    if (line[index] !== '"') return 'unknown';
+    const key = readJsonStringAt(line, index);
     if (!key) return 'unknown';
-    index = skipJsonWhitespace(prefix, key.next);
-    if (prefix[index] !== ':') return 'unknown';
-    index = skipJsonWhitespace(prefix, index + 1);
-    if (key.value === 'subtype') {
-      if (prefix[index] !== '"') return 'unknown';
-      const value = readJsonStringAt(prefix, index);
+    if (keys.has(key.value)) return 'unknown';
+    keys.add(key.value);
+    index = skipJsonWhitespace(line, key.next);
+    if (line[index++] !== ':') return 'unknown';
+    index = skipJsonWhitespace(line, index);
+    if (key.value === 'type' || key.value === 'subtype') {
+      if (line[index] !== '"') return 'unknown';
+      const value = readJsonStringAt(line, index);
       if (!value) return 'unknown';
-      return OWNER_SUBTYPES.has(value.value) ? 'owner' : 'ordinary';
+      if (key.value === 'type') {
+        user = value.value === 'user';
+      } else {
+        if (OWNER_SUBTYPES.has(value.value)) return 'owner';
+        seenSubtype = true;
+      }
+      index = value.next;
+    } else {
+      const next = skipJsonValue(line, index);
+      if (next === undefined) {
+        // The remaining bytes must really be an unfinished JSON string inside
+        // the user message, not arbitrary malformed or trailing record data.
+        return key.value === 'message' &&
+          user &&
+          !seenSubtype &&
+          !hasDuplicateOwnerFields(line) &&
+          isValidTornMessagePrefix(line, index) &&
+          isTornUserMessage(line.slice(index))
+          ? 'torn-user'
+          : 'unknown';
+      }
+      index = next;
     }
-    if (key.value === 'type') {
-      if (prefix[index] !== '"') return 'unknown';
-      const value = readJsonStringAt(prefix, index);
-      if (!value) return 'unknown';
-      if (value.value !== 'system') return 'ordinary';
-      index = skipJsonWhitespace(prefix, value.next);
-      continue;
+    index = skipJsonWhitespace(line, index);
+    if (line[index] === '}') {
+      const rest = skipJsonWhitespace(line, index + 1);
+      if (rest === line.length) return 'ordinary';
+      return 'unknown';
     }
-    if (key.value === 'message' || key.value === 'systemPayload') {
-      // The record's payload starts before any ownership subtype; owner
-      // records serialize `subtype` first.
-      return 'ordinary';
-    }
-    const next = skipJsonValue(prefix, index);
-    if (next === undefined) return 'unknown';
-    index = skipJsonWhitespace(prefix, next);
+    if (line[index++] !== ',') return 'unknown';
   }
-  return 'unknown';
+}
+
+function isValidTornMessagePrefix(line: string, valueStart: number): boolean {
+  try {
+    JSON.parse(`${line.slice(0, valueStart)}null}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isTornUserMessage(value: string): boolean {
+  // Validate all bytes through the unfinished string as a JSON prefix by
+  // closing only the string and its containers. This excludes malformed values
+  // that merely happen to contain an unterminated quote.
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of value) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === '{') stack.push('}');
+    else if (char === '[') stack.push(']');
+    else if (char === '}' || char === ']') {
+      if (stack.pop() !== char) return false;
+    }
+  }
+  if (!inString || escaped || stack.length === 0) return false;
+  try {
+    const message: unknown = JSON.parse(`${value}"${stack.reverse().join('')}`);
+    return (
+      typeof message === 'object' &&
+      message !== null &&
+      !Array.isArray(message) &&
+      (message as Record<string, unknown>)['role'] === 'user' &&
+      Array.isArray((message as Record<string, unknown>)['parts'])
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasDuplicateOwnerFields(line: string): boolean {
+  const scopes: Array<Set<string> | undefined> = [];
+  const ownerFields = new Set([
+    'type',
+    'subtype',
+    'systemPayload',
+    'version',
+    'engine',
+  ]);
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '{') scopes.push(new Set());
+    else if (line[i] === '[') scopes.push(undefined);
+    else if (line[i] === '}' || line[i] === ']') scopes.pop();
+    else if (line[i] === '"') {
+      const token = readJsonStringAt(line, i);
+      if (!token) break;
+      i = token.next - 1;
+      const keys = scopes[scopes.length - 1];
+      if (
+        !keys ||
+        line[skipJsonWhitespace(line, token.next)] !== ':' ||
+        !ownerFields.has(token.value)
+      )
+        continue;
+      if (keys.has(token.value)) return true;
+      keys.add(token.value);
+    }
+  }
+  return false;
 }
 
 function ownerEvidenceFromFd(
@@ -248,73 +333,57 @@ function ownerEvidenceFromFd(
   );
   const head = readFromFd(fd, headLength, 0);
   const linesToInspect = head.toString('utf8').split('\n');
-  // A window that ends mid-file yields a partial final line; it is a read
-  // artifact, not ownership evidence, and parsing it can only produce a false
-  // "ownership could not be verified". Drop it: the single-line-larger-than-
-  // the-window case is re-read in full by the block below.
-  if (headLength < Number(stats.size) && linesToInspect.length > 1) {
-    linesToInspect.pop();
-  }
-  const firstNewline = head.indexOf(10);
-  if (headLength > 0 && firstNewline < 0 && headLength < Number(stats.size)) {
-    // The first physical line exceeds the head window. Read further only to
-    // find its newline; fail closed when that line carries an ownership
-    // marker, but let an oversized ordinary legacy record fall through.
-    const firstLineLength = Number(
-      stats.size < BigInt(MANAGED_SESSION_LIMITS.maxEventBytes)
-        ? stats.size
-        : BigInt(MANAGED_SESSION_LIMITS.maxEventBytes),
+  // A partial line at the end of the head must not hide owner evidence. Read
+  // it to its newline or EOF, but refuse rather than classify a bounded prefix.
+  if (headLength < Number(stats.size)) {
+    const lastNewline = head.lastIndexOf(10);
+    const lineStart = lastNewline + 1;
+    const length = Number(
+      stats.size - BigInt(lineStart) < BigInt(MAX_INSPECTED_LINE_BYTES + 1)
+        ? stats.size - BigInt(lineStart)
+        : BigInt(MAX_INSPECTED_LINE_BYTES + 1),
     );
-    const firstLine = readFromFd(fd, firstLineLength, 0);
-    const newline = firstLine.indexOf(10);
-    const completeFirstLine =
-      newline < 0
-        ? firstLine.toString('utf8')
-        : firstLine.subarray(0, newline).toString('utf8');
-    if (newline < 0) {
-      // The whole first line exceeds even the extended bound. Decide from its
-      // top-level fields: a marker inside a message body or nested object is
-      // not ownership evidence, while an owner record still serializes its
-      // `subtype` before any large payload.
-      const shape = classifyTruncatedFirstLine(completeFirstLine);
-      if (shape === 'owner') {
-        throw new SessionExecutionEngineError(
-          sessionId,
-          'ownership record exceeds the read bound',
-        );
-      }
-      if (shape === 'unknown') {
-        throw new SessionExecutionEngineError(
-          sessionId,
-          'ownership could not be verified',
-        );
-      }
-      return;
+    const bytes = readFromFd(fd, length, lineStart);
+    const newline = bytes.indexOf(10);
+    if (
+      newline < 0 &&
+      (bytes.length > MAX_INSPECTED_LINE_BYTES ||
+        lineStart + bytes.length < Number(stats.size))
+    ) {
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'ownership could not be verified: line exceeds the read bound',
+      );
     }
-    linesToInspect[0] = completeFirstLine;
+    linesToInspect[linesToInspect.length - 1] = (
+      newline < 0 ? bytes : bytes.subarray(0, newline)
+    ).toString('utf8');
   }
 
   for (const line of linesToInspect) {
     if (
+      Buffer.byteLength(line, 'utf8') <= OWNERSHIP_HEAD_BYTES &&
       !line.includes(EXECUTION_ENGINE_SUBTYPE) &&
       !line.includes(MANAGED_HEADER_SUBTYPE) &&
       !line.includes('\\u')
     ) {
       continue;
     }
-    const ownerShaped =
-      line.includes(EXECUTION_ENGINE_SUBTYPE) ||
-      line.includes(MANAGED_HEADER_SUBTYPE);
-    const records = jsonl.parseLineTolerant(line, filePath);
-    if (records.length === 0) {
-      if (ownerShaped) {
-        throw new SessionExecutionEngineError(
-          sessionId,
-          'ownership could not be verified',
-        );
-      }
-      continue;
+    const shape = classifyLine(line);
+    if (shape === 'torn-user') continue;
+    const parsed = jsonl.parseLineTolerantWithIntegrity(line, filePath);
+    const records = parsed.records;
+    if (
+      (shape === 'unknown' && records.length <= 1) ||
+      !parsed.complete ||
+      hasDuplicateOwnerFields(line)
+    ) {
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'ownership could not be verified',
+      );
     }
+    let verifiedOwner = false;
     for (const record of records) {
       if (!record || typeof record !== 'object') continue;
       const candidate = record as Record<string, unknown>;
@@ -346,7 +415,15 @@ function ownerEvidenceFromFd(
       if (payload['engine'] === 'managed') {
         throw new SessionExecutionEngineError(sessionId, 'belongs to managed');
       }
-      // A valid Legacy owner record; nothing more to verify for this line.
+      verifiedOwner = true;
+    }
+    if (shape === 'owner' && !verifiedOwner) {
+      // JSON.parse keeps only the last duplicate key; an earlier owner subtype
+      // must not be erased by a later, conflicting subtype.
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'ownership could not be verified',
+      );
     }
   }
 }

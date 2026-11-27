@@ -1019,7 +1019,158 @@ describe('Managed Session log recording', () => {
     await restored.closeSessionWriter();
   });
 
-  it('refuses unverifiable ownership before taking the writer lease', async () => {
+  it('releases the lease when unverifiable ownership appears during acquisition', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    await writeFile(transcriptPath, '');
+    await expect(
+      stat(getSessionWriterLockPath(runtimeDir, SESSION_ID)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    const legacy = `${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      cwd: projectDir,
+      version: 'test',
+      systemPayload: { version: 2, engine: 'legacy' },
+    })}\n${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: projectDir,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: 'existing' }] },
+    })}\n`;
+
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    const ownership = vi.spyOn(
+      config as unknown as { existingTranscriptOwnership(): string },
+      'existingTranscriptOwnership',
+    );
+    const acquire = SessionWriterLease.acquire;
+    const acquiring = vi
+      .spyOn(SessionWriterLease, 'acquire')
+      .mockImplementation(async (options) => {
+        expect(ownership).toHaveReturnedWith('absent');
+        expect(await readFile(transcriptPath, 'utf8')).toBe('');
+        await writeFile(transcriptPath, legacy);
+        return acquire(options);
+      });
+
+    const failure = await config.initialize().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const acquisitionCalls = acquiring.mock.calls.length;
+    acquiring.mockRestore();
+    const after = await readFile(transcriptPath, 'utf8');
+    const lock = await lockRecord().catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    let subsequentFailure: unknown;
+    try {
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: runtimeDir,
+        sessionId: SESSION_ID,
+        transcriptPath,
+        processKind: 'acp',
+        qwenVersion: 'test',
+      });
+      await lease.release();
+    } catch (error) {
+      subsequentFailure = error;
+    }
+
+    expect.soft(failure).toBeInstanceOf(SessionExecutionEngineError);
+    expect
+      .soft(failure)
+      .toHaveProperty(
+        'message',
+        expect.stringMatching(
+          /managed restore requires a restore projection|ownership could not be verified/,
+        ),
+      );
+    expect.soft(acquisitionCalls).toBe(1);
+    expect.soft(after).toBe(legacy);
+    expect.soft(lock).toBeUndefined();
+    expect.soft(subsequentFailure).toBeUndefined();
+    expect.soft(await readFile(transcriptPath, 'utf8')).toBe(legacy);
+  });
+
+  it('preserves a schema 2 seal installed after the ownership precheck', async () => {
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    await writeFile(transcriptPath, '');
+    const v2 = `${JSON.stringify({
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      cwd: projectDir,
+      version: 'test',
+      systemPayload: { version: 2, engine: 'legacy' },
+    })}\n`;
+    const config = managedConfig();
+    vi.spyOn(
+      config as unknown as { initializeInternal(): Promise<void> },
+      'initializeInternal',
+    ).mockResolvedValue(undefined);
+    const ownership = vi.spyOn(
+      config as unknown as { existingTranscriptOwnership(): string },
+      'existingTranscriptOwnership',
+    );
+    const acquire = SessionWriterLease.acquire;
+    let sealed: Record<string, unknown> | undefined;
+    const acquiring = vi
+      .spyOn(SessionWriterLease, 'acquire')
+      .mockImplementation(async (options) => {
+        expect(ownership).toHaveReturnedWith('absent');
+        await writeFile(transcriptPath, v2);
+        const legacyLease = await acquire({
+          runtimeBaseDir: runtimeDir,
+          sessionId: SESSION_ID,
+          transcriptPath,
+          processKind: 'acp',
+          qwenVersion: 'test',
+        });
+        await legacyLease.sealForHandoff();
+        sealed = await lockRecord();
+        return acquire(options);
+      });
+
+    await expect(config.initialize()).rejects.toBeInstanceOf(
+      SessionWriterUnavailableError,
+    );
+    acquiring.mockRestore();
+    expect(sealed).toMatchObject({ state: 'sealed', schema_version: 2 });
+    expect(await lockRecord()).toEqual(sealed);
+    expect(await readFile(transcriptPath, 'utf8')).toBe(v2);
+    const successor = await acquire({
+      runtimeBaseDir: runtimeDir,
+      sessionId: SESSION_ID,
+      transcriptPath,
+      processKind: 'acp',
+      takeoverPolicy: 'certified',
+    });
+    await successor.assertOwnedAndUnchanged();
+    await successor.release();
+  });
+
+  it('refuses a v2 owner without positive Managed evidence before taking the lease', async () => {
     const transcriptPath =
       sessionService().getSessionTranscriptPath(SESSION_ID);
     await mkdir(path.dirname(transcriptPath), { recursive: true });
@@ -1051,7 +1202,7 @@ describe('Managed Session log recording', () => {
       'initializeInternal',
     ).mockResolvedValue(undefined);
     await expect(config.initialize()).rejects.toThrow(
-      'ownership could not be verified',
+      'belongs to legacy, cannot execute with managed',
     );
     expect(await readFile(transcriptPath, 'utf8')).toBe(before);
 

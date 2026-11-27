@@ -13,6 +13,7 @@ import {
   extractLastJsonStringField,
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
+  readManagedExecutionEvidenceSync,
   extractJsonStringFieldFromLastMatchingLine,
   readLastMatchingLineFieldSync,
   readLastJsonStringFieldSync,
@@ -71,6 +72,64 @@ function appendOnFirstRead(p: string, line: string) {
     return originalReadSync(...args);
   }) as typeof fs.readSync);
 }
+
+describe('readManagedExecutionEvidenceSync', () => {
+  const file = useTmpFiles('managed-evidence-');
+  const owner = (engine: string, version: number) =>
+    JSON.stringify({
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version, engine },
+    });
+
+  it('reports no positive evidence for a parsed v2 owner, not proof of Legacy', () => {
+    expect(
+      readManagedExecutionEvidenceSync(file('v2', `${owner('legacy', 2)}\n`)),
+    ).toBe(false);
+    expect(
+      readManagedExecutionEvidenceSync(
+        file('future', `${owner('future', 2)}\n`),
+      ),
+    ).toBe(false);
+  });
+
+  it('finds positive managed evidence anywhere in the head and in a long first record', () => {
+    const header = JSON.stringify({
+      type: 'system',
+      subtype: 'managed_session_header_v1',
+    });
+    expect(
+      readManagedExecutionEvidenceSync(
+        file('head', `${owner('legacy', 2)}\n${header}\n`),
+      ),
+    ).toBe(true);
+    const longOwner = JSON.stringify({
+      padding: 'x'.repeat(LITE_READ_BUF_SIZE),
+      type: 'system',
+      subtype: 'session_execution_engine',
+      systemPayload: { version: 2, engine: 'managed' },
+    });
+    expect(
+      readManagedExecutionEvidenceSync(file('long', `${longOwner}\n`)),
+    ).toBe(true);
+  });
+
+  it('distinguishes missing or empty files from unreadable entries and reads', () => {
+    expect(readManagedExecutionEvidenceSync(file('missing'))).toBe(false);
+    expect(readManagedExecutionEvidenceSync(file('empty', ''))).toBe(false);
+    const target = file('target', owner('legacy', 2));
+    const link = file('link');
+    fs.symlinkSync(target, link);
+    expect(readManagedExecutionEvidenceSync(link)).toBeUndefined();
+    expect(
+      readManagedExecutionEvidenceSync(path.dirname(target)),
+    ).toBeUndefined();
+    vi.spyOn(fs, 'readSync').mockImplementation(() => {
+      throw Object.assign(new Error('read failed'), { code: 'EIO' });
+    });
+    expect(readManagedExecutionEvidenceSync(target)).toBeUndefined();
+  });
+});
 
 describe('sessionStorageUtils', () => {
   const GOAL = '"subtype":"goal_state"';

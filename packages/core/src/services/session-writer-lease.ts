@@ -339,6 +339,8 @@ export interface AcquireSessionWriterLeaseOptions {
     readonly resumeFormatVersion?: number;
   };
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
+  /** Recheck admission under the transition claim against a verified transcript. */
+  admitTranscript?: () => void;
 }
 
 export interface SealedManagedMaintenanceLease {
@@ -2187,6 +2189,21 @@ export class SessionWriterLease {
     lockRecord: ActiveLockRecord,
     options: AcquireSessionWriterLeaseOptions,
   ): Promise<SessionWriterLease> {
+    // Schema 2 does not identify the transcript's execution engine or carry a
+    // Managed commit proof. A schema-3 writer cannot safely retire this seal:
+    // an earlier ownership precheck may have raced with a Legacy handoff.
+    // Refuse even for apparently Managed or empty transcripts; the proof alone
+    // cannot establish that this is a Managed handoff.
+    if (
+      !isManagedLockRecord(observed.record) &&
+      options.lockSchema !== undefined
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          'Managed writer cannot take over a schema-2 session writer seal',
+        ),
+      });
+    }
     // A sealed Managed lock carries the authority's commit proof; continuing
     // it with a baseline writer would drop that proof and downgrade the
     // record, so only a schema-3 acquirer may take it over.

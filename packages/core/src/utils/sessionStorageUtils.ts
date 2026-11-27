@@ -964,8 +964,8 @@ export function isManagedExecutionTranscriptSync(filePath: string): boolean {
 
 /**
  * The evidence {@link isManagedExecutionTranscriptSync} looks for, telling a
- * transcript whose head cannot be read (`undefined`) apart from one that is
- * missing or empty (`false`).
+ * transcript whose head cannot be read or verified (`undefined`) apart from
+ * one with no Managed evidence (`false`).
  */
 export function readManagedExecutionEvidenceSync(
   filePath: string,
@@ -1052,13 +1052,16 @@ function readManagedExecutionEvidenceFromFdSync(
         return true;
       }
       if (records.some(isExecutionEngineOwnerRecord)) {
-        // A valid `version: 1` Legacy owner record proves Legacy; anything
-        // else owner-shaped (bad version/payload, mixed records) is
-        // ambiguous evidence, never proof that the transcript is Legacy.
-        return isLegacyOwnerRecord(records) ? false : undefined;
+        // Positive Managed evidence always wins over a Legacy-shaped line. A
+        // fully parsed owner whose engine is not `managed` carries no positive
+        // Managed evidence whatever its version claims — `false` is the
+        // bounded reader's "no positive evidence", not proof of Legacy. A line
+        // that only partly parses (torn owner, mixed records) stays
+        // ambiguous: `undefined`.
+        return isLegacyOwnerRecord(records) || isManagedOwnerRecord(records)
+          ? false
+          : undefined;
       }
-      // The first line carries no ownership evidence: the transcript is
-      // Legacy regardless of whether the line was newline-terminated.
       return false;
     }
     return false;
@@ -1071,7 +1074,12 @@ function readManagedExecutionEvidenceFromFdSync(
   }
 }
 
-/** Every record on the line is a valid `version: 1` Legacy owner record. */
+/**
+ * True when every parsed record on the line is a well-formed execution-engine
+ * owner whose engine is not `managed`. The version is not validated: `false`
+ * from the bounded reader means "no positive Managed evidence found", never
+ * proof of Legacy ownership.
+ */
 function isLegacyOwnerRecord(records: readonly unknown[]): boolean {
   return records.every((record) => {
     if (!record || typeof record !== 'object') return false;
@@ -1083,8 +1091,7 @@ function isLegacyOwnerRecord(records: readonly unknown[]): boolean {
       !!payload &&
       typeof payload === 'object' &&
       !Array.isArray(payload) &&
-      (payload as Record<string, unknown>)['version'] === 1 &&
-      (payload as Record<string, unknown>)['engine'] === 'legacy'
+      (payload as Record<string, unknown>)['engine'] !== 'managed'
     );
   });
 }

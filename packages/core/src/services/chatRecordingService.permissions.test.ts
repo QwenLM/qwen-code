@@ -11,6 +11,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { appendLegacySessionTranscriptLine } from './legacy-session-transcript-writer.js';
+import { readSessionTranscriptSnapshot } from './session-transcript-reader.js';
+import { assertSessionExecutionEngine } from './session-execution-engine.js';
 
 // Permissions are an OS-level property, so these cases drive the recorder
 // against a real temporary directory instead of the mocked fs the rest of the
@@ -141,6 +143,48 @@ describe.skipIf(process.platform === 'win32')(
       expect(fs.lstatSync(transcriptPath).isSymbolicLink()).toBe(true);
     });
 
+    it('refuses a hard-linked transcript without changing its inode, bytes or mode', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      const target = path.join(projectDir, 'linked.jsonl');
+      const original = '{"message":"sentinel"}\n';
+      fs.writeFileSync(target, original, { mode: 0o644 });
+      fs.linkSync(target, transcriptPath);
+      const inode = fs.statSync(target).ino;
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'no',
+        }),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+      expect(fs.statSync(transcriptPath).ino).toBe(inode);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(modeOf(target)).toBe(0o644);
+    });
+
+    it('refuses a replacement inode installed after open', async () => {
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      const displaced = `${transcriptPath}.original`;
+      const original = '{"message":"original"}\n';
+      const replacement = '{"message":"replacement"}\n';
+      fs.writeFileSync(transcriptPath, original, { mode: 0o600 });
+      const realLstatSync = fs.lstatSync.bind(fs);
+      let calls = 0;
+      vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+        if (args[0] === transcriptPath && ++calls === 2) {
+          fs.renameSync(transcriptPath, displaced);
+          fs.writeFileSync(transcriptPath, replacement, { mode: 0o644 });
+        }
+        return realLstatSync(...args);
+      });
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'no',
+        }),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+      expect(fs.readFileSync(displaced, 'utf8')).toBe(original);
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(replacement);
+      expect(modeOf(transcriptPath)).toBe(0o644);
+    });
+
     it('refuses conflicting Legacy and Managed ownership records', async () => {
       fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
       fs.writeFileSync(
@@ -181,6 +225,208 @@ describe.skipIf(process.platform === 'win32')(
       expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
     });
 
+    it('appends repeatedly after a torn user message mentioning the owner marker', async () => {
+      const torn =
+        '{"uuid":"user-1","type":"user","message":{"role":"user","parts":[{"text":"Discuss session_execution_engine';
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, torn, { mode: 0o644 });
+      const records = [
+        { type: 'assistant', message: 'one' },
+        { type: 'user', message: 'two' },
+      ];
+
+      for (const record of records) {
+        await appendLegacySessionTranscriptLine(
+          transcriptPath,
+          sessionId,
+          record,
+        );
+      }
+
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${torn}\n${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it.each([false, true])(
+      'continues after a marker-bearing torn user message ending in qqqys (newline: %s)',
+      async (newline) => {
+        const torn =
+          '{"uuid":"user-1","type":"user","message":{"role":"user","parts":[{"text":"Discuss session_execution_engine qqqys';
+        const original = `${torn}${newline ? '\n' : ''}`;
+        fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+        fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+        for (const message of ['one', 'two']) {
+          await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+            message,
+          });
+        }
+        expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+          `${torn}\n{"message":"one"}\n{"message":"two"}\n`,
+        );
+        expect(modeOf(transcriptPath)).toBe(0o600);
+      },
+    );
+
+    it('continues appending after a torn user message ending in qqqys', async () => {
+      const torn =
+        '{"type":"user","message":{"role":"user","parts":[{"text":"qqqys';
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, torn, { mode: 0o600 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${torn}\n{"message":"next"}\n`,
+      );
+    });
+
+    it('reports incomplete ownership on resume after appending to a torn message', async () => {
+      const base = {
+        uuid: 'record-1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cwd: projectDir,
+        version: 'test',
+      };
+      const owner = JSON.stringify({
+        ...base,
+        type: 'system',
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 1, engine: 'legacy' },
+      });
+      const torn = JSON.stringify({
+        ...base,
+        uuid: 'user-1',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'session_execution_engine and more' }],
+        },
+      }).split(' and more')[0];
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, `${owner}\n${torn}`, { mode: 0o600 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        ...base,
+        uuid: 'user-2',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'next' }] },
+      });
+      const snapshot = await readSessionTranscriptSnapshot(
+        transcriptPath,
+        sessionId,
+      );
+      expect(snapshot?.sourceReadComplete).toBe(false);
+      expect(snapshot?.executionEngine).toMatchObject({
+        status: 'unavailable',
+        reason: 'incomplete transcript',
+      });
+      expect(() =>
+        assertSessionExecutionEngine(
+          snapshot?.executionEngine,
+          sessionId,
+          'legacy',
+        ),
+      ).toThrow(/incomplete transcript/);
+    });
+
+    it.each([
+      '{"type":"system","subtype":"session_execution_engine","systemPayload":{"version":1,"engine":"managed',
+      MANAGED_OWNER_LINE.trimEnd(),
+      '{"type":"system","subtype":"session\\u005fexecution\\u005fengine","systemPayload":',
+      '{"type":"system","subtype":"session_execution_engine","systemPayload":{}',
+      `${JSON.stringify({ type: 'user', message: 'hello' })}${MANAGED_OWNER_LINE.trimEnd()}`,
+      '{"type":"user","message":"hello","subtype":"session_execution_engine","subtype":"other"}',
+      '{"type":"user","message":"hello","sub\\u0074ype":"session\\u005fexecution_engine","type":"system","systemPayload":{"version":1,"engine":"managed"}}',
+      '{"type":"user","message":"hello","subtype":"session_execution_engine"',
+      '{"type":"system","subtype":"session_execution_engine","systemPayload":{"version":1,"engine":"managed","engine":"legacy"}}',
+      '{"type":"system","subtype":"session_execution_engine","subtype":"session_execution_engine","systemPayload":{"version":1,"engine":"legacy"}}',
+      '{"type":"system","subtype":"managed_session_header_v1","systemPayload":',
+      '{"type":"user","message":{"role":"user","parts":[{"text":"session_execution_engine"}]},"subtype":"session_execution_engine","systemPayload":',
+      '{"type":"user","systemPayload":{"engine":"managed","engine":"legacy"},"message":{"role":"user","parts":[{"text":"session_execution_engine',
+      `{"type":"user","message":{"role":"user","parts":[{"text":"session_execution_engine"}]}}{broken`,
+      '{"type":"user","extra":garbage,"message":{"role":"user","parts":[{"text":"session_execution_engine qqqys',
+      '{"type":"user","subtype":"other","subtype":"session_execution_engine","message":{"role":"user","parts":[{"text":"qqqys',
+      '{"systemPayload":{"engine":"managed","version":1},"subtype":"session_execution_engine","type":"system"}',
+      `${MANAGED_OWNER_LINE.trimEnd()}${JSON.stringify({ type: 'user', message: 'qqqys' })}`,
+    ])(
+      'refuses owner evidence without modifying bytes or mode: %s',
+      async (original) => {
+        fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+        fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+
+        await expect(
+          appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+            message: 'no',
+          }),
+        ).rejects.toMatchObject({ name: 'SessionExecutionEngineError' });
+        expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+        expect(modeOf(transcriptPath)).toBe(0o644);
+      },
+    );
+
+    it('continues after a torn user message containing an escaped marker', async () => {
+      const original =
+        '{"type":"user","message":{"role":"user","parts":[{"text":"session\\u005fexecution_engine qqqys';
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      for (const message of ['one', 'two']) {
+        await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message,
+        });
+      }
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${original}\n{"message":"one"}\n{"message":"two"}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('permits complete glued ordinary records that mention the marker', async () => {
+      const original = `${JSON.stringify({ type: 'user', message: 'session_execution_engine' })}${JSON.stringify({ type: 'user', message: 'hello' })}\n`;
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${original}{"message":"next"}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('permits a valid legacy owner glued to an ordinary record', async () => {
+      const original = `${JSON.stringify({ type: 'user', message: 'hello' })}${JSON.stringify({ type: 'system', subtype: 'session_execution_engine', systemPayload: { version: 1, engine: 'legacy' } })}`;
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${original}\n{"message":"next"}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('allows a valid legacy owner with the same field names in different objects', async () => {
+      const original = JSON.stringify({
+        type: 'system',
+        subtype: 'session_execution_engine',
+        systemPayload: { version: 1, engine: 'legacy' },
+        version: 'test',
+      });
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${original}\n{"message":"next"}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
     it('keeps appending after an oversized first record that merely names the owner marker', async () => {
       const oversized = JSON.stringify({
         type: 'user',
@@ -210,6 +456,172 @@ describe.skipIf(process.platform === 'win32')(
       expect(lines).toHaveLength(2);
       for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
     });
+
+    it.each([
+      (padding: string) =>
+        `{"type":"user","message":"${padding}","subtype":"session_execution_engine","systemPayload":{"version":1,"engine":"managed"}}`,
+      (padding: string) =>
+        `{"type":"user","message":"${padding}"}${MANAGED_OWNER_LINE.trimEnd()}`,
+      (padding: string) =>
+        `{"type":"user","message":"${padding}","subtype":"other","subtype":"session_execution_engine","systemPayload":{"version":1,"engine":"managed"}}`,
+    ])('refuses owner evidence after an oversized prefix', async (makeLine) => {
+      const original = makeLine('x'.repeat(1100 * 1024));
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'no',
+        }),
+      ).rejects.toMatchObject({ name: 'SessionExecutionEngineError' });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+      expect(modeOf(transcriptPath)).toBe(0o644);
+    });
+
+    it('continues appending after writing a record larger than 8 MiB', async () => {
+      const record = {
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            { text: `session_execution_engine ${'x'.repeat(8 * 1024 * 1024)}` },
+          ],
+        },
+      };
+      await appendLegacySessionTranscriptLine(
+        transcriptPath,
+        sessionId,
+        record,
+      );
+      const original = `${JSON.stringify(record)}\n`;
+      expect(Buffer.byteLength(original)).toBeGreaterThan(8 * 1024 * 1024);
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'again',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${original}{"message":"next"}\n{"message":"again"}\n`,
+      );
+    });
+
+    it('documents that a record beyond the inspection bound leaves later appends unavailable', async () => {
+      const record = {
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'x'.repeat(32 * 1024 * 1024) }],
+        },
+      };
+      await appendLegacySessionTranscriptLine(
+        transcriptPath,
+        sessionId,
+        record,
+      );
+      const original = `${JSON.stringify(record)}\n`;
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'next',
+        }),
+      ).rejects.toThrow(/line exceeds the read bound/);
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it('accepts an exactly bounded UTF-8 record and continues appending', async () => {
+      const limit = 8 * 1024 * 1024;
+      const empty = JSON.stringify({ type: 'user', message: '' });
+      const textBytes = limit - Buffer.byteLength(empty);
+      const record = {
+        type: 'user',
+        message: `${'é'.repeat(Math.floor(textBytes / 2))}${'x'.repeat(textBytes % 2)}`,
+      };
+      expect(Buffer.byteLength(JSON.stringify(record))).toBe(limit);
+      await appendLegacySessionTranscriptLine(
+        transcriptPath,
+        sessionId,
+        record,
+      );
+      await appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+        message: 'next',
+      });
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+        `${JSON.stringify(record)}\n{"message":"next"}\n`,
+      );
+      expect(modeOf(transcriptPath)).toBe(0o600);
+    });
+
+    it.each([false, true])(
+      'enforces the exact byte boundary at EOF (newline: %s)',
+      async (newline) => {
+        const limit = 32 * 1024 * 1024;
+        const prefix = '{"message":"';
+        const suffix = '"}';
+        const makeLine = (size: number) =>
+          `${prefix}${'x'.repeat(size - prefix.length - suffix.length)}${suffix}`;
+        fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+        for (const size of [limit, limit + 1]) {
+          const original = `${makeLine(size)}${newline ? '\n' : ''}`;
+          fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+          fs.chmodSync(transcriptPath, 0o644);
+          const append = appendLegacySessionTranscriptLine(
+            transcriptPath,
+            sessionId,
+            { message: 'next' },
+          );
+          if (size === limit) {
+            await expect(append).resolves.toBeUndefined();
+            expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(
+              `${makeLine(size)}\n{"message":"next"}\n`,
+            );
+            expect(modeOf(transcriptPath)).toBe(0o600);
+          } else {
+            await expect(append).rejects.toThrow(/line exceeds the read bound/);
+            expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+            expect(modeOf(transcriptPath)).toBe(0o644);
+          }
+        }
+      },
+    );
+
+    it('refuses a first line beyond the inspection bound rather than trusting its prefix', async () => {
+      const original = `{"type":"user","message":"${'x'.repeat(32 * 1024 * 1024)}"}\n`;
+      fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+      fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+      await expect(
+        appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+          message: 'no',
+        }),
+      ).rejects.toThrow(/line exceeds the read bound/);
+      expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+      expect(modeOf(transcriptPath)).toBe(0o644);
+    });
+
+    it.each([false, true])(
+      'rejects reordered, escaped and glued owner evidence after 8 MiB (newline: %s)',
+      async (newline) => {
+        const padding = 'x'.repeat(8 * 1024 * 1024);
+        const owners = [
+          `{"padding":"${padding}","systemPayload":{"engine":"managed","version":1},"subtype":"session_execution_engine","type":"system"}`,
+          `{"padding":"${padding}","type":"system","sub\\u0074ype":"session\\u005fexecution_engine","systemPayload":{"version":1,"engine":"managed"}}`,
+          `{"padding":"${padding}","type":"system","subtype":"session_execution_engine","subtype":"other","systemPayload":{"version":1,"engine":"managed"}}`,
+          `{"type":"user","message":"${padding}"}${MANAGED_OWNER_LINE.trimEnd()}`,
+        ];
+        fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+        for (const owner of owners) {
+          const original = `${owner}${newline ? '\n' : ''}`;
+          fs.writeFileSync(transcriptPath, original, { mode: 0o644 });
+          fs.chmodSync(transcriptPath, 0o644);
+          await expect(
+            appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
+              message: 'no',
+            }),
+          ).rejects.toMatchObject({ name: 'SessionExecutionEngineError' });
+          expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
+          expect(modeOf(transcriptPath)).toBe(0o644);
+        }
+      },
+    );
 
     it('does not treat nested JSON in an oversized message as ownership evidence', async () => {
       const embedded = JSON.stringify({
@@ -276,7 +688,7 @@ describe.skipIf(process.platform === 'win32')(
         appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
           message: 'must not append',
         }),
-      ).rejects.toThrow(/ownership record exceeds the read bound/);
+      ).rejects.toThrow(/ownership could not be verified|belongs to managed/);
 
       expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(original);
     });
@@ -306,7 +718,7 @@ describe.skipIf(process.platform === 'win32')(
         appendLegacySessionTranscriptLine(transcriptPath, sessionId, {
           message: 'must not append',
         }),
-      ).rejects.toThrow(/ownership record exceeds the read bound/);
+      ).rejects.toThrow(/ownership could not be verified|belongs to managed/);
     });
 
     it('refuses a directory at the transcript path', async () => {

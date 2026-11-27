@@ -2343,6 +2343,40 @@ describe('SessionWriterLease', () => {
       expect(lease.isReleased).toBe(true);
     });
 
+    it.each([
+      ['missing', undefined],
+      ['empty', ''],
+      ['legacy', '{"record":"legacy"}\n'],
+      [
+        'managed-looking',
+        '{"type":"system","subtype":"managed_session_header_v1"}\n',
+      ],
+    ])(
+      'preserves a schema-2 seal for a %s transcript',
+      async (_label, transcript) => {
+        const { fixture, lockPath } = await sealedLease(
+          `schema-2-${_label}`,
+          transcript,
+        );
+        const sealed = await fs.readFile(lockPath, 'utf8');
+        let acquired = false;
+        await expect(
+          acquire({
+            ...certified(fixture),
+            lockSchema: managedSchema,
+            onOwnershipAcquired: () => {
+              acquired = true;
+            },
+          }),
+        ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+        expect(acquired).toBe(false);
+        expect(await fs.readFile(lockPath, 'utf8')).toBe(sealed);
+        const successor = await acquire(certified(fixture));
+        await successor.assertOwnedAndUnchanged();
+        await successor.release();
+      },
+    );
+
     it('blocks a baseline writer from a sealed managed lock', async () => {
       const fixture = await createFixture('managed-takeover-guard-session');
       const first = await SessionWriterLease.acquire({
