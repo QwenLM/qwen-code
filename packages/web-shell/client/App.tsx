@@ -23524,9 +23524,9 @@ export function App({
           }
           if (isDaemonTurnError(error)) {
             // A loop-detected rejection ends the retry lineage: the
-            // retried turn itself was stopped for loop protection, so
-            // the stashed prompt must not be re-offered — resubmitting
-            // it tends to re-loop.
+            // retried turn itself was stopped by the tool-call cap or the
+            // duplicate tool-call breaker, so the stashed prompt must not
+            // be re-offered — resubmitting it tends to hit the same stop.
             if (error.body !== 'LOOP_DETECTED') {
               failedTurnErrorRetryRef.current = {
                 errorId: retryErrorId,

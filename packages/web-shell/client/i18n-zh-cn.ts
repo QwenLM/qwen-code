@@ -2894,18 +2894,8 @@ export const ZH: Messages = {
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'error.loopDetected.explicitCap': (vars) =>
     `本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（${vars?.limit} 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。`,
-  'error.loopDetected.backstop': (vars) =>
-    `本轮工具调用达到了 ${vars?.limit} 次的安全上限，因此系统停止了本轮操作。会话并未结束，你可以发送新的指令继续，也可以通过 model.maxToolCallsPerTurn 设定其他上限。`,
-  'error.loopDetected.stuckRepetition': (vars) =>
-    `工具调用超过 ${vars?.limit} 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。`,
-  'error.loopDetected.repeatedCall':
-    '模型在本轮中反复发起同一个工具调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
   'error.loopDetected.providerDuplicateId':
     '模型服务发来了一个已经执行过的工具调用，为避免重复执行，系统停止了本轮操作。会话并未结束，你可以发送新消息继续。',
-  'error.loopDetected.invalidToolParams':
-    '模型反复向同一个工具传入无效参数，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
-  'error.loopDetected.repeatedToolFailure':
-    '同一个工具在收到提醒后仍因相同原因失败，因此系统停止了本轮操作。会话并未结束，你可以查看上面的错误，或换一种方式。',
   'shell.command': 'Shell 命令',
   'shell.result.timedOut': '执行超时',
   'shell.result.notices': '提示',
