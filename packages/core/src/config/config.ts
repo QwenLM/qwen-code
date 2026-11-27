@@ -54,11 +54,6 @@ import {
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import {
-  DEFAULT_LOOP_PROTECTION,
-  isLoopProtectionMode,
-} from '../services/loop-protection.js';
-import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
   getQualifiedVisionModelId,
@@ -221,7 +216,6 @@ import {
 } from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
@@ -277,6 +271,7 @@ import {
   type StopFailureErrorType,
   type TodoItem,
   type TodoStatus,
+  type UserPromptSource,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import {
@@ -310,6 +305,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
+import { isSubpath } from '../utils/paths.js';
 import { type ToolName } from '../tools/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -433,9 +429,11 @@ import {
 import {
   getAutoMemoryRoot,
   getAutoMemoryIndexPath,
+  getMemoryBaseDir,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from '../memory/paths.js';
 import {
   type AutoMemoryIndexRead,
@@ -1660,10 +1658,7 @@ export interface ConfigParameters {
   preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
-  skipLoopDetection?: boolean;
-  /** What a firing loop detector does; defaults to `warn`. */
-  loopProtection?: LoopProtectionMode;
-  /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
+  /** Per-turn tool-call cap; unset or <= 0 means no cap. */
   maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
@@ -2105,13 +2100,13 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
-  const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
-  if (!Number.isInteger(resolved)) {
+  if (value == null) return 0;
+  if (!Number.isInteger(value)) {
     throw new FatalConfigError(
-      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(resolved)}`,
+      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(value)}`,
     );
   }
-  return resolved;
+  return value;
 }
 
 /** Maximum number of fallback models allowed in the chain. */
@@ -2632,6 +2627,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
+    | 'getProjectMemoryOwner'
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
@@ -2872,11 +2868,13 @@ export function deriveWorktreeConfig(
     options.customIgnoreFiles,
   );
   const workspaceContext = new WorkspaceContext(worktreePath);
+  const memoryOwner = base.getProjectMemoryOwner();
   const derived = deriveConfig(base, {
     getTargetDir: () => worktreePath,
     getCwd: () => worktreePath,
     getWorkingDir: () => worktreePath,
     getProjectRoot: () => worktreePath,
+    getProjectMemoryOwner: () => memoryOwner,
     getFileService: () => fileService,
     getWorkspaceContext: () => workspaceContext,
   });
@@ -3076,6 +3074,11 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
+  private readonly projectMemoryBaseDir: string;
+  private projectMemoryBinding?: {
+    owner: ProjectMemoryOwner;
+    worktreeRoot?: string;
+  };
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -3424,10 +3427,7 @@ export class Config {
   private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
-  private readonly skipLoopDetection: boolean;
-  private readonly loopProtection: LoopProtectionMode;
   private readonly maxToolCallsPerTurn: number;
-  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -3588,6 +3588,7 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.projectMemoryBaseDir = getMemoryBaseDir(this.sessionRuntimeBaseDir);
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
@@ -3879,17 +3880,9 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
-    this.skipLoopDetection = params.skipLoopDetection ?? false;
-    // Embedders bypass the CLI's check; an unknown mode would act as `off`.
-    this.loopProtection = isLoopProtectionMode(params.loopProtection)
-      ? params.loopProtection
-      : DEFAULT_LOOP_PROTECTION;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
-    // Whether the user explicitly set the cap (vs. the resolved default). An
-    // explicit value is honored as a hard cap; the default is adaptive.
-    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -4546,6 +4539,7 @@ export class Config {
                       input['submitted_prompt'].trim().length > 0
                       ? input['submitted_prompt']
                       : undefined,
+                    input['source'] as UserPromptSource | undefined,
                   );
                   break;
                 case 'UserPromptExpansion':
@@ -5896,13 +5890,18 @@ export class Config {
         this.memoryCorpusRevision = corpusStatus?.revision ?? '';
         this.memoryRecallModeInitialized = true;
       }
+      const projectRoot = this.getProjectRoot();
+      const owner = this.getProjectMemoryOwner();
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
-          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readAutoMemoryIndexWithStats(projectRoot, owner).catch((error) => {
+            this.debugLogger.warn('Project memory index read failed', error);
+            return null;
+          }),
           readUserAutoMemoryIndexWithStats().catch(() => null),
         ]);
       this.recordAutoMemoryIndexRead(
-        getAutoMemoryIndexPath(this.getProjectRoot()),
+        getAutoMemoryIndexPath(projectRoot, owner),
         managedAutoMemoryIndexRead,
       );
       this.recordAutoMemoryIndexRead(
@@ -5918,7 +5917,7 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      const memoryDir = getAutoMemoryRoot(this.getProjectRoot());
+      const memoryDir = getAutoMemoryRoot(projectRoot, owner);
       const userSection = {
         memoryDir: getUserAutoMemoryRoot(),
         indexContent: userAutoMemoryIndex,
@@ -5941,6 +5940,7 @@ export class Config {
           managedAutoMemoryIndex,
           userSection,
           teamSection,
+          this.getModelContextWindowSize(),
         );
         this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
@@ -5976,11 +5976,16 @@ export class Config {
     });
   }
 
-  private buildMemoryContextWarning(memoryContent: string): string | undefined {
-    const contextWindowSize =
+  getModelContextWindowSize(): number {
+    return (
       this.getContentGeneratorConfig()?.contextWindowSize ??
       this.modelsConfig.getGenerationConfig().contextWindowSize ??
-      tokenLimit(this.getModel(), 'input');
+      tokenLimit(this.getModel(), 'input')
+    );
+  }
+
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize = this.getModelContextWindowSize();
     if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
       return undefined;
     }
@@ -8581,6 +8586,10 @@ export class Config {
     }
 
     this.backgroundTaskRegistry.disposeResidentAgents();
+    const worktreeRoot = this.projectMemoryBinding?.worktreeRoot;
+    if (worktreeRoot && !isSubpath(worktreeRoot, expected)) {
+      this.projectMemoryBinding = undefined;
+    }
     this.targetDir = expected;
     this.cwd = expected;
     await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
@@ -8664,6 +8673,34 @@ export class Config {
 
   getProjectRoot(): string {
     return this.targetDir;
+  }
+
+  bindProjectMemoryToWorkspace(
+    memoryBaseDir = this.projectMemoryBaseDir,
+  ): void {
+    this.projectMemoryBinding = {
+      owner: { cwd: this.storage.getProjectRoot(), memoryBaseDir },
+    };
+  }
+
+  bindProjectMemoryToWorktree(root: string, owner: ProjectMemoryOwner): void {
+    this.projectMemoryBinding = { owner, worktreeRoot: root };
+  }
+
+  getProjectMemoryOwner(): ProjectMemoryOwner {
+    return (
+      this.projectMemoryBinding?.owner ?? {
+        cwd: this.getProjectRoot(),
+        memoryBaseDir: this.projectMemoryBaseDir,
+      }
+    );
+  }
+
+  getProjectAutoMemoryRoot(): string {
+    return getAutoMemoryRoot(
+      this.getProjectRoot(),
+      this.getProjectMemoryOwner(),
+    );
   }
 
   getCwd(): string {
@@ -10039,8 +10076,9 @@ export class Config {
       return undefined;
     }
     const projectRoot = this.getProjectRoot();
+    const owner = this.getProjectMemoryOwner();
     const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
-    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot, owner);
     // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
     // prompt is built from scans, not these indexes, so a tier that cannot be
     // read or written (EACCES, a rejected root) must not block the
@@ -10050,10 +10088,11 @@ export class Config {
         ...getProjectMetadataMigrationRoots(
           projectRoot,
           this.isTrustedFolder(),
+          owner,
         ).map((root) =>
           root === configuredProjectRoot
-            ? rebuildManagedAutoMemoryIndex(projectRoot)
-            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+            ? rebuildManagedAutoMemoryIndex(projectRoot, owner)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project', owner),
         ),
         rebuildUserAutoMemoryIndex(),
         ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
@@ -10066,7 +10105,7 @@ export class Config {
       ),
     );
     const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
-      getAutoMemoryRoot(projectRoot),
+      configuredProjectRoot,
       getUserAutoMemoryRoot(),
       teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
     );
@@ -10115,6 +10154,7 @@ export class Config {
   private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
     return scanMemoryMetadataCorpusStatus({
       projectRoot: this.getProjectRoot(),
+      projectMemoryOwner: this.getProjectMemoryOwner(),
       teamMemoryEnabled: this.getTeamMemoryEnabled(),
       trustedProject: this.isTrustedFolder(),
     });
@@ -12868,34 +12908,16 @@ export class Config {
     return this.accessibility.screenReader ?? false;
   }
 
-  getSkipLoopDetection(): boolean {
-    return this.skipLoopDetection;
-  }
-
-  getLoopProtection(): LoopProtectionMode {
-    return this.loopProtection;
-  }
-
   /**
-   * Effective per-turn tool-call cap. A configured value <= 0 disables the
-   * cap and is returned as Infinity so callers can compare unconditionally
-   * (mirrors getTruncateToolOutputThreshold).
+   * Effective per-turn tool-call cap. No cap (unset or a value <= 0) is
+   * returned as Infinity so callers can compare unconditionally (mirrors
+   * getTruncateToolOutputThreshold).
    */
   getMaxToolCallsPerTurn(): number {
     if (this.maxToolCallsPerTurn <= 0) {
       return Number.POSITIVE_INFINITY;
     }
     return this.maxToolCallsPerTurn;
-  }
-
-  /**
-   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
-   * default). An explicit value is treated as a hard cap (the released
-   * contract); the default is treated adaptively (see
-   * LoopDetectionService.checkTurnToolCallCap).
-   */
-  isMaxToolCallsPerTurnExplicit(): boolean {
-    return this.maxToolCallsPerTurnExplicit;
   }
 
   getSkipStartupContext(): boolean {

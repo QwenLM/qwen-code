@@ -480,6 +480,7 @@ jobs:
       ${{
         always() &&
         needs.prepare.result == 'success' &&
+        needs.prepare.outputs.is_dry_run == 'false' &&
         needs.build.result == 'success' &&
         needs.publish.result == 'success'
       }}

@@ -89,6 +89,7 @@ class SearchMemoryToolInvocation extends BaseToolInvocation<
     try {
       result = await executeSearchMemory(this.params, {
         projectRoot: this.config.getProjectRoot(),
+        projectMemoryOwner: this.config.getProjectMemoryOwner?.(),
         abortSignal: signal,
         teamMemoryEnabled: this.config.getTeamMemoryEnabled?.() ?? false,
         trustedProject: this.config.isTrustedFolder?.() ?? false,

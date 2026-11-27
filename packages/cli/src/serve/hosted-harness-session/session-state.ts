@@ -114,6 +114,8 @@ export interface HostedSession {
    * until the block clears. Only `managed_session_store_unavailable` goes
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
+  /** Original prompt parked by a Broker that has yet to adopt its Runtime. */
+  runtimeRecoveryPromptId?: string;
   /** The one A6 block whose pre-aborted managed cancel can still settle. */
   recoveryCancelPromptId?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;

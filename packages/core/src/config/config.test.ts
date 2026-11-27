@@ -66,7 +66,6 @@ const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -9498,11 +9497,9 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
       new Error('read failed'),
     );
-    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
-      'read failed',
-    );
+    await config.refreshHierarchicalMemory();
     expect(config.getAutoMemoryPrompt()).toBe(policy);
-    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
 
     vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
     await config.refreshHierarchicalMemory();
@@ -10210,6 +10207,58 @@ describe('Server Config (config.ts)', () => {
     skipProcessChdir: true,
     skipArtifactMigration: true,
   };
+
+  it('keeps startup-worktree memory anchored through a nested cd', async () => {
+    const config = makeConfig({ targetDir: NEW_DIR, cwd: NEW_DIR });
+    const owner = {
+      ...config.getProjectMemoryOwner(),
+      cwd: path.resolve('/launch/workspace'),
+    };
+    const originalStorage = config.storage;
+    const nested = path.join(NEW_DIR, 'nested');
+
+    config.bindProjectMemoryToWorktree(NEW_DIR, owner);
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+    expect(config.storage).toBe(originalStorage);
+    expect(
+      deriveWorktreeConfig(
+        config,
+        path.join(NEW_DIR, 'child'),
+      ).getProjectMemoryOwner(),
+    ).toEqual(owner);
+
+    await config.relocateWorkingDirectory(
+      nested,
+      nested,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(nested);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+
+    const outside = path.join(path.dirname(NEW_DIR), 'different-workspace');
+    await config.relocateWorkingDirectory(
+      outside,
+      outside,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getProjectMemoryOwner().cwd).toBe(outside);
+    expect(config.storage).toBe(originalStorage);
+  });
+
+  it('keeps the registered workspace memory owner through daemon relocations', async () => {
+    const config = makeConfig();
+    const memoryBaseDir = path.resolve('/bound/workspace-memory-base');
+    const owner = { ...config.getProjectMemoryOwner(), memoryBaseDir };
+    config.bindProjectMemoryToWorkspace(memoryBaseDir);
+    await config.relocateWorkingDirectory(
+      NEW_DIR,
+      NEW_DIR,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+  });
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
@@ -11987,37 +12036,22 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('getMaxToolCallsPerTurn', () => {
-    it('should return the default cap when unset', () => {
+    it('has no cap when unset', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
-        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        Number.POSITIVE_INFINITY,
       );
     });
 
-    it('defaults loopProtection to warn', () => {
-      expect(makeConfig().getLoopProtection()).toBe('warn');
-      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
-        'stop',
-      );
-    });
-
-    it('falls back to warn for an unknown loopProtection mode', () => {
-      expect(
-        makeConfig({
-          loopProtection: 'Stop' as never,
-        }).getLoopProtection(),
-      ).toBe('warn');
+    it('has no cap when a settings file sets it to null', () => {
+      const config = makeConfig({
+        maxToolCallsPerTurn: null as unknown as number,
+      });
+      expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
-    });
-
-    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
-      expect(makeConfig().isMaxToolCallsPerTurnExplicit()).toBe(false);
-      expect(
-        makeConfig({ maxToolCallsPerTurn: 42 }).isMaxToolCallsPerTurnExplicit(),
-      ).toBe(true);
     });
 
     it.each([0, -1])(
@@ -13843,8 +13877,27 @@ describe('Model Switching and Config Updates', () => {
         'model prompt',
         undefined,
         expected,
+        undefined,
       );
       expect(response.success).toBe(true);
+    });
+
+    it('passes the sending session through', async () => {
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      const config = await withHookSystem({ fireUserPromptSubmitEvent });
+      const source = { session_id: 'sender', cwd: '/workspace/a' };
+
+      await hookRequest(config, 'UserPromptSubmit', {
+        prompt: 'model prompt',
+        source,
+      });
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        undefined,
+        source,
+      );
     });
   });
 

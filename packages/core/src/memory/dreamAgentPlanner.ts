@@ -16,6 +16,7 @@ import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
@@ -40,7 +41,7 @@ Synthesize what you've learned recently into durable, well-organized memories so
 Rules:
 - Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory as protected read-only records. Never modify, overwrite, rename, merge into, or delete them.
 - Leave \`${AUTO_MEMORY_PINNED_DIRNAME}/\` out of consolidation analysis; do not list, read, or compare its files during Dream.
-- Merge semantically duplicate entries among writable topic files — if the same fact appears in multiple writable files, consolidate into one file and delete the rest.
+- Merge semantically duplicate entries among writable topic files. Write the surviving topic and schedule the redundant files for runtime deletion.
 - Preserve all durable information; do not delete content that is still accurate.
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
 - Keep each file independently retrievable: one coherent fact, rule, preference, or reference per file.
@@ -95,13 +96,10 @@ export function buildConsolidationTaskPrompt(
         `- Do not edit \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`; the runtime validates operations, deletes scheduled files, and rebuilds it`,
       ]
     : [
-        '## Phase 4 — Prune and index',
+        '## Phase 4 — Finish topic updates',
         '',
-        '- Delete redundant or stale files only after every replacement file is complete and valid',
-        `- Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to contain one concise line per surviving memory`,
-        '- Remove pointers to deleted files and add pointers to newly created files',
-        `- Do not intentionally remove existing index entries for valid \`${AUTO_MEMORY_PINNED_DIRNAME}/\` files; normal index limits still apply`,
-        '- Never create `.dream-operations.json`; manual `/dream` has no background runtime to apply it',
+        '- Use write_file or edit for topic updates. The runtime generates the project index.',
+        '- Leave deletions to the runtime-managed Dream operation.',
       ];
 
   return [
@@ -131,7 +129,11 @@ export function buildConsolidationTaskPrompt(
     '',
     'For each topic directory:',
     '- Identify duplicate or near-duplicate `.md` files (same fact expressed differently)',
-    '- Merge duplicates: write the canonical version into one file, delete the redundant files',
+    ...(runtimeManagedOperations
+      ? [
+          '- Merge duplicates: write the canonical version into one file and schedule redundant files in Phase 4',
+        ]
+      : []),
     `- Exclude \`${AUTO_MEMORY_PINNED_DIRNAME}/\` from duplicate, stale, and contradiction analysis; never use a pinned file as a merge target or deletion candidate`,
     '- Fix stale or contradicted facts when clear from the existing content',
     '- Convert relative dates (for example: "yesterday", "last week") to absolute dates when preserving them',
@@ -161,16 +163,25 @@ export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
   abortSignal?: AbortSignal,
-  options: { suppressChatRecording?: boolean } = {},
+  options: {
+    suppressChatRecording?: boolean;
+    projectMemoryOwner?: ProjectMemoryOwner;
+  } = {},
 ): Promise<ForkedAgentResult> {
-  const memoryRoot = getAutoMemoryRoot(projectRoot);
+  const owner = options.projectMemoryOwner ?? config.getProjectMemoryOwner?.();
+  const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
   const transcriptDir = getTranscriptDir(projectRoot);
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
-    allowShell: true,
-    includeUserMemory: false,
-    protectPinnedMemory: true,
-  });
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot, owner);
+  const scopedConfig = createMemoryScopedAgentConfig(
+    config,
+    projectRoot,
+    {
+      allowShell: true,
+      includeUserMemory: false,
+      protectPinnedMemory: true,
+    },
+    owner,
+  );
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
     config: scopedConfig,

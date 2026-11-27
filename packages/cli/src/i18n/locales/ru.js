@@ -510,7 +510,6 @@ export default {
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'Max Session Turns': 'Макс. количество ходов сессии',
   'Skip Next Speaker Check': 'Пропустить проверку следующего говорящего',
-  'Skip Loop Detection': 'Пропустить обнаружение циклов',
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
@@ -2479,6 +2478,8 @@ export default {
   Retry: 'Повторить',
   'Connecting…': 'Подключение…',
   'Loading models from provider…': 'Загрузка моделей провайдера…',
+  'Could not list models. Enter model IDs manually.':
+    'Не удалось получить список моделей. Введите идентификаторы моделей вручную.',
   'Recommended models · provider list unavailable, showing built-ins':
     'Рекомендуемые модели · список провайдера недоступен, показаны встроенные',
   'Cannot disable an extension-provided MCP server here.':
