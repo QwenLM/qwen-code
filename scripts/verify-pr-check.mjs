@@ -66,6 +66,11 @@ export const EXECUTION_CLASSES = ['hardware-isolated', 'trusted-shared-kernel'];
 export const HARDWARE_BACKENDS = ['firecracker', 'vfkit', 'provider-vm'];
 export const LIGHTWEIGHT_BACKENDS = ['container'];
 export const EXECUTION_RECORD_SCHEMA = 'verify-pr-exec-record-v1';
+export const GUARD_VERDICT_SCHEMA = 'verify-pr-guard-verdict-v1';
+export const DEFAULT_GUARD_MAX_AGE_SEC = 600;
+export const MAX_GUARD_AGE_SEC = 86400;
+const GUARD_FUTURE_SKEW_MS = 60_000;
+const GUARD_ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -95,7 +100,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--guard <verdict>] [--guard-sha256 <digest>] [--guard-max-age-sec <sec>] [--require-guard] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -162,6 +167,17 @@ Pass --context-sha256 <digest> — the sha256 that verify-pr-prepare.mjs prints
 host-side when it writes the snapshot — to bind the content: the check refuses
 a --context whose bytes do not match, so a rewritten or substituted snapshot
 is rejected even when its path and link count look clean.
+
+With --guard <verdict> (produced host-side by verify-pr-guard.mjs --compare
+--out <file>), the checker enforces the pre-publish guard mechanically: the
+verdict must live outside the PR-writable tree (never symlinked or hard-linked),
+match --guard-sha256 when provided, carry schema ${GUARD_VERDICT_SCHEMA}, be
+clean with zero reasons, match the PR coordinates and verified head, report an
+OPEN PR state, and have fresh start/now/compare timestamps within
+--guard-max-age-sec (default ${DEFAULT_GUARD_MAX_AGE_SEC}s, max ${MAX_GUARD_AGE_SEC}s).
+Pass --require-guard before local publication so missing guard evidence or a
+missing --guard-sha256 fails closed. A guard-verdict.json planted inside the
+PR-writable artifact directory is always refused.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -1466,6 +1482,158 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
   return warnings;
 }
 
+function parseGuardTimestamp(value) {
+  if (typeof value !== 'string' || !GUARD_ISO_UTC_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  // Reject calendar rollovers such as 2026-02-31T00:00:00Z that V8 silently
+  // parses into March.
+  if (!new Date(ms).toISOString().startsWith(value.slice(0, 19))) return null;
+  return ms;
+}
+
+/**
+ * Validates a host-held `verify-pr-guard.mjs --compare --out` verdict record
+ * before local publication. Fails closed on dirty verdicts, moved heads,
+ * non-OPEN PR states, PR/repo mismatches, missing timestamps, inverted order,
+ * or stale captures so reviews or pushes arriving mid-round cannot be skipped.
+ */
+export function checkGuardVerdict(
+  rawText,
+  {
+    expectedHead = null,
+    coordinates = null,
+    maxAgeSec = DEFAULT_GUARD_MAX_AGE_SEC,
+    nowMs = Date.now(),
+  } = {},
+) {
+  const errors = [];
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    return ['--guard verdict is not valid JSON'];
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return ['--guard verdict must be a JSON object'];
+  }
+  if (parsed.schema !== GUARD_VERDICT_SCHEMA) {
+    errors.push(
+      `--guard verdict schema must be ${JSON.stringify(GUARD_VERDICT_SCHEMA)}; got ${JSON.stringify(parsed.schema)}`,
+    );
+  }
+  if (typeof parsed.clean !== 'boolean') {
+    errors.push('--guard verdict clean must be a boolean');
+  }
+  if (
+    !Array.isArray(parsed.reasons) ||
+    !parsed.reasons.every((r) => typeof r === 'string')
+  ) {
+    errors.push('--guard verdict reasons must be an array of strings');
+  } else if (parsed.clean === false) {
+    const detail =
+      parsed.reasons.length > 0
+        ? `: ${parsed.reasons.slice(0, 5).join('; ')}`
+        : '';
+    errors.push(`--guard verdict is dirty${detail}`);
+  } else if (parsed.clean === true && parsed.reasons.length > 0) {
+    errors.push(
+      `--guard verdict claims clean=true but still lists ${parsed.reasons.length} dirty reason(s)`,
+    );
+  }
+
+  const repoMatch =
+    typeof parsed.repo === 'string'
+      ? /^([\w.-]+)\/([\w.-]+)$/.exec(parsed.repo)
+      : null;
+  if (!repoMatch) {
+    errors.push('--guard verdict must carry a valid owner/repo slug');
+  }
+  if (!Number.isInteger(parsed.pr) || parsed.pr <= 0) {
+    errors.push('--guard verdict must carry a positive integer pr number');
+  }
+  if (coordinates && repoMatch && Number.isInteger(parsed.pr)) {
+    if (
+      repoMatch[1].toLowerCase() !== coordinates.owner.toLowerCase() ||
+      repoMatch[2].toLowerCase() !== coordinates.repo.toLowerCase() ||
+      parsed.pr !== coordinates.number
+    ) {
+      errors.push(
+        `--guard verdict targets ${parsed.repo}#${parsed.pr}, not ${coordinates.owner}/${coordinates.repo}#${coordinates.number}`,
+      );
+    }
+  }
+
+  const head40 = /^[0-9a-f]{40}$/;
+  const validStartHead = head40.test(parsed.startHeadRefOid ?? '');
+  const validNowHead = head40.test(parsed.nowHeadRefOid ?? '');
+  if (!validStartHead || !validNowHead) {
+    errors.push(
+      '--guard verdict must carry 40-hex startHeadRefOid and nowHeadRefOid',
+    );
+  } else {
+    if (parsed.startHeadRefOid !== parsed.nowHeadRefOid) {
+      errors.push(
+        `--guard verdict shows head moved ${parsed.startHeadRefOid} -> ${parsed.nowHeadRefOid}`,
+      );
+    }
+    if (expectedHead && parsed.nowHeadRefOid !== expectedHead) {
+      errors.push(
+        `--guard verdict head ${parsed.nowHeadRefOid} does not match verified head ${expectedHead}`,
+      );
+    }
+  }
+
+  if (parsed.startState !== 'OPEN' || parsed.nowState !== 'OPEN') {
+    errors.push(
+      `--guard verdict requires an OPEN PR at start and now; got startState=${JSON.stringify(parsed.startState)}, nowState=${JSON.stringify(parsed.nowState)}`,
+    );
+  }
+
+  const startMs = parseGuardTimestamp(parsed.startCapturedAt);
+  const nowSnapMs = parseGuardTimestamp(parsed.nowCapturedAt);
+  const comparedMs = parseGuardTimestamp(parsed.comparedAt);
+  if (startMs === null || nowSnapMs === null || comparedMs === null) {
+    errors.push(
+      '--guard verdict requires valid UTC ISO-8601 startCapturedAt, nowCapturedAt, and comparedAt timestamps (re-capture snapshots with current verify-pr-guard.mjs)',
+    );
+  } else {
+    if (nowSnapMs < startMs) {
+      errors.push(
+        `--guard verdict nowCapturedAt (${parsed.nowCapturedAt}) precedes startCapturedAt (${parsed.startCapturedAt})`,
+      );
+    }
+    if (comparedMs < nowSnapMs) {
+      errors.push(
+        `--guard verdict comparedAt (${parsed.comparedAt}) precedes nowCapturedAt (${parsed.nowCapturedAt})`,
+      );
+    }
+    if (
+      nowSnapMs - nowMs > GUARD_FUTURE_SKEW_MS ||
+      comparedMs - nowMs > GUARD_FUTURE_SKEW_MS
+    ) {
+      errors.push(
+        '--guard verdict carries a future timestamp beyond the allowed clock skew',
+      );
+    }
+    const maxAgeMs = maxAgeSec * 1000;
+    const snapAgeMs = nowMs - nowSnapMs;
+    if (snapAgeMs > maxAgeMs) {
+      errors.push(
+        `--guard verdict nowCapturedAt is stale (${Math.round(snapAgeMs / 1000)}s old, limit ${maxAgeSec}s): re-fetch --now and re-run --compare before posting`,
+      );
+    }
+    const compareAgeMs = nowMs - comparedMs;
+    if (compareAgeMs > maxAgeMs) {
+      errors.push(
+        `--guard verdict comparedAt is stale (${Math.round(compareAgeMs / 1000)}s old, limit ${maxAgeSec}s): re-run --compare before posting`,
+      );
+    }
+  }
+
+  return errors;
+}
+
 /**
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
@@ -1881,6 +2049,11 @@ function main(argv) {
   let contextSha = null;
   let executionRecordPath = null;
   let executionRecordSha = null;
+  let guardPath = null;
+  let guardSha = null;
+  let guardMaxAgeSec = DEFAULT_GUARD_MAX_AGE_SEC;
+  let guardMaxAgeProvided = false;
+  let requireGuard = false;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -1925,6 +2098,41 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--guard') {
+      guardPath = argv[++index];
+      if (!guardPath) {
+        process.stderr.write(
+          `verify-pr check: --guard requires a host guard verdict path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--guard-sha256') {
+      guardSha = argv[++index];
+      if (!guardSha || !/^[0-9a-f]{64}$/.test(guardSha)) {
+        process.stderr.write(
+          `verify-pr check: --guard-sha256 requires the 64-hex digest guard printed\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--guard-max-age-sec') {
+      const rawMaxAge = argv[++index];
+      if (!rawMaxAge || !/^\d+$/.test(rawMaxAge)) {
+        process.stderr.write(
+          `verify-pr check: --guard-max-age-sec requires an integer between 1 and ${MAX_GUARD_AGE_SEC}\n\n${HELP}`,
+        );
+        return 2;
+      }
+      const parsedAge = Number(rawMaxAge);
+      if (parsedAge < 1 || parsedAge > MAX_GUARD_AGE_SEC) {
+        process.stderr.write(
+          `verify-pr check: --guard-max-age-sec requires an integer between 1 and ${MAX_GUARD_AGE_SEC}\n\n${HELP}`,
+        );
+        return 2;
+      }
+      guardMaxAgeSec = parsedAge;
+      guardMaxAgeProvided = true;
+    } else if (arg === '--require-guard') {
+      requireGuard = true;
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -1946,6 +2154,18 @@ function main(argv) {
   if (executionRecordSha && !executionRecordPath) {
     process.stderr.write(
       `verify-pr check: --execution-record-sha256 binds an --execution-record file; pass --execution-record too\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (guardSha && !guardPath) {
+    process.stderr.write(
+      `verify-pr check: --guard-sha256 binds a --guard verdict file; pass --guard too\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (guardMaxAgeProvided && !guardPath) {
+    process.stderr.write(
+      `verify-pr check: --guard-max-age-sec applies to --guard; pass --guard too\n\n${HELP}`,
     );
     return 2;
   }
@@ -2554,6 +2774,98 @@ function main(argv) {
     }
   }
 
+  // Refuse a guest-planted guard-verdict.json inside the PR-writable artifact dir.
+  // Only ENOENT confirms absence; EACCES/ENOTDIR must fail closed.
+  const plantedGuardPath = join(canonicalDir, 'guard-verdict.json');
+  try {
+    lstatSync(plantedGuardPath);
+    unreadableErrors.push(
+      'guard-verdict.json must not reside inside the PR-writable artifact directory: pass the host-held verdict via --guard',
+    );
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      unreadableErrors.push(
+        `could not verify absence of planted guard-verdict.json (${error?.code ?? 'error'})`,
+      );
+    }
+  }
+
+  let guardText = null;
+  let guardWarning = null;
+  const guardErrors = [];
+  if (guardPath) {
+    let realGuard;
+    try {
+      realGuard = realPath(guardPath);
+    } catch {
+      realGuard = resolve(guardPath);
+    }
+    const guardDerivedRoots = deriveTrustRoots();
+    if (guardDerivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${guardDerivedRoots.error}\n`);
+      return 1;
+    }
+    const guardMatchedRoot =
+      guardDerivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      guardDerivedRoots.roots.find((root) => withinRoot(root, realGuard)) ??
+      null;
+    const guardInsideByPath = guardMatchedRoot !== null;
+    let guardIsAlias = false;
+    let guardLinks = 0;
+    if (!guardInsideByPath) {
+      try {
+        const guardStat = statSync(realGuard);
+        if (guardStat.isFile()) {
+          guardLinks = guardStat.nlink;
+          guardIsAlias = guardStat.nlink !== 1;
+        }
+      } catch {
+        // Missing/unreadable verdict is refused below.
+      }
+    }
+    if (guardInsideByPath || guardIsAlias) {
+      let reason;
+      if (guardIsAlias) {
+        reason = `--guard ${guardPath} is a hard link (${guardLinks} names); write the verdict into host-held storage instead of linking it`;
+      } else if (isFilesystemRoot(guardMatchedRoot)) {
+        reason = `--guard ${guardPath} cannot be trusted under root-level trust root '${guardMatchedRoot}'`;
+      } else {
+        reason = `--guard must not point inside the PR-writable worktree (${guardPath}): pass a host-held guard verdict outside the artifact tree`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
+      return 1;
+    }
+    const rawGuard = readIfExists(guardPath);
+    if (rawGuard === null || rawGuard === UNREADABLE) {
+      process.stderr.write(
+        `verify-pr check: --guard ${guardPath} is missing or unreadable (symlinks, directories, FIFOs, and oversized files are refused)\n`,
+      );
+      return 1;
+    }
+    if (guardSha) {
+      const actualGuardSha = createHash('sha256')
+        .update(rawGuard, 'utf8')
+        .digest('hex');
+      if (actualGuardSha !== guardSha) {
+        process.stderr.write(
+          `verify-pr check: --guard ${guardPath} does not match --guard-sha256\n`,
+        );
+        return 1;
+      }
+    } else if (requireGuard) {
+      guardErrors.push(
+        '--require-guard requires --guard-sha256 to bind the host guard verdict bytes',
+      );
+    } else {
+      guardWarning = `--guard ${guardPath} has no --guard-sha256 binding; pass the host digest guard printed to bind its bytes`;
+    }
+    guardText = rawGuard;
+  } else if (requireGuard) {
+    guardErrors.push(
+      '--require-guard requires a host-held --guard verdict and matching --guard-sha256 produced by verify-pr-guard.mjs --compare --out before posting',
+    );
+  }
+
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
@@ -2669,7 +2981,23 @@ function main(argv) {
   result.errors.push(
     ...containerNonceErrors(files.boundary, files.boundaryGate, canonicalDir),
   );
+  if (requireGuard && (!contextPath || !coordinates || !expectedHead)) {
+    guardErrors.push(
+      '--require-guard requires a valid host --context snapshot (with repo, pr, and headRefOid) so the guard verdict cannot be replayed from another PR or head',
+    );
+  }
+  if (guardText !== null) {
+    guardErrors.push(
+      ...checkGuardVerdict(guardText, {
+        expectedHead,
+        coordinates,
+        maxAgeSec: guardMaxAgeSec,
+      }),
+    );
+  }
+  result.errors.push(...guardErrors);
   result.errors.unshift(...unreadableErrors);
+  if (guardWarning) result.warnings.unshift(guardWarning);
   if (executionRecordWarning) result.warnings.unshift(executionRecordWarning);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];

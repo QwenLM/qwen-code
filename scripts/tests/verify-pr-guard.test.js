@@ -5,12 +5,16 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +22,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  GUARD_VERDICT_SCHEMA,
+  buildGuardVerdict,
   compareSnapshots,
   fetchSnapshot,
   isSnapshot,
@@ -90,14 +96,18 @@ function tmpDir() {
 }
 
 describe('fetchSnapshot', () => {
-  it('normalizes each list and reads the review stamp from submitted_at', () => {
+  it('normalizes each list, reads the review stamp from submitted_at, and records capturedAt', () => {
+    const fixedNow = () => new Date('2026-11-27T12:00:00.000Z');
     const result = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
       run: fakeRun(allLists()),
+      now: fixedNow,
     });
     expect(result.ok).toBe(true);
-    expect(result.snapshot).toEqual(snapshot());
+    expect(result.snapshot).toEqual(
+      snapshot({ capturedAt: '2026-11-27T12:00:00.000Z' }),
+    );
   });
 
   it('asks for every page, not the first 30', () => {
@@ -254,6 +264,42 @@ describe('isSnapshot', () => {
         }),
       ),
     ).toBe(false);
+    expect(isSnapshot(snapshot({ capturedAt: 'not-a-timestamp' }))).toBe(false);
+    expect(
+      isSnapshot(snapshot({ capturedAt: '2026-11-27T12:00:00.000Z' })),
+    ).toBe(true);
+  });
+});
+
+describe('buildGuardVerdict', () => {
+  it('captures PR coordinates, heads, states, timestamps, and dirty reasons', () => {
+    const start = snapshot({ capturedAt: '2026-11-27T12:00:00.000Z' });
+    const now = snapshot({
+      capturedAt: '2026-11-27T12:15:00.000Z',
+      issueComments: [{ id: 9, stamp: '2026-11-27T12:10:00Z', body: 'P1' }],
+    });
+    const result = compareSnapshots(start, now);
+    expect(
+      buildGuardVerdict({
+        start,
+        now,
+        result,
+        comparedAt: '2026-11-27T12:15:02.000Z',
+      }),
+    ).toEqual({
+      schema: GUARD_VERDICT_SCHEMA,
+      clean: false,
+      repo: 'owner/repo',
+      pr: 7,
+      startHeadRefOid: HEAD,
+      nowHeadRefOid: HEAD,
+      startState: 'OPEN',
+      nowState: 'OPEN',
+      startCapturedAt: '2026-11-27T12:00:00.000Z',
+      nowCapturedAt: '2026-11-27T12:15:00.000Z',
+      comparedAt: '2026-11-27T12:15:02.000Z',
+      reasons: ['issueComments: 9 is new'],
+    });
   });
 });
 
@@ -567,10 +613,131 @@ esac`;
       withGh(dir, GH_OK),
     );
     expect(result.status).toBe(0);
-    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual(snapshot());
+    const written = JSON.parse(readFileSync(out, 'utf8'));
+    expect(written.capturedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/,
+    );
+    const { capturedAt: _capturedAt, ...rest } = written;
+    expect(rest).toEqual(snapshot());
     expect(result.stdout).toContain(
       'reviews 1, reviewComments 1, issueComments 0',
     );
+  });
+
+  it('refuses comparing a snapshot with a symlink or hardlink alias to itself', () => {
+    const dir = tmpDir();
+    const orig = join(dir, 'start.json');
+    const sym = join(dir, 'sym.json');
+    const hard = join(dir, 'hard.json');
+    writeFileSync(orig, JSON.stringify(snapshot()));
+    symlinkSync(orig, sym);
+    linkSync(orig, hard);
+
+    for (const alias of [sym, hard]) {
+      const result = run(['--compare', '--start', orig, '--now', alias]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('are the same file');
+      expect(result.stdout).not.toContain('clean');
+    }
+  });
+
+  it('writes a digest-bound verdict with --compare --out and overwrites stale clean records on dirty', () => {
+    const dir = tmpDir();
+    const verdictPath = join(dir, 'guard-verdict.json');
+    const startSnap = snapshot({ capturedAt: '2026-11-27T12:00:00.000Z' });
+    const nowSnap = snapshot({ capturedAt: '2026-11-27T12:05:00.000Z' });
+
+    const clean = run([
+      ...writeSnapshots(dir, startSnap, nowSnap),
+      '--out',
+      verdictPath,
+    ]);
+    expect(clean.status).toBe(0);
+    const rawClean = readFileSync(verdictPath, 'utf8');
+    const cleanSha = createHash('sha256')
+      .update(rawClean, 'utf8')
+      .digest('hex');
+    expect(clean.stdout).toContain(`  guard-verdict  ${verdictPath}`);
+    expect(clean.stdout).toContain(`  guard-sha256  ${cleanSha}`);
+    const parsedClean = JSON.parse(rawClean);
+    expect(parsedClean.schema).toBe(GUARD_VERDICT_SCHEMA);
+    expect(parsedClean.clean).toBe(true);
+    expect(parsedClean.reasons).toEqual([]);
+    expect(parsedClean.startCapturedAt).toBe('2026-11-27T12:00:00.000Z');
+    expect(parsedClean.nowCapturedAt).toBe('2026-11-27T12:05:00.000Z');
+
+    // A later dirty comparison at the same --out path overwrites clean=true
+    // with clean=false so a stale clean verdict cannot survive.
+    const dirtyNow = snapshot({
+      capturedAt: '2026-11-27T12:10:00.000Z',
+      issueComments: [{ id: 9, stamp: '2026-11-27T12:09:00Z', body: 'P1' }],
+    });
+    const dirty = run([
+      ...writeSnapshots(dir, startSnap, dirtyNow),
+      '--out',
+      verdictPath,
+    ]);
+    expect(dirty.status).toBe(1);
+    expect(dirty.stdout).not.toContain('guard-sha256');
+    const parsedDirty = JSON.parse(readFileSync(verdictPath, 'utf8'));
+    expect(parsedDirty.clean).toBe(false);
+    expect(parsedDirty.reasons).toContain('issueComments: 9 is new');
+  });
+
+  it('refuses unsafe --out targets, missing flag values, and unknown options', () => {
+    const dir = tmpDir();
+    const startSnap = snapshot({ capturedAt: '2026-11-27T12:00:00.000Z' });
+    const nowSnap = snapshot({ capturedAt: '2026-11-27T12:05:00.000Z' });
+    const baseArgs = writeSnapshots(dir, startSnap, nowSnap);
+
+    // --out aliasing --start or --now (directly or via symlinked parent dir)
+    // is a usage error.
+    expect(run([...baseArgs, '--out', join(dir, 'start.json')]).status).toBe(2);
+    expect(run([...baseArgs, '--out', join(dir, 'now.json')]).status).toBe(2);
+    const parentAlias = join(dir, 'dir-alias');
+    symlinkSync(dir, parentAlias);
+    expect(
+      run([...baseArgs, '--out', join(parentAlias, 'start.json')]).status,
+    ).toBe(2);
+    expect(
+      isSnapshot(snapshot({ capturedAt: '2026-02-31T12:00:00.000Z' })),
+    ).toBe(false);
+
+    // --out through a symlink, hardlink, or directory is refused.
+    const target = join(dir, 'real.json');
+    writeFileSync(target, 'keep');
+    const symOut = join(dir, 'sym-out.json');
+    symlinkSync(target, symOut);
+    const symRes = run([...baseArgs, '--out', symOut]);
+    expect(symRes.status).toBe(1);
+    expect(symRes.stderr).toContain('symbolic link');
+    expect(readFileSync(target, 'utf8')).toBe('keep');
+
+    const hardOut = join(dir, 'hard-out.json');
+    linkSync(target, hardOut);
+    const hardRes = run([...baseArgs, '--out', hardOut]);
+    expect(hardRes.status).toBe(1);
+    expect(hardRes.stderr).toContain('hard link');
+
+    const dirOut = join(dir, 'dir-out');
+    mkdirSync(dirOut);
+    expect(run([...baseArgs, '--out', dirOut]).status).toBe(1);
+
+    // Usage errors for missing value, misplaced --out, and unknown flag.
+    expect(run([...baseArgs, '--out']).status).toBe(2);
+    expect(
+      run([
+        '--pr',
+        '7',
+        '--repo',
+        'owner/repo',
+        '--snapshot',
+        join(dir, 's.json'),
+        '--out',
+        join(dir, 'v.json'),
+      ]).status,
+    ).toBe(2);
+    expect(run(['--unknown-flag']).status).toBe(2);
   });
 
   it('leaves no file behind when a call fails, so a retry cannot read as a snapshot', () => {

@@ -324,11 +324,44 @@ function reviewPages() {
       ],
     },
   });
+  const comments = {
+    totalCount: 105,
+    nodes: [
+      {
+        createdAt: '2026-11-01T01:30:00Z',
+        updatedAt: '2026-11-01T01:35:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-101',
+        body: '**[P1]** Separate git-dir objects symlinked into `.qwen/tmp/` are deleted.',
+        author: { login: 'maintainer' },
+        authorAssociation: 'COLLABORATOR',
+        isMinimized: false,
+      },
+      {
+        createdAt: '2026-11-01T01:40:00Z',
+        updatedAt: '2026-11-01T01:40:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-102',
+        body: 'Minimized old note **[P1]**',
+        author: { login: 'colleague' },
+        authorAssociation: 'MEMBER',
+        isMinimized: true,
+      },
+      {
+        createdAt: '2026-11-01T01:45:00Z',
+        updatedAt: '2026-11-01T01:45:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-103',
+        body: '**[P0]** Drive-by comment from non-maintainer',
+        author: { login: 'outsider' },
+        authorAssociation: 'NONE',
+        isMinimized: false,
+      },
+    ],
+  };
   const page = (nodes, hasNextPage) => ({
     data: {
       repository: {
         pullRequest: {
           latestOpinionatedReviews: opinionated,
+          comments,
           reviewThreads: {
             pageInfo: { hasNextPage, endCursor: hasNextPage ? 'c1' : 'c2' },
             nodes,
@@ -1457,6 +1490,19 @@ describe('reviewState', () => {
         body: 'Blocking: the retry drops the cursor.',
       },
     ]);
+    // Only non-minimized OWNER/MEMBER/COLLABORATOR top-level comments survive,
+    // while totalCount preserves whether `last: 100` truncated older comments.
+    expect(state.issueCommentCount).toBe(105);
+    expect(state.issueComments).toEqual([
+      {
+        author: 'maintainer',
+        association: 'COLLABORATOR',
+        createdAt: '2026-11-01T01:30:00Z',
+        updatedAt: '2026-11-01T01:35:00Z',
+        url: 'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-101',
+        body: '**[P1]** Separate git-dir objects symlinked into `.qwen/tmp/` are deleted.',
+      },
+    ]);
   });
 
   // The stand-ins answer any query, so only GitHub can reject a field: a
@@ -1464,7 +1510,7 @@ describe('reviewState', () => {
   // text only after running the new query against a real PR.
   it('sends the query that was checked against the live API', () => {
     expect(REVIEW_STATE_QUERY).toBe(
-      'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }',
+      'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } comments(last: 100) { totalCount nodes { createdAt updatedAt url body author { login } authorAssociation isMinimized } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }',
     );
   });
 
@@ -1481,6 +1527,7 @@ describe('reviewState', () => {
       [{ data: null }],
       withPull({ reviewThreads: null }),
       withPull({ latestOpinionatedReviews: null }),
+      withPull({ comments: null }),
       withPull({
         reviewThreads: {
           ...pull.reviewThreads,
@@ -1497,6 +1544,7 @@ describe('reviewState', () => {
         },
       }),
       withPull({ latestOpinionatedReviews: { nodes: [null] } }),
+      withPull({ comments: { totalCount: 1, nodes: [null] } }),
     ]) {
       expect(reviewState(pages)).toBeNull();
     }
