@@ -1236,6 +1236,256 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(git(inner, 'show', 'HEAD:committed.txt')).toBe('v1-committed');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves an external --separate-git-dir objects/ symlink target inside ignored .qwen/tmp/git-objects/',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extGitDir = path.join(root, 'ext-git-symlinked-objects');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'first-revision\n');
+      await fs.writeFile(path.join(inner, 'keep.txt'), 'kept\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2-delete-old', '--no-verify');
+      await fs.writeFile(path.join(inner, 'draft.md'), 'keep-draft\n');
+
+      // Move the external repo's `objects/` inside ignored `.qwen/tmp/git-objects/`
+      // and leave a symlink in `extGitDir/objects`, with sibling plain cache beside it.
+      const movedObjects = path.join(worktree, '.qwen', 'tmp', 'git-objects');
+      await fs.mkdir(path.dirname(movedObjects), { recursive: true });
+      await fs.rename(path.join(extGitDir, 'objects'), movedObjects);
+      await fs.symlink(movedObjects, path.join(extGitDir, 'objects'));
+
+      const blobs = path.join(worktree, '.qwen', 'tmp', 'blobs');
+      await fs.mkdir(blobs, { recursive: true });
+      await fs.writeFile(path.join(blobs, 'scratch.bin'), 'cache\n');
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members.some((m) => m.startsWith('.qwen/tmp/git-objects/'))).toBe(
+        true,
+      );
+      expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+
+      // A late object written into `.qwen/tmp/git-objects/` must be caught by
+      // post-capture verification (not skipped as ignored cache).
+      const lateBlob = path.join(movedObjects, 'late-probe.tmp');
+      await fs.writeFile(lateBlob, 'late\n');
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(false);
+      await fs.rm(lateBlob);
+
+      // Simulate parent deletion + original-path restore.
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'vendor'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(await fs.readFile(path.join(inner, 'draft.md'), 'utf8')).toBe(
+        'keep-draft\n',
+      );
+      expect(git(inner, 'cat-file', '-t', 'HEAD^{commit}')).toBe('commit');
+      expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe(
+        'first-revision',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves an in-tree symlink inside ignored .qwen/tmp/ that .git traverses to reach an external repo',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extGitDir = path.join(root, 'ext-git-via-tmp-symlink');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'via-symlink-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2', '--no-verify');
+
+      const linkInTmp = path.join(worktree, '.qwen', 'tmp', 'link-to-ext-git');
+      await fs.mkdir(path.dirname(linkInTmp), { recursive: true });
+      await fs.symlink(extGitDir, linkInTmp);
+      await fs.writeFile(path.join(inner, '.git'), `gitdir: ${linkInTmp}\n`);
+
+      const blobs = path.join(worktree, '.qwen', 'tmp', 'blobs');
+      await fs.mkdir(blobs, { recursive: true });
+      await fs.writeFile(path.join(blobs, 'scratch.bin'), 'cache\n');
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members).toContain('.qwen/tmp/link-to-ext-git');
+      expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'vendor'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe(
+        'via-symlink-v1',
+      );
+    },
+  );
+
+  it('preserves an alternate objects directory under ignored dist/ referenced by a shared clone', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), 'dist/\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-dist', '--no-verify');
+
+    const upstream = path.join(worktree, 'dist', 'upstream');
+    await fs.mkdir(upstream, { recursive: true });
+    git(upstream, 'init', '-q', '-b', 'main');
+    git(upstream, 'config', 'user.email', 't@e.com');
+    git(upstream, 'config', 'user.name', 't');
+    git(upstream, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(upstream, 'old.txt'), 'shared-v1\n');
+    git(upstream, 'add', '.');
+    git(upstream, 'commit', '-qm', 'u1', '--no-verify');
+    const firstCommit = git(upstream, 'rev-parse', 'HEAD');
+    await fs.rm(path.join(upstream, 'old.txt'));
+    git(upstream, 'add', '-A');
+    git(upstream, 'commit', '-qm', 'u2', '--no-verify');
+
+    const shared = path.join(worktree, 'vendor', 'shared');
+    await fs.mkdir(path.dirname(shared), { recursive: true });
+    git(worktree, 'clone', '-q', '--shared', upstream, shared);
+
+    const { snapshotPath, metaPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+    expect(checkoutMatchesCapture).toBe(true);
+
+    const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+    await fs.rm(path.join(worktree, 'dist'), { recursive: true, force: true });
+    await fs.rm(path.join(worktree, 'vendor'), {
+      recursive: true,
+      force: true,
+    });
+    await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+    expect(git(shared, 'show', `${firstCommit}:old.txt`)).toBe('shared-v1');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses capture when a clean external linked worktree resolves its objects/ back into ignored .qwen/tmp/',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extOrigin = path.join(root, 'ext-origin-symlinked-objs');
+      await fs.mkdir(extOrigin, { recursive: true });
+      git(extOrigin, 'init', '-q', '-b', 'main');
+      git(extOrigin, 'config', 'user.email', 't@e.com');
+      git(extOrigin, 'config', 'user.name', 't');
+      git(extOrigin, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(extOrigin, 'seed.txt'), 'seed\n');
+      git(extOrigin, 'add', '.');
+      git(extOrigin, 'commit', '-qm', 'seed', '--no-verify');
+
+      const inner = path.join(worktree, '.qwen', 'worktrees', 'clean-ext');
+      git(extOrigin, 'worktree', 'add', '-q', '-b', 'clean-ext', inner, 'HEAD');
+
+      const movedObjects = path.join(worktree, '.qwen', 'tmp', 'ext-objects');
+      await fs.mkdir(path.dirname(movedObjects), { recursive: true });
+      await fs.rename(path.join(extOrigin, '.git', 'objects'), movedObjects);
+      await fs.symlink(movedObjects, path.join(extOrigin, '.git', 'objects'));
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow(
+        /nested checkout \.qwen\/worktrees\/clean-ext resolves git metadata through paths inside this checkout/,
+      );
+    },
+  );
+
   it.each(['.qwen/tmp/*\n', ''])(
     'refuses capture when .qwen/tmp itself is a detached external linked worktree under ignore rule %j',
     async (ignoreRule) => {

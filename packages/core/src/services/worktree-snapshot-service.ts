@@ -833,6 +833,279 @@ async function resolveWorktreeAdminDir(
     .catch(() => undefined);
 }
 
+interface PathResolutionTrace {
+  resolvedPath: string | undefined;
+  inTreePaths: string[];
+  hitsUnarchivableRoot: boolean;
+  hitsParentAdminDir: boolean;
+  unreadable: boolean;
+}
+
+const MAX_SYMLINK_HOPS = 40;
+const MAX_ALTERNATES_DEPTH = 5;
+
+/**
+ * Resolve `inputPath` step-by-step across symlinks, recording every in-tree
+ * path (both intermediate/leaf symlinks and resolved targets) that lies inside
+ * `worktreePath`, as well as whether resolution touches the unarchivable
+ * top-level `.git` root or the parent worktree's own admin dir.
+ */
+async function tracePathResolution(
+  inputPath: string,
+  realWorktree: string,
+  resolvedWorktree: string,
+  realParentAdminDir: string | undefined,
+  optional: boolean,
+): Promise<PathResolutionTrace> {
+  const inTreePathSet = new Set<string>();
+  let hitsUnarchivableRoot = false;
+  let hitsParentAdminDir = false;
+
+  const recordCandidate = (candidate: string): void => {
+    const rel =
+      relativePosixIfInside(realWorktree, candidate) ??
+      relativePosixIfInside(resolvedWorktree, candidate);
+    if (rel !== undefined) {
+      if (rel === '' || rel === '.git' || rel.startsWith('.git/')) {
+        hitsUnarchivableRoot = true;
+      } else {
+        inTreePathSet.add(rel);
+      }
+    }
+    if (
+      realParentAdminDir !== undefined &&
+      relativePosixIfInside(realParentAdminDir, candidate) !== undefined
+    ) {
+      hitsParentAdminDir = true;
+    }
+  };
+
+  let current = path.resolve(inputPath);
+  let hops = 0;
+
+  while (true) {
+    const parsed = path.parse(current);
+    const remainder = current.slice(parsed.root.length);
+    const segments = remainder.split(path.sep).filter((s) => s.length > 0);
+    let built = parsed.root;
+    let followedSymlink = false;
+
+    for (let i = 0; i < segments.length; i++) {
+      built = path.join(built, segments[i]);
+      let stat;
+      try {
+        stat = await fs.lstat(built);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const missing = code === 'ENOENT' || code === 'ENOTDIR';
+        return {
+          resolvedPath: undefined,
+          inTreePaths: [...inTreePathSet],
+          hitsUnarchivableRoot,
+          hitsParentAdminDir,
+          unreadable: !(optional && missing),
+        };
+      }
+      if (stat.isSymbolicLink()) {
+        recordCandidate(built);
+        hops += 1;
+        if (hops > MAX_SYMLINK_HOPS) {
+          return {
+            resolvedPath: undefined,
+            inTreePaths: [...inTreePathSet],
+            hitsUnarchivableRoot,
+            hitsParentAdminDir,
+            unreadable: true,
+          };
+        }
+        let target: string;
+        try {
+          target = await fs.readlink(built);
+        } catch {
+          return {
+            resolvedPath: undefined,
+            inTreePaths: [...inTreePathSet],
+            hitsUnarchivableRoot,
+            hitsParentAdminDir,
+            unreadable: true,
+          };
+        }
+        const nextBase = path.resolve(path.dirname(built), target);
+        const rest = segments.slice(i + 1);
+        current = rest.length > 0 ? path.join(nextBase, ...rest) : nextBase;
+        followedSymlink = true;
+        break;
+      }
+    }
+
+    if (!followedSymlink) {
+      recordCandidate(built);
+      return {
+        resolvedPath: built,
+        inTreePaths: [...inTreePathSet],
+        hitsUnarchivableRoot,
+        hitsParentAdminDir,
+        unreadable: false,
+      };
+    }
+  }
+}
+
+interface GitStoreDependencyTrace {
+  inTreePaths: string[];
+  hitsUnarchivableRoot: boolean;
+  hitsParentAdminDir: boolean;
+  unreadable: boolean;
+}
+
+/**
+ * Trace the critical git store entries (`objects/`, `objects/pack`,
+ * `objects/info`, `objects/info/alternates`, `refs/`, `reftable/`,
+ * `packed-refs`, `HEAD`, `index`, `config`, `logs`) of a repository's git dir
+ * and common dir so symlinks or alternates pointing back into ignored paths of
+ * `worktreePath` (e.g. `.qwen/tmp/git-objects/` or `dist/`) are discovered and
+ * preserved in the snapshot (or refused fail-closed when unarchivable).
+ */
+async function traceGitStoreDependencies(
+  realGitDir: string,
+  realCommonDir: string,
+  realWorktree: string,
+  resolvedWorktree: string,
+  realParentAdminDir: string | undefined,
+): Promise<GitStoreDependencyTrace> {
+  const inTreePathSet = new Set<string>();
+  let hitsUnarchivableRoot = false;
+  let hitsParentAdminDir = false;
+  let unreadable = false;
+
+  const absorb = (trace: PathResolutionTrace): void => {
+    for (const p of trace.inTreePaths) inTreePathSet.add(p);
+    if (trace.hitsUnarchivableRoot) hitsUnarchivableRoot = true;
+    if (trace.hitsParentAdminDir) hitsParentAdminDir = true;
+    if (trace.unreadable) unreadable = true;
+  };
+
+  const gitDirEntries: Array<[string, boolean]> = [
+    ['HEAD', false],
+    ['index', true],
+    ['logs', true],
+  ];
+  for (const [entry, optional] of gitDirEntries) {
+    absorb(
+      await tracePathResolution(
+        path.join(realGitDir, entry),
+        realWorktree,
+        resolvedWorktree,
+        realParentAdminDir,
+        optional,
+      ),
+    );
+  }
+
+  const objectsTrace = await tracePathResolution(
+    path.join(realCommonDir, 'objects'),
+    realWorktree,
+    resolvedWorktree,
+    realParentAdminDir,
+    false,
+  );
+  absorb(objectsTrace);
+
+  const commonDirEntries: Array<[string, boolean]> = [
+    ['refs', true],
+    ['reftable', true],
+    ['packed-refs', true],
+    ['config', true],
+  ];
+  if (realCommonDir !== realGitDir) {
+    commonDirEntries.push(['HEAD', true]);
+  }
+  for (const [entry, optional] of commonDirEntries) {
+    absorb(
+      await tracePathResolution(
+        path.join(realCommonDir, entry),
+        realWorktree,
+        resolvedWorktree,
+        realParentAdminDir,
+        optional,
+      ),
+    );
+  }
+
+  const visitedObjectsDirs = new Set<string>();
+  const traceObjectsDir = async (
+    objectsDir: string,
+    depth: number,
+  ): Promise<void> => {
+    if (visitedObjectsDirs.has(objectsDir)) return;
+    visitedObjectsDirs.add(objectsDir);
+    for (const sub of ['pack', 'info']) {
+      absorb(
+        await tracePathResolution(
+          path.join(objectsDir, sub),
+          realWorktree,
+          resolvedWorktree,
+          realParentAdminDir,
+          true,
+        ),
+      );
+    }
+    const alternatesPath = path.join(objectsDir, 'info', 'alternates');
+    const alternatesTrace = await tracePathResolution(
+      alternatesPath,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+      true,
+    );
+    absorb(alternatesTrace);
+    if (alternatesTrace.resolvedPath === undefined) return;
+    if (depth >= MAX_ALTERNATES_DEPTH) {
+      unreadable = true;
+      return;
+    }
+    let content: string;
+    try {
+      content = await fs.readFile(alternatesTrace.resolvedPath, 'utf8');
+    } catch {
+      unreadable = true;
+      return;
+    }
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.replace(/\r$/, '');
+      if (line.length === 0 || line.startsWith('#')) continue;
+      if (line.startsWith('"')) {
+        // C-quoted alternate path: fail closed rather than misparsing escapes.
+        unreadable = true;
+        return;
+      }
+      const altTarget = path.resolve(objectsDir, line);
+      const altTrace = await tracePathResolution(
+        altTarget,
+        realWorktree,
+        resolvedWorktree,
+        realParentAdminDir,
+        false,
+      );
+      absorb(altTrace);
+      if (altTrace.resolvedPath !== undefined) {
+        await traceObjectsDir(altTrace.resolvedPath, depth + 1);
+      }
+    }
+  };
+
+  if (objectsTrace.resolvedPath !== undefined) {
+    await traceObjectsDir(objectsTrace.resolvedPath, 0);
+  }
+
+  return {
+    inTreePaths: [...inTreePathSet],
+    hitsUnarchivableRoot,
+    hitsParentAdminDir,
+    unreadable,
+  };
+}
+
 interface ResolvedGitFileTargets {
   realGitDir: string;
   realCommonDir: string | undefined;
@@ -846,12 +1119,16 @@ interface ResolvedGitFileTargets {
    * survives `git worktree prune` intact.
    */
   isLinkedWorktree: boolean;
+  hitsUnarchivableRoot: boolean;
+  hitsParentAdminDir: boolean;
+  unreadableDependency: boolean;
 }
 
 async function resolveGitFileTargets(
   childPath: string,
   realWorktree: string,
   resolvedWorktree: string,
+  realParentAdminDir?: string,
 ): Promise<ResolvedGitFileTargets | undefined> {
   const marker = await fs
     .lstat(path.join(childPath, '.git'))
@@ -863,18 +1140,38 @@ async function resolveGitFileTargets(
   const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1]?.trim();
   if (!declared) return undefined;
   const rawGitDir = path.resolve(childPath, declared);
-  const realGitDir = await fs.realpath(rawGitDir).catch(() => undefined);
+  const gitDirTrace = await tracePathResolution(
+    rawGitDir,
+    realWorktree,
+    resolvedWorktree,
+    realParentAdminDir,
+    true,
+  );
+  const realGitDir = gitDirTrace.resolvedPath;
   if (realGitDir === undefined) return undefined;
+
   let commonDirUnreadable = false;
-  const commonDirRaw = await fs
-    .readFile(path.join(realGitDir, 'commondir'), 'utf8')
-    .catch((error) => {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-        commonDirUnreadable = true;
-      }
-      return undefined;
-    });
+  const commonDirFilePath = path.join(realGitDir, 'commondir');
+  const commonDirFileTrace = await tracePathResolution(
+    commonDirFilePath,
+    realWorktree,
+    resolvedWorktree,
+    realParentAdminDir,
+    true,
+  );
+  const commonDirRaw =
+    commonDirFileTrace.resolvedPath !== undefined
+      ? await fs
+          .readFile(commonDirFileTrace.resolvedPath, 'utf8')
+          .catch((error) => {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+              commonDirUnreadable = true;
+            }
+            return undefined;
+          })
+      : undefined;
+  if (commonDirFileTrace.unreadable) commonDirUnreadable = true;
   const hasCommonDir =
     commonDirRaw !== undefined && commonDirRaw.trim().length > 0;
   const hasGitDirBackPointer = await fs
@@ -888,57 +1185,106 @@ async function resolveGitFileTargets(
     );
   const isLinkedWorktree =
     hasCommonDir || commonDirUnreadable || hasGitDirBackPointer;
-  const realCommonDir = hasCommonDir
-    ? await fs
-        .realpath(path.resolve(realGitDir, commonDirRaw.trim()))
-        .catch(() => undefined)
-    : commonDirUnreadable
-      ? undefined
-      : realGitDir;
+
+  let realCommonDir: string | undefined;
+  let commonDirTargetTrace: PathResolutionTrace | undefined;
+  if (hasCommonDir) {
+    commonDirTargetTrace = await tracePathResolution(
+      path.resolve(realGitDir, commonDirRaw.trim()),
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+      false,
+    );
+    realCommonDir = commonDirTargetTrace.resolvedPath;
+  } else {
+    realCommonDir = commonDirUnreadable ? undefined : realGitDir;
+  }
 
   const gitDirInside = relativePosixIfInside(realWorktree, realGitDir);
-  const rawGitDirInside = relativePosixIfInside(resolvedWorktree, rawGitDir);
   const commonDirInside =
     realCommonDir !== undefined
       ? relativePosixIfInside(realWorktree, realCommonDir)
       : undefined;
   const insideWorktree =
     gitDirInside !== undefined || commonDirInside !== undefined;
-  const inTreeStorePaths: string[] = [];
-  if (insideWorktree) {
-    for (const candidate of [gitDirInside, rawGitDirInside, commonDirInside]) {
-      if (
-        candidate !== undefined &&
-        candidate.length > 0 &&
-        candidate !== '.git' &&
-        !candidate.startsWith('.git/')
-      ) {
-        inTreeStorePaths.push(candidate);
-      }
-    }
+
+  const inTreePathSet = new Set<string>([
+    ...gitDirTrace.inTreePaths,
+    ...commonDirFileTrace.inTreePaths,
+    ...(commonDirTargetTrace?.inTreePaths ?? []),
+  ]);
+  let hitsUnarchivableRoot =
+    gitDirTrace.hitsUnarchivableRoot ||
+    commonDirFileTrace.hitsUnarchivableRoot ||
+    (commonDirTargetTrace?.hitsUnarchivableRoot ?? false);
+  let hitsParentAdminDir =
+    gitDirTrace.hitsParentAdminDir ||
+    commonDirFileTrace.hitsParentAdminDir ||
+    (commonDirTargetTrace?.hitsParentAdminDir ?? false);
+  let unreadableDependency =
+    gitDirTrace.unreadable ||
+    commonDirFileTrace.unreadable ||
+    (commonDirTargetTrace?.unreadable ?? false);
+
+  if (realCommonDir !== undefined) {
+    const storeTrace = await traceGitStoreDependencies(
+      realGitDir,
+      realCommonDir,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+    );
+    for (const p of storeTrace.inTreePaths) inTreePathSet.add(p);
+    if (storeTrace.hitsUnarchivableRoot) hitsUnarchivableRoot = true;
+    if (storeTrace.hitsParentAdminDir) hitsParentAdminDir = true;
+    if (storeTrace.unreadable) unreadableDependency = true;
   }
+
   return {
     realGitDir,
     realCommonDir,
-    inTreeStorePaths,
+    inTreeStorePaths: [...inTreePathSet],
     insideWorktree,
     isLinkedWorktree,
+    hitsUnarchivableRoot,
+    hitsParentAdminDir,
+    unreadableDependency,
   };
 }
 
 /**
- * Extract any in-tree git object-store paths (`gitdir` / `commondir`) pointed
- * to by `childPath/.git` when that store lies inside `worktreePath` (outside
- * top-level `.git/`). Called during verification even when the archive already
- * carries `childPath/` so a `--separate-git-dir` store inside an ignored dir
- * (e.g. `dist/inner.git`) stays unexcluded and late commits cannot slip past
- * the final pre-removal check.
+ * Extract any in-tree paths required to resolve `childPath/.git` and its object
+ * store (`gitdir` symlinks, `commondir`, `objects/`, `refs/`, `alternates`,
+ * etc.) that lie inside `worktreePath` (outside top-level `.git/`). Works for
+ * both `.git` files and `.git` directories, and is called during verification
+ * even when the archive already carries `childPath/` so stores or symlinks
+ * inside ignored dirs (e.g. `dist/inner.git`, `.qwen/tmp/git-objects/`) stay
+ * unexcluded and late commits cannot slip past the final pre-removal check.
  */
 async function resolveInTreeGitStorePaths(
   childPath: string,
   realWorktree: string,
   resolvedWorktree: string,
 ): Promise<string[]> {
+  const marker = await fs
+    .lstat(path.join(childPath, '.git'))
+    .catch(() => undefined);
+  if (marker === undefined) return [];
+  if (marker.isDirectory()) {
+    const realGitDir = await fs
+      .realpath(path.join(childPath, '.git'))
+      .catch(() => undefined);
+    if (realGitDir === undefined) return [];
+    const storeTrace = await traceGitStoreDependencies(
+      realGitDir,
+      realGitDir,
+      realWorktree,
+      resolvedWorktree,
+      undefined,
+    );
+    return storeTrace.inTreePaths;
+  }
   const targets = await resolveGitFileTargets(
     childPath,
     realWorktree,
@@ -1024,40 +1370,83 @@ async function classifyNestedCheckout(
     .catch(() => undefined);
   if (marker === undefined) return { kind: 'not-checkout' };
   // `lstat`, never a followed probe: `.git` as a DIRECTORY is an independent
-  // repository whose entire object database lives inside this directory and is
-  // archived intact when the child stays unexcluded.
+  // repository whose object database lives here — still trace its store
+  // dependencies in case `objects/` or `objects/info/alternates` points into
+  // an ignored directory inside `worktreePath` (e.g. `.qwen/tmp/` or `dist/`).
+  if (marker.isDirectory()) {
+    const realGitDir = await fs
+      .realpath(path.join(childPath, '.git'))
+      .catch(() => undefined);
+    if (realGitDir === undefined) {
+      return { kind: 'archive', preserveRelPaths: [] };
+    }
+    const looksLikeGitRepo = await fs.lstat(path.join(realGitDir, 'HEAD')).then(
+      () => true,
+      () => false,
+    );
+    if (!looksLikeGitRepo) {
+      return { kind: 'archive', preserveRelPaths: [] };
+    }
+    const storeTrace = await traceGitStoreDependencies(
+      realGitDir,
+      realGitDir,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+    );
+    if (
+      storeTrace.hitsParentAdminDir ||
+      storeTrace.hitsUnarchivableRoot ||
+      storeTrace.unreadable
+    ) {
+      return {
+        kind: 'refuse-external',
+        reason: `nested checkout ${childRel} depends on git store state that cannot be archived faithfully; refusing to capture a parent that would delete it`,
+      };
+    }
+    return { kind: 'archive', preserveRelPaths: storeTrace.inTreePaths };
+  }
   if (!marker.isFile()) return { kind: 'archive', preserveRelPaths: [] };
   const targets = await resolveGitFileTargets(
     childPath,
     realWorktree,
     resolvedWorktree,
+    realParentAdminDir,
   );
   if (targets === undefined) {
     return { kind: 'archive', preserveRelPaths: [] };
+  }
+  if (targets.hitsParentAdminDir) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} stores git metadata inside this worktree's admin dir; refusing to capture a parent that would delete it`,
+    };
   }
   if (targets.insideWorktree) {
     return { kind: 'archive', preserveRelPaths: targets.inTreeStorePaths };
   }
   const { realGitDir, realCommonDir } = targets;
 
-  if (
-    realParentAdminDir !== undefined &&
-    (relativePosixIfInside(realParentAdminDir, realGitDir) !== undefined ||
-      (realCommonDir !== undefined &&
-        relativePosixIfInside(realParentAdminDir, realCommonDir) !== undefined))
-  ) {
+  if (targets.hitsUnarchivableRoot || targets.unreadableDependency) {
     return {
       kind: 'refuse-external',
-      reason: `nested checkout ${childRel} stores git metadata inside this worktree's admin dir; refusing to capture a parent that would delete it`,
+      reason: `nested checkout ${childRel} depends on unreadable or unarchivable git store state; refusing to capture a parent that would delete it`,
     };
   }
 
   // A standalone repository using an external `--separate-git-dir` has no
   // linked-worktree admin dir for `git worktree prune` to remove: archiving
-  // the checkout preserves drafts and `.git` while the external store stays
-  // intact, so restore keeps drafts, HEAD, and commit history readable.
+  // the checkout PLUS any in-tree symlinks/object-store targets it depends on
+  // keeps drafts, HEAD, and commit history readable after prune and restore.
   if (!targets.isLinkedWorktree) {
-    return { kind: 'archive', preserveRelPaths: [] };
+    return { kind: 'archive', preserveRelPaths: targets.inTreeStorePaths };
+  }
+
+  if (targets.inTreeStorePaths.length > 0) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} resolves git metadata through paths inside this checkout (${targets.inTreeStorePaths[0]}); refusing to capture a parent that would delete them`,
+    };
   }
 
   if (realCommonDir === undefined) {
