@@ -12,9 +12,8 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { applyModelReasoningEffort } from '../../config/model-preferences.js';
 import {
-  applyReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
@@ -110,16 +109,12 @@ export const effortCommand: SlashCommand = {
       };
     }
 
-    // Apply at runtime (takes effect next turn) and persist for future sessions.
-    // Provider adapters clamp the tier to what the active model supports.
-    applyReasoningEffort(config, tier);
-    if (context.executionPolicy?.persistModelSelection !== false) {
-      settings.setValue(
-        getPersistScopeForModelSelection(settings),
-        'model.reasoningEffort',
-        tier,
-      );
-    }
+    applyModelReasoningEffort(
+      config,
+      settings,
+      tier,
+      context.executionPolicy?.persistModelSelection !== false,
+    );
 
     return {
       type: 'message',

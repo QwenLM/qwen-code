@@ -363,6 +363,7 @@ function isBusyWorkspaceAcquisition(cause: unknown): boolean {
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
+  writerOwner?: HttpToolPublicationOwner['owner'];
   // The Session-scoped publisher instance: one server owns every Shell
   // capture of the Session across turns, so background traffic keeps its
   // endpoint after the registering turn ends (H3 fifth slice drains it at
@@ -2432,7 +2433,9 @@ export class HostedWorkspaceToolTurn {
       externalShellLane ||
       extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
     // The Shell lane's publication is the capture its drain proves, so it is
-    // required there and forbidden on files; every other lane is closed on both.
+    // required there and forbidden on files; every other lane is closed on
+    // both. The skill catalog is the one exception: it is turn content served
+    // from the Session's pinned definition, so both external lanes declare it.
     const closedLane =
       externalLane &&
       ((externalShellLane
@@ -2450,7 +2453,6 @@ export class HostedWorkspaceToolTurn {
           extras!.messages,
           extras!.teams,
           extras!.commands,
-          extras!.skills,
           extras!.extensionConfig,
           extras!.allowedToolNames,
         ].some((lane) => lane !== undefined) ||
@@ -2743,17 +2745,25 @@ export class HostedWorkspaceToolTurn {
       if (this.questionChild) await waitForTurn(this.warmed, signal);
     }
     if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) {
-      this.advertised = hostedWorkspaceDeclarations(
-        [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
-        !this.fileBackupsEnabled,
-      );
+      const skill = this.skills?.declaration();
+      this.advertised = [
+        ...hostedWorkspaceDeclarations(
+          [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
+          !this.fileBackupsEnabled,
+        ),
+        ...(skill ? [skill] : []),
+      ];
       return this.advertised;
     }
     if (isHostedWorkspaceExternalShellProfile(this.profile)) {
-      this.advertised = hostedWorkspaceDeclarations(
-        [...HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS, HOSTED_GLOB_TOOL],
-        !this.fileBackupsEnabled,
-      );
+      const skill = this.skills?.declaration();
+      this.advertised = [
+        ...hostedWorkspaceDeclarations(
+          [...HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS, HOSTED_GLOB_TOOL],
+          !this.fileBackupsEnabled,
+        ),
+        ...(skill ? [skill] : []),
+      ];
       return this.advertised;
     }
     if (
@@ -5944,8 +5954,10 @@ export class HostedWorkspaceToolTurn {
             this.monitors,
             () => this.shell!.monitorWakeKick?.(),
           );
+          const writer = await this.shell.writerOwner?.();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer?.writerGeneration,
           );
           this.workerOwnsObservation = this.broker.observationOwned;
         } else if (

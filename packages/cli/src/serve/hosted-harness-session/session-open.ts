@@ -2093,6 +2093,7 @@ export function registerHostedSessionOpenRoutes({
               shell: {
                 resources: stores.toolResultResources,
                 assertWritable: stores.assertWritable,
+                writerOwner: stores.publication.owner,
               },
             }
           : {}),
@@ -3325,11 +3326,13 @@ export function registerHostedSessionOpenRoutes({
           body?.['cancellationTakeover'] === true,
         );
       const deliveryRecoveryLane = session.backgroundLane ?? session.shell;
+      // A resumed approval can share its park with a background hold. Restore
+      // the publisher now so that hold can deliver its terminal to this resident.
       if (
         brokerOptions &&
         deliveryRecoveryLane &&
         session.stores?.publication &&
-        !unsettledPromptId(session)
+        (!unsettledPromptId(session) || resumeApproval !== undefined)
       ) {
         await reattachAndDrainBackgroundDeliveries({
           managed,

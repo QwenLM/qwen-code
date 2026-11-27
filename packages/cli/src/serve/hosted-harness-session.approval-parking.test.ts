@@ -1046,17 +1046,31 @@ describe('idle suspension', () => {
     }
   });
 
-  it('parks a recoverable approval and resumes it through cold recovery', async () => {
+  it('parks a recoverable approval, releases placement, and resumes through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
+    state.suspensionPlacementRelease = true;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
     mockApprovalTurn();
     try {
-      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const server = await app(true, 'pod-a', true, { idleSuspendMs: 150 });
       // The Turn deadline lands before the 60s approval expiry.
-      const clientId = await promptApproval(server, undefined, 30_000);
+      const clientId = await promptApproval(
+        server,
+        undefined,
+        30_000,
+        'hosted-workspace-files/1',
+        {
+          managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+          harnessPlacement: {
+            instanceId: 'pod-a',
+            bootId: BOOT_ID,
+            placementEpoch: 1,
+          },
+        },
+      );
       await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
         timeout: 5000,
       });
@@ -1068,6 +1082,12 @@ describe('idle suspension', () => {
         },
         { timeout: 5000 },
       );
+      expect(state.ownershipReleases).toHaveLength(1);
+      expect(state.ownershipReleases[0]).toMatchObject({
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+      });
 
       const journal = await LocalJsonlManagedSessionJournalStore.read({
         transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -1101,7 +1121,15 @@ describe('idle suspension', () => {
       const loaded = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
       )
-        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .send({
+          managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+          harnessPlacement: {
+            instanceId: 'pod-a',
+            bootId: BOOT_ID,
+            placementEpoch: 2,
+          },
+          driveRuntimeRecovery: true,
+        })
         .expect(200);
       await headers(
         supertest(server).post(
@@ -1153,6 +1181,7 @@ describe('idle suspension', () => {
     } finally {
       state.wakeDispatch = false;
       state.actionParking = false;
+      state.suspensionPlacementRelease = false;
       state.approvalSelections.clear();
     }
   });
