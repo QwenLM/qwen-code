@@ -92,7 +92,7 @@ describe('createLlmContentGenerator', () => {
     );
   });
 
-  it('strips trailing /v1beta from Gemini baseUrl and omits SDK httpOptions.timeout', () => {
+  it('strips trailing /v1beta (Gemini) or /v1beta1 (Vertex) from baseUrl and omits SDK httpOptions.timeout', () => {
     expect(
       normalizeGeminiBaseUrl('  https://proxy.example.com/gateway/V1BETA///  '),
     ).toBe('https://proxy.example.com/gateway');
@@ -104,6 +104,15 @@ describe('createLlmContentGenerator', () => {
     expect(
       normalizeGeminiBaseUrl('https://proxy.example.com/gateway/v1beta1/'),
     ).toBe('https://proxy.example.com/gateway/v1beta1');
+    expect(
+      normalizeGeminiBaseUrl(
+        'https://proxy.example.com/vertex/v1beta1/V1BETA1///',
+        true,
+      ),
+    ).toBe('https://proxy.example.com/vertex');
+    expect(
+      normalizeGeminiBaseUrl('https://proxy.example.com/vertex/v1beta/', true),
+    ).toBe('https://proxy.example.com/vertex/v1beta');
 
     const config = {
       model: 'gemini-2.5-flash',
@@ -120,6 +129,19 @@ describe('createLlmContentGenerator', () => {
       'https://proxy.example.com/gateway',
     );
     expect(passedHttpOptions).not.toHaveProperty('timeout');
+
+    createLlmContentGenerator(
+      {
+        model: 'gemini-2.5-flash',
+        apiKey: 'test-key',
+        authType: AuthType.USE_VERTEX_AI,
+        baseUrl: 'https://proxy.example.com/vertex/v1beta1/',
+      },
+      mockConfig,
+    );
+    const vertexHttpOptions =
+      vi.mocked(LlmContentGenerator).mock.calls[1]?.[0]?.httpOptions;
+    expect(vertexHttpOptions?.baseUrl).toBe('https://proxy.example.com/vertex');
   });
 
   it('should keep httpOptions unchanged when baseUrl is missing', () => {

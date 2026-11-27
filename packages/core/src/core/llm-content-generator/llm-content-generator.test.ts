@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import {
@@ -917,6 +918,7 @@ describe('LlmContentGenerator', () => {
             'user',
             inline('image/png', 'img'),
             inline('audio/wav', 'aud', 'clip.wav'),
+            inline('application/pdf; charset=binary', 'pdfdata', 'doc.pdf'),
           ),
           content(
             'user',
@@ -939,6 +941,7 @@ describe('LlmContentGenerator', () => {
     expect(called.contents[0].parts).toEqual([
       inline('image/png', 'img'),
       { text: 'Unsupported media type for Gemini: audio/wav (clip.wav).' },
+      { text: 'Unsupported media type for Gemini: application/pdf (doc.pdf).' },
     ]);
     expect(called.contents[1].parts[0].functionResponse).toMatchObject({
       parts: [inline('image/png', 'img2')],
@@ -1168,6 +1171,58 @@ describe('LlmContentGenerator', () => {
     ]);
   });
 
+  it('prepends Gemini 2.5 promoted tool media ahead of split reattach-boundary bundles on user turns', async () => {
+    await generator.generateContent(
+      {
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              fnRespPart(
+                [inline('VIDEO/WEBM', 'webmdata', 'clip.webm')],
+                { output: 'done' },
+                'call-split-promote',
+              ),
+              {
+                text: 'Reattached image summary',
+                partMetadata: { 'qwen-code:reattach-boundary': true },
+              },
+              { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+            ],
+          },
+        ],
+      },
+      'prompt-id',
+    );
+
+    expect(sent().contents).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-split-promote',
+              name: 'read_file',
+              response: {
+                output:
+                  'done\nAttached video/webm (clip.webm) in following user message.',
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'video/webm', data: 'webmdata' } },
+          { text: 'Reattached image summary' },
+          { inlineData: { mimeType: 'image/png', data: 'imgdata' } },
+        ],
+      },
+    ]);
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/9453
   //
   // The OpenAI Responses generator stashes an opaque reasoning-replay payload
@@ -1283,9 +1338,16 @@ describe('LlmContentGenerator', () => {
         StreamInactivityTimeoutError,
       ],
       [
-        'QWEN_STREAM_IDLE_TIMEOUT_MS + streamMaxLifetimeMs',
-        { streamMaxLifetimeMs: 250 },
-        '300',
+        'QWEN_STREAM_IDLE_TIMEOUT_MS',
+        { streamMaxLifetimeMs: 0 },
+        '200',
+        200,
+        StreamInactivityTimeoutError,
+      ],
+      [
+        'streamMaxLifetimeMs',
+        { streamIdleTimeoutMs: 0, streamMaxLifetimeMs: 250 },
+        undefined,
         250,
         StreamLifetimeExceededError,
       ],
@@ -1312,6 +1374,48 @@ describe('LlmContentGenerator', () => {
         }
       },
     );
+
+    it('aborts request signal and cleans up caller abort listener on mid-stream error even when both guards are disabled', async () => {
+      const caller = new AbortController();
+      const { gen, models } = build(
+        {},
+        {
+          model: 'gemini-2.5-flash',
+          streamIdleTimeoutMs: 0,
+          streamMaxLifetimeMs: 0,
+        },
+      );
+      let capturedSignal: AbortSignal | undefined;
+      models.generateContentStream.mockImplementation(
+        async (req: { config?: { abortSignal?: AbortSignal } }) => {
+          capturedSignal = req.config?.abortSignal;
+          let count = 0;
+          return {
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                if (count++ === 0) {
+                  return { done: false, value: { responseId: '1' } };
+                }
+                throw new Error('mid-stream socket reset');
+              },
+            }),
+          };
+        },
+      );
+
+      const stream = await gen.generateContentStream(
+        { ...flashReq(), config: { abortSignal: caller.signal } },
+        'prompt-guards-off-err',
+      );
+      expect(await stream.next()).toEqual({
+        done: false,
+        value: { responseId: '1' },
+      });
+      expect(capturedSignal?.aborted).toBe(false);
+      await expect(stream.next()).rejects.toThrow('mid-stream socket reset');
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    });
 
     it('aborts the per-request signal on early consumer return', async () => {
       const { gen, close, getSignal } = setupHangingStream(

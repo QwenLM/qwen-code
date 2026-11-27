@@ -34,6 +34,7 @@ vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
 
 import {
   GeminiConnectTimeoutError,
+  GeminiRequestTimeoutError,
   LlmContentGenerator,
 } from './llm-content-generator.js';
 import { StreamInactivityTimeoutError } from '../stream-guards.js';
@@ -727,12 +728,12 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(candidate);
             }
-          }, 500),
+          }, 1_500),
         );
       },
       async (baseUrl) => {
         await expect(
-          localGen(baseUrl, { timeout: 80 }).generateContent(
+          localGen(baseUrl, { timeout: 200 }).generateContent(
             { model: 'gemini-test', contents: 'hello' },
             'timeout-wire-test',
           ),
@@ -740,9 +741,38 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
           (err: unknown) =>
             err instanceof GeminiConnectTimeoutError &&
             err.code === 'ETIMEDOUT' &&
-            err.connectTimeoutMs === 80,
+            err.connectTimeoutMs === 200,
         );
         expect(seenServerTimeouts).toEqual([undefined]);
+      },
+    );
+  });
+
+  it('enforces non-streaming body-phase timeout (ETIMEDOUT) and closes socket when body stalls after headers arrive', async () => {
+    let closedCount = 0;
+    await withRawServer(
+      (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.write('{"candidates":');
+        res.on('close', () => {
+          closedCount += 1;
+        });
+      },
+      async (baseUrl) => {
+        await expect(
+          localGen(baseUrl, { timeout: 150 }).generateContent(
+            { model: 'gemini-test', contents: 'hello' },
+            'stalled-body-wire-test',
+          ),
+        ).rejects.toSatisfy(
+          (err: unknown) =>
+            err instanceof GeminiRequestTimeoutError &&
+            err.code === 'ETIMEDOUT' &&
+            err.timeoutMs === 150,
+        );
+        await vi.waitFor(() => expect(closedCount).toBe(1), {
+          timeout: 2_000,
+        });
       },
     );
   });
@@ -758,13 +788,13 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
               res.write(`data: ${candidate}\n\n`);
               res.end();
             }
-          }, 140),
+          }, 450),
         );
       },
       async (baseUrl) => {
         const stream = await localGen(baseUrl, {
-          timeout: 60,
-          streamIdleTimeoutMs: 500,
+          timeout: 200,
+          streamIdleTimeoutMs: 2_000,
         }).generateContentStream(
           { model: 'gemini-test', contents: 'hello' },
           'long-stream-wire-test',
@@ -791,7 +821,7 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
       async (baseUrl) => {
         const gen = localGen(baseUrl, {
           timeout: 5_000,
-          streamIdleTimeoutMs: 80,
+          streamIdleTimeoutMs: 120,
         });
         const stream1 = await gen.generateContentStream(
           { model: 'gemini-test', contents: 'hello' },
@@ -821,8 +851,9 @@ describe('real HTTP wire compliance for Gemini functionResponse.parts', () => {
           break;
         }
         expect(chunks2).toEqual(['answer']);
-        await new Promise((r) => setTimeout(r, 40));
-        expect(closedCount).toBe(2);
+        await vi.waitFor(() => expect(closedCount).toBe(2), {
+          timeout: 2_000,
+        });
       },
     );
   });

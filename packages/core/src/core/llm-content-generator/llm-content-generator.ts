@@ -71,16 +71,18 @@ const DEFAULT_SDK_RETRY_MAX_DELAY_MS = 60_000;
 const DEFAULT_SDK_RETRY_JITTER_RATIO = 0.3;
 
 /**
- * Strip redundant trailing `/v1beta` segment(s) (with optional trailing
- * slashes) from a Gemini base URL before passing it to `@google/genai`, which
- * appends its own `/v1beta/models/...` path prefix and would otherwise send
- * `/v1beta/v1beta/`.
+ * Strip redundant trailing API version segment(s) (`/v1beta` for Gemini
+ * Developer API, `/v1beta1` for Vertex AI, with optional trailing slashes)
+ * from a base URL before passing it to `@google/genai`, which appends its
+ * own version prefix and would otherwise send `/v1beta/v1beta/` or
+ * `/v1beta1/v1beta1/`.
  */
-export function normalizeGeminiBaseUrl(baseUrl: string): string {
-  return baseUrl
-    .trim()
-    .replace(/\/+$/, '')
-    .replace(/(?:\/v1beta)+$/i, '');
+export function normalizeGeminiBaseUrl(
+  baseUrl: string,
+  vertexai = false,
+): string {
+  const versionPattern = vertexai ? /(?:\/v1beta1)+$/i : /(?:\/v1beta)+$/i;
+  return baseUrl.trim().replace(/\/+$/, '').replace(versionPattern, '');
 }
 
 /**
@@ -100,10 +102,10 @@ export function supportsGeminiFunctionResponseAudioVideo(
 function getMediaModality(
   mimeType: string | undefined,
 ): keyof InputModalities | undefined {
-  if (!mimeType) {
+  const normalized = normalizeMediaMimeType(mimeType);
+  if (!normalized) {
     return undefined;
   }
-  const normalized = mimeType.trim().toLowerCase();
   if (normalized.startsWith('image/')) return 'image';
   if (normalized.startsWith('audio/')) return 'audio';
   if (normalized.startsWith('video/')) return 'video';
@@ -149,6 +151,30 @@ export class GeminiConnectTimeoutError extends Error {
     this.name = 'GeminiConnectTimeoutError';
   }
 }
+
+/**
+ * Thrown when a non-streaming Gemini/Vertex request exceeds the configured
+ * request timeout while reading the response body after headers have arrived.
+ * Stamped with `code: 'ETIMEDOUT'` so `classifyRetryError` classifies it as a
+ * retryable transport timeout.
+ */
+export class GeminiRequestTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(readonly timeoutMs: number) {
+    super(
+      `Gemini API non-streaming request exceeded ${timeoutMs}ms while reading ` +
+        `the response body. Increase the model request timeout ` +
+        `(or set it to 0 to disable this bound).`,
+    );
+    this.name = 'GeminiRequestTimeoutError';
+  }
+}
+
+type NonStreamingHeaderCallback = (
+  remainingMs: number,
+  abortConnect: (reason: Error) => void,
+) => void;
 
 type GeminiStreamPart = { responseInternal: Response };
 
@@ -236,6 +262,10 @@ function installIsolatedTransport(
     apiKey?: string;
     getProxy?: () => string | undefined;
     connectTimeoutMs?: number;
+    nonStreamingHeaderCallbacks?: WeakMap<
+      AbortSignal,
+      NonStreamingHeaderCallback
+    >;
   },
 ): boolean {
   // @google/genai 2.6 has no public fetch hook. Both model request paths use
@@ -247,28 +277,40 @@ function installIsolatedTransport(
   const destinations = new WeakMap<Response, string>();
   // apiCall shallow-copies RequestInit but preserves the Headers instance.
   const explicitNativeHeaderRequests = new WeakSet<Headers>();
+  // Maps the SDK's per-request AbortSignal back to our non-streaming body
+  // deadline callback registered under `abortScope.signal`.
+  const sdkSignalToHeaderCallback = new WeakMap<
+    AbortSignal,
+    NonStreamingHeaderCallback
+  >();
   if (typeof apiClient.includeExtraHttpOptionsToRequestInit === 'function') {
     const includeExtraHttpOptionsToRequestInit =
       apiClient.includeExtraHttpOptionsToRequestInit.bind(apiClient);
     apiClient.includeExtraHttpOptionsToRequestInit = async (
       init,
-      options,
+      httpOptions,
       url,
       signal,
     ) => {
       // The SDK only observes abort events after it starts building the request.
       signal?.throwIfAborted();
-      const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
-        (name) => name.toLowerCase() === 'x-goog-api-key',
-      );
+      const hasExplicitNativeHeader = Object.keys(
+        httpOptions.headers ?? {},
+      ).some((name) => name.toLowerCase() === 'x-goog-api-key');
       const request = await includeExtraHttpOptionsToRequestInit(
         init,
-        options,
+        httpOptions,
         url,
         signal,
       );
       if (hasExplicitNativeHeader && request.headers) {
         explicitNativeHeaderRequests.add(request.headers as Headers);
+      }
+      if (signal && request.signal) {
+        const cb = options.nonStreamingHeaderCallbacks?.get(signal);
+        if (cb) {
+          sdkSignalToHeaderCallback.set(request.signal, cb);
+        }
       }
       return request;
     };
@@ -315,6 +357,8 @@ function installIsolatedTransport(
     const singleAttempt = Boolean(retryContext.getStore()?.singleAttempt);
     const fetchFn: typeof fetch = runtimeOptions.fetch ?? fetch;
     const parentSignal = preparedInit.signal ?? undefined;
+    let lastAttemptStartMs = Date.now();
+    let lastConnectController: AbortController | undefined;
 
     const executeSingleAttempt = async (): Promise<Response> => {
       const requestInit: RequestInit & { dispatcher?: unknown } = {
@@ -333,7 +377,9 @@ function installIsolatedTransport(
         }
       }
 
+      lastAttemptStartMs = Date.now();
       const connectController = new AbortController();
+      lastConnectController = connectController;
       // Combine via AbortSignal.any (Node >= 20.3; repo requires Node >= 22)
       // instead of registering a listener on `parentSignal`, avoiding listener
       // accumulation / MaxListenersExceededWarning across repeated retries and
@@ -428,6 +474,23 @@ function installIsolatedTransport(
       response = await executeSingleAttempt();
     }
     destinations.set(response, url);
+    if (connectTimeoutActive && parentSignal) {
+      const onHeaders =
+        sdkSignalToHeaderCallback.get(parentSignal) ??
+        options.nonStreamingHeaderCallbacks?.get(parentSignal);
+      if (onHeaders) {
+        const remainingMs = Math.max(
+          0,
+          connectTimeoutMs - (Date.now() - lastAttemptStartMs),
+        );
+        const controller = lastConnectController;
+        onHeaders(remainingMs, (reason) => {
+          if (controller && !controller.signal.aborted) {
+            controller.abort(reason);
+          }
+        });
+      }
+    }
     return response;
   };
   if (typeof apiClient.processStreamResponse === 'function') {
@@ -475,7 +538,13 @@ function observeLlmStream(
   return {
     async next() {
       started = true;
-      const result = await iterator.next();
+      let result: IteratorResult<GenerateContentResponse>;
+      try {
+        result = await iterator.next();
+      } catch (error) {
+        options.abortRequest();
+        throw error;
+      }
       if (!result.done) {
         reportLlmChunk(telemetryAttempt, result.value);
       } else {
@@ -543,6 +612,11 @@ function createRequestAbortScope(callerSignal?: AbortSignal): {
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
   private readonly hasIsolatedTransport: boolean;
+  private readonly requestTimeoutMs?: number;
+  private readonly nonStreamingHeaderCallbacks = new WeakMap<
+    AbortSignal,
+    NonStreamingHeaderCallback
+  >();
   private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
   private readonly cliConfig?: Config;
@@ -603,10 +677,11 @@ export class LlmContentGenerator implements ContentGenerator {
     }
     // Normalize any resolved baseUrl — including env-populated
     // GOOGLE_GEMINI_BASE_URL / GOOGLE_VERTEX_BASE_URL and direct constructor
-    // callers — so `@google/genai` never appends `/v1beta` onto a trailing
-    // `/v1beta` segment.
+    // callers — using the SDK's resolved vertexai mode so `@google/genai`
+    // never doubles `/v1beta` (Developer API) or `/v1beta1` (Vertex AI).
+    const isVertex = Boolean(this.googleGenAI.vertexai);
     const normalizedClientBaseUrl = rawResolvedBaseUrl
-      ? normalizeGeminiBaseUrl(rawResolvedBaseUrl)
+      ? normalizeGeminiBaseUrl(rawResolvedBaseUrl, isVertex)
       : undefined;
     this.clientBaseUrl = normalizedClientBaseUrl;
     if (finalOptions.httpOptions && normalizedClientBaseUrl !== undefined) {
@@ -617,22 +692,26 @@ export class LlmContentGenerator implements ContentGenerator {
     };
     const sdkHttpOptions = apiClient?.clientOptions?.httpOptions;
     if (sdkHttpOptions?.baseUrl) {
-      sdkHttpOptions.baseUrl = normalizeGeminiBaseUrl(sdkHttpOptions.baseUrl);
+      sdkHttpOptions.baseUrl = normalizeGeminiBaseUrl(
+        sdkHttpOptions.baseUrl,
+        isVertex,
+      );
     }
     const rawTimeout = contentGeneratorConfig?.timeout;
-    const normalizedTimeout =
-      typeof rawTimeout === 'number' &&
-      (!Number.isFinite(rawTimeout) || rawTimeout > DISABLED_REQUEST_TIMEOUT_MS)
-        ? undefined
-        : rawTimeout;
+    let normalizedTimeout: number | undefined;
+    if (typeof rawTimeout === 'number' && Number.isFinite(rawTimeout)) {
+      normalizedTimeout = Math.min(rawTimeout, DISABLED_REQUEST_TIMEOUT_MS);
+    }
     const connectTimeoutMs =
       finalOptions.httpOptions?.timeout === undefined
         ? resolveRequestTimeout(normalizedTimeout)
         : undefined;
+    this.requestTimeoutMs = connectTimeoutMs;
     this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI, {
       apiKey: finalOptions.apiKey,
       getProxy: () => cliConfig?.getProxy?.() ?? contentGeneratorConfig?.proxy,
       connectTimeoutMs,
+      nonStreamingHeaderCallbacks: this.nonStreamingHeaderCallbacks,
     });
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
@@ -843,23 +922,79 @@ export class LlmContentGenerator implements ContentGenerator {
   ): Promise<GenerateContentResponse> {
     const effectiveModel = request.model || this.contentGeneratorConfig?.model;
     const callerSignal = request.config?.abortSignal;
-    const abortScope = callerSignal
-      ? createRequestAbortScope(callerSignal)
-      : undefined;
-    const builtConfig = this.buildGenerateContentConfig(request);
-    const finalRequest = {
-      ...request,
-      contents: this.stripUnsupportedFields(request.contents, effectiveModel),
-      config: abortScope
-        ? { ...builtConfig, abortSignal: abortScope.signal }
-        : builtConfig,
-    };
-    const telemetryAttempt = reportLlmRequest(finalRequest);
+    const totalTimeoutMs =
+      request.config?.httpOptions?.timeout === undefined
+        ? this.requestTimeoutMs
+        : undefined;
+    const totalTimeoutActive =
+      this.hasIsolatedTransport &&
+      totalTimeoutMs !== undefined &&
+      totalTimeoutMs > 0 &&
+      totalTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
+
+    let abortScope: ReturnType<typeof createRequestAbortScope> | undefined;
+    let bodyTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const response = await this.models.generateContent(finalRequest);
+      abortScope =
+        callerSignal || totalTimeoutActive
+          ? createRequestAbortScope(callerSignal)
+          : undefined;
+      const builtConfig = this.buildGenerateContentConfig(request);
+      const finalRequest = {
+        ...request,
+        contents: this.stripUnsupportedFields(request.contents, effectiveModel),
+        config: abortScope
+          ? { ...builtConfig, abortSignal: abortScope.signal }
+          : builtConfig,
+      };
+      const telemetryAttempt = reportLlmRequest(finalRequest);
+
+      let response: GenerateContentResponse;
+      if (totalTimeoutActive && abortScope) {
+        let rejectBodyTimeout!: (error: Error) => void;
+        const bodyTimeoutPromise = new Promise<never>((_resolve, reject) => {
+          rejectBodyTimeout = reject;
+        });
+        void bodyTimeoutPromise.catch(() => {});
+
+        const activeScope = abortScope;
+        this.nonStreamingHeaderCallbacks.set(
+          activeScope.signal,
+          (remainingMs, abortConnect) => {
+            if (bodyTimer !== undefined) {
+              clearTimeout(bodyTimer);
+            }
+            bodyTimer = setTimeout(() => {
+              if (callerSignal?.aborted) {
+                const abortErr = new Error('Aborted');
+                abortErr.name = 'AbortError';
+                rejectBodyTimeout(abortErr);
+              } else {
+                const timeoutErr = new GeminiRequestTimeoutError(
+                  totalTimeoutMs,
+                );
+                abortConnect(timeoutErr);
+                activeScope.abort();
+                rejectBodyTimeout(timeoutErr);
+              }
+            }, remainingMs);
+            bodyTimer.unref?.();
+          },
+        );
+
+        const requestPromise = this.models.generateContent(finalRequest);
+        void requestPromise.catch(() => {});
+        response = await Promise.race([requestPromise, bodyTimeoutPromise]);
+      } else {
+        response = await this.models.generateContent(finalRequest);
+      }
+
       reportLlmResponse(telemetryAttempt, response);
       return response;
     } finally {
+      if (bodyTimer !== undefined) {
+        clearTimeout(bodyTimer);
+      }
       abortScope?.dispose();
     }
   }
@@ -875,24 +1010,25 @@ export class LlmContentGenerator implements ContentGenerator {
     const idleMs = resolveStreamIdleTimeoutMs(streamConfig);
     const maxLifetimeMs = resolveStreamMaxLifetimeMs(streamConfig);
     const callerSignal = request.config?.abortSignal;
-    const abortScope = createRequestAbortScope(callerSignal);
-
-    const config = {
-      ...this.buildGenerateContentConfig(request),
-      abortSignal: abortScope.signal,
-    };
-    const finalRequest = {
-      ...request,
-      contents: this.stripUnsupportedFields(request.contents, effectiveModel),
-      config,
-    };
-    const telemetryAttempt = reportLlmRequest(finalRequest);
-    markRequestDispatched();
+    let abortScope: ReturnType<typeof createRequestAbortScope> | undefined;
+    let telemetryAttempt: GenAiAttemptHandle | undefined;
     let stream: AsyncIterable<GenerateContentResponse>;
     try {
+      abortScope = createRequestAbortScope(callerSignal);
+      const config = {
+        ...this.buildGenerateContentConfig(request),
+        abortSignal: abortScope.signal,
+      };
+      const finalRequest = {
+        ...request,
+        contents: this.stripUnsupportedFields(request.contents, effectiveModel),
+        config,
+      };
+      telemetryAttempt = reportLlmRequest(finalRequest);
+      markRequestDispatched();
       stream = await this.models.generateContentStream(finalRequest);
     } catch (error) {
-      abortScope.abort();
+      abortScope?.abort();
       throw error;
     }
     return observeLlmStream(stream, telemetryAttempt, {

@@ -45,22 +45,23 @@ export function createLlmContentGenerator(
       'x-gemini-api-privileged-user-id': `${installationId}`,
     };
   }
+  const useVertex = config.authType === AuthType.USE_VERTEX_AI;
+  // Ambient SDK settings and the parent's mode cannot select the protocol
+  // of an isolated route. Other callers keep their existing overrides.
+  const vertexai = config.isolatedRoute
+    ? useVertex
+    : (config.vertexai ?? (useVertex || undefined));
   const httpOptions = config.baseUrl
     ? {
         headers,
-        baseUrl: normalizeGeminiBaseUrl(config.baseUrl),
+        baseUrl: normalizeGeminiBaseUrl(config.baseUrl, Boolean(vertexai)),
       }
     : { headers };
-  const useVertex = config.authType === AuthType.USE_VERTEX_AI;
 
   const llmContentGenerator = new LlmContentGenerator(
     {
       apiKey: config.apiKey === '' ? undefined : config.apiKey,
-      // Ambient SDK settings and the parent's mode cannot select the protocol
-      // of an isolated route. Other callers keep their existing overrides.
-      vertexai: config.isolatedRoute
-        ? useVertex
-        : (config.vertexai ?? (useVertex || undefined)),
+      vertexai,
       httpOptions,
     },
     config,

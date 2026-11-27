@@ -29,8 +29,10 @@ vi.mock('../../utils/runtimeFetchOptions.js', async (importOriginal) => {
 
 import {
   GeminiConnectTimeoutError,
+  GeminiRequestTimeoutError,
   LlmContentGenerator,
 } from './llm-content-generator.js';
+import { DISABLED_REQUEST_TIMEOUT_MS } from '../openaiContentGenerator/constants.js';
 
 function okResponse(): Response {
   return Response.json({
@@ -300,7 +302,7 @@ it('honors Retry-After delta-seconds and clamped HTTP-date headers on 429/503 re
   expect(runtimeFetch).toHaveBeenCalledTimes(2);
 });
 
-it('does not leak abort listeners on a shared AbortSignal and still propagates mid-stream aborts', async () => {
+it('does not leak abort listeners on completed turns/streams and propagates in-flight unary and stream aborts', async () => {
   const shared = new AbortController();
   const generator = makeGen({ timeout: 5_000 });
   for (let i = 0; i < 25; i += 1) {
@@ -310,6 +312,66 @@ it('does not leak abort listeners on a shared AbortSignal and still propagates m
     );
   }
   expect(getEventListeners(shared.signal, 'abort')).toHaveLength(0);
+
+  // Completed streaming turn (without aborting) must remove its caller listener.
+  const noAbortController = new AbortController();
+  runtimeFetch.mockImplementationOnce(async () => {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'done' }], role: 'model' } }] })}\n\n`,
+            ),
+          );
+          controller.close();
+        },
+      }),
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    );
+  });
+  const completedStream = await generator.generateContentStream(
+    { ...HELLO_REQ, config: { abortSignal: noAbortController.signal } },
+    'prompt-stream-complete',
+  );
+  const completedChunks: string[] = [];
+  for await (const chunk of completedStream) {
+    if (chunk.text) completedChunks.push(chunk.text);
+  }
+  expect(completedChunks).toEqual(['done']);
+  expect(getEventListeners(noAbortController.signal, 'abort')).toHaveLength(0);
+
+  // In-flight non-streaming generateContent must propagate caller aborts.
+  const unaryController = new AbortController();
+  let observedUnarySignal: AbortSignal | undefined;
+  runtimeFetch.mockImplementationOnce(
+    (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        observedUnarySignal = init?.signal ?? undefined;
+        observedUnarySignal?.addEventListener(
+          'abort',
+          () => {
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          },
+          { once: true },
+        );
+      }),
+  );
+  const pendingUnary = generator.generateContent(
+    { ...HELLO_REQ, config: { abortSignal: unaryController.signal } },
+    'prompt-unary-abort',
+  );
+  await vi.waitFor(() => {
+    expect(observedUnarySignal).toBeDefined();
+  });
+  expect(observedUnarySignal?.aborted).toBe(false);
+  unaryController.abort(new Error('user cancelled unary'));
+  expect(observedUnarySignal?.aborted).toBe(true);
+  await expect(pendingUnary).rejects.toMatchObject({ name: 'AbortError' });
+  expect(getEventListeners(unaryController.signal, 'abort')).toHaveLength(0);
 
   let observedSignal: AbortSignal | undefined;
   let releaseStream!: () => void;
@@ -370,7 +432,90 @@ it('cancels a late Response.body when connect timeout wins Promise.race', async 
   expect(cancelSpy).toHaveBeenCalledTimes(1);
 });
 
-it('redacts synchronous fetch throws without leaking connect timers or unhandled rejections', async () => {
+it('bounds non-streaming response body stalls after headers arrive and honors timeout=0 / sentinel+1 disablement', async () => {
+  vi.useFakeTimers();
+  let observedSignal: AbortSignal | undefined;
+  runtimeFetch.mockImplementationOnce(async (_url, init) => {
+    observedSignal = init?.signal ?? undefined;
+    return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+
+  const pending = makeGen({ timeout: 50 }).generateContent(
+    HELLO_REQ,
+    'stalled-body',
+  );
+  const caughtPromise = pending.catch((err: unknown) => err);
+  await vi.advanceTimersByTimeAsync(60);
+  const caught = await caughtPromise;
+  expect(caught).toBeInstanceOf(GeminiRequestTimeoutError);
+  expect((caught as GeminiRequestTimeoutError).code).toBe('ETIMEDOUT');
+  expect((caught as GeminiRequestTimeoutError).timeoutMs).toBe(50);
+  expect(observedSignal?.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+
+  // timeout=0 disables the body-phase bound as well.
+  let finishZeroBody!: () => void;
+  runtimeFetch.mockImplementationOnce(async () => {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          finishZeroBody = () => {
+            controller.enqueue(
+              encoder.encode(
+                JSON.stringify({
+                  candidates: [
+                    { content: { parts: [{ text: 'answer' }], role: 'model' } },
+                  ],
+                }),
+              ),
+            );
+            controller.close();
+          };
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  });
+  let zeroSettled = false;
+  const zeroPending = makeGen({ timeout: 0 })
+    .generateContent(HELLO_REQ, 'zero-timeout-body')
+    .then((res) => {
+      zeroSettled = true;
+      return res;
+    });
+  await vi.advanceTimersByTimeAsync(120_001);
+  expect(zeroSettled).toBe(false);
+  finishZeroBody();
+  expect((await zeroPending).text).toBe('answer');
+
+  // timeout > DISABLED_REQUEST_TIMEOUT_MS clamps to disabled instead of falling back to 120s.
+  let settled = false;
+  let resolveSlow!: (res: Response) => void;
+  runtimeFetch.mockImplementationOnce(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveSlow = resolve;
+      }),
+  );
+  const disabledPending = makeGen({
+    timeout: DISABLED_REQUEST_TIMEOUT_MS + 1,
+  })
+    .generateContent(HELLO_REQ, 'above-sentinel')
+    .then((res) => {
+      settled = true;
+      return res;
+    });
+  await vi.advanceTimersByTimeAsync(120_001);
+  expect(settled).toBe(false);
+  resolveSlow(okResponse());
+  expect((await disabledPending).text).toBe('answer');
+});
+
+it('redacts sync and async fetch errors without leaking connect timers or unhandled rejections', async () => {
   vi.useFakeTimers();
   const unhandled: unknown[] = [];
   const onUnhandledRejection = (reason: unknown) => {
@@ -389,8 +534,19 @@ it('redacts synchronous fetch throws without leaking connect timers or unhandled
     ).rejects.toThrow(
       'sync connect error http://<redacted>@proxy.example:8080',
     );
-
     expect(vi.getTimerCount()).toBe(0);
+
+    // Async rejection runs after the connect timer is armed and must clear it in finally.
+    runtimeFetch.mockRejectedValueOnce(
+      new Error('async connect error http://user:secret@proxy.example:8080'),
+    );
+    await expect(
+      makeGen({ timeout: 50 }).generateContent(HELLO_REQ, 'async-reject'),
+    ).rejects.toThrow(
+      'async connect error http://<redacted>@proxy.example:8080',
+    );
+    expect(vi.getTimerCount()).toBe(0);
+
     await vi.advanceTimersByTimeAsync(100);
     expect(unhandled).toEqual([]);
   } finally {
@@ -408,11 +564,11 @@ it.each([
   [
     true,
     'GOOGLE_VERTEX_BASE_URL',
-    'https://vertex.example.test/gateway/V1BETA///',
+    'https://vertex.example.test/gateway/V1BETA1///',
     'https://vertex.example.test/gateway/v1beta1/publishers/google/models/gemini-test:generateContent',
   ],
 ] as const)(
-  'normalizes trailing /v1beta on env-populated %s (%s)',
+  'normalizes trailing API version on env-populated %s (%s)',
   async (vertexai, env, rawUrl, expectedUrl) => {
     vi.stubEnv(env, rawUrl);
     const generator = new LlmContentGenerator(
