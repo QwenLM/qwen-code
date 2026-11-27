@@ -458,6 +458,7 @@ export default {
   'Debug Keystroke Logging': 'Debug-Protokollierung von Tastatureingaben',
   'Language: UI': 'Sprache: Benutzeroberfläche',
   'Language: Model': 'Sprache: Modell',
+  'Language: Display Translation': 'Sprache: Anzeigeübersetzung',
   'Output Format': 'Ausgabeformat',
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
@@ -477,7 +478,6 @@ export default {
   'Screen Reader Mode': 'Bildschirmleser-Modus',
   'Max Session Turns': 'Maximale Sitzungsrunden',
   'Skip Next Speaker Check': 'Nächste-Sprecher-Prüfung überspringen',
-  'Skip Loop Detection': 'Schleifenerkennung überspringen',
   'Skip Startup Context': 'Startkontext überspringen',
   'Enable OpenAI Logging': 'OpenAI-Protokollierung aktivieren',
   'OpenAI Logging Directory': 'OpenAI-Protokollierungsverzeichnis',
@@ -768,6 +768,8 @@ export default {
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Ein Hook hat die Runde beendet: {{reason}}',
   'Loading hooks...': 'Hooks werden geladen...',
   'Error loading hooks:': 'Fehler beim Laden der Hooks:',
   'Press Escape to close': 'Escape zum Schließen drücken',
@@ -1148,6 +1150,8 @@ export default {
     'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
   'Could not compress chat history due to an API error.':
     'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Chatverlauf konnte nicht komprimiert werden, da er für das Kontextfenster zu groß ist.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

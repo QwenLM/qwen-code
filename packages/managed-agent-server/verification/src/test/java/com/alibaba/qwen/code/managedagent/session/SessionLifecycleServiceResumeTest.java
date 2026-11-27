@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -69,6 +70,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first close runs v1 and fails terminally: the Session parks in
         // CLOSING and the fence row keeps the claim released.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -136,6 +140,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first delete runs v1 against the ACTIVE Session and fails
         // terminally: the Session parks in DELETING and the fence row keeps
         // the claim released.
@@ -206,6 +213,9 @@ class SessionLifecycleServiceResumeTest {
                         .agentId("qwen-code")
                         .selection(new WorkspaceSelection("workspace", "."))
                         .build()).sessionId());
+        // D3: this witnesses the v1 resume pin, so the Session rides
+        // external-files (ordinary files is v2 now).
+        externalFiles(sessionId);
         // The first close runs v1, persists its effects receipt — the fence
         // moves to DRAINING — and only then fails terminally.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -275,6 +285,13 @@ class SessionLifecycleServiceResumeTest {
                 .isEqualTo("CLOSED");
         assertThat(store.findOperation(TENANT, sessionId, readmitted.id())
                 .orElseThrow().state()).isEqualTo("COMPLETED");
+    }
+
+    // D3: ordinary files moved to lifecycle v2; external-files keeps v1, so
+    // the failed-v1-resume witnesses ride it.
+    private void externalFiles(String sessionId) {
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, sessionId);
     }
 
     // A store with the Workspace-files deployment flag on, plus the

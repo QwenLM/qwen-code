@@ -37,6 +37,7 @@ import {
 } from './managed-session-authority.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { managedCommandId } from './managed-command-id.js';
 
 export class ManagedHarnessBlockedError extends Error {
   readonly code = 'managed_harness_blocked';
@@ -1695,7 +1696,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     await this.authority.commitCheckpoint(
       (assignedState, coveredSequence) => ({
         operation: 'commitCheckpoint',
-        commandId: `${commandPrefix}:${coveredSequence}`,
+        commandId: managedCommandId(`${commandPrefix}:${coveredSequence}`),
         sessionKey: header.sessionKey,
         contentDigest: createHash('sha256').update(assignedState).digest('hex'),
       }),

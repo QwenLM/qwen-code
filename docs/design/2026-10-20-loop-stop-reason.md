@@ -3,6 +3,7 @@
 [English](2026-10-20-loop-stop-reason.md) | [简体中文](2026-10-20-loop-stop-reason.zh-CN.md)
 
 - **Status**: implemented on the PR branch
+- **Superseded by**: [remove loop detection](2026-11-25-remove-loop-detection.md), except the explicit cap and provider-replay stops
 - **Date**: 2026-10-20
 - **Related**: issue #14828 (PR 1 of 2),
   [adaptive tool-call cap](2026-07-17-adaptive-tool-call-cap.md),

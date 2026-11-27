@@ -733,6 +733,17 @@ The [English design](../../docs/design/2026-10-18-hosted-wake-recovery.md) and
 [Chinese design](../../docs/design/2026-10-18-hosted-wake-recovery.zh-CN.md) describe
 the recovery boundary and acceptance criteria.
 
+Suspension with pending wake inputs is opt-in through
+`qwen.managed-agent.wake-dispatch.enabled=true` (default `false`). The Store
+then advertises `wakeDispatch` in its writer grants, and a Harness that sees it
+may suspend an idle Session whose only pending inputs are deferred,
+unattempted wake inputs. Its seal stamps the head with what the wake pump would pick: the scan
+skips the head until its earliest input is due, then loads it without replaying
+the journal. Any later writer acquisition clears the stamp. Disabling the flag
+stops new such suspensions; heads already stamped are still delivered when due.
+See the [English design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.md)
+and [Chinese design](../../docs/design/2026-11-19-managed-control-plane-wake-seal-stamp.zh-CN.md).
+
 ## Managed automation (H6)
 
 The control plane runs the H6 automation runtime for `persistent`
@@ -910,7 +921,7 @@ deployment passes #12904, #13010 and public FG6f physical failure gates. See
 
 ### Public child agents
 
-`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, a durable LOCAL process Broker, Session isolation, and a Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out. SSH, custom definitions, Team, Workflow, messaging, nesting and isolated child Workspaces are excluded from this first release.
+`QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED` defaults to true and enables public `agent` delegation for qualified new built-in `qwen-code` Workspace Sessions. Set it to false to disable new delegation. Admission requires public Shell, Session isolation, a durable LOCAL process Broker or an SSH Broker with configured nodes and Session isolation, and a single or pooled Harness advertising `public-child-agents/1`, approval selection and Shell lifecycle v2. AgentDefinition children additionally require managed extension execution. Resident/CSI Workspaces never qualify — the provisioner capability arms and the public Shell profile requirement exclude them structurally. Team, Workflow, messaging, nesting and isolated child Workspaces remain excluded. Other deployment profiles continue to start without public child admission. Existing Sessions remain opted out.
 
 Children share the parent's directory, definition and owner, start without its conversation, and keep the effective approval mode, actual model route and Skills captured at launch. Later parent policy changes apply only to new children. Default execution is background; explicit foreground waits retain the existing mount restrictions. Each root admits at most four active children and 64 launches over its lifetime.
 
@@ -1323,6 +1334,7 @@ a stale `300000` keeps meaning five minutes instead of widening the
 signature-replay window to ~83 hours), the sub-second `events.batch-interval`
 and `events.materialize-interval`,
 `runtime-broker.child-workspace-git-timeout`, `runtime-broker.retention.scan-delay`,
+`runtime-broker.mcp-parking.idle-duration`, `runtime-broker.mcp-parking.scan-delay`,
 `automation.scan-delay`,
 `automation.lease`, `automation.late-tolerance` and `automation.lookback`
 — bind a suffix-less number as milliseconds. Always write the suffix (`90s`,
@@ -1718,6 +1730,65 @@ nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
 
+### Disposable MySQL safety
+
+A leaked MySQL 8 `mysqld` whose datadir was removed keeps looping on
+`MY-012894 Unable to open './#innodb_redo/...'`, and the stray log can reach
+hundreds of GB within hours — enough to fill the volume. MariaDB emits no
+`MY-0*` codes and fails silently instead, so the pre-delete presence check in
+rule 3 is what has to work there. Scripted fixtures such as
+`integration-tests/helpers/provider-media-mysql.mjs` already pair start and
+stop; these rules are for instances started by hand:
+
+1. Cap the output. Start the server under bash with `ulimit -f 8388608`
+   (8 GiB in bash's 1024-byte blocks; dash counts 512-byte blocks, so the
+   same value is 4 GiB there) and pass `--log-error=<path>` so the server
+   keeps its own log, including startup notes, independent of the launching
+   shell. A runaway writer then dies with SIGXFSZ at the cap. The limit
+   bounds shell redirects too; the server's own log is preferred because it
+   survives the shell, not because a redirect would be uncapped.
+   `RLIMIT_FSIZE` is per-process: it also caps the datadir's own files, so
+   keep the bound well above the expected datadir size or a legitimate
+   `ibdata`/redo grow fails with SIGXFSZ and reads as a mysterious crash.
+2. Pair start and stop in the same shell, and always pass `--pid-file=`.
+   Trap EXIT for the stop and make INT/TERM exit, so the stop runs exactly
+   once:
+
+   ```bash
+   (ulimit -f 8388608; exec mysqld --no-defaults --datadir="$DATADIR" \
+     --socket="$SOCKET" --pid-file="$DATADIR/mysql.pid" \
+     --log-error="$DATADIR/mysql.log") &
+   PID=$!
+   trap 'mysqladmin --socket="$SOCKET" -uroot shutdown 2>/dev/null;
+         kill -0 "$PID" 2>/dev/null && kill -9 "$PID"' EXIT
+   trap 'exit 130' INT; trap 'exit 143' TERM
+   ```
+
+   With `exec`, `$PID` is the server itself. The guarded `kill -9` fires
+   only if the graceful shutdown left the server alive, so a recycled PID
+   is not signalled.
+
+3. Confirm the process is actually gone **before** removing the datadir,
+   and fail closed on unknown — an empty or missing pid file is not "gone":
+
+   ```bash
+   PID=$(cat "$DATADIR/mysql.pid") && [ -n "$PID" ] \
+     || { echo 'no pid recorded — do not delete'; exit 1; }
+   if kill -0 "$PID" 2>/dev/null; then
+     echo 'server still alive — do not delete'; exit 1
+   fi
+   ```
+
+   `pgrep -f <datadir>` is argv-text matching, not a presence check: it
+   misses a server started from a config file (no datadir on argv) and
+   matches any launcher whose argv merely mentions the path. Use it only
+   as a secondary sweep when `--datadir` is on the command line.
+
+4. A background wrapper reporting "terminated by signal 9" killed only the
+   wrapper. Re-check the real child with a pid-file `kill -0` (or
+   `pgrep -f <datadir>` when the datadir is on argv) and stop it explicitly
+   before deleting anything.
+
 ## Managed extension packages
 
 Complete package distribution and the seven-component Managed profile are opt-in.
@@ -2081,7 +2152,7 @@ The [SQL wake scan](#wake-recovery-after-harness-loss) has separate local
 macOS/MySQL 8.4 evidence; it does not yet have Linux/Windows, real-MQ or deployed
 provider acceptance. The scope below does not extend those claims.
 
-The first Hosted release supports recovery for one Java control-plane instance
+First-release Hosted recovery acceptance covers one Java control-plane instance
 on one trusted Linux host. That control plane replaces reachable Hosted Harness
 process generations one after another, and a Runtime Session stays exclusive
 to its Session. Recovery covers only the profiles and parked states that are
@@ -2095,13 +2166,20 @@ durable engine ownership, capability and journal-contract checks and
 fail-closed recovery apply throughout. A refused recovery is never replayed
 through another Runtime or the Legacy engine.
 
-The frozen control-plane arm shows that a woken former control plane's stale
-claim is refused and changes nothing, and a store test pins the bind guards
-that claim never reaches. Neither makes two live control planes a supported
-deployment. Routing between them is out of scope: a new Turn could
-be claimed by either one. Cross-host takeover, physical-ownership handoff
-between hosts, real providers and mixed-version clusters still need their own
-acceptance before they are supported.
+The frozen control-plane arm verifies that a former control plane's stale
+claim is fenced. A store test verifies the binding guards independently.
+Separate MySQL integration tests use two Java control-plane instances with the
+same Session Store and Hosted Harness. They cover reusing an existing
+attachment for the first Turn, cancelling the original Turn, and delivering
+Shell approval decisions from a replica with no local attachment. See the
+[cross-instance attachment recovery design](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.md)
+([简体中文](https://github.com/QwenLM/qwen-code/blob/f43f4d1813674f0f2e3b4e10fdd72afda965c9ef/docs/design/2026-11-26-managed-control-plane-attachments.zh-CN.md)).
+
+Multi-replica release acceptance needs routing evidence in the intended
+topology. When Workspace tools are enabled, acceptance also covers Runtime
+Broker and Workspace ownership. Cross-host takeover, physical-ownership
+handoff between hosts, real providers, and mixed-version clusters also need
+their own acceptance.
 
 The `--big-output` long-answer mode is also Workspace-bound:
 

@@ -74,9 +74,8 @@ import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
-import { StreamingState } from '../types.js';
+import { MessageType, StreamingState, type HistoryItem } from '../types.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
-import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import {
   markApiHistoryPrompt,
@@ -89,6 +88,7 @@ import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
 import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import { livePromptEvents } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import type { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
 import {
   applyCollapsePolicyAndSummary,
@@ -133,7 +133,7 @@ const mocks = vi.hoisted(() => {
     /** Hook lines the project hooks approval hook reports as pending. */
     pendingHookLines: null as string[] | null,
     handleProjectHooksApprovalSelect: vi.fn(),
-    hooksAddInfo: null as ((text: string) => void) | null,
+    hooksAddNotice: undefined as Parameters<typeof useProjectHooksApproval>[2],
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
     statusLineState: null as StatusLineState | null,
@@ -412,9 +412,9 @@ vi.mock('../hooks/use-project-hooks-approval.js', () => ({
   useProjectHooksApproval: (
     _config: unknown,
     _settings: unknown,
-    addInfo?: (text: string) => void,
+    addNotice?: Parameters<typeof useProjectHooksApproval>[2],
   ) => {
-    mocks.state.hooksAddInfo = addInfo ?? null;
+    mocks.state.hooksAddNotice = addNotice;
     return {
       isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
       pendingProjectHooks: mocks.state.pendingHookLines
@@ -546,7 +546,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
@@ -3794,16 +3794,27 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
-  it('writes the hooks approval note to the transcript', async () => {
+  it('writes hooks approval notices to the transcript', async () => {
     const onTranscriptEvent = vi.fn();
     renderApp({ onTranscriptEvent });
     await settle();
     await act(async () => {
-      mocks.state.hooksAddInfo?.('Project hooks were not loaded.');
+      mocks.state.hooksAddNotice?.({
+        type: MessageType.INFO,
+        text: 'Project hooks were not loaded.',
+      });
+      mocks.state.hooksAddNotice?.({
+        type: MessageType.WARNING,
+        text: 'A project hook was skipped.',
+      });
     });
     expect(onTranscriptEvent).toHaveBeenCalledWith({
       type: 'info',
       text: 'Project hooks were not loaded.',
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'warning',
+      text: 'A project hook was skipped.',
     });
   });
 
@@ -5162,7 +5173,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
@@ -5428,7 +5439,7 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.handleMcpApprovalSelect.mockClear();
     mocks.state.hooksApprovalProps = null;
     mocks.state.pendingHookLines = null;
-    mocks.state.hooksAddInfo = null;
+    mocks.state.hooksAddNotice = undefined;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 

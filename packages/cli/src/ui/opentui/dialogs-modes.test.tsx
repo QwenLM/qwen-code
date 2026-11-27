@@ -1711,6 +1711,7 @@ describe('OpenTuiEffortDialog', () => {
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
+      getModelPreferenceKey: () => undefined,
       getReasoningEffort: () => applied,
       setReasoningEffort,
       getContentGeneratorConfig: () => generation,
@@ -1923,7 +1924,7 @@ describe('OpenTuiEffortDialog', () => {
     renderEffortDialog(undefined);
 
     expect(
-      screen.getByText('(applied across all providers; clamped per model)'),
+      screen.getByText('(for the current model, within provider limits)'),
     ).not.toBeNull();
   });
 

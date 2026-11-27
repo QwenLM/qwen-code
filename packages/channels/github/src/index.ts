@@ -79,12 +79,20 @@ export {
   githubSettings,
 } from './managed-github-adapter.js';
 export type {
+  GithubCiObservation,
+  GithubPrWatchBinding,
+  GithubPrWatchControlPlane,
+  GithubPullObservation,
   GithubReplyContext,
   GithubSettings,
   ManagedGithubAdapterDeps,
   ManagedGithubAdapterOptions,
   ManagedGithubClient,
 } from './managed-github-adapter.js';
+export type {
+  ManagedGithubCiAggregate,
+  ManagedGithubPrTransition,
+} from './managed-state.js';
 export { createManagedGithubDeps } from './managed-github-deps.js';
 
 export const plugin: ChannelPlugin = {

@@ -24,7 +24,7 @@ ACP 已经为其中一种用法做了临时方案 `MessageRewriteMiddleware`（�
 - 渲染站点（`ui.render`）。ACP 客户端目前都不绘制 Mod 改写。Web Shell 的投影和它的客户端能力检查是下一步。
 - 工具和命令中间件（`tool.call`、`tool.check`、Mod 命令）以及 prompt（`prompt.submit`、`$.prompt.submit`），留给后续的 ACP 步骤。
 - 在 Web Shell 里显示 Mod 日志，随投影一起做。
-- 移除 `MessageRewriteMiddleware`。Web Shell 能绘制 Mod 改写之后再移除。
+- 移除 `MessageRewriteMiddleware`。Web Shell 能绘制 Mod 改写之后已将其移除：[移除 MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.zh-CN.md)。
 
 ## 契约
 
@@ -95,5 +95,5 @@ ACP 用自己的旧循环或共享 agent 循环运行 prompt。共享循环交�
 - 每个加载了 Mod 的 ACP 会话都运行自己的 Mod worker 线程，guest 内存上限 64 MiB，所以 daemon 要为每个加载 Mod 的打开会话付出一个 worker。
 - 旧循环的映射是对模型流的第二种读法。ACP 默认改用共享循环、旧循环移除后，它也随之移除。
 - daemon 关闭时的 `session.end` 与终端有相同的结束预算。更早杀掉进程的关闭会截断它。关闭会话已在真实 `qwen serve` daemon 上手动验证（关闭返回前，`session.end` hook 已写入 `$.store`）；集成测试没有覆盖关闭和进程退出。
-- `mod_log` 帧还不是 TypeScript SDK 的已知事件；Web Shell 投影会连同显示一起加上。在那之前，SDK 把每个帧转成一个未识别的 debug 块，Web Shell 不显示它；日志很多的 Mod 会占用会话事件 ring 的位置。在那之前，`experimental.mods` 也不出现在 Web Shell 的设置页中。
+- 日志很多的 Mod，其 `mod_log` 帧会占用会话事件 ring 的位置。（SDK 事件、Web Shell 中的显示和 Web Shell 设置页中的该设置，已在 [Web Shell 中的 Mod 回复行](2026-11-18-mod-rows-in-web-shell.zh-CN.md) 中完成。）
 - 集成测试里的两个会话是先后运行的。并发 prompt 下的 turn 隔离依靠 prompt id 过滤和每个会话自己的 Config，没有并发测试覆盖。

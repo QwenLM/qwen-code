@@ -8,16 +8,21 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.ManagedSessionActivityService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.PreparedStatementSetter;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -25,6 +30,7 @@ import javax.sql.DataSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
@@ -39,7 +45,7 @@ class ManagedActivityDiagnosticsTest {
     private static final String TENANT = "activity-tenant";
     private static final String SESSION = "activity-session";
     private final ObjectMapper json = new ObjectMapper();
-    private ManagedSchemaJdbcTemplate jdbc;
+    private ObservedJdbc jdbc;
     private JdbcManagedSessionStore sessions;
     private JdbcManagedExtensionRecordStore records;
     private TransactionTemplate transactions;
@@ -55,7 +61,7 @@ class ManagedActivityDiagnosticsTest {
     void setup() {
         DataSource source = dataSource();
         ManagedSchema.initialize(source);
-        jdbc = new ManagedSchemaJdbcTemplate(source);
+        jdbc = new ObservedJdbc(source);
         records = new JdbcManagedExtensionRecordStore(jdbc);
         sessions = VerificationFixtures.managedSessionStore(jdbc, records);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -95,7 +101,7 @@ class ManagedActivityDiagnosticsTest {
         assertThat(page.hasMore()).isTrue();
         assertThat(records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 2, page.lastTime(), page.lastKey(), 2).items()).hasSize(2);
         assertThat(records.findActivityStatistics("other-tenant", SESSION)).isNull();
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE task_kind IS NOT NULL", Integer.class)).isZero();
         JdbcManagedExtensionRecordStore restarted = new JdbcManagedExtensionRecordStore(jdbc);
         assertThat(restarted.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
@@ -140,7 +146,7 @@ class ManagedActivityDiagnosticsTest {
         assertThat(summary.path("files").path("measurements").path("executionDurationSamples").asText()).isEqualTo("1");
         assertThat(summary.path("files").path("measurements").path("modelLinesAdded").asText()).isEqualTo("3");
         assertThat(summary.path("files").path("measurements").path("appliedLinesAdded").asText()).isEqualTo("2");
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(5);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
         var api = new ManagedSessionActivityService(mock(ManagedAgentService.class), records);
         assertThat(api.list(TENANT, "reader", SESSION, "tools", null, 100).toString()).doesNotContain("_measurementEvidenceDigest", "_measurementOutcomeKnown", "resultDigest");
         transactions.executeWithoutResult(status -> {
@@ -260,17 +266,82 @@ class ManagedActivityDiagnosticsTest {
 
     @Test
     void writerAdmissionRebuildsMissingDerivedStateFromCommittedSource() {
+        commitRebuildHistory();
+        JsonNode before = records.findActivityStatistics(TENANT, SESSION).deepCopy();
+        var domains = List.of(ManagedActivityDiagnostics.TOOLS, ManagedActivityDiagnostics.FILES, ManagedActivityDiagnostics.SKILLS);
+        var pages = domains.stream().map(domain -> records.listActivity(TENANT, SESSION, domain, 64, null, null, 100)).toList();
+        clearActivity();
+        assertThat(records.findActivityStatistics(TENANT, SESSION)).isNull();
+        jdbc.queries.clear();
+        journal.acquire();
+        assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(before);
+        assertThat(domains.stream().map(domain -> records.listActivity(TENANT, SESSION, domain, 64, null, null, 100)).toList()).isEqualTo(pages);
+        assertResourceSizeQueries(32, 32, 1);
+        assertThat(rebuildBodyReadsPerBatch()).containsExactly(65);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rebuildPreservesEightMiBTransactionAndBatchBoundaries(boolean fullTransactionBudget) {
         commitRequests();
         commit(results());
         JsonNode before = records.findActivityStatistics(TENANT, SESSION).deepCopy();
+        long padding = 8L * 1024 * 1024 - rebuildCost(2) - (fullTransactionBudget ? 0 : rebuildCost(1));
+        String journalOwner = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, TENANT, SESSION);
+        addBudgetReference(TENANT, "JOURNAL", journalOwner, 2, "padding-a", padding / 2);
+        addBudgetReference(TENANT, "JOURNAL", journalOwner, 2, "padding-b", padding - padding / 2);
+        addBudgetReference(TENANT, "MESSAGE",
+                ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, TENANT, SESSION, "other-kind"),
+                2, "other-kind", 8L * 1024 * 1024);
+        addBudgetReference(TENANT, "JOURNAL",
+                ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, TENANT, SESSION, "other-owner"),
+                2, "other-owner", 8L * 1024 * 1024);
+        addBudgetReference("other-tenant", "JOURNAL", journalOwner, 2, "other-scope", 8L * 1024 * 1024);
+        clearActivity();
+        jdbc.queries.clear();
+        journal.acquire();
+        assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(before);
+        if (fullTransactionBudget) {
+            assertResourceSizeQueries(3, 2, 1);
+            assertThat(rebuildBodyReadsPerBatch()).containsExactly(1, 1, 1);
+        } else {
+            assertResourceSizeQueries(3, 1);
+            assertThat(rebuildBodyReadsPerBatch()).containsExactly(2, 1);
+        }
+    }
+
+    @Test
+    void rebuildRejectsOversizedFirstTransactionWithoutScanningAllCandidatesOrReadingBodies() {
+        commitRebuildHistory();
+        String journalOwner = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, TENANT, SESSION);
+        long padding = 8L * 1024 * 1024 + 1 - rebuildCost(1);
+        addBudgetReference(TENANT, "JOURNAL", journalOwner, 1, "padding-a", padding / 2);
+        addBudgetReference(TENANT, "JOURNAL", journalOwner, 1, "padding-b", padding - padding / 2);
+        clearActivity();
+        jdbc.queries.clear();
+        assertThatThrownBy(() -> journal.acquire()).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("Diagnostic recovery source exceeds its bounded batch");
+        assertThat(records.findActivityStatistics(TENANT, SESSION).path("readiness").asText()).isEqualTo("rebuilding");
+        assertResourceSizeQueries(32);
+        assertThat(rebuildBodyReadsPerBatch()).containsExactly(0);
+    }
+
+    @Test
+    void commitIsRefusedWhileTheActivityProjectionRebuildsAndAdmittedOnceReady() {
+        commitRequests();
+        commit(results());
         transactions.executeWithoutResult(status -> {
             jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND session_id = ?", SESSION);
             jdbc.update("DELETE FROM ma_session_record WHERE session_id = ?", SESSION);
         });
-        assertThat(records.findActivityStatistics(TENANT, SESSION)).isNull();
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
+        var next = message("after-wipe", "assistant", evidence("message:after-wipe"), json.createArrayNode());
+        assertThatThrownBy(() -> transactions.executeWithoutResult(status -> journal.commit(next)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_activity_rebuilding"));
         journal.acquire();
-        assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(before);
-        assertThat(records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 2, null, null, 100).items()).hasSize(4);
+        assertThat(records.findActivityStatistics(TENANT, SESSION).path("readiness").asText()).isEqualTo("ready");
+        commit(next);
     }
 
     @Test
@@ -283,31 +354,28 @@ class ManagedActivityDiagnosticsTest {
         assertThat(records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.FILES, 2, null, null, 100).items()).hasSize(2);
     }
 
-    @Test
-    void rebuildRejectsMissingMiddleTransactionsInsteadOfPublishingSmallerTotals() {
-        commitRequests();
-        commit(results());
-        transactions.executeWithoutResult(status -> {
-            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND session_id = ?", SESSION);
-            jdbc.update("DELETE FROM ma_session_record WHERE session_id = ?", SESSION);
-            jdbc.update("DELETE FROM ma_session_journal_tx WHERE session_id = ? AND journal_revision = 2", SESSION);
-        });
+    @ParameterizedTest
+    @ValueSource(ints = {2, 33})
+    void rebuildRejectsMissingMiddleTransactionsInsteadOfPublishingSmallerTotals(int missingRevision) {
+        commitRebuildHistory();
+        clearActivity();
+        jdbc.update("DELETE FROM ma_session_journal_tx WHERE session_id = ? AND journal_revision = ?", SESSION, missingRevision);
+        jdbc.queries.clear();
         assertThatThrownBy(() -> journal.acquire()).hasMessageContaining("source chain is incomplete");
         JsonNode statistics = records.findActivityStatistics(TENANT, SESSION);
         assertThat(statistics == null || !"ready".equals(statistics.path("readiness").asText())).isTrue();
+        assertResourceSizeQueries(32);
+        assertThat(rebuildBodyReadsPerBatch()).containsExactly(missingRevision - 1);
     }
 
     @Test
     void paginationBoundsCandidateScanningAndAdvancesPastNewMembers() {
         commitRequests();
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
         String resource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE session_id = ? AND domain = ? LIMIT 1",
                 String.class, SESSION, ManagedActivityDiagnostics.TOOLS);
         for (int index = 0; index < 512; index++) {
             String id = "new-" + index;
-            String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(SESSION, ManagedActivityDiagnostics.TOOLS, id);
-            jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, revision, record_resource_id, gmt_create, first_sequence) VALUES (?, ?, ?, 'w1', ?, ?, ?, 2, ?, ?, 2)",
-                    scope, key, TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, id, resource, 100000 + index);
+            jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, domain, record_id, revision, record_resource_id, gmt_create, first_sequence) VALUES (?, 'w1', ?, ?, ?, 2, ?, ?, 2)", TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, id, resource, 100000 + index);
         }
         var first = records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 1, null, null, 50);
         assertThat(first.items()).isEmpty();
@@ -316,6 +384,81 @@ class ManagedActivityDiagnosticsTest {
         var next = records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 1, first.lastTime(), first.lastKey(), 50);
         assertThat(next.items()).hasSize(4);
         assertThat(next.hasMore()).isFalse();
+    }
+
+    private void commitRebuildHistory() {
+        commitRequests();
+        commit(results());
+        for (int index = 0; index < 62; index++) {
+            String id = "extra-" + index;
+            commit(message(id, "assistant", evidence("message:" + id), json.createArrayNode()));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, TENANT, SESSION)).isEqualTo(65);
+    }
+
+    private void clearActivity() {
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND session_id = ?", SESSION);
+            jdbc.update("DELETE FROM ma_session_record WHERE session_id = ?", SESSION);
+        });
+    }
+
+    private long rebuildCost(long revision) {
+        String journalOwner = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, TENANT, SESSION);
+        return jdbc.queryForObject("SELECT byte_length FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                Long.class, TENANT, SESSION, revision)
+                + jdbc.queryForObject("SELECT COALESCE(SUM(r.byte_length), 0) FROM ma_resource_ref f JOIN ma_resource r"
+                        + " ON r.resource_id = f.resource_id AND r.tenant_id = f.tenant_id AND r.session_id = f.session_id"
+                        + " WHERE f.tenant_id = ? AND f.session_id = ? AND f.owner_kind = 'JOURNAL'"
+                        + " AND f.owner_ref = ? AND f.owner_revision = ?", Long.class, TENANT, SESSION, journalOwner, revision);
+    }
+
+    private void addBudgetReference(String tenant, String ownerKind, String ownerRef, long revision, String id, long bytes) {
+        // Size-only external resources are not diagnostic evidence and must never be fetched by the reducer.
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id,"
+                        + " kind, schema_version, byte_length, sha256, storage_kind, object_key, state, gmt_create)"
+                        + " VALUES (?, 'w1', ?, ?, 'managed-tool-outcome', 1, ?, ?, 'OBJECT_STORE', ?, 'REFERENCED', 1)",
+                tenant, SESSION, id, bytes, ManagedSchemaKeys.key(id), id);
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
+                        + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, ?, ?, ?, 'w1', ?, ?, 1)", ownerKind, ownerRef, revision, tenant, SESSION, id);
+    }
+
+    private void assertResourceSizeQueries(int... revisionsPerQuery) {
+        var queries = jdbc.queries.stream().filter(sql -> sql.contains("SUM(r.byte_length)")).toList();
+        assertThat(queries).hasSize(revisionsPerQuery.length);
+        for (int index = 0; index < queries.size(); index++) {
+            String sql = queries.get(index);
+            assertThat(sql).contains("f.tenant_id = ?", "f.session_id = ?", "f.owner_kind = 'JOURNAL'", "f.owner_ref = ?",
+                    "f.owner_revision IN (", "GROUP BY f.owner_revision").doesNotContain("record_bytes", "inline_bytes");
+            assertThat(sql.chars().filter(value -> value == '?').count()).isEqualTo(3L + revisionsPerQuery[index]);
+        }
+    }
+
+    private List<Integer> rebuildBodyReadsPerBatch() {
+        List<Integer> counts = new ArrayList<>();
+        for (String sql : jdbc.queries) {
+            if (sql.startsWith("SELECT journal_revision, first_sequence")) {
+                counts.add(0);
+            } else if (sql.startsWith("SELECT record_bytes, record_digest FROM ma_session_journal_tx")) {
+                counts.set(counts.size() - 1, counts.getLast() + 1);
+            }
+        }
+        return counts;
+    }
+
+    private static final class ObservedJdbc extends ManagedSchemaJdbcTemplate {
+        private final List<String> queries = new ArrayList<>();
+
+        private ObservedJdbc(DataSource source) {
+            super(source);
+        }
+
+        @Override
+        public <T> T query(String sql, PreparedStatementSetter setter, ResultSetExtractor<T> extractor) {
+            queries.add(sql);
+            return super.query(sql, setter, extractor);
+        }
     }
 
     private void commitRequests() {

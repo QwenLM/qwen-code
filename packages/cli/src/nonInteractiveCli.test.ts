@@ -19,6 +19,7 @@ import type {
   ServerLlmStreamEvent,
   SessionMetrics,
   WorkflowApprovalRequestCallback,
+  WorkflowRunCompletionCallback,
 } from '@qwen-code/qwen-code-core';
 import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
@@ -274,6 +275,14 @@ describe('runNonInteractive', () => {
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
+  let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setApprovalRequestCallback: ReturnType<typeof vi.fn>;
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setRegisterCallback: ReturnType<typeof vi.fn>;
@@ -348,6 +357,15 @@ describe('runNonInteractive', () => {
       setRegisterCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      abortAll: vi.fn(),
+    };
+
+    mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setApprovalRequestCallback: vi.fn(),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      getHandle: vi.fn(),
       abortAll: vi.fn(),
     };
 
@@ -433,6 +451,7 @@ describe('runNonInteractive', () => {
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       // Phase C: headless --resume reads the resumed session + sidecar to
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
@@ -2728,6 +2747,63 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('ends the turn on a tool hook stop and keeps the results in history', async () => {
+    useSharedLoopWithModToolHooks();
+    setupMetricsMock();
+    const parts = [
+      {
+        functionResponse: {
+          id: 'hook-stop-call',
+          name: 'read_file',
+          response: { output: 'read' },
+        },
+      },
+    ];
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: 'hook-stop-call',
+      responseParts: parts,
+      resultDisplay: 'read',
+      error: undefined,
+      errorType: undefined,
+      hookStopReason: 'budget spent',
+    });
+    mockLlmClient.sendMessageStream.mockImplementation(() =>
+      createStreamFromEvents([
+        {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'hook-stop-call',
+            name: 'read_file',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'hook-stop',
+          },
+        },
+      ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'read it',
+      'hook-stop',
+    );
+
+    expect(exitCode).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+    expect(mockLlmClient.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'hook-stop-call' }),
+        }),
+      ],
+    });
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'A hook stopped the turn: budget spent\n',
+    );
+  });
+
   it('streams Goal state changes that happen while a headless turn settles', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
@@ -3583,10 +3659,8 @@ describe('runNonInteractive', () => {
 
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     const handleWorkflowApproval = vi.fn().mockResolvedValue(undefined);
     const controlService = {
       permission: { handleWorkflowApproval },
@@ -3632,10 +3706,8 @@ describe('runNonInteractive', () => {
 
   it('does not register a workflow approval channel in plain headless mode', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
@@ -3652,6 +3724,210 @@ describe('runNonInteractive', () => {
 
     expect(setApprovalRequestCallback).not.toHaveBeenCalled();
   });
+
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  it('waits for a failed workflow to finish persisting before notifying the model', async () => {
+    setupMetricsMock();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const onResultEmitted = vi.fn();
+    const { promise: completion, resolve: finishPersisting } = deferred();
+    mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(true);
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({
+      runId: 'wf_bg',
+      completion,
+    });
+    mockLlmClient.sendMessageStream
+      .mockImplementationOnce(async function* () {
+        const notify = mockWorkflowRunRegistry.setCompletionCallback.mock
+          .calls[0]?.[0] as WorkflowRunCompletionCallback | undefined;
+        expect(notify).toBeTypeOf('function');
+        setTimeout(() => {
+          notify?.(
+            'Background workflow "review" failed.',
+            '<task-notification>workflow failed</task-notification>',
+            { runId: 'wf_bg', status: 'failed' },
+          );
+          mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(false);
+          mockWorkflowRunRegistry.list.mockReturnValue([
+            { runId: 'wf_bg', status: 'failed' },
+          ]);
+        }, 150);
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      })
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'It finished.' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]),
+      );
+
+    try {
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'run it',
+        'p-wf-bg',
+        { onResultEmitted },
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      const turnsBeforePersistence =
+        mockLlmClient.sendMessageStream.mock.calls.length;
+      const resultsBeforePersistence = onResultEmitted.mock.calls.length;
+      finishPersisting();
+      mockWorkflowRunRegistry.getHandle.mockReturnValue(undefined);
+      await vi.advanceTimersByTimeAsync(100);
+      await run;
+      expect(turnsBeforePersistence).toBe(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(resultsBeforePersistence).toBe(0);
+      expect(onResultEmitted).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(
+      JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]?.[0]),
+    ).toContain('workflow failed');
+    expect(
+      mockWorkflowRunRegistry.setCompletionCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it.each([
+    { reason: 'interrupt', exitCode: 130 },
+    { reason: 'turn limit', exitCode: 53 },
+    { reason: 'provider error', exitCode: 1 },
+  ])(
+    'lets a cancelled workflow record its end before exit on $reason',
+    async ({ reason, exitCode }) => {
+      setupMetricsMock();
+      const order: string[] = [];
+      const { promise: completion, resolve: settle } = deferred();
+      mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+      mockWorkflowRunRegistry.abortAll.mockImplementation(() => {
+        order.push('aborted');
+        setTimeout(() => {
+          order.push('settled');
+          settle();
+        }, 20);
+      });
+      vi.mocked(process.exit).mockImplementation((code) => {
+        order.push('exit');
+        throw new Error(`process.exit(${code}) called`);
+      });
+      const controller = new AbortController();
+      if (reason === 'turn limit') {
+        vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+      }
+      if (reason === 'provider error') {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.JSON,
+        );
+      }
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        if (reason === 'provider error') {
+          yield {
+            type: LlmEventType.Error,
+            value: { error: { message: 'Provider failure', status: 500 } },
+          };
+          return;
+        }
+        controller.abort();
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      });
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
+          abortController: controller,
+        }),
+      ).rejects.toThrow(`process.exit(${exitCode}) called`);
+
+      expect(order.slice(0, 3)).toEqual(['aborted', 'settled', 'exit']);
+    },
+  );
+
+  it.each([
+    { kind: 'recoverable', recoverable: true },
+    { kind: 'terminal', recoverable: false },
+  ])(
+    'classifies a $kind interrupt during the workflow wait before cancelling',
+    async ({ recoverable }) => {
+      setupMetricsMock();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const controller = new AbortController();
+      const { promise: waiting, resolve: enterHoldback } = deferred();
+      mockWorkflowRunRegistry.hasRunningEntries.mockImplementation(() => {
+        enterHoldback();
+        return true;
+      });
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf_bg', status: 'running' },
+      ]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({
+        completion: new Promise<never>(() => {}),
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]),
+      );
+
+      try {
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'run it',
+          'p-wf-wait',
+          {
+            abortController: controller,
+            recoverableCancellation: recoverable,
+          },
+        ).catch((error: unknown) => error);
+        await waiting;
+        controller.abort(recoverable ? new TurnInterruptedError() : undefined);
+        await vi.advanceTimersByTimeAsync(2_100);
+        const exitedWithinOneWindow = vi.mocked(process.exit).mock.calls.length;
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        if (recoverable) {
+          expect(await run).toBe(130);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(mockWorkflowRunRegistry.abortAll).not.toHaveBeenCalled();
+        } else {
+          expect(await run).toEqual(new Error('process.exit(130) called'));
+          expect(exitedWithinOneWindow).toBe(1);
+          expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalledOnce();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
     setupMetricsMock();
@@ -4103,7 +4379,7 @@ describe('runNonInteractive', () => {
       markApiHistoryPrompt(content, 'client-A');
       const historyOwner = {
         history: [content],
-        unaccountedMemorySnapshots: new WeakSet(),
+        unaccountedContextSnapshots: new WeakSet<Part>(),
       } as unknown as LlmChat;
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
@@ -4369,123 +4645,6 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('shows the always-on hint (not the skipLoopDetection escape) for a consecutive-identical halt', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'run_shell_command',
-        args: { command: 'echo loop' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-consecutive-loop',
-      },
-    };
-    const events: ServerLlmStreamEvent[] = [
-      toolCallEvent,
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat a tool',
-      'prompt-id-consecutive-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // The consecutive guard runs before the skipLoopDetection gate, so the
-    // headless message must point at model.loopProtection, which governs it,
-    // and must NOT suggest skipLoopDetection, which cannot disable it.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Set `model.loopProtection` to "warn"'),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('`model.skipLoopDetection`'),
-    );
-  });
-
-  it('shows the skipLoopDetection escape hint for a heuristic loop type', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'run_shell_command',
-        args: { command: 'echo loop' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-heuristic-loop',
-      },
-    };
-    const events: ServerLlmStreamEvent[] = [
-      toolCallEvent,
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.REPETITIVE_THOUGHTS },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat a tool',
-      'prompt-id-heuristic-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // A heuristic loop IS gated by skipLoopDetection, so the message must offer
-    // that escape hatch and must NOT claim it is an always-on guard. (Mutation
-    // guard: routing all types into the always-on hint would fail here.)
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('always-on guard'),
-    );
-  });
-
-  it('describes a chanting halt as output-or-reasoning repetition', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      {
-        type: LlmEventType.LoopDetected,
-        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    const exitCode = await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Chant',
-      'prompt-id-chanting-loop',
-    );
-
-    expect(exitCode).toBe(1);
-    // Reasoning-stream chants fire CHANTING_IDENTICAL_SENTENCES while
-    // getResponseText filters reasoning out of visible output, so the
-    // headless label must name both channels — a halt on an empty stdout
-    // with an "output"-only label reads as a detector misfire.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'the model repeated the same sentence in its output or reasoning',
-      ),
-    );
-  });
-
   it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
     setupMetricsMock();
     const events: ServerLlmStreamEvent[] = [
@@ -4514,11 +4673,6 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('cannot be disabled'),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
     );
   });
 
@@ -4552,44 +4706,6 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
       ),
-    );
-    // The reason replaces the hedged hint that lists every cause.
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('A per-turn tool-call cap was reached'),
-    );
-  });
-
-  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      {
-        type: LlmEventType.LoopDetected,
-        value: {
-          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          loopReason: LoopReason.REPEATED_CALL,
-        },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Repeat',
-      'prompt-id-global-dup-reason',
-    );
-
-    // The heuristic detector runs only with skipLoopDetection: false, so the
-    // always-on hint the provider-id breaker gets would be wrong here.
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        '`model.skipLoopDetection` to true to disable this check',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -7635,16 +7751,6 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
         'the provider replayed a tool call id that had already run',
-      ),
-    );
-    expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
-    );
-    expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
       ),
     );
   });

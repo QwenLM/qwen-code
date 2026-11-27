@@ -232,6 +232,13 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   /**
+   * The output-token budget at the moment a max_tokens cut truncated this
+   * call's arguments; present only when `wasOutputTruncated` is true and both
+   * numbers were knowable. Lets the scheduler's rejection name the budget so
+   * the model can size each part of a split write (#16417).
+   */
+  outputBudgetAtTruncation?: { usedTokens: number; limitTokens: number };
+  /**
    * Set to true when this call's arguments arrived unterminated and were
    * repaired into shape, but the output token limit was *not* what cut them.
    * The data-loss guard needs this fact; the user-visible wording needs the
@@ -269,6 +276,11 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * A tool hook returned `continue: false` without blocking: the turn ends
+   * after this batch, and this is the reason shown to the user.
+   */
+  hookStopReason?: string;
   /**
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
@@ -532,6 +544,16 @@ export enum CompressionStatus {
    * apart from model output quality failures.
    */
   COMPRESSION_FAILED_API_ERROR,
+
+  /**
+   * The compression request could not leave the summary a usable output
+   * budget in the receiving model's window, even after its text was
+   * truncated (#9455).
+   * Either it was refused before it was sent, or the provider rejected it for
+   * context length and no smaller request could be built, or the one retry
+   * was rejected for context length too.
+   */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
 
 export function isCompressionFailureStatus(
@@ -542,7 +564,8 @@ export function isCompressionFailureStatus(
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
   );
 }
 
@@ -618,6 +641,7 @@ export type ServerLlmCitationEvent = {
 export type ServerLlmHookSystemMessageEvent = {
   type: LlmEventType.HookSystemMessage;
   value: string;
+  isStopReason?: true;
 };
 
 export type ServerLlmGoalSettlementFailedEvent = {
@@ -671,6 +695,17 @@ export type ServerLlmStreamEvent =
   | ServerLlmUserCancelledEvent
   | ServerLlmSessionTokenLimitExceededEvent
   | ServerLlmRetryEvent;
+
+/**
+ * Whether a stream event restarts the current attempt from scratch: the
+ * failed attempt's partial output is discarded and streamed again.
+ */
+export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
+  return (
+    event.type === LlmEventType.Retry ||
+    event.type === LlmEventType.ModelFallback
+  );
+}
 
 /** @deprecated Use `ServerLlmRetryEvent`; retained until a future major release. */
 export type ServerGeminiRetryEvent = ServerLlmRetryEvent;
@@ -795,6 +830,7 @@ export class Turn {
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
     private readonly ledgerTurnKey?: string,
+    private readonly retractToolCallsOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -827,6 +863,9 @@ export class Turn {
         ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
         ...(this.retractDeliveredOutputOnRetry
           ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.retractToolCallsOnRetry
+          ? { retractToolCallsOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
         ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),
@@ -980,6 +1019,42 @@ export class Turn {
           if (finishReason === FinishReason.MAX_TOKENS) {
             for (const tc of this.pendingToolCalls) {
               tc.wasOutputTruncated = true;
+              // Record the budget numbers alongside the truncation mark so
+              // the rejection can tell the model how large each part of a
+              // split write should be (#16417). The limit is whatever the
+              // send layer actually used — clamp, escalation, or user
+              // override.
+              // Prefer total − prompt: Gemini-family providers report
+              // reasoning tokens separately in thoughtsTokenCount, and the
+              // output-limit consumption includes them. A bare
+              // candidatesTokenCount under-reports there and the model would
+              // size its retry too large. Fall back to candidatesTokenCount
+              // when total or prompt is missing, zero-coerced (OpenAI
+              // converters stamp totalTokenCount unconditionally with
+              // `|| 0`), or non-finite. A MAX_TOKENS cut always consumed
+              // output tokens, so both arms refuse to certify a budget
+              // nothing was taken from — a zero or non-finite count is a
+              // coerced/missing value, not a measurement (#16417 R1-1/R4-1).
+              const usage = resp.usageMetadata;
+              const total = usage?.totalTokenCount;
+              const prompt = usage?.promptTokenCount;
+              const candidates = usage?.candidatesTokenCount;
+              const usedTokens =
+                total !== undefined &&
+                prompt !== undefined &&
+                Number.isFinite(total) &&
+                Number.isFinite(prompt) &&
+                total > prompt
+                  ? total - prompt
+                  : candidates !== undefined &&
+                      Number.isFinite(candidates) &&
+                      candidates > 0
+                    ? candidates
+                    : undefined;
+              const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
+              if (usedTokens !== undefined && limitTokens !== undefined) {
+                tc.outputBudgetAtTruncation = { usedTokens, limitTokens };
+              }
             }
           }
 

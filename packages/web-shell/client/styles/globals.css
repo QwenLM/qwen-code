@@ -154,3 +154,37 @@
 [data-user-selectable] ::selection {
   background: hsl(210 100% 50% / 30%);
 }
+
+/*
+ * iOS Safari zooms when a text field below 16px receives focus. Apply the
+ * floor in the shared stylesheet: dialogs can portal outside the app root,
+ * including into a ShadowRoot, and embedded shells do not load standalone.css.
+ * Keep this unlayered and more specific than the responsive input utilities
+ * and the CodeMirror editor's generated font rules.
+ */
+@supports (-webkit-touch-callout: none) {
+  @media (hover: none) and (pointer: coarse) {
+    :is(
+        [data-web-shell-root]:where([data-web-shell-shadcn]),
+        [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+      )
+      :is(
+        input:is(
+          :not([type]),
+          [type='text'],
+          [type='search'],
+          [type='password'],
+          [type='email'],
+          [type='url'],
+          [type='tel'],
+          [type='number']
+        ),
+        textarea,
+        [contenteditable='true'],
+        [data-composer] .cm-content,
+        [data-composer] .cm-line
+      ) {
+      font-size: 16px;
+    }
+  }
+}

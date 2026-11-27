@@ -5,6 +5,7 @@
  */
 
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
 import { extensionsCommand } from './extensionsCommand.js';
 import { type CommandContext } from './types.js';
@@ -13,6 +14,7 @@ import {
   it,
   expect,
   vi,
+  afterEach,
   beforeEach,
   type MockedFunction,
 } from 'vitest';
@@ -161,6 +163,48 @@ describe('extensionsCommand', () => {
         dialog: 'extensions_manage',
       });
     });
+  });
+
+  describe('list subcommand capability counts', () => {
+    afterEach(async () => {
+      await setLanguageAsync('en');
+    });
+
+    it.each([
+      ['en', 1, '1 MCP server, 1 skill, 1 command'],
+      ['en', 2, '2 MCP servers, 2 skills, 2 commands'],
+      ['ru', 1, '1 MCP-сервер, 1 навык, 1 команда'],
+      ['ru', 2, '2 MCP-сервера, 2 навыка, 2 команды'],
+      ['ru', 11, '11 MCP-серверов, 11 навыков, 11 команд'],
+      ['ru', 21, '21 MCP-сервер, 21 навык, 21 команда'],
+    ] as const)(
+      'formats %s capability counts of %i',
+      async (language, count, expected) => {
+        await setLanguageAsync(language);
+        const capabilities = Array.from({ length: count }, (_, i) => [
+          `cap-${i}`,
+          {},
+        ]);
+        mockGetExtensions.mockReturnValue([
+          {
+            name: 'test-extension',
+            isActive: true,
+            mcpServers: Object.fromEntries(capabilities),
+            skills: capabilities,
+            commands: capabilities,
+          },
+        ]);
+        const list = extensionsCommand.subCommands!.find(
+          (command) => command.name === 'list',
+        )!;
+        const result = await list.action!(mockContext, '');
+
+        expect(result).toMatchObject({
+          type: 'message',
+          content: expect.stringContaining(`**test-extension** [${expected}]`),
+        });
+      },
+    );
   });
 
   describe('install', () => {

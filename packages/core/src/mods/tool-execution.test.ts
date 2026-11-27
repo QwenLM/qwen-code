@@ -152,6 +152,100 @@ describe('Mod tool request projection', () => {
   });
 
   it.each([
+    [
+      'returns an earlier reference',
+      { ref: 1, result: { error: 'first' } },
+      { error: 'first' },
+    ],
+    [
+      'returns the retry',
+      { ref: 3, result: { output: 'retry' } },
+      { output: 'retry' },
+    ],
+    [
+      'rewrites the result',
+      { result: 'replacement' },
+      { output: 'replacement' },
+    ],
+    [
+      'withholds the result',
+      { deny: 'withheld' },
+      { error: expect.stringContaining('withheld') },
+    ],
+    [
+      'receives a refusal on its last retry',
+      { result: 'replacement' },
+      { error: expect.stringContaining('refused') },
+    ],
+  ] as const)(
+    'keeps the first native hook stop when the Mod %s',
+    async (action, answer, expected) => {
+      const { request } = setup();
+      const tool = new MockTool({ name: request.name });
+      const attempts = [
+        { error: 'first' },
+        { error: 'second', hookStopReason: 'stop after failure' },
+        {
+          output: 'retry',
+          hookStopReason:
+            action === 'returns the retry' ? undefined : 'later hook stop',
+        },
+        ...(action === 'receives a refusal on its last retry'
+          ? [{ error: 'refused' }]
+          : []),
+      ];
+      let index = 0;
+      const { response } = await executeModTool(
+        request,
+        request,
+        async (input, next, signal) => {
+          for (const _attempt of attempts) {
+            await next(input, signal, async (_input, verdict) => verdict);
+          }
+          return answer;
+        },
+        async () => {
+          const attempt = attempts[index++];
+          const refused = attempt.error === 'refused';
+          return {
+            status: attempt.error ? 'error' : 'success',
+            request,
+            tool,
+            invocation: tool.build(request.args),
+            response: {
+              callId: request.callId,
+              responseParts: [
+                {
+                  functionResponse: {
+                    response: attempt.error
+                      ? { error: attempt.error }
+                      : { output: attempt.output },
+                  },
+                },
+              ],
+              executionStatus: refused
+                ? 'not_started'
+                : attempt.error
+                  ? 'error'
+                  : 'success',
+              error: attempt.error ? new Error(attempt.error) : undefined,
+              errorType: undefined,
+              resultDisplay: attempt.error ?? attempt.output,
+              hookStopReason: attempt.hookStopReason,
+            },
+          };
+        },
+        new AbortController().signal,
+      );
+      expect(response.responseParts[0].functionResponse?.response).toEqual(
+        expected,
+      );
+      expect(response.executionStatus).toBe('success');
+      expect(response.hookStopReason).toBe('stop after failure');
+    },
+  );
+
+  it.each([
     { payload: 'x'.repeat(120_000) },
     { output: { payload: 'x'.repeat(120_000) } },
     { output: 'short', payload: 'x'.repeat(120_000) },

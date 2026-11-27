@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -20,6 +21,7 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -288,7 +290,7 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
             if (!saved.equals(JSON.readTree(regularText(completion(plan))))) {
                 throw new IOException("Original checkout completion changed");
             }
-            var fields = new java.util.TreeMap<String, String>();
+            var fields = new TreeMap<String, String>();
             JSON.readTree(captureGitIdentity(plan, null)).properties().forEach(entry -> fields.put(entry.getKey(), entry.getValue().asText()));
             String actual = JSON.writeValueAsString(fields);
             JsonNode current = JSON.readTree(actual);
@@ -303,7 +305,7 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
             requireAttestedAnchor(target.resolve(".git"), saved.path("gitfile").asText(), volumeUuid);
             requireAttestedAnchor(Path.of(saved.path("gitdir").asText()), saved.path("gitdirIdentity").asText(), volumeUuid);
             var upgraded = JSON.valueToTree(plan);
-            ((com.fasterxml.jackson.databind.node.ObjectNode) upgraded)
+            ((ObjectNode) upgraded)
                     .put("rootIdentity", identity(Path.of(plan.root())))
                     .put("commonIdentity", identity(Path.of(plan.commonDirectory())));
             boolean stableCompletion = saved.path("target").asText().startsWith("macos-volume/1:")
