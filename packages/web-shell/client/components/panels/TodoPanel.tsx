@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { TodoItem } from '../../adapters/types';
 import type { WebShellBottomStatusItem } from '../../customization';
 import { getTodoStatusIcon } from '../../utils/todos';
@@ -60,6 +60,27 @@ export const TodoPanel = memo(function TodoPanel({
         total,
       })
     : statusOnlyLabel;
+
+  // The rows are selectable text, and `click` is dispatched on the nearest
+  // common ancestor of mousedown and mouseup: the click that ends a
+  // drag-selection — and the repeat clicks of a double-click — must not open
+  // the panel. (The first click of a double-click still arrives before the
+  // selection exists; that residual is accepted over adding a dedicated
+  // control row to the card.)
+  const openDetail = (event: MouseEvent<HTMLDivElement>) => {
+    if (!onOpen) return;
+    if (event.detail > 1) return;
+    if (!window.getSelection()?.isCollapsed) return;
+    onOpen();
+  };
+
+  const activateDetail = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!onOpen) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onOpen();
+    }
+  };
 
   return (
     <section
@@ -133,7 +154,19 @@ export const TodoPanel = memo(function TodoPanel({
       </div>
 
       {total > 0 && (
-        <div className={styles.detail} role="tooltip">
+        <div
+          className={
+            onOpen
+              ? `${styles.detail} ${styles.detailClickable}`
+              : styles.detail
+          }
+          data-testid="todo-panel-detail"
+          role={onOpen ? 'button' : 'tooltip'}
+          tabIndex={onOpen ? 0 : undefined}
+          aria-label={onOpen ? summaryAriaLabel : undefined}
+          onClick={onOpen ? openDetail : undefined}
+          onKeyDown={onOpen ? activateDetail : undefined}
+        >
           {todos.map((todo, index) => (
             <div
               key={`${todo.id || index}:${todo.content}`}
