@@ -1062,7 +1062,7 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
     writeElf('usr/lib/x86_64-linux-gnu/libwayland-client.so.0');
     assert.throws(
       () => verifyAppImageClosure(extractedRoot),
-      /AppImage must not bundle host-baseline libraries: usr\/lib\/x86_64-linux-gnu\/libwayland-client\.so\.0$/,
+      /AppImage must not bundle host-baseline libraries: usr\/lib\/x86_64-linux-gnu\/libwayland-client\.so\.0\./,
     );
     fs.rmSync(
       path.join(
@@ -1125,7 +1125,8 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       assert.throws(
         () => verifyAppImageClosure(extractedRoot),
         new RegExp(
-          `AppImage must not bundle host-baseline libraries: usr/lib/${soname.replaceAll('.', '\\.')}$`,
+          `AppImage must not bundle host-baseline libraries: usr/lib/${soname.replaceAll('.', '\\.')}\\. ` +
+            'Stop linuxdeploy from copying them at packaging time, e\\.g\\. `linuxdeploy --exclude-library=<soname>`',
         ),
       );
       fs.rmSync(library);
