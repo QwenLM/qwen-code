@@ -11,6 +11,7 @@ import type { GeneratedUiStateRecordPayload } from './generated-ui-state.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
+import type { ModelPreferenceSnapshot } from '../models/model-preferences.js';
 import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
 import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
 import type { HookLifecycleRecord } from '../telemetry/hook-lifecycle-contract.js';
@@ -861,6 +862,8 @@ export interface SessionModelRecordPayload {
   authType: string;
   baseUrl?: string;
   isRuntime?: boolean;
+  preferenceSnapshot?: ModelPreferenceSnapshot;
+  reasoningSelection?: string;
 }
 
 export interface SessionWorkflowModeRecordPayload {
@@ -972,6 +975,12 @@ export function normalizeSessionModelPayload(
   if (payload.isRuntime) {
     normalized.isRuntime = true;
   }
+  if (payload.preferenceSnapshot?.values) {
+    normalized.preferenceSnapshot = payload.preferenceSnapshot;
+  }
+  if (typeof payload.reasoningSelection === 'string') {
+    normalized.reasoningSelection = payload.reasoningSelection;
+  }
   return normalized;
 }
 
@@ -983,7 +992,10 @@ export function sessionModelPayloadsEqual(
     a.modelId === b.modelId &&
     a.authType === b.authType &&
     (a.baseUrl ?? '') === (b.baseUrl ?? '') &&
-    Boolean(a.isRuntime) === Boolean(b.isRuntime)
+    Boolean(a.isRuntime) === Boolean(b.isRuntime) &&
+    a.reasoningSelection === b.reasoningSelection &&
+    JSON.stringify(a.preferenceSnapshot) ===
+      JSON.stringify(b.preferenceSnapshot)
   );
 }
 
@@ -4598,6 +4610,10 @@ export class ChatRecordingService {
         this.reanchorSessionSource();
       }
     }
+  }
+
+  getRecordedSessionModel(): SessionModelRecordPayload | undefined {
+    return this.currentSessionModel;
   }
 
   /** Persist the daemon session's current model so load/resume can restore it. */

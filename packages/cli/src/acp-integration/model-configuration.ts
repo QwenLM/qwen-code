@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { normalizeReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import {
+  resolveModelPreferenceReasoning,
+  type ModelPreference,
+} from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import {
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
@@ -119,6 +124,8 @@ export const PERSIST_REASONING_SELECTION_META_KEY =
   'qwenCode/persistReasoningSelection';
 export const REASONING_SELECTION_PERSISTED_META_KEY =
   'qwenCode/reasoningSelectionPersisted';
+export const PERSIST_SESSION_REASONING_META_KEY =
+  'qwenCode/persistSessionReasoning';
 
 export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   low: 'Low',
@@ -721,6 +728,7 @@ export function buildModelReasoningRoutePreview(
   reasoning: ResolvedReasoning | undefined,
   selection: unknown,
   opaqueRoute = false,
+  preference?: ModelPreference['reasoning'],
 ): SessionConfigOption[] | undefined {
   const model = getRequestModel(generation);
   const thinkingMandatory =
@@ -740,6 +748,23 @@ export function buildModelReasoningRoutePreview(
     !getDeepSeekReasoningState(generation, routeReasoning)
   )
     return undefined;
+  if (preference) {
+    const capability = getModelConfiguration(model, routeReasoning)?.reasoning;
+    generation = {
+      ...generation,
+      reasoning: resolveModelPreferenceReasoning(
+        generation.reasoning,
+        preference,
+        selection === REASONING_EFFORT_NONE
+          ? selection
+          : normalizeReasoningEffort(
+              typeof selection === 'string' ? selection : undefined,
+            ),
+        !thinkingMandatory && capability?.canDisable !== false,
+      ),
+    };
+    selection = undefined;
+  }
   const parsedSelection = parseReasoningSelection(selection);
   const usesConfiguredState =
     !parsedSelection ||

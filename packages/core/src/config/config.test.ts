@@ -8852,6 +8852,22 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
     expect(config.getModelPreferenceContextLimit()).toBe(400_000);
 
+    config.setModelPreferences({
+      [firstKey]: {
+        ...firstPreference,
+        reasoning: { enabled: false, effort: 'high' },
+      },
+    });
+    expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+    expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
+    config.setModelPreferences({
+      [firstKey]: {
+        ...firstPreference,
+        reasoning: { enabled: true, effort: 'high' },
+      },
+    });
+    expect(config.getReasoningEffort()).toBe('high');
+
     await config.switchModel(authType, model, { baseUrl: second });
     const secondKey = config.getModelPreferenceKey()!;
     expect(secondKey).not.toBe(firstKey);

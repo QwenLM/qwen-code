@@ -109,12 +109,16 @@ export const effortCommand: SlashCommand = {
       };
     }
 
-    applyModelReasoningEffort(
-      config,
-      settings,
-      tier,
-      context.executionPolicy?.persistModelSelection !== false,
-    );
+    if (context.session.setReasoningEffort) {
+      await context.session.setReasoningEffort(tier);
+    } else {
+      applyModelReasoningEffort(
+        config,
+        settings,
+        tier,
+        context.executionPolicy?.persistModelSelection !== false,
+      );
+    }
 
     return {
       type: 'message',

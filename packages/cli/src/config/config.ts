@@ -1720,6 +1720,7 @@ export async function loadCliConfig(
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
     modelPreferences?: ConfigParameters['modelPreferences'];
+    restoreModelPreferences?: boolean;
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -2643,6 +2644,16 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     modelPreferences,
+    ...(!bareMode &&
+    !sshWorkspace &&
+    !modelConfiguration &&
+    hostPolicy?.restoreModelPreferences
+      ? {
+          modelPreferenceRestoreBase: {
+            reasoning: resolvedCliConfig.providerReasoning,
+          },
+        }
+      : {}),
     modelPreferenceDefaultEffort:
       modelPreferences === undefined
         ? undefined

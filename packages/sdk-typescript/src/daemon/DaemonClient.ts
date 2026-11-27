@@ -320,6 +320,9 @@ import type {
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
   DaemonModelConfiguration,
+  DaemonModelPreferences,
+  DaemonModelPreferencesPatch,
+  DaemonReasoningUpdateOptions,
   DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
@@ -6452,6 +6455,28 @@ export class DaemonClient {
     );
   }
 
+  modelPreferences(): Promise<DaemonModelPreferences> {
+    return this.jsonRequest(
+      '/workspace/model-preferences',
+      'GET /workspace/model-preferences',
+      { mode: 'rest' },
+    );
+  }
+
+  updateModelPreferences(
+    patch: DaemonModelPreferencesPatch,
+  ): Promise<DaemonModelPreferences> {
+    return this.jsonRequest(
+      '/workspace/model-preferences',
+      'PATCH /workspace/model-preferences',
+      {
+        method: 'PATCH',
+        body: patch,
+        mode: 'rest',
+      },
+    );
+  }
+
   async modelConfigurations(): Promise<{ models: DaemonModelConfiguration[] }> {
     return this.jsonRequest('/workspace/models', 'GET /workspace/models');
   }
@@ -7409,7 +7434,9 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
-    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+    clientOrOptions?:
+      | string
+      | (DaemonReasoningUpdateOptions & { clientId?: string }),
   ): Promise<DaemonSessionConfigOptionResult>;
   setSessionConfigOption(
     sessionId: string,
@@ -7421,7 +7448,9 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort' | 'workflow_mode',
     value: ReasoningSelection | 'on' | 'off',
-    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+    clientOrOptions?:
+      | string
+      | (DaemonReasoningUpdateOptions & { clientId?: string }),
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
@@ -7429,7 +7458,9 @@ export class DaemonClient {
         : clientOrOptions;
     if (
       configId === 'workflow_mode' &&
-      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+      ((value !== 'on' && value !== 'off') ||
+        options?.persist !== undefined ||
+        options?.persistToSession !== undefined)
     ) {
       throw new Error(
         'Workflow mode requires on/off and does not accept persist',
@@ -7446,8 +7477,12 @@ export class DaemonClient {
           ...(options?.persist !== undefined
             ? { persist: options.persist }
             : {}),
+          ...(options?.persistToSession !== undefined
+            ? { persistToSession: options.persistToSession }
+            : {}),
         },
         clientId: options?.clientId,
+        ...(options?.persistToSession !== undefined ? { mode: 'rest' } : {}),
       },
     );
     // ACP returns configOptions only; a successful Workflow mode write has
@@ -8740,6 +8775,26 @@ export class WorkspaceDaemonClient {
       sessionId,
       { ...req, workspaceCwd },
       clientId,
+    );
+  }
+
+  modelPreferences(): Promise<DaemonModelPreferences> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/model-preferences',
+      'GET /workspaces/:workspace/model-preferences',
+      { mode: 'rest' },
+    );
+  }
+
+  updateModelPreferences(
+    patch: DaemonModelPreferencesPatch,
+  ): Promise<DaemonModelPreferences> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/model-preferences',
+      'PATCH /workspaces/:workspace/model-preferences',
+      { method: 'PATCH', body: patch, mode: 'rest' },
     );
   }
 

@@ -440,7 +440,7 @@ function ModelWindowEditor({
       }}
     >
       <Field>
-        <FieldLabel htmlFor={id}>{t('auth.advanced.contextWindow')}</FieldLabel>
+        <FieldLabel htmlFor={id}>{t('settings.models.editWindow')}</FieldLabel>
         <Input
           id={id}
           value={value}

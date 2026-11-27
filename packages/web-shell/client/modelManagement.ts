@@ -4,11 +4,13 @@ export interface WebShellModelManagementOptions {
   allowAdd?: boolean;
   /** Allow model deletion. Defaults to true. */
   allowDelete?: boolean;
+  /** Enable new-task preferences in an embedding host that preserves these settings. */
+  allowPreferences?: boolean;
 }
 
 export function resolveModelManagement(
   options?: WebShellModelManagementOptions,
-): Required<WebShellModelManagementOptions> {
+): Required<Pick<WebShellModelManagementOptions, 'allowAdd' | 'allowDelete'>> {
   return {
     allowAdd: options?.allowAdd ?? true,
     allowDelete: options?.allowDelete ?? true,

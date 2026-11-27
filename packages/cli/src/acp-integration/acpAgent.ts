@@ -344,7 +344,15 @@ import {
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { acpModRowSites } from './session/acp-mod-session.js';
-import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
+import {
+  recordDaemonSessionModelFromConfig,
+  restoreSessionModelThenAuthenticate,
+} from './session-model-persistence.js';
+import {
+  copyModelPreferences,
+  getModelPreferenceKey,
+} from '@qwen-code/qwen-code-core/models/model-preferences.js';
+import { STARTUP_REASONING_SELECTION_META_KEY } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -379,6 +387,7 @@ import {
   hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
+  PERSIST_SESSION_REASONING_META_KEY,
   parseReasoningSelection,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
@@ -6237,6 +6246,11 @@ class QwenAgent implements Agent {
                 this.setupFileSystem(config),
               );
             }
+            if (config.getModelPreferenceSnapshot?.()) {
+              await recordDaemonSessionModelFromConfig(config, {
+                required: true,
+              });
+            }
             session = await profiler.time('session_register', () =>
               this.createAndStoreSession(config, settings, undefined, {
                 deferWorkspaceActivation: provisionalStandalone,
@@ -7386,6 +7400,10 @@ class QwenAgent implements Agent {
 
           const persist =
             params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
+          const persistToSession =
+            params._meta?.[PERSIST_SESSION_REASONING_META_KEY] === true ||
+            (params._meta?.[STARTUP_REASONING_SELECTION_META_KEY] === true &&
+              config.getModelPreferenceSnapshot?.() !== undefined);
           const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
             selected !== REASONING_EFFORT_DEFAULT;
@@ -7416,7 +7434,15 @@ class QwenAgent implements Agent {
             if (modelReasoning && !modelReasoning.toggleOnly) {
               clearReasoningRequestOverrides(generation, config);
             }
-            applyReasoningSelection(config, selected, defaultReasoning);
+            applyReasoningSelection(
+              config,
+              selected,
+              selected === REASONING_EFFORT_DEFAULT &&
+                persistToSession &&
+                generation.reasoning === false
+                ? defaultReasoning || {}
+                : defaultReasoning,
+            );
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
               config.setReasoningEffort?.(
                 selected === REASONING_EFFORT_DEFAULT
@@ -7453,12 +7479,21 @@ class QwenAgent implements Agent {
             if (persist) {
               session.persistReasoningSelection(selected);
             }
-            session.setSessionReasoningSelection(
-              persist ? undefined : selected,
-            );
+            const savedToSession =
+              persistToSession &&
+              (await recordDaemonSessionModelFromConfig(config, {
+                reasoningSelection: selected,
+                required: true,
+              }));
+            if (savedToSession)
+              session.setSessionReasoningSelection(selected, true);
+            else
+              session.setSessionReasoningSelection(
+                persist ? undefined : selected,
+              );
             return {
               configOptions,
-              ...(persist
+              ...(persist || savedToSession
                 ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
                 : {}),
             };
@@ -9083,6 +9118,13 @@ class QwenAgent implements Agent {
               resolveReasoningForModel(undefined, generation),
               settings.merged.model?.reasoningEffort,
               modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+              settings.merged.model?.preferences?.[
+                getModelPreferenceKey(
+                  model.authType,
+                  model.id,
+                  generation.baseUrl,
+                )
+              ]?.reasoning,
             );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
@@ -16395,6 +16437,11 @@ class QwenAgent implements Agent {
         const envResult = reloadEnvironment(newMerged, cwd);
 
         const changed = diffSettingsKeys(oldMerged, newMerged);
+        if (changed.has('model')) {
+          const { preferences: _old, ...oldModel } = oldMerged.model ?? {};
+          const { preferences: _new, ...newModel } = newMerged.model ?? {};
+          if (isDeepStrictEqual(oldModel, newModel)) changed.delete('model');
+        }
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
         const providersChanged =
@@ -17281,6 +17328,17 @@ class QwenAgent implements Agent {
     );
     const agentHostReadOnly =
       sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE;
+    const useModelPreferences =
+      this.isTrustedManagedParent() &&
+      !provisionalWorkspace &&
+      !agentHostReadOnly &&
+      executionEngine !== 'managed' &&
+      this.hostExecutionEngine !== 'managed' &&
+      chatRecording !== false;
+    const modelPreferences =
+      useModelPreferences && resume !== true
+        ? copyModelPreferences(settings.merged.model?.preferences)
+        : undefined;
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -17444,8 +17502,18 @@ class QwenAgent implements Agent {
         provisionalWorkspace ||
         agentHostReadOnly ||
         executionEngine ||
-        workflowAncestorTrustProvider
+        workflowAncestorTrustProvider ||
+        useModelPreferences
         ? {
+            ...(useModelPreferences
+              ? {
+                  restoreModelPreferences: true,
+                  ...(modelPreferences &&
+                  Object.keys(modelPreferences).length > 0
+                    ? { modelPreferences }
+                    : {}),
+                }
+              : {}),
             ...(workflowAncestorTrustProvider
               ? { workflowAncestorTrustProvider }
               : {}),
@@ -17876,7 +17944,9 @@ class QwenAgent implements Agent {
     }
     const selection =
       sessionSelection ??
-      parseReasoningSelection(settings.merged.model?.reasoningEffort);
+      (config.getModelPreferenceSnapshot?.()
+        ? undefined
+        : parseReasoningSelection(settings.merged.model?.reasoningEffort));
     if (!selection || selection === REASONING_EFFORT_DEFAULT) {
       return;
     }
@@ -17916,6 +17986,9 @@ class QwenAgent implements Agent {
     authenticate: () => Promise<void>,
     allowSubscriptionStartupFallback = false,
   ): Promise<void> {
+    const snapshot =
+      projection?.runtime.recording.sessionModel?.preferenceSnapshot;
+    if (snapshot) config.restoreModelPreferenceSnapshot?.(snapshot);
     const subscriptionFallbackModel = allowSubscriptionStartupFallback
       ? getSubscriptionStartupFallbackModel(
           settings,
@@ -18527,6 +18600,14 @@ class QwenAgent implements Agent {
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
       }
+      if (
+        parseReasoningSelection(
+          config.getSessionRestoreRuntime?.()?.recording?.sessionModel
+            ?.reasoningSelection,
+        ) !== undefined
+      ) {
+        session.reapplySessionReasoningSelection();
+      }
       options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
@@ -18692,7 +18773,12 @@ class QwenAgent implements Agent {
       name: model.label,
       description: model.description ?? null,
       _meta: {
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+        contextLimit:
+          (modelId === currentModelId
+            ? config.getContentGeneratorConfig?.()?.contextWindowSize
+            : undefined) ??
+          model.contextWindowSize ??
+          tokenLimit(model.id),
         authType: model.authType,
         baseModelId: model.id,
         ...(model.modalities !== undefined

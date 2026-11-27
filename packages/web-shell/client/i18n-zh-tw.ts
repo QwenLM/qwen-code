@@ -5807,7 +5807,26 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.description.experimental.generatedUi':
     '在 Web Shell 等受支援的本地會話中，用內建 Generated UI 展示互動檢視。預設開啟。重新建立所屬會話後生效。',
 
-  'settings.models.editWindow': '配置視窗大小',
+  'settings.models.editWindow': '供應商視窗上限',
+  'settings.modelPreferences.title': '新任務預設值',
+  'settings.modelPreferences.name': '模型名稱',
+  'settings.modelPreferences.contextWindow': '上下文視窗',
+  'settings.modelPreferences.tokens': 'tokens',
+  'settings.modelPreferences.limit': (v) => `上限 ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `請輸入 1 至 ${v?.tokens ?? ''} 之間的整數。`,
+  'settings.modelPreferences.alwaysOn': '一律開啟',
+  'settings.modelPreferences.providerDefault': '模型預設',
+  'settings.modelPreferences.providerSettings': '供應商設定',
+  'settings.modelPreferences.inherit': '恢復繼承',
+  'settings.modelPreferences.source.model': '模型預設',
+  'settings.modelPreferences.source.system': '管理政策',
+  'settings.modelPreferences.source.user': '使用者設定',
+  'settings.modelPreferences.source.workspace': '工作區設定',
+  'settings.modelPreferences.newTasksOnly': '這些設定僅對之後新建的任務生效。',
+  'settings.modelPreferences.save': '儲存設定',
+  'settings.modelPreferences.saveFailed': '無法儲存模型偏好',
+  'settings.modelPreferences.retry': '重試',
   'settings.models.windowHint':
     '留空根據模型 ID 自動推斷。已有會話需重啟後使用新視窗大小。',
   'settings.models.windowSaved': '已儲存，重啟已有會話後生效。',

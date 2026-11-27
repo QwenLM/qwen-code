@@ -30,7 +30,27 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.experimental.generatedUi':
     'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default. Restart the owning session to apply changes.',
 
-  'settings.models.editWindow': 'Edit context window',
+  'settings.models.editWindow': 'Provider window limit',
+  'settings.modelPreferences.title': 'New task defaults',
+  'settings.modelPreferences.name': 'Model name',
+  'settings.modelPreferences.contextWindow': 'Context window',
+  'settings.modelPreferences.tokens': 'tokens',
+  'settings.modelPreferences.limit': (v) => `Limit ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `Enter a whole number from 1 to ${v?.tokens ?? ''}.`,
+  'settings.modelPreferences.alwaysOn': 'Always on',
+  'settings.modelPreferences.providerDefault': 'Model default',
+  'settings.modelPreferences.providerSettings': 'Provider configuration',
+  'settings.modelPreferences.inherit': 'Reset to inherited',
+  'settings.modelPreferences.source.model': 'Model default',
+  'settings.modelPreferences.source.system': 'Policy',
+  'settings.modelPreferences.source.user': 'User',
+  'settings.modelPreferences.source.workspace': 'Workspace',
+  'settings.modelPreferences.newTasksOnly':
+    'Changes apply only to tasks created after saving.',
+  'settings.modelPreferences.save': 'Save settings',
+  'settings.modelPreferences.saveFailed': 'Could not save model preferences',
+  'settings.modelPreferences.retry': 'Retry',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
   'settings.models.windowSaved': 'Saved. Restart existing sessions to apply.',
@@ -141,7 +161,26 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.experimental.generatedUi':
     '在 Web Shell 等受支持的本地会话中，用内置 Generated UI 展示交互视图。默认开启。重新创建所属会话后生效。',
 
-  'settings.models.editWindow': '配置窗口大小',
+  'settings.models.editWindow': '供应商窗口上限',
+  'settings.modelPreferences.title': '新任务默认值',
+  'settings.modelPreferences.name': '模型名称',
+  'settings.modelPreferences.contextWindow': '上下文窗口',
+  'settings.modelPreferences.tokens': 'tokens',
+  'settings.modelPreferences.limit': (v) => `上限 ${v?.tokens ?? ''}`,
+  'settings.modelPreferences.invalidWindow': (v) =>
+    `请输入 1 至 ${v?.tokens ?? ''} 之间的整数。`,
+  'settings.modelPreferences.alwaysOn': '始终开启',
+  'settings.modelPreferences.providerDefault': '模型默认',
+  'settings.modelPreferences.providerSettings': '供应商配置',
+  'settings.modelPreferences.inherit': '恢复继承',
+  'settings.modelPreferences.source.model': '模型默认',
+  'settings.modelPreferences.source.system': '管理策略',
+  'settings.modelPreferences.source.user': '用户设置',
+  'settings.modelPreferences.source.workspace': '工作区设置',
+  'settings.modelPreferences.newTasksOnly': '这些设置仅对之后新建的任务生效。',
+  'settings.modelPreferences.save': '保存设置',
+  'settings.modelPreferences.saveFailed': '无法保存模型偏好',
+  'settings.modelPreferences.retry': '重试',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
   'settings.models.windowSaved': '已保存，重启已有会话后生效。',
@@ -530,7 +569,7 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.description.experimental.mods':
     'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных, headless и ACP сессиях. Требуется перезапуск.',
 
-  'settings.models.editWindow': 'Изменить окно контекста',
+  'settings.models.editWindow': 'Лимит окна провайдера',
   'settings.models.windowHint':
     'Оставьте пустым, чтобы вывести лимит из ID модели. Существующим сессиям нужен перезапуск, чтобы использовать новый лимит.',
   'settings.models.windowSaved':

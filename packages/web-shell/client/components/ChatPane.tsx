@@ -87,6 +87,7 @@ import type {
 } from '../unavailableModels';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
+import { StandaloneContext } from '../config/standalone';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { base64ToBlob } from '../utils/base64';
@@ -1887,16 +1888,33 @@ export function ChatPane({
       language,
     ],
   );
+  const standaloneShell = useContext(StandaloneContext);
+  const modelPreferencesSupported =
+    (standaloneShell || modelManagement?.allowPreferences === true) &&
+    workspace.capabilities?.features?.includes(
+      'workspace_model_preferences',
+    ) === true;
   const handleSelectReasoningEffort = useCallback(
-    (value: ReasoningSelection) =>
-      actions
-        .setReasoningEffort(value, {
-          persist: connection.sessionContext?.kind !== 'standalone',
-        })
+    (value: ReasoningSelection) => {
+      const inWorkspace = connection.sessionContext?.kind !== 'standalone';
+      return actions
+        .setReasoningEffort(
+          value,
+          inWorkspace && modelPreferencesSupported
+            ? { persistToSession: true }
+            : { persist: inWorkspace },
+        )
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
-        ),
-    [actions, connection.sessionContext?.kind, reportError, t],
+        );
+    },
+    [
+      actions,
+      connection.sessionContext?.kind,
+      modelPreferencesSupported,
+      reportError,
+      t,
+    ],
   );
 
   const headerLabel =

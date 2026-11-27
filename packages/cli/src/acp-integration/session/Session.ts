@@ -510,7 +510,10 @@ import {
   deleteNestedPropertySafe,
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
-import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  recordDaemonSessionModel,
+  recordDaemonSessionModelFromConfig,
+} from '../session-model-persistence.js';
 import {
   recordDaemonSessionApprovalMode,
   recordDaemonSessionApprovalModeFromConfig,
@@ -2695,6 +2698,7 @@ export class Session implements SessionContext {
   /** The end of the session's Mods, which `dispose` starts. */
   modsClosed?: Promise<void>;
   private sessionReasoningSelection?: ReasoningSelection;
+  private sessionReasoningSelectionSaved = false;
   private readonly restoredHistoryGaps?: HistoryGap[];
   private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
@@ -2739,7 +2743,15 @@ export class Session implements SessionContext {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
-    this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
+    const restoredRuntime = config.getSessionRestoreRuntime?.();
+    this.restoredHistoryGaps = restoredRuntime?.historyGaps;
+    const recordedSelection = parseReasoningSelection(
+      restoredRuntime?.recording?.sessionModel?.reasoningSelection,
+    );
+    this.setSessionReasoningSelection(
+      recordedSelection,
+      recordedSelection !== undefined,
+    );
     this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
@@ -7535,6 +7547,23 @@ export class Session implements SessionContext {
                             content,
                             pendingSend.signal,
                           ),
+                      }
+                    : {}),
+                  ...(this.config.getModelPreferenceSnapshot?.() ||
+                  this.sessionReasoningSelectionSaved
+                    ? {
+                        setReasoningEffort: async (effort) => {
+                          const saved =
+                            await recordDaemonSessionModelFromConfig(
+                              this.config,
+                              {
+                                reasoningSelection: effort,
+                                required: true,
+                              },
+                            );
+                          this.setSessionReasoningSelection(effort, saved);
+                          this.reapplySessionReasoningSelection();
+                        },
                       }
                     : {}),
                 },
@@ -15690,6 +15719,9 @@ export class Session implements SessionContext {
         ? { baseUrl: resolvedRoute.baseUrl ?? '' }
         : {}),
       ...(isRuntime ? { isRuntime: true } : {}),
+      ...(this.sessionReasoningSelectionSaved
+        ? { reasoningSelection: this.sessionReasoningSelection }
+        : {}),
     });
     const activeRuntimeSnapshot = this.config.getActiveRuntimeModelSnapshot?.();
     const currentAcpModelId = getCurrentAcpModelId(
@@ -15801,8 +15833,10 @@ export class Session implements SessionContext {
 
   setSessionReasoningSelection(
     selection: ReasoningSelection | undefined,
+    saved = false,
   ): void {
     this.sessionReasoningSelection = selection;
+    this.sessionReasoningSelectionSaved = saved;
   }
 
   getSessionReasoningSelection(): ReasoningSelection | undefined {
@@ -15862,11 +15896,20 @@ export class Session implements SessionContext {
     }
   }
 
+  reapplySessionReasoningSelection(): void {
+    this.reconcileReasoningSelection(this.config.getModel(), {
+      persist: false,
+    });
+  }
+
   private reconcileReasoningSelection(
     modelId: string,
     options: { persist: boolean },
   ): void {
-    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    const frozenPreferences = this.config.getModelPreferenceSnapshot?.();
+    const rawSelection = frozenPreferences
+      ? undefined
+      : this.settings.merged.model?.reasoningEffort;
     let hasSessionSelection = this.sessionReasoningSelection !== undefined;
     if (!hasSessionSelection && rawSelection === undefined) return;
 
@@ -15897,6 +15940,7 @@ export class Session implements SessionContext {
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
     if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      if (frozenPreferences || this.sessionReasoningSelectionSaved) return;
       this.sessionReasoningSelection = undefined;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
@@ -15935,10 +15979,15 @@ export class Session implements SessionContext {
       (supported || appliesSessionDefault) && selection !== undefined
         ? selection
         : REASONING_EFFORT_DEFAULT;
+    const defaultReasoning = this.getDefaultReasoningConfig();
     applyReasoningSelection(
       this.config,
       effectiveSelection,
-      this.getDefaultReasoningConfig(),
+      (frozenPreferences || this.sessionReasoningSelectionSaved) &&
+        appliesSessionDefault &&
+        generation?.reasoning === false
+        ? defaultReasoning || {}
+        : defaultReasoning,
     );
   }
 

@@ -2500,6 +2500,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    modelPreferencesAvailable: opts.profile !== 'hosted-harness',
     userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,

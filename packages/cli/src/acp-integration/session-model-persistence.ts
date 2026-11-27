@@ -42,35 +42,68 @@ export async function recordDaemonSessionModel(
   config: Config,
   payload: SessionModelRecordPayload,
 ): Promise<void> {
+  await persistSessionModel(config, payload, false);
+}
+
+async function persistSessionModel(
+  config: Config,
+  payload: SessionModelRecordPayload,
+  required: boolean,
+): Promise<boolean> {
   const recording = config.getChatRecordingService?.();
-  if (!recording?.recordSessionModel) return;
+  if (
+    !recording?.recordSessionModel ||
+    config.getSessionExecutionEngine?.() === 'managed'
+  )
+    return false;
+  const preferenceSnapshot = config.getModelPreferenceSnapshot?.();
+  const reasoningSelection =
+    payload.reasoningSelection ??
+    recording.getRecordedSessionModel?.()?.reasoningSelection;
   try {
-    await recording.recordSessionModel(payload);
+    const saved = await recording.recordSessionModel({
+      ...payload,
+      ...(preferenceSnapshot ? { preferenceSnapshot } : {}),
+      ...(reasoningSelection !== undefined ? { reasoningSelection } : {}),
+    });
+    if (!saved && required)
+      throw new Error('Could not save the session model preferences');
+    return saved;
   } catch (error) {
+    if (required) throw error;
     debugLogger.debug('recordSessionModel failed', error);
+    return false;
   }
 }
 
 export async function recordDaemonSessionModelFromConfig(
   config: Config,
-): Promise<void> {
+  options: { reasoningSelection?: string; required?: boolean } = {},
+): Promise<boolean> {
   const modelId = config.getModel()?.trim();
   const authType = config.getAuthType();
-  if (!modelId || !authType) return;
+  if (!modelId || !authType) return false;
   const snapshot = config.getActiveRuntimeModelSnapshot?.();
   // `null` is the implicit-registry sentinel; do not coerce it to the resolved
   // default endpoint or restore can pick an explicit same-id route.
   const registryBaseUrl = snapshot
     ? undefined
     : config.getCurrentModelRegistryBaseUrl?.();
-  await recordDaemonSessionModel(config, {
-    modelId,
-    authType,
-    ...(typeof registryBaseUrl === 'string'
-      ? { baseUrl: registryBaseUrl }
-      : {}),
-    ...(snapshot ? { isRuntime: true } : {}),
-  });
+  return persistSessionModel(
+    config,
+    {
+      modelId,
+      authType,
+      ...(options.reasoningSelection !== undefined
+        ? { reasoningSelection: options.reasoningSelection }
+        : {}),
+      ...(typeof registryBaseUrl === 'string'
+        ? { baseUrl: registryBaseUrl }
+        : {}),
+      ...(snapshot ? { isRuntime: true } : {}),
+    },
+    options.required === true,
+  );
 }
 
 function hasMatchingRuntimeSnapshot(

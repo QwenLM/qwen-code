@@ -21,7 +21,13 @@ import {
 } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
-import type { ModelPreferences } from '../models/model-preferences.js';
+import {
+  copyModelPreferences,
+  getModelPreferenceKey,
+  resolveModelPreferenceReasoning,
+  type ModelPreferences,
+  type ModelPreferenceSnapshot,
+} from '../models/model-preferences.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -1717,6 +1723,8 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   modelPreferences?: ModelPreferences;
   modelPreferenceDefaultEffort?: string;
+  /** Provider reasoning before the legacy settings fallback was applied. */
+  modelPreferenceRestoreBase?: Pick<ContentGeneratorConfig, 'reasoning'>;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
   /** Agent and multi-agent collaboration settings */
@@ -3498,7 +3506,11 @@ export class Config {
   private compactionModel?: string;
   private reasoningSnapshot?: ReasoningSnapshot;
   private modelPreferences?: ModelPreferences;
-  private readonly modelPreferenceDefaultEffort?: ReasoningEffort | 'none';
+  private modelPreferenceDefaultEffort?: ReasoningEffort | 'none';
+  private readonly modelPreferenceRestoreBase?: Pick<
+    ContentGeneratorConfig,
+    'reasoning'
+  >;
   private modelPreferenceDefaults?: ModelPreferenceDefaults;
   private modelPreferenceSessionEffort?: {
     key: string;
@@ -3863,6 +3875,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.modelPreferences = params.modelPreferences;
+    this.modelPreferenceRestoreBase = params.modelPreferenceRestoreBase;
     this.modelPreferenceDefaultEffort =
       params.modelPreferenceDefaultEffort === 'none'
         ? 'none'
@@ -7273,6 +7286,35 @@ export class Config {
     return this.modelPreferenceDefaults?.key;
   }
 
+  getModelPreferenceSnapshot(): ModelPreferenceSnapshot | undefined {
+    return !this.modelPreferenceRestoreBase ||
+      this.modelPreferences === undefined
+      ? undefined
+      : {
+          values: this.modelPreferences,
+          defaultEffort: this.modelPreferenceDefaultEffort,
+        };
+  }
+
+  restoreModelPreferenceSnapshot(snapshot: ModelPreferenceSnapshot): void {
+    if (!this.modelPreferenceRestoreBase) return;
+    this.modelPreferences = copyModelPreferences(snapshot.values);
+    this.modelPreferenceDefaultEffort =
+      snapshot.defaultEffort === 'none'
+        ? 'none'
+        : normalizeReasoningEffort(snapshot.defaultEffort);
+    this.modelsConfig.getGenerationConfig().reasoning =
+      this.modelPreferenceRestoreBase.reasoning;
+    const sources = this.modelsConfig.getGenerationConfigSources();
+    const reasoningSource = sources['reasoning'];
+    if (
+      reasoningSource?.kind === 'settings' &&
+      reasoningSource.settingsPath === 'model.reasoningEffort'
+    ) {
+      delete sources['reasoning'];
+    }
+  }
+
   getModelPreferenceContextLimit(): number {
     return (
       this.modelPreferenceDefaults?.contextWindowSize ??
@@ -7314,14 +7356,8 @@ export class Config {
       endpointSource === 'settings'
         ? config.baseUrl
         : (registryEndpoint ?? config.baseUrl);
-    const modelId = encodeURIComponent(
-      stripRuntimeSnapshotPrefix(config.model),
-    );
-    const suffix = endpoint
-      ? `#${createHash('sha256').update(endpoint).digest('hex')}`
-      : '';
     return {
-      key: `${config.authType}/${modelId}${suffix}`,
+      key: getModelPreferenceKey(config.authType, config.model, endpoint),
       reasoning: config.reasoning,
       contextWindowSize: config.contextWindowSize,
       reasoningSource: sources['reasoning'],
@@ -7357,29 +7393,40 @@ export class Config {
     config.reasoning = defaults.reasoning;
     sources['reasoning'] = defaults.reasoningSource;
     const sessionEffort = this.modelPreferenceSessionEffort;
-    const savedEffort = normalizeReasoningEffort(preference?.reasoning?.effort);
     if (sessionEffort?.key === defaults.key) {
       setGeneratorReasoningEffort(config, sessionEffort.effort);
-    } else if (savedEffort) {
-      if (setGeneratorReasoningEffort(config, savedEffort)) {
-        sources['reasoning'] = {
-          kind: 'settings',
-          settingsPath: 'model.preferences',
-        };
-      }
-    } else if (this.modelPreferenceDefaultEffort === 'none') {
-      if (
-        config.thinkingMandatory !== true &&
-        resolveReasoningForModel(this, config)?.canDisable !== false
-      ) {
-        config.reasoning = false;
-        sources['reasoning'] = {
-          kind: 'settings',
-          settingsPath: 'model.reasoningEffort',
-        };
-      }
-    } else if (this.modelPreferenceDefaultEffort) {
-      setGeneratorReasoningEffort(config, this.modelPreferenceDefaultEffort);
+      return;
+    }
+    const reasoningPreference = preference?.reasoning;
+    const canDisable =
+      (getRequestModel(config) !== config.model ||
+        config.thinkingMandatory !== true) &&
+      resolveReasoningForModel(this, config)?.canDisable !== false;
+    config.reasoning = resolveModelPreferenceReasoning(
+      config.reasoning,
+      reasoningPreference,
+      this.modelPreferenceDefaultEffort,
+      canDisable,
+    );
+    if (
+      (reasoningPreference?.enabled === false && config.reasoning === false) ||
+      reasoningPreference?.enabled === true ||
+      (reasoningPreference?.effort && config.reasoning !== false)
+    ) {
+      sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.preferences',
+      };
+    } else if (
+      !reasoningPreference?.effort &&
+      config.reasoning === false &&
+      this.modelPreferenceDefaultEffort === 'none' &&
+      canDisable
+    ) {
+      sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.reasoningEffort',
+      };
     }
   }
 

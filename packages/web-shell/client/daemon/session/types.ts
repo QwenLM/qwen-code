@@ -69,6 +69,7 @@ import type {
   PromptContentBlock,
   PromptResult,
   ReasoningSelection,
+  DaemonReasoningUpdateOptions,
   SessionMetadataResult,
   SetModelResult,
 } from '@qwen-code/sdk/daemon';
@@ -637,7 +638,7 @@ export interface DaemonSessionActions {
   setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
-    opts?: { persist?: boolean },
+    opts?: DaemonReasoningUpdateOptions,
   ): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,

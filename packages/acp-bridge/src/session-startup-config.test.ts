@@ -14,6 +14,7 @@ import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
 import {
   applySessionStartupConfig,
   parseSessionStartupConfig,
+  STARTUP_REASONING_SELECTION_META_KEY,
 } from './session-startup-config.js';
 
 const startupConfig = {
@@ -336,6 +337,7 @@ describe('session startup configuration', () => {
           sessionId: 'configured',
           configId: 'reasoning_effort',
           value: 'high',
+          _meta: { [STARTUP_REASONING_SELECTION_META_KEY]: true },
         },
       ]);
       expect(

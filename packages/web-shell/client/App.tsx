@@ -4380,6 +4380,11 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const modelPreferencesSupported =
+    (standalone || modelManagement?.allowPreferences === true) &&
+    workspace.capabilities?.features?.includes(
+      'workspace_model_preferences',
+    ) === true;
   const [skillsSource, setSkillsSource] = useState<{
     client: typeof workspace.client;
     cwd: string;
@@ -13354,6 +13359,7 @@ export function App({
                 'session_startup_config',
               ),
             reasoningEffort,
+            persistReasoningToSession: modelPreferencesSupported,
             modeId,
             planMode,
             workspaceCwd: targetWorkspaceCwd,
@@ -13519,6 +13525,7 @@ export function App({
     [
       getComposerWorkspaceCwd,
       lockedWorkspaceCwd,
+      modelPreferencesSupported,
       sessionActions,
       sessionCatalogController,
       setPendingSessionContext,
@@ -15615,6 +15622,15 @@ export function App({
       (entry) => entry.cwd === settingsWorkspaceCwd && entry.trusted,
     )
       ? settingsWorkspaceCwd
+      : undefined;
+  const preferenceWorkspace = settingsWorkspaceCwd ?? uiLanguageWorkspaceCwd;
+  const modelPreferencesWorkspaceCwd =
+    modelPreferencesSupported &&
+    ordinaryWorkspaces.some(
+      (entry) =>
+        entry.cwd === preferenceWorkspace && entry.trusted && !entry.ssh,
+    )
+      ? preferenceWorkspace
       : undefined;
   const secondarySettingsReloadRef = useRef<
     (() => Promise<unknown>) | undefined
@@ -23138,15 +23154,26 @@ export function App({
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
         return Promise.resolve();
       }
+      const inWorkspace =
+        connectionRef.current.sessionContext?.kind !== 'standalone';
       return sessionActions
-        .setReasoningEffort(value, {
-          persist: connectionRef.current.sessionContext?.kind !== 'standalone',
-        })
+        .setReasoningEffort(
+          value,
+          inWorkspace && modelPreferencesSupported
+            ? { persistToSession: true }
+            : { persist: inWorkspace },
+        )
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         );
     },
-    [reportError, sessionActions, sessionWriteBlocked, t],
+    [
+      modelPreferencesSupported,
+      reportError,
+      sessionActions,
+      sessionWriteBlocked,
+      t,
+    ],
   );
 
   const handleWelcomeReasoningEffort = useCallback(
@@ -26183,6 +26210,9 @@ export function App({
                                   }
                                 />
                               ) : undefined
+                            }
+                            modelPreferencesWorkspaceCwd={
+                              modelPreferencesWorkspaceCwd
                             }
                             modelManagementSectionProps={
                               projectFeaturesAvailable

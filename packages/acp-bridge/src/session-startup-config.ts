@@ -11,6 +11,9 @@ import {
 import { MAX_CRON_TASK_ROUTING_ID_LENGTH } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import type { AcpSessionBridge } from './bridgeTypes.js';
 
+export const STARTUP_REASONING_SELECTION_META_KEY =
+  'qwenCode/startupReasoningSelection';
+
 export interface SessionStartupConfig {
   modelServiceId: string;
   reasoningEffort?: ReasoningEffort | 'default' | 'none';
@@ -158,6 +161,7 @@ export async function applySessionStartupConfig(
       sessionId,
       configId: 'reasoning_effort',
       value: config.reasoningEffort,
+      _meta: { [STARTUP_REASONING_SELECTION_META_KEY]: true },
     })
     .catch((error: unknown) => rejectInvalidSelection(error, sessionId));
   const reasoning = result.configOptions?.find(
