@@ -105,8 +105,8 @@ not authorize replacing or retiring them.
 
 The Pod IP is an observed endpoint, not identity. Only a literal IPv4 Pod IP returned
 by the trusted Kubernetes API is admitted; invalid, loopback, unspecified,
-link-local or multicast addresses are rejected. The configured worker port is
-fixed at 43190 (outside Node fetch's blocked port list). IPv6-only clusters are
+link-local or multicast addresses are rejected. The K1 provisioner uses the default worker port
+of 43190 (outside Node fetch's blocked port list). IPv6-only clusters are
 not supported by K1. Automatic container restarts are forbidden, and observations reject
 nonzero restart counts so an empty replacement journal cannot appear to be the
 original incarnation. K1 uses HTTP with the existing bearer/lease protocol only
@@ -114,7 +114,7 @@ inside a trusted test network. Production TLS/workload identity is a K3 gate.
 
 The hidden worker command adds `--container-boot <path>`. It reads the existing
 bounded boot-v1 JSON envelope from the Secret file and explicitly listens on
-`0.0.0.0:43190`. Ordinary stdin startup keeps loopback and its current ready record.
+`0.0.0.0:43190` by default. Container deployments can pass `--port <1-65535>` to use their existing ingress port. The ready record reports the bound port. Ordinary stdin startup uses an ephemeral loopback listener.
 The non-CSI boot-v1 container mode accepts Session isolation only and rejects managed-context boot. The private CSI boot-v3 increment instead validates its nested workspace context and original mount before listening.
 Container cwd validation uses POSIX lexical rules independently of the Broker host.
 No private protocol schema is widened. Boot bytes and bearer credentials are not

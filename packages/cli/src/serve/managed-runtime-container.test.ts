@@ -157,7 +157,7 @@ describe('Managed Runtime container entry', () => {
       boot,
       undefined,
       localPublications,
-      true,
+      43190,
     );
     try {
       expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
@@ -281,7 +281,7 @@ describe('Managed Runtime container entry', () => {
     );
     if (process.platform !== 'linux') {
       await expect(
-        startManagedRuntimeAttestationWorker(csi, undefined, undefined, true),
+        startManagedRuntimeAttestationWorker(csi, undefined, undefined, 43190),
       ).rejects.toThrow('Managed CSI mount is unavailable.');
     }
   });
@@ -325,7 +325,7 @@ describe('Managed Runtime container entry', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     try {
       expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
@@ -411,7 +411,7 @@ describe('Managed Runtime container entry', () => {
         { ...boot, isolationClass: 'workspace' },
         undefined,
         undefined,
-        true,
+        43190,
       ),
     ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
   });

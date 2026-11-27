@@ -81,14 +81,13 @@ seed 的冲突不能淘汰活跃原 worker。`close` 清空两个本地索引，
 资源；进程重启也不授权替换或退休原资源。
 
 Pod IP 是观测 endpoint，不是身份。只接受可信 Kubernetes API 返回的 IPv4 字面量，
-拒绝无效、loopback、未指定、link-local 和 multicast 地址。worker 固定使用 43190
+拒绝无效、loopback、未指定、link-local 和 multicast 地址。K1 provisioner 使用 worker 的默认端口 43190
 端口（避开 Node fetch 的禁止端口列表）；K1 不支持纯 IPv6 集群。禁止自动重启容器，观测发现非零 restart count 即拒绝，防止清空账本后的容器
 冒充原 incarnation。K1 仅在可信测试网络使用现有 bearer/lease HTTP 协议；生产
 TLS/workload identity 属于 K3 门禁。
 
 隐藏 worker 命令增加 `--container-boot <path>`，从 Secret 文件读取现有有界 boot-v1
-JSON envelope，并显式监听 `0.0.0.0:43190`。普通 stdin 启动继续使用 loopback 和
-现有 ready record。非 CSI 的 boot-v1 容器模式仅接受 Session isolation，拒绝 managed-context boot。私有 CSI boot-v3 增量则在监听前校验内嵌 workspace context 和原挂载。
+JSON envelope，默认监听 `0.0.0.0:43190`。容器部署可通过 `--port <1-65535>` 复用已有入口端口，ready 回执报告实际监听端口。普通 stdin 启动仍使用 loopback 上的临时端口。非 CSI 的 boot-v1 容器模式仅接受 Session isolation，拒绝 managed-context boot。私有 CSI boot-v3 增量则在监听前校验内嵌 workspace context 和原挂载。
 容器 cwd 按 POSIX 词法校验，不依赖 Broker 主机操作系统。
 不扩展私有协议 schema，不打印 boot 内容或 bearer。镜像须提供 Node.js 22+、已构建
 CLI 及运行依赖。K1 Pod 使用 non-root、drop capabilities、禁止提权、RuntimeDefault

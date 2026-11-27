@@ -219,7 +219,7 @@ describe('boot6 finalization HTTP with labelled Linux/composer and saved-cut sea
       candidate,
       undefined,
       undefined,
-      true,
+      43190,
     );
     expect(
       (
@@ -252,7 +252,7 @@ describe('boot6 finalization HTTP with labelled Linux/composer and saved-cut sea
         parseManagedCsiFileBoot(oldBoot),
         undefined,
         undefined,
-        true,
+        43190,
       );
       expect((await send(finalization.CSI_FILE_FINALIZE_PATH, {})).status).toBe(
         404,
@@ -534,10 +534,10 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
         candidate,
         undefined,
         undefined,
-        true,
+        4096,
       );
       expect(worker.ready.version).toBe(candidate.version);
-      expect(Server.prototype.listen).toHaveBeenCalledWith(43190, '0.0.0.0');
+      expect(Server.prototype.listen).toHaveBeenCalledWith(4096, '0.0.0.0');
       expect(worker.ready).not.toHaveProperty('authority');
       const attest = await send(
         'context-attest',
@@ -635,7 +635,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     const original = fixture.installationRequest.context;
     for (const context of [
@@ -690,7 +690,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     let release!: () => void;
     let started!: () => void;
@@ -740,7 +740,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     let release!: () => void;
     mount.close.mockImplementation(
@@ -767,7 +767,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       new Error('Original mount unavailable'),
     );
     await expect(
-      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, 43190),
     ).rejects.toThrow('Original mount unavailable');
     expect(mount.close).toHaveBeenCalledTimes(2);
     vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
@@ -779,7 +779,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       return this;
     });
     await expect(
-      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, 43190),
     ).rejects.toThrow('Listener unavailable');
     expect(mount.close).toHaveBeenCalledTimes(3);
   });
@@ -807,7 +807,7 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       candidate,
       undefined,
       undefined,
-      true,
+      43190,
     );
     expect(
       (
@@ -876,7 +876,7 @@ describe('boot5 history HTTP ownership with labelled readback/composer seams', (
       candidate,
       undefined,
       undefined,
-      true,
+      43190,
     );
     const revised = { ...installed.binding, contextRevision: '2' };
     expect(
@@ -1673,7 +1673,7 @@ it.each([boot, parseManagedCsiFileBoot(fixture.executionBoot5)])(
           candidate,
           undefined,
           undefined,
-          true,
+          43190,
         ),
       ).rejects.toThrow();
       expect(observe).not.toHaveBeenCalled();

@@ -675,9 +675,11 @@ export async function runCliEntry(
     await runMcpFastPath(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
-    const containerBoot =
-      argv.length === 3 && argv[1] === '--container-boot' ? argv[2] : undefined;
-    if (argv.length !== 1 && !containerBoot) {
+    const { parseManagedRuntimeWorkerOptions } = await import(
+      './serve/managed-runtime-worker-options.js'
+    );
+    const options = parseManagedRuntimeWorkerOptions(argv.slice(1));
+    if (!options) {
       writeStderrLine('Managed Runtime worker arguments are invalid.');
       process.exitCode = 1;
       return;
@@ -685,7 +687,10 @@ export async function runCliEntry(
     const { runManagedRuntimeAttestationWorker } = await import(
       './serve/managed-runtime-attestation-worker.js'
     );
-    await runManagedRuntimeAttestationWorker(containerBoot);
+    await runManagedRuntimeAttestationWorker(
+      options.bootPath,
+      options.containerPort,
+    );
     return;
   } else if (route === 'session-send-mcp') {
     // Nothing on this path may write to stdout (the MCP stream) or read
