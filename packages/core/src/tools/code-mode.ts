@@ -28,6 +28,10 @@ export type ToolMode = (typeof ToolMode)[keyof typeof ToolMode];
 const HIDDEN_TOOLS = new Set<string>(['tool_call']);
 
 const DIRECT_ONLY_TOOLS = new Set<string>([
+  ToolNames.SESSION_NOTES,
+  ToolNames.SESSION_HISTORY,
+  ToolNames.GET_CONTEXT_REMAINING,
+  ToolNames.NEW_CONTEXT,
   ToolNames.TOOL_SEARCH,
   ToolNames.AGENT,
   ToolNames.ASK_USER_QUESTION,

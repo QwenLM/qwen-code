@@ -583,6 +583,7 @@ export interface SubagentSnapshot {
 }
 
 export interface ComposePostCompactOptions {
+  verbatimCheckpoint?: boolean;
   transcriptHint?: string;
   /**
    * Workspace root. When set, file paths from history that resolve
@@ -857,7 +858,13 @@ export async function composePostCompactHistory(
   const out: Content[] = [
     {
       role: 'user',
-      parts: [{ text: postProcessSummary(summary, options.transcriptHint) }],
+      parts: [
+        {
+          text: options.verbatimCheckpoint
+            ? `${summary}\n\nResume the prior task using the notes above. Continue the work and use session_history to recover omitted evidence. Do not acknowledge the checkpoint or greet the user again.`
+            : postProcessSummary(summary, options.transcriptHint),
+        },
+      ],
     },
   ];
 

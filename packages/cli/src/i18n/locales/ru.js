@@ -1158,6 +1158,8 @@ export default {
   'Failed to compress chat history: {{error}}':
     'Не удалось сжать историю чата: {{error}}',
   'Compressing chat history': 'Сжатие истории чата',
+  'Started a new context from local notes: {{originalTokens}} to {{newTokens}} tokens.':
+    'Новый контекст создан из локальных заметок: с {{originalTokens}} до {{newTokens}} токенов.',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     'История чата сжата с {{originalTokens}} до {{newTokens}} токенов.',
   'Compression was not beneficial for this history size.':
@@ -2638,6 +2640,15 @@ export default {
   '↓ more below': '↓ ещё ниже',
   '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
     '⚠ Устанавливайте, обновляйте и используйте только те расширения, которым доверяете. Мы не можем проверить, какие MCP-серверы, файлы или другое ПО входит в расширение и работает ли оно как заявлено. Подробности — на домашней странице расширения.',
+  'Chat Compression Strategy': 'Способ сжатия контекста',
+  Summary: 'Сводка',
+  'Notes and History': 'Заметки и история',
+  'Choose summary compression or local notes with history recovery. Restart Qwen Code to apply.':
+    'Выберите сжатие с помощью сводки или локальные заметки с восстановлением истории. Перезапустите Qwen Code, чтобы применить изменения.',
+  'toolDisplayName.SessionNotes': 'Заметки сессии',
+  'toolDisplayName.SessionHistory': 'История сессии',
+  'toolDisplayName.GetContextRemaining': 'Остаток контекста',
+  'toolDisplayName.NewContext': 'Новый контекст',
   'toolDisplayName.Exec': 'Выполнение кода',
   'toolDisplayName.Edit': 'Правка',
   'toolDisplayName.WriteFile': 'Запись файла',

@@ -788,6 +788,98 @@ describe('ChatRecordingService', () => {
       expect(liveSummary).toContain(hint);
     });
 
+    it('strips the live hint from a notes-mode strict summary checkpoint without changing live or replay evidence', async () => {
+      const realFs =
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        );
+      const { tmpdir } = await import('node:os');
+      const runtime = await realFs.mkdtemp(
+        `${tmpdir()}/qwen-strict-summary-checkpoint-`,
+      );
+      try {
+        const transcript = `${runtime}/checkpoint.jsonl`;
+        Object.assign(mockConfig, {
+          getChatCompression: () => ({ strategy: 'notes' }),
+        });
+        vi.mocked(mockLease.appendJsonLine).mockImplementation(
+          async (record) => {
+            await realFs.appendFile(transcript, JSON.stringify(record) + '\n');
+          },
+        );
+        vi.mocked(path.basename).mockImplementation(
+          (file) => file.split('/').at(-1)!,
+        );
+        const hint = buildCompactionTranscriptHint('/live/session.jsonl');
+        const literal = buildCompactionTranscriptHint('/evidence/quoted.jsonl');
+        const summary: Content = {
+          role: 'user',
+          parts: [
+            { text: 'Startup prelude' },
+            { text: postProcessSummary('Fallback task summary', hint) },
+          ],
+        };
+        const retained: Content = {
+          role: 'user',
+          parts: [{ text: `Recorded user evidence:\n${literal}` }],
+        };
+        markApiHistoryPrompt(summary, 'summary-prompt');
+        markApiHistoryPrompt(retained, 'retained-prompt');
+        const liveHistory: Content[] = [
+          summary,
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+          retained,
+        ];
+        const before = JSON.stringify(liveHistory);
+        const uuid = await svc.recordChatCompressionStrict(
+          {
+            info: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              compressionStatus: CompressionStatus.COMPRESSED,
+              strategy: 'summary',
+            },
+            summaryPrefixLength: 2,
+            compressedHistory: liveHistory,
+          },
+          undefined,
+          new AbortController().signal,
+          svc.getSessionNotesState(),
+        );
+        const lines = (await realFs.readFile(transcript, 'utf8'))
+          .trim()
+          .split('\n');
+        expect(lines).toHaveLength(1);
+        const record = JSON.parse(lines[0]) as ChatRecord;
+        const checkpoint = record.systemPayload as {
+          compressedHistory: Content[];
+          promptIds: Array<string | null>;
+        };
+        expect(record).toMatchObject({ uuid, subtype: 'chat_compression' });
+        expect(JSON.stringify(liveHistory)).toBe(before);
+        expect(checkpoint.promptIds).toEqual([
+          'summary-prompt',
+          null,
+          'retained-prompt',
+        ]);
+        expect(checkpoint.compressedHistory[0].parts?.[0]?.text).toBe(
+          'Startup prelude',
+        );
+        expect(checkpoint.compressedHistory.slice(1)).toEqual(
+          JSON.parse(before).slice(1),
+        );
+        expect
+          .soft(checkpoint.compressedHistory[0].parts?.[1]?.text)
+          .toBe(postProcessSummary('Fallback task summary'));
+        expect.soft(lines[0]).not.toContain('/live');
+      } finally {
+        await realFs.rm(runtime, { recursive: true, force: true });
+      }
+    });
+
     it('freezes compression snapshot containers against later live-history mutation', async () => {
       // Deferred serialization must keep entries aligned with promptIds.
       const first: Content = { role: 'user', parts: [{ text: 'A' }] };

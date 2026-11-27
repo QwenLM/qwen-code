@@ -4085,6 +4085,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected session with permission to compress context.',
+  'contextCompression.notesResult': (v) =>
+    `Started a new context from local notes ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.result': (v) =>
     `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
   'contextCompression.instructionsTruncated': (v) =>

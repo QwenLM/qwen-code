@@ -1591,6 +1591,71 @@ describe('loggers', () => {
       expect(new ToolCallEvent(call).started_at_ms).toBeUndefined();
     });
 
+    it.each(
+      [
+        'session_notes',
+        'session_history',
+        'structured_output',
+        'Session_Notes',
+        'session_notes ',
+        ' SESSION_NOTES\t',
+        'Session_History',
+        ' session_history ',
+        'Structured_Output',
+        ' structured_output ',
+      ].flatMap((functionName) =>
+        (['success', 'error', 'cancelled'] as const).map((status) => ({
+          functionName,
+          status,
+        })),
+      ),
+    )(
+      'redacts literal $functionName events before every sink on $status',
+      ({ functionName, status }) => {
+        const recordUiTelemetryEvent = vi.fn();
+        const event = rawEvent({
+          function_name: functionName,
+          function_args: {
+            text: 'PRIVATE_CONTEXT_CANARY',
+            query: 'PRIVATE_QUERY_CANARY',
+          },
+          status,
+          duration_ms: 42,
+          success: status === 'success',
+          prompt_id: 'redaction-test',
+        });
+        const expected = {
+          __redacted:
+            functionName.trim().toLowerCase() === 'structured_output'
+              ? 'structured_output payload (see stdout result)'
+              : 'local session context',
+        };
+        logToolCall(recordingConfig(recordUiTelemetryEvent), event);
+        const normalized = expect.objectContaining({
+          function_name: functionName,
+          function_args: expected,
+          duration_ms: 42,
+          status,
+        });
+        expect
+          .soft(QwenLogger.prototype.logToolCallEvent)
+          .toHaveBeenLastCalledWith(normalized);
+        expect
+          .soft(mockUiEvent.addEvent)
+          .toHaveBeenLastCalledWith(normalized, 'test-session-id');
+        expect
+          .soft(recordUiTelemetryEvent)
+          .toHaveBeenLastCalledWith(normalized);
+        expect
+          .soft(mockLogger.emit.mock.calls.at(-1)?.[0].attributes.function_args)
+          .toBe(JSON.stringify(expected, null, 2));
+        expect(event.function_args).toHaveProperty(
+          'text',
+          'PRIVATE_CONTEXT_CANARY',
+        );
+      },
+    );
+
     it('clears call errors when cancellation is the final outcome', () => {
       const event = rawEvent({
         function_name: 'shell',

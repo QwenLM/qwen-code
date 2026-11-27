@@ -36,6 +36,7 @@ const SETTING_KEYS = {
   'setting:vision-model': 'visionModel',
   'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
   'setting:model-fallbacks': 'modelFallbacks',
+  'setting:chat-compression-strategy': 'model.chatCompression.strategy',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
   'setting:fuzzy-file-search': 'context.fileFiltering.enableFuzzySearch',

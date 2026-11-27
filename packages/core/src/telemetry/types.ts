@@ -183,6 +183,21 @@ export class UserRetryEvent implements BaseTelemetryEvent {
   }
 }
 
+export function redactToolCallArgs(
+  functionName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const toolName = functionName.trim().toLowerCase();
+  if (toolName === ToolNames.STRUCTURED_OUTPUT)
+    return { ...STRUCTURED_OUTPUT_REDACTED_ARGS };
+  if (
+    toolName === ToolNames.SESSION_NOTES ||
+    toolName === ToolNames.SESSION_HISTORY
+  )
+    return { __redacted: 'local session context' };
+  return args;
+}
+
 export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
@@ -242,10 +257,10 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     // payload itself doesn't ride along. The same constant is used by
     // `redactStructuredOutputArgsForRecording` in `core/llm-chat.ts`
     // for the on-disk JSONL surface so neither side can silently drift.
-    this.function_args =
-      call.request.name === ToolNames.STRUCTURED_OUTPUT
-        ? { ...STRUCTURED_OUTPUT_REDACTED_ARGS }
-        : call.request.args;
+    this.function_args = redactToolCallArgs(
+      call.request.name,
+      call.request.args,
+    );
     this.duration_ms = call.durationMs ?? 0;
     if (call.startTime !== undefined) this.started_at_ms = call.startTime;
     this.status = call.status;

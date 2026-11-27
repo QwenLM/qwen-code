@@ -583,6 +583,7 @@ export type CompactionTriggerReason =
   | 'manual';
 
 export interface ChatCompressionInfo {
+  strategy?: 'summary' | 'notes';
   /** Synthetic prefix length; retained original operations follow it. */
   summaryPrefixLength?: number;
   originalTokenCount: number;

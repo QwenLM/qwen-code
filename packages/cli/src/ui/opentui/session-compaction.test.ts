@@ -48,6 +48,12 @@ describe('session-compaction texts (CompressionMessage parity)', () => {
     ).toBe('Chat history compressed from 12000 to 3000 tokens.');
   });
 
+  it('identifies a context restored from notes', () => {
+    expect(compactionText(props({ strategy: 'notes' }))).toBe(
+      'Started a new context from local notes: 1000 to 200 tokens.',
+    );
+  });
+
   it('defaults missing token counts to zero', () => {
     expect(
       compactionText(props({ originalTokenCount: null, newTokenCount: null })),
