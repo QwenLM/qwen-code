@@ -984,6 +984,10 @@ export class Query implements AsyncIterable<SDKMessage> {
         this.transport.write(serializeJsonLine(message));
       }
 
+      // Single-turn input is closed by the result message, not by exhaustion
+      // of the one-message source used by the query factory.
+      if (this.isSingleTurn) return;
+
       /**
        * After all user messages are sent (for-await loop ended), determine when to
        * close the CLI's stdin via endInput().
@@ -1020,10 +1024,21 @@ export class Query implements AsyncIterable<SDKMessage> {
     } catch (error) {
       if (this.abortController.signal.aborted) {
         logger.info('Aborted during input streaming');
-        this.inputStream.error(
-          new AbortError('Query aborted during input streaming'),
-        );
         return;
+      }
+      if (this.closed) {
+        throw error;
+      }
+      if (!this.inputStream.settled) {
+        this.inputStream.error(
+          this.transport.exitError ??
+            (error instanceof Error ? error : new Error(String(error))),
+        );
+      }
+      try {
+        await this.close();
+      } catch (cleanupError) {
+        logger.error('Error during input failure cleanup:', cleanupError);
       }
       throw error;
     }

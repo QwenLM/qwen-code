@@ -2108,6 +2108,42 @@ describe('Query', () => {
   });
 
   describe('Single-Turn Mode', () => {
+    it('keeps input open after sending one prompt until its result arrives', async () => {
+      const query = new Query(
+        transport,
+        { cwd: '/test', timeout: { streamClose: 5 } },
+        true,
+      );
+      const endInput = vi.spyOn(transport, 'endInput');
+      await respondToInitialize(transport, query);
+      const message = createUserMessage('hello');
+      async function* prompts() {
+        yield message;
+      }
+
+      try {
+        await query.streamInput(prompts());
+        expect(
+          transport
+            .getAllWrittenMessages()
+            .filter(
+              (written) =>
+                typeof written === 'object' &&
+                written !== null &&
+                'type' in written &&
+                written.type === 'user',
+            ),
+        ).toEqual([message]);
+        expect(endInput).not.toHaveBeenCalled();
+
+        transport.simulateMessage(createResultMessage(true));
+        await query.next();
+        expect(endInput).toHaveBeenCalledTimes(1);
+      } finally {
+        await query.close();
+      }
+    });
+
     it('should auto-close input after result in single-turn mode', async () => {
       const query = new Query(
         transport,
