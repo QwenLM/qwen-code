@@ -66,7 +66,10 @@ root and the Workspace's generation and capability digest. Sessions selecting
 different directories can therefore hold the same Worker. The Worker validates
 the directory on the live mount when installing the Session context. Closing
 one Session releases its own hold. A shared Worker can remain ready for the
-other Sessions. Foreground Shell retains its Session-only placement contract.
+other Sessions. Retiring the registered storage binding uses the original
+Worker's attested drained-stop receipt. Outstanding file operations must
+settle and be acknowledged before the Worker can confirm its stop.
+Foreground Shell retains its Session-only placement contract.
 The provider still has to confirm the identity of the original mounted storage
 on acquisition.
 

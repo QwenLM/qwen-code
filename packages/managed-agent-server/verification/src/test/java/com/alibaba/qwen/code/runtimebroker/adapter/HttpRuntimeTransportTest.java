@@ -181,6 +181,32 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void sharedRetirementKeepsCaptureAndOtherWorkspaceCapabilitiesClosed() {
+        var seed = ManagedContextProtocolTest.seed();
+        var lease = contextLease(seed);
+        String channel = "d349deae-7931-48c2-9f22-39c340bbaaf9";
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call",
+                "argsDigest", "sha256:" + "b".repeat(64));
+        Map<String, Object> capture = Map.of("tenantId", "tenant-a", "sessionId", "harness", "turnId", "turn",
+                "executionCallId", "execution", "bindingGeneration", "1", "capturePolicy", "complete_required");
+        for (String digest : List.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST)) {
+            var shared = new RuntimeProvisionRequest(new RuntimeScope("tenant-a", "workspace-a", "1",
+                    "/workspace/storage", digest, "workspace"), null, "external-workspace", "workspace-a");
+            long expires = System.currentTimeMillis() + 30_000;
+            assertThrows(IllegalArgumentException.class, () ->
+                    transport.externalPublicationBegin(lease, shared, seed, 3, reference, capture, expires, "capture"));
+            assertThrows(IllegalArgumentException.class, () ->
+                    transport.externalPublicationRead(lease, shared, seed, 3, channel, "stdout", 0, -1));
+            assertThrows(IllegalArgumentException.class, () -> transport.externalPublicationRenew(lease, shared, seed, 3, channel, expires));
+            if (WorkspaceExecutionProfile.isExternalShell(digest)) {
+                assertThrows(IllegalArgumentException.class, () -> transport.stopExternalWorkspaceDrained(lease, shared, seed, 3));
+            }
+        }
+        assertNull(capturedPath.get());
+    }
+
+    @Test
     void externalDrainAcceptsPublicationReceiptsButRejectsMalformedEntries() throws Exception {
         var request = externalRequest();
         var seed = ManagedContextProtocolTest.seed();
