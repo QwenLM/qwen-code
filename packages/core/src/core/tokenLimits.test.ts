@@ -608,6 +608,7 @@ describe('tokenLimit with output type', () => {
 
     it('should return correct output limits for MiniMax', () => {
       expect(tokenLimit('MiniMax-M2.5', 'output')).toBe(65536);
+      expect(defaultOutputCeiling('MiniMax-M3.1-Flash')).toBe(64000);
     });
 
     it('should return correct output limits for Kimi', () => {

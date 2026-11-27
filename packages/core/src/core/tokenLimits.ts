@@ -381,6 +381,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // MiniMax
   [/^minimax-m2\.5/i, LIMITS['64k']],
+  [/^minimax-m3\.1-flash/i, LIMITS['64k']],
 
   // Kimi
   [/^kimi-k3/, LIMITS['128k']], // Kimi K3: 128K default max output (up to 1M configurable)
