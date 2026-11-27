@@ -281,7 +281,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.backgroundProcessAdmission = new BackgroundProcessAdmission(bindingRepository,
                 sessionRepository, executionRepository);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
-                this.brokerOwnerId, this.dispatchLeaseDuration, clock);
+                transport, this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
                 bindingRepository, sessionRepository, executionRepository, provisioner, transport,
                 publicationVerifier, this.brokerOwnerId, this.dispatchLeaseDuration, this.v3ResultWindow,
@@ -1672,24 +1672,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 throw invalid("runtime_reference_invalid",
                         "reference must be well-formed text");
             }
-            record = executionRepository.findByIdempotencyKey(idempotencyKey);
-            if (record == null) {
-                transport.requireExecutionAdmission(context.lease(), context.session());
-                try {
-                    record = bindingRepository.admitExecution(sessionRepository,
-                            executionRepository, candidate);
-                } catch (IllegalArgumentException exception) {
-                    throw conflict("runtime_execution_conflict",
-                            "execution identity is already in use", exception);
-                }
-            } else if (record.sameRequest(candidate) && dispatch && (record.getState() == ToolExecutionRecord.State.PREPARED
-                    || record.getState() == ToolExecutionRecord.State.DISPATCHING)) {
-                transport.requireExecutionAdmission(context.lease(), context.session());
-            }
-            if (!record.sameRequest(candidate)) {
-                throw conflict("runtime_idempotency_conflict",
-                        "idempotency key belongs to another request");
-            }
+            record = executionState.admitExecution(context, candidate, dispatch);
         } finally {
             context.unlock();
         }
