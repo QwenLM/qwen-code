@@ -8295,6 +8295,12 @@ describe('LlmChat', async () => {
         appendedDense: true,
       },
       {
+        name: 'a refreshed memory catalog',
+        primaryWindow: 65_536,
+        appendedDense: true,
+        refreshedCatalog: true,
+      },
+      {
         name: 'restored Japanese history',
         primaryWindow: 65_536,
         resumed: true,
@@ -8341,6 +8347,7 @@ describe('LlmChat', async () => {
         staticPrompt,
         resumed,
         appendedDense,
+        refreshedCatalog,
         japaneseHistory,
       }) => {
         const fallbackModel = 'another-minimax-account';
@@ -8397,6 +8404,8 @@ describe('LlmChat', async () => {
             { functionDeclarations: [{ name: 'generated_tool' }] },
           ]);
         }
+        let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+        if (refreshedCatalog) mockConfig.getAutoMemoryContext = () => catalog;
         mockCompress(noop());
         streamMock().mockResolvedValueOnce(
           textStream('acknowledged', {
@@ -8420,6 +8429,8 @@ describe('LlmChat', async () => {
           chat = newChat({ history: chat.getHistory() });
           chat.seedResumeTokenCounts(promptTokenCount, 3);
         }
+        const denseFollowUp = '嗰陣'.repeat(11_000);
+        catalog = denseFollowUp;
         streamMock().mockRejectedValueOnce(tpmCapacityError());
 
         await drain(
@@ -8430,7 +8441,7 @@ describe('LlmChat', async () => {
                 ? [{ text: 'What happened next?' }, inline('image/png', 'abc')]
                 : 'What happened next?' +
                   (staticPrompt ? ' cat'.repeat(2_000) : '') +
-                  (appendedDense ? '嗰陣'.repeat(11_000) : ''),
+                  (appendedDense && !refreshedCatalog ? denseFollowUp : ''),
             },
             'warm-fallback-second',
           ),
@@ -8444,6 +8455,11 @@ describe('LlmChat', async () => {
           );
         } else if (resumed || appendedDense) {
           expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          if (refreshedCatalog) {
+            expect(
+              findLatestAutoMemorySnapshot(fallbackRequest.contents)?.text,
+            ).toContain(denseFollowUp);
+          }
           const measuredInput = appendedDense ? 43_000 : promptTokenCount;
           expect(
             fallbackRequest.config.maxOutputTokens + measuredInput,
@@ -8464,6 +8480,88 @@ describe('LlmChat', async () => {
           }
           expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(
             primaryRequest.config!.maxOutputTokens!,
+          );
+        }
+      },
+    );
+
+    it.each([
+      { name: 'an equal window', window: 65_536 },
+      { name: 'a smaller window', window: 52_000, output: 4_000 },
+      { name: 'a different system prompt', window: 36_000, otherSystem: true },
+      {
+        name: 'a raw message override',
+        window: 36_000,
+        rawMessages: [{ role: 'user', content: 'Use this fixed prompt.' }],
+      },
+    ])(
+      'keeps a warmed compatible fallback within budget for $name',
+      async ({ window, output, otherSystem, rawMessages }) => {
+        const fallbackModel = 'compatible-minimax';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        const differentPrompt = otherSystem || rawMessages !== undefined;
+        const fallbackSystem = 'Short fallback instructions.';
+        if (otherSystem) {
+          chat.setSystemInstructionResolver((model) =>
+            model === digitalOceanModel
+              ? 'primary '.repeat(20_000)
+              : fallbackSystem,
+          );
+        }
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              baseUrl: 'https://compatible.example/v1',
+              contextWindowSize: window,
+              extra_body: {
+                model: otherSystem ? fallbackModel : digitalOceanModel,
+                ...(rawMessages && { messages: rawMessages }),
+              },
+            }),
+          ),
+          narrowPrimary,
+        );
+        mockCompress(noop());
+        streamMock().mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount: 41_038,
+            totalTokenCount: 41_041,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: differentPrompt
+                ? 'First question'
+                : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
+              config: { maxOutputTokens: 1_000 },
+            },
+            'warm-compatible-first',
+          ),
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            { message: 'What happened next?' },
+            'warm-compatible-second',
+          ),
+        );
+        const primaryRequest = streamMock().mock.calls[1][0];
+        const fallbackRequest = fallback.mock.calls[0][0];
+        expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+        if (otherSystem) {
+          expect(fallbackRequest.config.systemInstruction).toBe(fallbackSystem);
+        }
+        if (differentPrompt) {
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(5_000);
+        } else {
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            output ?? primaryRequest.config?.maxOutputTokens,
           );
         }
       },

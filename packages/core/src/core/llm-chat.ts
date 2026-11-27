@@ -1011,7 +1011,7 @@ function getConfiguredHuggingFaceChatOutputBudget(
   });
 }
 
-interface HuggingFaceChatPromptSource {
+interface OpenAIChatPromptSource {
   model: string;
   messages?: unknown[];
   tools: unknown;
@@ -1019,18 +1019,14 @@ interface HuggingFaceChatPromptSource {
   schemaCompliance?: ContentGeneratorConfig['schemaCompliance'];
 }
 
-function huggingFaceChatPromptSource(
+function openAIChatPromptSource(
   config: ContentGeneratorConfig | undefined,
   model: string | undefined,
   generation:
     | Pick<GenerateContentConfig, 'systemInstruction' | 'tools'>
     | undefined,
-): HuggingFaceChatPromptSource | undefined {
-  if (
-    !model ||
-    config?.authType !== AuthType.USE_OPENAI ||
-    !isHuggingFaceRouterUrl(config.baseUrl)
-  ) {
+): OpenAIChatPromptSource | undefined {
+  if (!model || config?.authType !== AuthType.USE_OPENAI) {
     return undefined;
   }
   const { messages, tools } = {
@@ -3888,7 +3884,7 @@ export class LlmChat {
     let requestContents: Content[];
     let usageBackedPrompt:
       | {
-          source: HuggingFaceChatPromptSource;
+          source: OpenAIChatPromptSource;
           contents: Content[];
           tokens: number;
         }
@@ -4665,17 +4661,19 @@ export class LlmChat {
           // Session counts may be attributed to the primary even when a different
           // model or prompt supplied the usage. Check the successful dispatch.
           const usageRequest = this.dispatchedRequest;
-          const primaryPromptSource = huggingFaceChatPromptSource(
+          const usageConfig = usageRequest?.runtimeView?.contentGeneratorConfig;
+          const primaryPromptSource = openAIChatPromptSource(
             cgConfigForThresholds,
             budgetModel,
             { ...this.generationConfig, ...params.config },
           );
           if (
             primaryPromptSource &&
+            isHuggingFaceRouterUrl(usageConfig?.baseUrl) &&
             isDeepStrictEqual(
               primaryPromptSource,
-              huggingFaceChatPromptSource(
-                usageRequest?.runtimeView?.contentGeneratorConfig,
+              openAIChatPromptSource(
+                usageConfig,
                 usageRequest?.model,
                 usageRequest?.generationConfig,
               ),
@@ -4685,7 +4683,8 @@ export class LlmChat {
             // covers the prior turns; the new input still needs a density estimate.
             let usageTokens = usageAnchor.promptTokens;
             if (!primaryPromptSource.messages) {
-              const pendingContents = [userContent];
+              // The prepared user turn includes any newly attached snapshots.
+              const pendingContents = requestContents.slice(-1);
               const legacyPendingTokens = Math.ceil(
                 estimateContentTokens(pendingContents, imageTokenEstimate) *
                   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
@@ -6378,8 +6377,8 @@ export class LlmChat {
                   );
                   const reclampOutput =
                     primaryUsesHuggingFace || fallbackUsesHuggingFace;
-                  const promptSource = fallbackUsesHuggingFace
-                    ? huggingFaceChatPromptSource(
+                  const fallbackPromptSource = reclampOutput
+                    ? openAIChatPromptSource(
                         fallbackConfig,
                         getRequestModel(
                           fallbackConfig ?? {},
@@ -6388,10 +6387,18 @@ export class LlmChat {
                         { ...self.generationConfig, ...fallbackParams.config },
                       )
                     : undefined;
+                  const promptSource = fallbackUsesHuggingFace
+                    ? fallbackPromptSource
+                    : undefined;
+                  // A compatible endpoint can use the primary count as a floor
+                  // when it sends the same model, messages, and tool definitions.
                   const usagePromptTokens =
                     usageBackedPrompt &&
-                    isDeepStrictEqual(usageBackedPrompt.source, promptSource) &&
-                    (promptSource?.messages ||
+                    isDeepStrictEqual(
+                      usageBackedPrompt.source,
+                      fallbackPromptSource,
+                    ) &&
+                    (fallbackPromptSource?.messages ||
                       isDeepStrictEqual(
                         usageBackedPrompt.contents,
                         fallbackRequestContents,
@@ -6866,7 +6873,7 @@ export class LlmChat {
     onModelRequestDispatched?: () => void,
     outputClamp?: {
       explicitOutputCeiling: number | undefined;
-      promptSource?: HuggingFaceChatPromptSource;
+      promptSource?: OpenAIChatPromptSource;
       usagePromptTokens?: number;
     },
   ): AsyncGenerator<StreamEvent> {
@@ -6881,11 +6888,13 @@ export class LlmChat {
         contentGeneratorConfig,
         route?.limits?.output,
       );
-      // The primary request's budget was sized for its own context window.
-      const { explicitOutputCeiling } = outputClamp;
+      const { explicitOutputCeiling, promptSource, usagePromptTokens } =
+        outputClamp;
+      // A fallback without its own prompt source can shrink the primary budget.
       const outputCeiling = Math.min(
         explicitOutputCeiling ?? Infinity,
         bodyOutputCeiling ?? Infinity,
+        promptSource ? Infinity : (params.config?.maxOutputTokens ?? Infinity),
         contentGeneratorConfig?.samplingParams?.max_tokens ??
           explicitOutputCeiling ??
           bodyOutputCeiling ??
@@ -6901,7 +6910,6 @@ export class LlmChat {
       const { imageTokenEstimate } = resolveSlimmingConfig(
         this.config.getChatCompression(),
       );
-      const { promptSource, usagePromptTokens } = outputClamp;
       let toolTokens = 0;
       if (promptSource && usagePromptTokens === undefined) {
         let wireTools = promptSource.tools;
