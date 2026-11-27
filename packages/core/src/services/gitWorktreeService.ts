@@ -872,7 +872,10 @@ export async function worktreeHasWork(
           WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
-      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+      } else if (
+        status === '!!' &&
+        (await isWaivableIgnoredEntry(worktreePath, entry))
+      ) {
         waived = 'disposable-output';
       } else if (
         (status === '!!' || status === '??') &&
@@ -1026,7 +1029,10 @@ async function hasNonCarriedWork(
           WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
-      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
+      } else if (
+        status === '!!' &&
+        (await isWaivableIgnoredEntry(worktreePath, entry))
+      ) {
         waived = 'disposable-output';
       } else if (
         (status === '!!' || status === '??') &&
@@ -1061,6 +1067,64 @@ async function hasNonCarriedWork(
  * deleting). The snapshot's exclusion matcher reads the same listing, so it
  * archives exactly this content rather than dropping it (R6-1).
  */
+/**
+ * `.qwen/tmp` / `.qwen/logs` when `entry` names that container or sits inside
+ * it; `undefined` for everything else.
+ */
+export function regenerableCacheContainerOf(entry: string): string | undefined {
+  const segments = entry.replace(/\/$/, '').split('/');
+  if (segments[0] !== '.qwen') return undefined;
+  const dir = segments[1];
+  return dir !== undefined && REGENERABLE_QWEN_CACHE_DIRS.has(dir)
+    ? `.qwen/${dir}`
+    : undefined;
+}
+
+/**
+ * Checkouts sitting inside a regenerable cache container. A `.git` **file** is
+ * a linked worktree (its git dir lives elsewhere); a `.git` **directory** is an
+ * independent repository whose only object database is right there. Either way
+ * the container is no longer disposable: its bytes would go with the parent.
+ */
+export async function cacheContainerCheckouts(
+  worktreePath: string,
+  container: string,
+): Promise<Array<{ name: string; kind: 'file' | 'dir' }>> {
+  const dir = path.join(worktreePath, container);
+  const entries = await fs
+    .readdir(dir, { withFileTypes: true })
+    .catch(() => [] as Array<import('node:fs').Dirent>);
+  const checkouts: Array<{ name: string; kind: 'file' | 'dir' }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const gitEntry = await fs
+      .lstat(path.join(dir, entry.name, '.git'))
+      .catch(() => undefined);
+    if (gitEntry === undefined) continue;
+    checkouts.push({
+      name: entry.name,
+      kind: gitEntry.isDirectory() ? 'dir' : 'file',
+    });
+  }
+  return checkouts;
+}
+
+/**
+ * Whether an ignored entry may still be waived as disposable. The pure
+ * predicate above answers for build output, but a regenerable cache container
+ * that holds a checkout is NOT disposable — waiving it would let the gate read
+ * a checkout with uncommitted work as clean and delete it without a snapshot.
+ */
+export async function isWaivableIgnoredEntry(
+  worktreePath: string,
+  entry: string,
+): Promise<boolean> {
+  if (!isDisposableIgnoredEntry(entry)) return false;
+  const container = regenerableCacheContainerOf(entry);
+  if (container === undefined) return true;
+  return (await cacheContainerCheckouts(worktreePath, container)).length === 0;
+}
+
 export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
   if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;

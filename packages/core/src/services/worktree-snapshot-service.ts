@@ -23,10 +23,12 @@ import { createHash } from 'node:crypto';
 import * as tar from 'tar';
 import {
   WORKTREE_SESSION_FILE,
+  cacheContainerCheckouts,
   computeCarriedIdentities,
   hasHiddenIndexBit,
   REGENERABLE_QWEN_CACHE_DIRS,
   isDisposableIgnoredEntry,
+  regenerableCacheContainerOf,
   worktreeHasPendingGitOperation,
   worktreeHasWork,
 } from './gitWorktreeService.js';
@@ -729,13 +731,34 @@ async function readSnapshotExclusions(
     }
     if (xy === '!!') ignoredEntries.push(record.slice(3));
   }
+  // A regenerable cache that holds a checkout is not disposable: the same
+  // listing that waives `.qwen/tmp/` for the archive is the one the gate reads,
+  // so excluding it here would certify a snapshot that carries none of the
+  // nested work. Those containers keep their entries (except a clean linked
+  // worktree, which `boundedSnapshotExclusions` excludes by its own path).
+  const cacheHolders = new Set<string>();
+  for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
+    const checkouts = await cacheContainerCheckouts(
+      worktreePath,
+      `.qwen/${cacheDir}`,
+    );
+    if (checkouts.length > 0) cacheHolders.add(`.qwen/${cacheDir}`);
+  }
+  const insideCacheHolder = (entry: string): boolean => {
+    const container = regenerableCacheContainerOf(entry);
+    return container !== undefined && cacheHolders.has(container);
+  };
   const matcher: DisposableIgnoredMatcher = {
     dirs: ignoredEntries.filter(
-      (e) => e.endsWith('/') && isDisposableIgnoredEntry(e),
+      (e) =>
+        e.endsWith('/') && isDisposableIgnoredEntry(e) && !insideCacheHolder(e),
     ),
     files: new Set(
       ignoredEntries.filter(
-        (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
+        (e) =>
+          !e.endsWith('/') &&
+          isDisposableIgnoredEntry(e) &&
+          !insideCacheHolder(e),
       ),
     ),
     neverDirs: await boundedSnapshotExclusions(
@@ -781,16 +804,45 @@ async function boundedSnapshotExclusions(
   // broad rule (`.qwen/`) to one `!! .qwen/` entry, so an ignored ANCESTOR
   // counts as covering the cache too; without that, a common `.qwen/` rule
   // would put the whole scratch tree back into the archive.
+  //
+  // The container is a cache only while nothing inside it is a checkout.
+  // `.qwen/tmp/review-pr-<n>` is a linked worktree in this repository's own
+  // workflow, and a nested checkout's bytes live nowhere else: a dirty one
+  // refuses the capture, a clean one is excluded by its own path, and an
+  // independent repository (`.git` is a DIRECTORY) is never excluded at all.
+  // Only when the container holds no checkout may the prefix go, which is what
+  // keeps the multi-GB cache out of the archive.
   for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
     const trailing = `.qwen/${cacheDir}/`;
     const covered = ignoredEntries.some(
       (entry) => entry.endsWith('/') && trailing.startsWith(entry),
     );
+    // An archive written before this exclusion proves what it carried; do not
+    // exclude the same subtree from the comparison.
     if (!covered || archived?.directories.has(trailing)) continue;
-    if (await holdsCheckout(path.join(worktreePath, '.qwen', cacheDir))) {
+    const checkouts = await cacheContainerCheckouts(
+      worktreePath,
+      `.qwen/${cacheDir}`,
+    );
+    if (checkouts.length === 0) {
+      exclusions.push(trailing);
       continue;
     }
-    exclusions.push(trailing);
+    for (const child of checkouts) {
+      if (child.kind === 'dir') continue;
+      const childPath = path.join(worktreePath, '.qwen', cacheDir, child.name);
+      // Exclude a linked worktree only when deleting this checkout leaves its
+      // commits reachable; otherwise the archive has to carry it.
+      if (!(await isRecoverableLinkedWorktree(childPath, worktreePath))) {
+        continue;
+      }
+      if (await worktreeHasWork(childPath)) {
+        throw new Error(
+          `Worktree snapshot: nested checkout .qwen/${cacheDir}/${child.name} holds work; refusing to capture a parent that would delete it`,
+        );
+      }
+      exclusions.push(`${trailing}${child.name}/`);
+    }
   }
   const managedRelative = '.qwen/worktrees/';
   const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
@@ -820,24 +872,6 @@ async function boundedSnapshotExclusions(
     exclusions.push(relative);
   }
   return exclusions;
-}
-
-/** Whether the cache directory directly holds a checkout of any kind. */
-async function holdsCheckout(dir: string): Promise<boolean> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return false;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const marker = await fs
-      .lstat(path.join(dir, entry.name, '.git'))
-      .catch(() => undefined);
-    if (marker !== undefined) return true;
-  }
-  return false;
 }
 
 /**
@@ -917,10 +951,11 @@ export async function captureWorktreeSnapshot(
     throw new Error('Worktree snapshot: invalid commit id');
   }
   await fs.access(path.join(worktreePath, '.git'));
-  // Preflight before any directory exists: a refusal (a case-variant protected
-  // path, or a nested checkout whose work exclusion would delete) must not
-  // leave an empty snapshot directory behind for the sweep to trip over. The
-  // same matcher filters the archive; membership is re-read after tar below.
+  // Preflight before any directory exists: a refusal (a FIFO, a case-variant
+  // path, a symlink target the fs/tar bridge cannot carry, or a nested checkout
+  // that holds work) must not leave an empty archive directory behind for a
+  // capture that never produced anything. The same matcher filters the archive;
+  // membership is re-read after tar so state that changes mid-capture is caught.
   const matcher = await readSnapshotExclusions(worktreePath);
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
