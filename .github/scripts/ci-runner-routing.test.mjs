@@ -727,8 +727,9 @@ describe('ci.yml lint HOME isolation', () => {
   // COREPACK_HOME stays inside the run-unique home (corepack does not
   // re-verify entries on cache hit — a shared home is a poisoning channel),
   // XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache, and
-  // XDG_DATA_HOME carries pnpm's content-addressable store, which pnpm
-  // re-verifies on every warm hit (the property asserted separately below).
+  // XDG_DATA_HOME carries pnpm's store — shared only behind the trust gate
+  // asserted separately below, because pnpm's store check is a corruption
+  // check and not a trust boundary.
   const ENV_WRITES = [
     'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
     'printf \'XDG_CACHE_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"',
@@ -886,63 +887,116 @@ describe('ci.yml lint HOME isolation', () => {
     }
   });
 
-  it('shares a content-verified pnpm store outside the run-unique HOME', () => {
+  it('shares the pnpm store only on the trusted persistent fleet', () => {
     // pnpm resolves its store through XDG_DATA_HOME. Inside the per-run home
     // the store is reclaimed with it, so every run refetched ~2300 packages;
     // the tail of that distribution overran the install step's 30-minute cap
     // (PR #18543, lint job 140553347054: 30m13s, killed two packages short).
-    // Sharing is only safe because pnpm re-verifies each store entry on a warm
-    // hit — measured on 11.24.0: an equal-length tamper is rejected and
-    // refetched, while verify-store-integrity=false adopts it silently. Both
-    // halves of that argument are pinned here: the path, and the setting.
+    //
+    // The store check is NOT what licenses sharing it. pnpm's verifyFile()
+    // skips the digest read whenever size and mtime still match the index, so
+    // an equal-length write that restores mtime is adopted silently — measured
+    // on 11.24.0 with a fresh store per arm: in-place r+b, truncate and atomic
+    // replace ALL landed the poisoned bytes (`reused 1, downloaded 0`), and only
+    // leaving mtime bumped triggered a refetch. pnpm's own source states that
+    // verification "does not make a store writable by untrusted users safe".
+    // What licenses sharing is therefore the TRUST GATE: every writer must
+    // already be trusted. That gate is what these assertions pin.
     for (const [id, job] of ungated) {
-      const run = String((job.steps ?? [])[0]?.run ?? '');
-      const writer = run.match(/printf 'XDG_DATA_HOME=%s\\n' "([^"]+)"/);
-      assert.ok(writer, `${id} must publish XDG_DATA_HOME`);
-      assert.equal(
-        writer[1],
-        '${RUNNER_TOOL_CACHE}/qwen-ci-data',
+      const step = (job.steps ?? [])[0] ?? {};
+      const run = String(step.run ?? '');
+      const eligible = String(step.env?.SHARED_STORE_ELIGIBLE ?? '');
+      assert.ok(eligible, `${id} must gate the shared store on an expression`);
+      // Both halves by value: self-hosted (hosted has no warm store to reuse)
+      // and the ephemeral exclusion (pick_runner sends untrusted forks there).
+      // Dropping either one re-admits an untrusted writer to a persistent store.
+      assert.ok(
+        eligible.includes("runner.environment == 'self-hosted'"),
+        `${id} shared store must require the persistent self-hosted fleet`,
+      );
+      assert.ok(
+        /!contains\(needs\.classify_pr\.outputs\.lint_runner,\s*'ephemeral'\)/.test(
+          eligible,
+        ),
+        `${id} shared store must exclude the ephemeral pool untrusted forks land on`,
+      );
+
+      const lines = run.split('\n').map((line) => line.trim());
+      const guardIndex = lines.indexOf(
+        'if [ "${SHARED_STORE_ELIGIBLE}" = "true" ]; then',
+      );
+      const endIndex = lines.indexOf('fi', guardIndex + 1);
+      assert.ok(
+        guardIndex >= 0,
+        `${id} must guard the shared store with a shell if`,
+      );
+      assert.ok(endIndex > guardIndex, `${id} guard must be closed`);
+      const guarded = lines.slice(guardIndex + 1, endIndex);
+
+      // The publish AND the mkdir must both sit inside the guard: publishing
+      // unconditionally is the poisoning channel, and mkdir outside it would
+      // create the shared directory on untrusted runs too.
+      const writer = guarded.find((line) =>
+        line.startsWith("printf 'XDG_DATA_HOME=%s\\n'"),
+      );
+      assert.ok(writer, `${id} must publish XDG_DATA_HOME inside the guard`);
+      assert.ok(
+        writer.includes('"${RUNNER_TOOL_CACHE}/qwen-ci-data"'),
         `${id} pnpm store must ride the persistent tool cache, not the per-run home`,
       );
-      // By value above, and structurally here: any `$home`-relative form (or a
-      // later `${HOME}/...` drift) puts the store back inside the directory the
-      // cleanup step deletes.
       assert.ok(
-        !writer[1].includes('home'),
+        !writer.includes('$home'),
         `${id} XDG_DATA_HOME must not resolve inside the run-unique home`,
       );
-      // Scope this to the mkdir line: a whole-step `includes` is satisfied by
-      // the printf that publishes the same path, so dropping the directory
-      // from mkdir alone left that form green (measured).
-      const mkdirLine = run
-        .split('\n')
-        .map((line) => line.trim())
-        .find((line) => line.startsWith('mkdir -p'));
-      assert.ok(mkdirLine, `${id} must create its directories with mkdir -p`);
       assert.ok(
-        mkdirLine.includes('"${RUNNER_TOOL_CACHE}/qwen-ci-data"'),
-        `${id} must create the shared data directory it publishes`,
-      );
-      // The contrast that makes this a boundary rather than a blanket unshare:
-      // corepack does NOT re-verify on hit, so it stays per-run.
-      assert.ok(
-        run.includes(
-          'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack"',
+        guarded.some(
+          (line) =>
+            line.startsWith('mkdir -p') &&
+            line.includes('"${RUNNER_TOOL_CACHE}/qwen-ci-data"'),
         ),
-        `${id} COREPACK_HOME must stay inside the run-unique home`,
+        `${id} must create the shared data directory inside the guard`,
+      );
+      // Nothing else may leak into the guarded block, and the unguarded part
+      // must not create or publish the shared path at all.
+      const unguarded = [
+        ...lines.slice(0, guardIndex),
+        ...lines.slice(endIndex + 1),
+      ];
+      assert.ok(
+        !unguarded.some((line) => line.includes('qwen-ci-data')),
+        `${id} must not touch the shared store path outside the trust gate`,
+      );
+      // corepack does NOT re-verify on hit, so it stays per-run unconditionally.
+      assert.ok(
+        unguarded.some(
+          (line) =>
+            line.startsWith("printf 'COREPACK_HOME=%s\\n'") &&
+            line.includes('"${home}/.cache/node/corepack"'),
+        ),
+        `${id} COREPACK_HOME must stay inside the run-unique home, ungated`,
       );
     }
 
-    // The store's integrity check is what licenses sharing it. Turning it off
-    // in repo config would hand every later job on the registration whatever a
-    // previous fork job wrote into the shared store.
+    // Turning the check off does not create the poisoning channel (mtime already
+    // does), but it removes the corruption safety net the trusted fleet relies
+    // on. Both config surfaces are pinned: pnpm reads verifyStoreIntegrity from
+    // pnpm-workspace.yaml as well, and that one is NOT visible in .npmrc —
+    // measured with `pnpm config list --json` on 11.24.0.
     const npmrc = readFileSync(
       new URL('../../.npmrc', import.meta.url),
       'utf8',
     );
     assert.ok(
       !/verify[-_]store[-_]integrity\s*=\s*false/i.test(npmrc),
-      '.npmrc must not disable pnpm store integrity verification while the store is shared',
+      '.npmrc must not disable pnpm store integrity verification',
+    );
+    const workspace = readFileSync(
+      new URL('../../pnpm-workspace.yaml', import.meta.url),
+      'utf8',
+    );
+    assert.ok(
+      !/verify[-_]?store[-_]?integrity\s*:\s*false/i.test(workspace),
+      'pnpm-workspace.yaml must not disable pnpm store integrity verification',
     );
   });
 

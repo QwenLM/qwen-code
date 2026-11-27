@@ -44,9 +44,9 @@ the gate-scoped HOME being the wrong shape (fork code starts ~14 steps
 earlier), so the lane now mirrors lint exactly: the FIRST step publishes a
 run-unique HOME plus COREPACK_HOME inside it via GITHUB_ENV (corepack does
 not re-verify entries on cache hit — a shared home is a cross-job
-poisoning channel), XDG_CACHE_HOME and XDG_DATA_HOME stay on the shared
-content-verified tool cache, and an always() cleanup step reclaims the home
-at the end. The
+poisoning channel), XDG_CACHE_HOME stays on the shared content-verified tool
+cache, XDG_DATA_HOME joins it only on the trusted persistent fleet, and an
+always() cleanup step reclaims the home at the end. The
 routing battery pins the lane set, the first-step isolation, the cleanup,
 and a zero-secrets env contract enforced by VALUE (every non-path key must
 be empty, including `ANTHROPIC_AUTH_TOKEN`, which the Anthropic SDK's auth
@@ -88,28 +88,46 @@ npm and pnpm resolve through `~`/`$HOME`. It does not stop a job that writes
 the account's real home by absolute path; that remains in the accepted
 residual surface below. Limits that stay accepted:
 
-- **The npm cache is cold; the pnpm store is shared and warm.** `NPM_CONFIG_CACHE`
-  lives under the per-run HOME and dies with it, yamllint is re-pipped into
-  `$HOME/.local`, and the corepack shim is re-downloaded per run. Two caches stay
-  shared, both because they verify content on every hit: `XDG_CACHE_HOME` points
-  at `${RUNNER_TOOL_CACHE}/qwen-ci-cache`, where lint.js SHA-256-verifies every
-  linter archive before extraction, rejecting and re-fetching tampered entries;
-  and `XDG_DATA_HOME` points at `${RUNNER_TOOL_CACHE}/qwen-ci-data`, which is
-  where pnpm resolves its content-addressable store. pnpm re-verifies each store
-  entry on a warm hit — measured on 11.24.0, an equal-length tamper is rejected
-  and refetched, while `verify-store-integrity=false` adopts it silently, so that
-  setting must stay at its default (pinned in the routing battery).
-  Until 2026-11-27 the store sat under the per-run HOME, so every run refetched
-  all ~2300 packages. That cost was accepted at ~900 s, but the distribution has
-  a long tail: five green lint runs that day spent 6m32s–24m35s in the install
-  step, and PR #18543's run (job 140553347054, `ecs-qwen-hz7-14`) hit the step's
-  30-minute cap two packages short of done, skipping all 20 lint steps. The
-  registry egress is the other factor — the same 12 MB tarball measured
+- **The npm cache is cold; the pnpm store is warm only on the trusted fleet.**
+  `NPM_CONFIG_CACHE` lives under the per-run HOME and dies with it, yamllint is
+  re-pipped into `$HOME/.local`, and the corepack shim is re-downloaded per run.
+  `XDG_CACHE_HOME` points at `${RUNNER_TOOL_CACHE}/qwen-ci-cache`, where lint.js
+  SHA-256-verifies every linter archive before extraction, rejecting and
+  re-fetching tampered entries — that per-hit content check is what licenses
+  sharing it.
+  `XDG_DATA_HOME` points at `${RUNNER_TOOL_CACHE}/qwen-ci-data`, where pnpm
+  resolves its store, **but only when the job is on the trusted persistent
+  fleet**. pnpm's store check is a corruption check, not a trust boundary:
+  `verifyFile()` skips the digest read whenever size and mtime still match the
+  index, and pnpm's own source says verification "does not make a store writable
+  by untrusted users safe". Measured on 11.24.0 with a fresh store per arm, an
+  equal-length write that restores mtime lands the poisoned bytes (`reused 1,
+downloaded 0`) through in-place `r+b`, truncate, and atomic replace alike; only
+  leaving mtime bumped triggers a refetch. So the gate is trust, not verification:
+  `SHARED_STORE_ELIGIBLE` requires `runner.environment == 'self-hosted'` and
+  excludes the `ephemeral` pool that `pick_runner` assigns to untrusted forks.
+  Those forks keep a per-run data home and still pay the cold fetch.
+  `verifyStoreIntegrity` must also stay at its default on the trusted fleet —
+  it is the corruption net there — and both config surfaces are pinned, since
+  pnpm reads it from `pnpm-workspace.yaml` as well as `.npmrc`.
+  Until 2026-11-27 the store sat under the per-run HOME on every run, so each run
+  refetched all ~2300 packages. That cost was accepted at ~900 s, but the
+  distribution has a long tail: five green lint runs that day spent 6m32s–24m35s
+  in the install step, and PR #18543's run (job 140553347054, `ecs-qwen-hz7-14`)
+  hit the step's 30-minute cap two packages short of done, skipping all 20 lint
+  steps. The registry egress is the other factor — the same 12 MB tarball measured
   86 KB/s direct from Hangzhou and 19 MB/s through the fleet's HK exit.
-  `COREPACK_HOME` stays inside the run-unique HOME: corepack does not re-verify
-  extracted entries on cache hit (reproduced on 0.34.6 and 0.36.0 — a tampered
-  pnpm entry executes with the recorded hash unchanged), so a shared corepack
-  home is a cross-job poisoning channel.
+  `COREPACK_HOME` stays inside the run-unique HOME unconditionally: corepack does
+  not re-verify extracted entries on cache hit (reproduced on 0.34.6 and 0.36.0 —
+  a tampered pnpm entry executes with the recorded hash unchanged), so a shared
+  corepack home is a cross-job poisoning channel.
+- **The shared store has no ownership recovery and no disk gate of its own.**
+  Every `Restore workspace ownership` step chowns only `$GITHUB_WORKSPACE`, and
+  `check-disk-floor.sh` is handed only the workspace and `RUNNER_TEMP`. Neither
+  covers `${RUNNER_TOOL_CACHE}/qwen-ci-data`. Today only same-UID uncontainerised
+  jobs write it, so no root-owned residue is expected; if a containerised lane
+  ever shares that path, it needs the ownership recovery the workspace has, and
+  the directory's growth needs a floor of its own. Both are unenforced today.
 - **`$GITHUB_WORKSPACE` is still shared.** The pre-checkout "Restore workspace
   ownership" step and the checkout itself reduce, but cannot eliminate,
   residue a co-resident job leaves behind. The lane's only credential is the
@@ -232,10 +250,12 @@ a strictly larger surface than the vitest side lane.
 - Follow-ups owned separately: disk-floor gate coverage of `/tmp` inodes; fleet
   metadata hardening; the `test` lane's constant `qwen-ci-home` persistence;
   an isolation fleet if the accepted residual surface is ever revisited.
-  Landed 2026-11-27: the warm shared pnpm store, for both ungated lanes, via
-  `XDG_DATA_HOME` at a content-verified shared path (see the isolation boundary
-  above). Two properties it now depends on: the store directory persists on the
-  registration, so it grows across runs and is subject to the disk-floor gate
-  rather than to per-run reclamation; and it is written by same-UID
-  uncontainerised jobs only — a containerised lane leaving root-owned entries
-  there would need the ownership recovery the workspace already has.
+  Landed 2026-11-27: the warm shared pnpm store for both ungated lanes, via
+  `XDG_DATA_HOME` behind a trust gate (see the isolation boundary above). The
+  first draft of that amendment justified sharing by pnpm's per-hit integrity
+  check; review disproved it — the check is skipped when size and mtime match, so
+  a metadata-preserving write is adopted — and the gate was changed from
+  "content-verified path" to "trusted writers only". Two properties remain
+  unenforced and are recorded as residuals above: the store directory grows on
+  the registration with no disk floor of its own, and no ownership recovery
+  covers it.
