@@ -1046,6 +1046,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_generation',
   'workspace_generation',
   'session_btw',
+  'session_reasoning_persistence',
   'session_btw_stream',
   'session_shell_command',
   'mcp_workspace_pool',
@@ -3988,6 +3989,11 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'session_reasoning_persistence') {
+          expect(predicate({})).toBe(true);
+          expect(predicate({ hostedHarness: true })).toBe(false);
           continue;
         }
         if (feature === 'session_btw_stream') {

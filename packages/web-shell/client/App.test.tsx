@@ -37298,7 +37298,7 @@ describe('App session callbacks', () => {
       });
       expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
         'medium',
-        { persist: !standalone },
+        { persist: !standalone, preferSessionPersistence: true },
       );
     },
   );

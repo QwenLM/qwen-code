@@ -861,6 +861,7 @@ export interface SessionModelRecordPayload {
   authType: string;
   baseUrl?: string;
   isRuntime?: boolean;
+  reasoningSelection?: string;
 }
 
 export interface SessionWorkflowModeRecordPayload {
@@ -972,6 +973,9 @@ export function normalizeSessionModelPayload(
   if (payload.isRuntime) {
     normalized.isRuntime = true;
   }
+  if (typeof payload.reasoningSelection === 'string') {
+    normalized.reasoningSelection = payload.reasoningSelection;
+  }
   return normalized;
 }
 
@@ -983,7 +987,8 @@ export function sessionModelPayloadsEqual(
     a.modelId === b.modelId &&
     a.authType === b.authType &&
     (a.baseUrl ?? '') === (b.baseUrl ?? '') &&
-    Boolean(a.isRuntime) === Boolean(b.isRuntime)
+    Boolean(a.isRuntime) === Boolean(b.isRuntime) &&
+    a.reasoningSelection === b.reasoningSelection
   );
 }
 
@@ -4598,6 +4603,10 @@ export class ChatRecordingService {
         this.reanchorSessionSource();
       }
     }
+  }
+
+  getRecordedSessionModel(): SessionModelRecordPayload | undefined {
+    return this.currentSessionModel;
   }
 
   /** Persist the daemon session's current model so load/resume can restore it. */

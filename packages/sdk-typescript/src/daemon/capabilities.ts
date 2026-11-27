@@ -640,6 +640,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // "Hand off": `POST /session/:id/worktree-handoff` moves the same session
   // between its managed worktree and the local checkout, carrying the work.
   session_worktree_handoff_v1: { since: 'v1' },
+  // Reasoning choices can be recorded on the session by the config-option route.
+  session_reasoning_persistence: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

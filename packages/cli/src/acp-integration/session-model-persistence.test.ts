@@ -75,6 +75,34 @@ describe('session-model-persistence', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('carries a recorded effort to the next model and requires a task write to succeed', async () => {
+    const recordSessionModel = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    const config = {
+      getModel: () => 'next-model',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getChatRecordingService: () => ({
+        recordSessionModel,
+        getRecordedSessionModel: () => ({ reasoningSelection: 'high' }),
+      }),
+    } as unknown as Config;
+
+    await recordDaemonSessionModelFromConfig(config);
+    expect(recordSessionModel).toHaveBeenCalledExactlyOnceWith({
+      modelId: 'next-model',
+      authType: AuthType.USE_OPENAI,
+      reasoningSelection: 'high',
+    });
+    await expect(
+      recordDaemonSessionModelFromConfig(config, {
+        reasoningSelection: 'low',
+        required: true,
+      }),
+    ).rejects.toThrow('Could not save reasoning for this task');
+  });
+
   it('captures the current config model for a new daemon session', async () => {
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     const config = {

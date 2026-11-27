@@ -4565,9 +4565,13 @@ export const DAEMON_REASONING_SELECTIONS = [
 
 export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
+export type DaemonReasoningPersistenceOptions =
+  | { persist?: boolean; persistToSession?: never }
+  | { persist?: never; persistToSession: true };
+
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
-  /** For workflow_mode, confirms session persistence; reasoning_effort retains settings persistence semantics. */
+  /** Confirms persistence to the session or settings requested by the call. */
   persisted: boolean;
 }
 

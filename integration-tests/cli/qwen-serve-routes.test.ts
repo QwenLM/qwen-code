@@ -961,6 +961,65 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     }
   });
 
+  it('scopes both chat effort entry points to the recorded task', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const settingsPath = path.join(homeDir, '.qwen', 'settings.json');
+    const sharedSettings = readFileSync(settingsPath, 'utf8');
+    const tasks: Array<{ sessionId: string; clientId: string }> = [];
+    const create = async () => {
+      const task = await client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: randomUUID(),
+        startupConfig: { modelServiceId },
+      });
+      tasks.push(task);
+      return task;
+    };
+    const choice = async ({ sessionId, clientId }: (typeof tasks)[number]) =>
+      (
+        await client.sessionContext(sessionId, clientId)
+      ).state.configOptions.find(({ id }) => id === 'reasoning_effort')
+        ?.currentValue;
+
+    try {
+      const menu = await create();
+      const command = await create();
+      expect(await choice(menu)).toBe('none');
+      expect(await choice(command)).toBe('none');
+      await expect(
+        client.setSessionConfigOption(
+          menu.sessionId,
+          'reasoning_effort',
+          'high',
+          {
+            clientId: menu.clientId,
+            persistToSession: true,
+          },
+        ),
+      ).resolves.toMatchObject({ persisted: true });
+      await expect(
+        client.prompt(
+          command.sessionId,
+          {
+            prompt: [{ type: 'text', text: '/effort high' }],
+            _meta: { 'qwenCode/persistSessionReasoning': true },
+          },
+          undefined,
+          command.clientId,
+        ),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      expect(await choice(menu)).toBe('high');
+      expect(await choice(command)).toBe('high');
+      expect(readFileSync(settingsPath, 'utf8')).toBe(sharedSettings);
+      expect(await choice(await create())).toBe('none');
+    } finally {
+      await Promise.all(
+        tasks.map(({ sessionId }) => client.closeSession(sessionId)),
+      );
+    }
+  });
+
   it('applies high over shared none and tears down only rejected startup selections', async () => {
     const modelServiceId = 'qwen-startup-test(openai)';
     const session = await client.createOrAttachSession({
