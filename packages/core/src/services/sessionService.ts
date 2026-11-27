@@ -1982,7 +1982,14 @@ export class SessionService {
   private removeWorktreeSidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
-      if (fs.existsSync(sidecar)) {
+      let present = false;
+      try {
+        present =
+          fs.lstatSync(sidecar, { throwIfNoEntry: false }) !== undefined;
+      } catch {
+        present = false;
+      }
+      if (present) {
         this.removeFileIfExists(sidecar);
       }
     }

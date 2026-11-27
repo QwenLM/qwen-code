@@ -278,6 +278,7 @@ describe('SessionService', () => {
   let statPromiseSpy: MockInstance<typeof fs.promises.stat>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
   let existsSyncSpy: MockInstance<typeof fs.existsSync>;
+  let lstatSyncSpy: MockInstance<typeof fs.lstatSync>;
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
   let rmSyncSpy: MockInstance<typeof fs.rmSync>;
@@ -324,6 +325,7 @@ describe('SessionService', () => {
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
     existsSyncSpy = vi.spyOn(fs, 'existsSync');
+    lstatSyncSpy = vi.spyOn(fs, 'lstatSync');
     mkdirSyncSpy = vi.spyOn(fs, 'mkdirSync');
     renameSyncSpy = vi
       .spyOn(fs, 'renameSync')
@@ -532,10 +534,15 @@ describe('SessionService', () => {
     });
     return { service, warnings };
   };
-  const existsFor = (...suffixes: string[]) =>
-    existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
-      suffixes.some((suffix) => filePath.toString().endsWith(suffix)),
-    );
+  const existsFor = (...suffixes: string[]) => {
+    const matches = (filePath: fs.PathLike) =>
+      suffixes.some((suffix) => filePath.toString().endsWith(suffix));
+    existsSyncSpy.mockImplementation(matches);
+    lstatSyncSpy.mockImplementation(((filePath: fs.PathLike) =>
+      matches(filePath)
+        ? ({ isFile: () => true } as fs.Stats)
+        : undefined) as typeof fs.lstatSync);
+  };
   const inChats = (ext = '.jsonl') =>
     expect.stringContaining(`/chats/${sessionIdA}${ext}`);
   const inArchive = (ext = '.jsonl') =>
@@ -5716,6 +5723,72 @@ describe('SessionService', () => {
 
     it('readParentSessionId returns undefined for a nonexistent session', async () => {
       expect(await service.readParentSessionId(sessionId)).toBeUndefined();
+    });
+  });
+
+  describe('removeSession dangling worktree sidecars', () => {
+    let service: SessionService;
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    const disk = useRealDisk(
+      'remove-dangling-worktree-',
+      (d) => ({ service, realTmpDir, realPath } = d),
+    );
+    const [sessionId] = realDiskIds;
+
+    it('unlinks dangling active and archived worktree sidecar symlinks when deleting a session', async () => {
+      disk.write(sessionId, [msgLine(sessionId, 'u1', null, 'user', 0, 'hi')]);
+      const activeSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'archived',
+      );
+      fs.mkdirSync(realPath.dirname(archivedSidecar), { recursive: true });
+      const missingTarget = realPath.join(realTmpDir, 'missing-target');
+      fs.symlinkSync(missingTarget, activeSidecar);
+      fs.symlinkSync(missingTarget, archivedSidecar);
+
+      expect(await service.removeSession(sessionId)).toBe(true);
+      expect(
+        fs.lstatSync(activeSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+      expect(
+        fs.lstatSync(archivedSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    });
+
+    it('keeps cleaning sibling sidecars when the archived sidecar parent raises ENOTDIR', async () => {
+      disk.write(sessionId, [msgLine(sessionId, 'u1', null, 'user', 0, 'hi')]);
+      const activeSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const activePrSidecar = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const archivedDir = realPath.dirname(
+        service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+      );
+      fs.symlinkSync(
+        realPath.join(realTmpDir, 'missing-target'),
+        activeSidecar,
+      );
+      fs.writeFileSync(activePrSidecar, '{"prs":[]}\n');
+      // Place a regular file at `chats/archive` so lstat on archived sidecars
+      // raises ENOTDIR rather than ENOENT.
+      fs.writeFileSync(archivedDir, 'not-a-directory');
+
+      expect(await service.removeSession(sessionId)).toBe(true);
+      expect(
+        fs.lstatSync(activeSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+      expect(
+        fs.lstatSync(activePrSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
     });
   });
 });
