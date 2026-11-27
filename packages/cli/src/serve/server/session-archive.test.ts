@@ -4304,31 +4304,24 @@ describe('retained snapshot archive lifecycle', () => {
         sourceState,
       );
       const oppositeState = sourceState === 'active' ? 'archived' : 'active';
-      const oppositeSidecarPath = service.getWorktreeSessionPathForArchiveState(
+      const transcriptPath = sessionPath(
+        workspace,
+        sessionId,
+        sourceState,
+        runtimeBaseDir,
+      );
+      const oppositeTranscriptPath = sessionPath(
+        workspace,
         sessionId,
         oppositeState,
+        runtimeBaseDir,
       );
-      const transcriptPath = path.join(
-        path.dirname(sidecarPath),
-        `${sessionId}.jsonl`,
-      );
-      const oppositeTranscriptPath = path.join(
-        path.dirname(oppositeSidecarPath),
-        `${sessionId}.jsonl`,
-      );
-      fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
-      fs.writeFileSync(
-        transcriptPath,
-        `${JSON.stringify({
-          uuid: 'record-1',
-          parentUuid: null,
-          sessionId,
-          timestamp: '2024-01-01T00:00:00.000Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello' }] },
-          cwd: workspace,
-          version: '1.0.0',
-        })}\n`,
+      writeSessionFile(
+        workspace,
+        sessionId,
+        sourceState,
+        workspace,
+        runtimeBaseDir,
       );
       fs.symlinkSync(path.join(root, 'missing-sidecar-target'), sidecarPath);
       const localCoordinator = new SessionArchiveCoordinator();
