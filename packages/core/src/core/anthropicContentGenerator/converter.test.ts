@@ -1998,6 +1998,55 @@ describe('AnthropicContentConverter', () => {
       expect((marked[0] as { type: string }).type).toBe('image');
     });
 
+    // A bare string part (not `{ text: '' }`, which is dropped) survives as an
+    // empty text block, which cannot carry cache_control.
+    const emptyText = '' as unknown as Part;
+    const markedBlocks = (messages: Anthropic.MessageParam[]) =>
+      messages.flatMap((m) =>
+        (Array.isArray(m.content) ? m.content : []).filter(
+          (b) => (b as { cache_control?: unknown }).cache_control,
+        ),
+      );
+
+    it('walks back to earlier text when the last persisted block is empty text', () => {
+      const { messages } = convert([
+        { role: 'user', parts: [{ text: 'q' }, emptyText] },
+      ]);
+      expect(messages).toEqual([user(txt('q', EPH), txt(''))]);
+      expect(markedBlocks(messages)).toHaveLength(1);
+    });
+
+    it('walks back to the image when an empty text block follows it', () => {
+      const { messages } = convert([
+        {
+          role: 'user',
+          parts: [{ text: 'q' }, inline('image/png', 'AAAA'), emptyText],
+        },
+      ]);
+      expect(messages).toEqual([
+        user(
+          txt('q'),
+          { ...b64('image', 'image/png', 'AAAA'), cache_control: EPH },
+          txt(''),
+        ),
+      ]);
+      expect(markedBlocks(messages)).toHaveLength(1);
+    });
+
+    it('falls back to an earlier user message when the last one has no cacheable block', () => {
+      const { messages } = convert([
+        userText('first'),
+        modelText('ok'),
+        { role: 'user', parts: [emptyText] },
+      ]);
+      expect(messages).toEqual([
+        user(txt('first', EPH)),
+        assistant(txt('ok')),
+        user(txt('')),
+      ]);
+      expect(markedBlocks(messages)).toHaveLength(1);
+    });
+
     it('omits the message breakpoint when there is only the catalog', () => {
       const { messages } = convert(
         appendAutoMemoryContext([], 'current memory catalog'),
