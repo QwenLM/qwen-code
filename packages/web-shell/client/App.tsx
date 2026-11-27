@@ -49,6 +49,7 @@ import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
 import {
   isSessionWriterBlockedCode,
+  resolveDraftSessionContext,
   sessionContextKey,
 } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
@@ -5042,8 +5043,25 @@ export function App({
         (entry) => entry.cwd === preferredCwd && entry.trusted !== false,
       )?.cwd;
     }
-    return trustedPrimaryWorkspaceCwd;
-  }, [lockedWorkspaceCwd, ordinaryWorkspaces, trustedPrimaryWorkspaceCwd]);
+    // A legacy single-project daemon exposes only capabilities.workspaceCwd
+    // (no workspaces catalog): that cwd is the daemon's own workspace, and a
+    // session-less prompt would land there anyway via the connection
+    // fallback, so the draft resolves to it instead of degrading (R3-1).
+    // With a workspaces catalog the answer stays undefined — an untrusted
+    // primary must never be auto-targeted.
+    return (
+      trustedPrimaryWorkspaceCwd ??
+      (workspace.capabilities?.workspaces === undefined
+        ? workspace.capabilities?.workspaceCwd
+        : undefined)
+    );
+  }, [
+    lockedWorkspaceCwd,
+    ordinaryWorkspaces,
+    trustedPrimaryWorkspaceCwd,
+    workspace.capabilities?.workspaceCwd,
+    workspace.capabilities?.workspaces,
+  ]);
   const projectFeaturesAvailable =
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
@@ -5078,8 +5096,14 @@ export function App({
     },
     [],
   );
+  // A session-less draft does not start in the leftover connection workspace
+  // of a terminated session (#16992): the connection's cwd seeds the answer
+  // only while a session is connected or the context is not a leftover
+  // workspace one.
   const legacyWorkspaceContextCwd =
-    connection.workspaceCwd ||
+    (connection.sessionId || connection.sessionContext?.kind !== 'workspace'
+      ? connection.workspaceCwd
+      : undefined) ||
     lockedWorkspaceCwd ||
     selectedWorkspaceCwd ||
     trustedPrimaryWorkspaceCwd ||
@@ -5404,7 +5428,14 @@ export function App({
   // their target separately and standalone sessions never borrow that repo.
   const activeWorkspaceCwd = useMemo(() => {
     if (!workspaceContextActive) return undefined;
-    const explicitContext = pendingSessionContext ?? connection.sessionContext;
+    // A session-less draft does not inherit the leftover workspace context
+    // of a terminated session (see ensureSessionForPrompt): it resolves to
+    // the pending selection or the primary like the picker does.
+    const explicitContext = resolveDraftSessionContext(
+      pendingSessionContext,
+      connection.sessionContext,
+      connection.sessionId,
+    );
     if (explicitContext?.kind === 'workspace') {
       return explicitContext.cwd;
     }
@@ -5418,6 +5449,33 @@ export function App({
     pendingSessionContext,
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
+  ]);
+  // The workspace a session-less draft starts in — the same resolution
+  // ensureSessionForPrompt runs on the first prompt, owned by
+  // resolveDraftSessionContext so the draft-scoped surfaces below (skills
+  // catalog, attachment panel, welcome header, sidebar removal reset) stop
+  // keying on the leftover connection workspace. Attached sessions keep
+  // following connection.workspaceCwd and get undefined here.
+  const draftWorkspaceCwd = useMemo(() => {
+    if (connection.sessionId !== undefined) return undefined;
+    const draftContext = resolveDraftSessionContext(
+      pendingSessionContext,
+      connection.sessionContext,
+      connection.sessionId,
+    );
+    if (draftContext)
+      return draftContext.kind === 'workspace' ? draftContext.cwd : undefined;
+    // A cold draft whose maintenance chain resolves nothing (no catalog,
+    // no daemon home) still starts in the connection workspace via the
+    // creation fallback — the draft's surfaces follow where the session
+    // actually lands.
+    return resolveWorkspaceMaintenanceTargetCwd() ?? connection.workspaceCwd;
+  }, [
+    connection.sessionContext,
+    connection.sessionId,
+    connection.workspaceCwd,
+    pendingSessionContext,
+    resolveWorkspaceMaintenanceTargetCwd,
   ]);
   const composerWorkspaceCwd = workspaceContextActive
     ? (ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
@@ -7473,7 +7531,12 @@ export function App({
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
-      workspaceCwd = connection.workspaceCwd,
+      // A session-less draft previews files in the workspace it starts in,
+      // not the leftover connection workspace; attached sessions keep the
+      // connection.
+      workspaceCwd = connection.sessionId === undefined
+        ? draftWorkspaceCwd
+        : connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
       sourcePreview = false,
       silentUnavailable = false,
@@ -7590,6 +7653,7 @@ export function App({
     [
       connection.workspaceCwd,
       connection.sessionId,
+      draftWorkspaceCwd,
       getDefaultReviewPanelWidth,
       onWorkspaceFileOpen,
       pushToast,
@@ -10920,7 +10984,12 @@ export function App({
   >(undefined);
   const skillsCatalogKey = useMemo(
     () => ({
-      cwd: connection.workspaceCwd,
+      // The workspace-fetched catalog only serves the session-less draft: it
+      // must follow the workspace the draft starts in, not the leftover
+      // connection workspace; attached sessions keep the connection.
+      cwd: skillsCatalogForNewSession
+        ? draftWorkspaceCwd
+        : connection.workspaceCwd,
       forNewSession: skillsCatalogForNewSession,
       client: workspace.client,
       settings: workspaceEventSignals?.settingsVersion,
@@ -10929,6 +10998,7 @@ export function App({
     }),
     [
       connection.workspaceCwd,
+      draftWorkspaceCwd,
       skillsCatalogForNewSession,
       workspace.client,
       workspaceEventSignals?.settingsVersion,
@@ -11114,7 +11184,12 @@ export function App({
     setSkillsLoading(false);
     setSkillsLoadError(false);
     setLoadedSkillsFallback(undefined);
-  }, [connection.workspaceCwd, workspaceContextActive, reloadLoadedSkills]);
+  }, [
+    connection.workspaceCwd,
+    draftWorkspaceCwd,
+    workspaceContextActive,
+    reloadLoadedSkills,
+  ]);
   useEffect(() => {
     if (!connected || !workspaceContextActive || !skillsCatalogActive) return;
     // Attached sessions already supply their authoritative Skill commands.
@@ -11125,7 +11200,9 @@ export function App({
       return;
     if (skillsCatalogCacheRef.current?.key === skillsCatalogKey) return;
     const promise = reloadLoadedSkills(
-      connection.workspaceCwd,
+      // The session-less draft's catalog follows its start workspace;
+      // attached sessions follow the connection.
+      skillsCatalogForNewSession ? draftWorkspaceCwd : connection.workspaceCwd,
       false,
       skillsCatalogForNewSession,
     );
@@ -11141,6 +11218,7 @@ export function App({
   }, [
     connected,
     connection.workspaceCwd,
+    draftWorkspaceCwd,
     reloadLoadedSkills,
     skillsCatalogActive,
     skillsCatalogForNewSession,
@@ -11209,49 +11287,55 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     const owner = sessionOwnerGuard.capture();
-    void reloadLoadedSkills(workspaceCwd, true, sessionId === undefined).then(
-      (status) => {
-        if (!owner.isCurrent() || !status) return;
-        markHandled();
-        if (!sessionId) {
-          pendingSkillTogglesByContextRef.current.delete(contextKey);
-          return;
-        }
-        const availableWorkspaceSkillNames = new Set(
-          status.skills
-            .filter((skill) => skill.status === 'ok')
-            .map((skill) => skill.name.toLowerCase()),
-        );
-        const pendingForSession = pendingToggles.filter(
-          (toggle) =>
-            !toggle.enabled ||
-            availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
-        );
-        if (pendingForSession.length === 0) {
-          pendingSkillTogglesByContextRef.current.delete(contextKey);
-          setLoadedSkillsFallback(undefined);
-          return;
-        }
-        pendingSkillTogglesByContextRef.current.set(
-          contextKey,
-          pendingForSession,
-        );
-        const currentSnapshot = connectionSkillSnapshotRef.current;
-        if (
-          currentSnapshot.sessionId === sessionId &&
-          sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
-        ) {
-          pendingSkillTogglesByContextRef.current.delete(contextKey);
-          setLoadedSkillsFallback(undefined);
-          return;
-        }
-        setLoadedSkillsFallback({ sessionId, workspaceCwd });
-      },
-    );
+    // The session-less draft's mutation refresh must request the same
+    // workspace as the catalog load effect (its resolved start workspace)
+    // or the in-flight dedup misses and two reads race (R3-6).
+    void reloadLoadedSkills(
+      sessionId === undefined ? draftWorkspaceCwd : workspaceCwd,
+      true,
+      sessionId === undefined,
+    ).then((status) => {
+      if (!owner.isCurrent() || !status) return;
+      markHandled();
+      if (!sessionId) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        return;
+      }
+      const availableWorkspaceSkillNames = new Set(
+        status.skills
+          .filter((skill) => skill.status === 'ok')
+          .map((skill) => skill.name.toLowerCase()),
+      );
+      const pendingForSession = pendingToggles.filter(
+        (toggle) =>
+          !toggle.enabled ||
+          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+      );
+      if (pendingForSession.length === 0) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      pendingSkillTogglesByContextRef.current.set(
+        contextKey,
+        pendingForSession,
+      );
+      const currentSnapshot = connectionSkillSnapshotRef.current;
+      if (
+        currentSnapshot.sessionId === sessionId &&
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
+      ) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      setLoadedSkillsFallback({ sessionId, workspaceCwd });
+    });
   }, [
     connected,
     connection.sessionId,
     connection.workspaceCwd,
+    draftWorkspaceCwd,
     reloadLoadedSkills,
     workspaceEventSignals?.lastSkillMutation,
     workspaceEventSignals?.skillMutationsByCwd,
@@ -13803,9 +13887,15 @@ export function App({
             : undefined;
         const modeId = executionModeRef.current;
         const planMode = currentModeRef.current === 'plan';
-        const requestedSessionContext =
-          pendingSessionContextRef.current ??
-          connectionRef.current.sessionContext;
+        // A leftover workspace sessionContext of a terminated session is
+        // not inherited into a session-less draft (#16992): the draft
+        // starts in the workspace the picker displays, so the displayed
+        // and the created workspace can never disagree.
+        const requestedSessionContext = resolveDraftSessionContext(
+          pendingSessionContextRef.current,
+          connectionRef.current.sessionContext,
+          connectionRef.current.sessionId,
+        );
         const availableWorkspaces = workspacesRef.current;
         const primaryWorkspaceCwd = availableWorkspaces.find(
           (entry) => entry.primary && entry.trusted !== false,
@@ -13837,7 +13927,15 @@ export function App({
                   (entry) => entry.cwd === lockedWorkspaceCwd,
                 )?.cwd ??
                 acceptedWorkspaceCwd ??
-                primaryWorkspaceCwd);
+                primaryWorkspaceCwd ??
+                // A legacy single-project daemon exposes no workspaces
+                // catalog: name its own cwd explicitly so the session
+                // registers in the catalog instead of inheriting the
+                // connection (R3-1). A catalog present (even with an
+                // untrusted primary) keeps the old "no target" behavior.
+                (workspaceCapabilitiesRef.current?.workspaces === undefined
+                  ? workspaceCapabilitiesRef.current?.workspaceCwd
+                  : undefined));
         if (
           requestedSessionContext?.kind === 'workspace' &&
           !targetWorkspaceCwd
@@ -18379,10 +18477,17 @@ export function App({
       } else if (lockedWorkspaceCwd) {
         nextContext = { kind: 'workspace', cwd: lockedWorkspaceCwd };
       } else if (intent.kind === 'inherit') {
+        // A cwd-less New task inherits like any other draft (#16992): the
+        // leftover connection workspace of a terminated session is not
+        // part of the answer, so a cold draft stays on the primary it
+        // displays instead of moving onto it.
         nextContext =
-          pendingSessionContextRef.current ??
-          connectionRef.current.sessionContext ??
-          (connectionRef.current.workspaceCwd
+          resolveDraftSessionContext(
+            pendingSessionContextRef.current,
+            connectionRef.current.sessionContext,
+            connectionRef.current.sessionId,
+          ) ??
+          (connectionRef.current.sessionId && connectionRef.current.workspaceCwd
             ? {
                 kind: 'workspace',
                 cwd: connectionRef.current.workspaceCwd,
@@ -24954,16 +25059,25 @@ export function App({
   const welcomeHeaderProps = useMemo(
     () => ({
       version: connection.capabilities?.qwenCodeVersion || '',
-      cwd: workspaceContextActive ? connection.workspaceCwd || '' : '',
+      // The welcome header greets the draft: a session-less draft names the
+      // workspace it starts in, not the leftover connection workspace;
+      // attached sessions keep the connection.
+      cwd: workspaceContextActive
+        ? connection.sessionId
+          ? connection.workspaceCwd || ''
+          : draftWorkspaceCwd || ''
+        : '',
       currentModel,
       currentMode,
       hideTips: hideTipsSetting?.values.effective === true,
     }),
     [
       connection.capabilities?.qwenCodeVersion,
+      connection.sessionId,
       connection.workspaceCwd,
       currentModel,
       currentMode,
+      draftWorkspaceCwd,
       hideTipsSetting?.values.effective,
       workspaceContextActive,
     ],
@@ -26881,6 +26995,7 @@ export function App({
                   mobileOpen={mobileDrawerOpen}
                   onMobileClose={closeMobileDrawer}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
+                  draftWorkspaceCwd={draftWorkspaceCwd}
                   onSelectWorkspace={(workspaceCwd) => {
                     splitClassificationGenerationRef.current += 1;
                     const targetWorkspaceCwd =
