@@ -570,7 +570,8 @@ const OPEN_SCHEMA_KEYWORDS = [
  * only learns which argument is missing. Empty for a schema that may accept
  * arguments its top-level `properties` do not list.
  */
-function describeUnrecognizedParams(schema: unknown, params: object): string {
+function describeUnrecognizedParams(schema: unknown, params: unknown): string {
+  if (typeof params !== 'object' || params === null) return '';
   if (typeof schema !== 'object' || schema === null) return '';
   const record = schema as Record<string, unknown>;
   const { properties, additionalProperties } = record;
