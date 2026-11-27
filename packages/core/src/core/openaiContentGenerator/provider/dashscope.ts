@@ -476,6 +476,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         )
       : undefined;
 
+    // Without it, Qwen models on DashScope hold an object or array tool
+    // argument back until it is complete and send nothing meanwhile, which can
+    // outlast the stream idle timeout. Models that already stream their
+    // arguments accept it unchanged. User extra_body still wins.
+    const toolStream =
+      request.stream && tools?.length ? { tool_stream: true } : {};
+
     if (this.isVisionModel(request.model)) {
       // DashScope-exclusive fields not present in the OpenAI SDK types; spread
       // through a loose record so they don't trip excess-property checks.
@@ -484,6 +491,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       const dashscopeExtras: Record<string, unknown> = {
         vl_high_resolution_images: true,
         preserve_thinking: true,
+        ...toolStream,
         ...qwenEffortConfig,
       };
       const visionResult: Record<string, unknown> = {
@@ -513,6 +521,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     // extra_body wins (merged last).
     const dashscopeExtras: Record<string, unknown> = {
       preserve_thinking: true,
+      ...toolStream,
       ...qwenEffortConfig,
     };
     const result: Record<string, unknown> = {

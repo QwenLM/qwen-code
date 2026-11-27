@@ -2359,6 +2359,43 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         false,
       );
     });
+
+    describe('tool_stream', () => {
+      const tools = [
+        {
+          type: 'function',
+          function: { name: 'submit', parameters: { type: 'object' } },
+        },
+      ];
+
+      it.each(['qwen3.8-max', 'qwen3.7-plus'])(
+        'asks %s to stream tool arguments on a streaming request with tools',
+        (model) => {
+          expect(hello(model, { stream: true, tools })['tool_stream']).toBe(
+            true,
+          );
+        },
+      );
+
+      it('leaves it out without streaming or without tools', () => {
+        expect(hello('qwen3.8-max', { tools })).not.toHaveProperty(
+          'tool_stream',
+        );
+        expect(hello('qwen3.8-max', { stream: true })).not.toHaveProperty(
+          'tool_stream',
+        );
+        expect(
+          hello('qwen3.8-max', { stream: true, tools: [] }),
+        ).not.toHaveProperty('tool_stream');
+      });
+
+      it('lets user extra_body.tool_stream override it', () => {
+        const optOut = gen({ extra_body: { tool_stream: false } });
+        expect(
+          hello('qwen3.8-max', { stream: true, tools }, optOut)['tool_stream'],
+        ).toBe(false);
+      });
+    });
   });
 });
 
