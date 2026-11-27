@@ -83,7 +83,7 @@ function fixture(
       afterSequence,
       intervalMs: 5,
     });
-  return { session, requests, ingestEvents, start };
+  return { session, events, requests, ingestEvents, start };
 }
 
 const settled = async (request: ManagedEventIngestRequest) => ({
@@ -159,6 +159,58 @@ describe('startHostedEventIngest', () => {
       throughSequence: 2,
       end: 'recovery_blocked',
     });
+  });
+
+  it('retries a refused recovery-blocked marker on the next tick', async () => {
+    const { session, events, requests, start } = fixture(2, [
+      async () => {
+        events.push(delta(3));
+        throw new ManagedSessionStoreHttpError(
+          409,
+          'managed_event_ingest_end_refused',
+          'The end marker does not follow the committed journal.',
+        );
+      },
+    ]);
+    session.active = undefined;
+    session.blocked = true;
+    start(0);
+
+    await vi.waitFor(() => expect(session.streams.size).toBe(0));
+    expect(
+      requests.map(({ throughSequence, end }) => [throughSequence, end]),
+    ).toEqual([
+      [2, 'recovery_blocked'],
+      [3, 'recovery_blocked'],
+    ]);
+  });
+
+  it('drains multiple batches before sending the parked marker', async () => {
+    const { session, events, requests, start } = fixture(2, []);
+    const ingest = start(0);
+    await ingest.pause();
+    for (let sequence = 3; sequence <= 130; sequence++) {
+      events.push(delta(sequence));
+    }
+
+    await ingest.flush();
+    expect(requests.every((request) => request.end === undefined)).toBe(true);
+    await ingest.park();
+
+    expect(
+      requests.map(({ afterSequence, throughSequence, events, end }) => [
+        afterSequence,
+        throughSequence,
+        events.length,
+        end,
+      ]),
+    ).toEqual([
+      [0, 2, 2, undefined],
+      [2, 66, 64, undefined],
+      [66, 130, 64, undefined],
+      [130, 130, 0, 'parked'],
+    ]);
+    expect(session.streams.size).toBe(0);
   });
 
   it('parks with the remaining tail after the seal', async () => {

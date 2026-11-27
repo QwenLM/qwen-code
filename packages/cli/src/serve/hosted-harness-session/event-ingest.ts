@@ -21,6 +21,8 @@ const DEFAULT_RENEW_AFTER_MS = 20_000;
 export interface HostedEventIngest {
   /** Stops pushing and waits for a request in flight. */
   pause(): Promise<void>;
+  /** Drains committed events after pause and before sealing the writer. */
+  flush(): Promise<void>;
   /** After a clean seal: posts the remaining tail with the park marker. */
   park(): Promise<void>;
   stop(): void;
@@ -104,7 +106,12 @@ export function startHostedEventIngest(options: {
         if (cause.remoteCode === 'managed_event_ingest_not_ready') {
           notReadySince ??= Date.now();
           if (Date.now() - notReadySince < NOT_READY_LIMIT_MS) return;
-        } else if (cause.status >= 500 || cause.contentionExhausted) {
+        } else if (
+          cause.status >= 500 ||
+          cause.contentionExhausted ||
+          (request.end === 'recovery_blocked' &&
+            cause.remoteCode === 'managed_event_ingest_end_refused')
+        ) {
           return;
         }
       }
@@ -161,6 +168,28 @@ export function startHostedEventIngest(options: {
       paused = true;
       clearInterval(timer);
       await inFlight;
+    },
+    async flush() {
+      try {
+        while (!stopped && cursor < authority.committedSequence) {
+          const before = cursor;
+          const { events, through } = await batch();
+          if (events.length === 0) return;
+          await send({
+            eventEpoch: epoch,
+            turnId,
+            promptId,
+            afterSequence: before,
+            throughSequence: through,
+            events,
+          });
+          if (cursor <= before) return;
+        }
+      } catch (cause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} event ingest flush failed: ${String(cause)}`,
+        );
+      }
     },
     async park() {
       await handle.pause();

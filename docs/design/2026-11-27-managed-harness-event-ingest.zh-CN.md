@@ -134,14 +134,14 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 
 回复为 `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false }`。
 
-| 回复                                                                | Harness 的处理                                               |
-| ------------------------------------------------------------------- | ------------------------------------------------------------ |
-| 成功，`terminal: false`                                             | 从 `cursor` 继续；若请求带了结束标记则停止                   |
-| `managed_event_ingest_cursor_mismatch`                              | 从返回的游标重新读 journal                                   |
-| `managed_event_ingest_not_ready`                                    | 退避重试，最长不超过租约时长                                 |
-| `terminal: true`、`managed_event_ingest_not_owner`、writer 校验被拒 | 停止为这次准入上报                                           |
-| `managed_event_ingest_end_refused`                                  | 若是游标未到，补发到已提交序号后重试；否则停止为这次准入上报 |
-| 传输失败                                                            | 原样重发同一请求                                             |
+| 回复                                                                | Harness 的处理                                         |
+| ------------------------------------------------------------------- | ------------------------------------------------------ |
+| 成功，`terminal: false`                                             | 从 `cursor` 继续；若请求带了结束标记则停止             |
+| `managed_event_ingest_cursor_mismatch`                              | 从返回的游标重新读 journal                             |
+| `managed_event_ingest_not_ready`                                    | 退避重试，最长不超过租约时长                           |
+| `terminal: true`、`managed_event_ingest_not_owner`、writer 校验被拒 | 停止为这次准入上报                                     |
+| `managed_event_ingest_end_refused`                                  | 下轮重新判断恢复阻塞标记。停靠标记被拒后等待租约过期。 |
+| 传输失败                                                            | 原样重发同一请求                                       |
 
 ## 5. 派发者的改动
 
@@ -164,7 +164,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
   - 收到 `terminal: true` 的回复、`not_owner`、writer 校验拒绝，或结束标记被确认后停止。
 - **准入。** 格式错误的 `eventDelivery` 返回 400 `invalid_hosted_event_delivery`；没有 HTTP Session Store 的 Session 返回 409 `hosted_event_ingest_unavailable`，派发者会重试，而不是让 Turn 失败。
 - **挂起与关闭。** 上报器视同一条打开的事件流：普通的空闲挂起会等它停止，各条关闭路径都会停掉它。因 Action 停靠而挂起时，会在 seal 之前暂停所有上报器。
-- **停靠。** 确认 seal 之后、释放 placement 之前（#18404），上报器先补发到已提交序号，再带上已 seal 实例发送 `end: "parked"`。如果失败，挂起照常继续，租约过期后走现有的恢复。
+- **停靠。** 上报器暂停后，在 writer 仍然有效时分批补发已提交的事件。游标没有推进时停止补发。确认 seal 之后、释放 placement 之前（#18404），如果标记能到达已提交序号，上报器就以已 seal 的实例发送 `end: "parked"`。如果投递失败，挂起照常继续，Turn 在租约过期后恢复。
 - **recovery block。** 条件与 Java 现在轮询的相同：该 Turn 没有活跃 prompt、`recoveryBlocked` 为真、游标已到已提交序号。条件满足时，上报器发送 `end: "recovery_blocked"`。
 
 ## 7. 兼容与上线

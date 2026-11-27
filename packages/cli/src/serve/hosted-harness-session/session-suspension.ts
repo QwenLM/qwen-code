@@ -727,6 +727,8 @@ export function createHostedSessionSuspension({
             // Turn's pusher posts its marker after the seal instead.
             for (const ingest of session.eventIngests?.values() ?? [])
               await ingest.pause();
+            if (actionPark)
+              await session.eventIngests?.get(actionPark.promptId)?.flush();
             // The writer lease's own renewal timer lives in the Store client,
             // not in the activation renewal below. End it before the release
             // and seal so a failure here leaves a lease that lapses instead of
