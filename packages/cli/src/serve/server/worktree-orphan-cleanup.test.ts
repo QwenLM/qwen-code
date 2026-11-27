@@ -54,12 +54,6 @@ const archiveVerificationGate = vi.hoisted(() => ({
       }
     | undefined,
 }));
-const waivableProbe = vi.hoisted(() => ({
-  active: false,
-  calls: 0,
-  caches: new Set<unknown>(),
-  lastCacheSize: 0,
-}));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/git-branches.js',
   async (importOriginal) => {
@@ -111,17 +105,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       const gate = carriedSourceVerification.active;
       if (gate && args[0] === gate.source) gate.afterCheck();
       return held;
-    },
-    isWaivableIgnoredEntry: async (
-      ...args: Parameters<typeof actual.isWaivableIgnoredEntry>
-    ) => {
-      const result = await actual.isWaivableIgnoredEntry(...args);
-      if (waivableProbe.active) {
-        waivableProbe.calls += 1;
-        waivableProbe.caches.add(args[2]);
-        waivableProbe.lastCacheSize = args[2]?.size ?? 0;
-      }
-      return result;
     },
     computeCarriedIdentities: async (
       worktreePath: string,
@@ -1825,94 +1808,5 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
     expect(fs.existsSync(plan.lockKey)).toBe(false);
     expect(archives(sessionId).length).toBeGreaterThan(0);
-  });
-
-  it('inspects .qwen/tmp once per checkoutChangeDigest call under .qwen/tmp/* instead of quadratically', async () => {
-    fs.appendFileSync(path.join(repoRoot, '.gitignore'), '.qwen/tmp/*\n');
-    git(repoRoot, 'add', '.gitignore');
-    git(repoRoot, 'commit', '-qm', 'ignore-tmp-glob', '--no-verify');
-
-    const plan = await planFor('digest-linear-cache-scan');
-    const subdirs = 48;
-    const tmpRoot = path.join(plan.lockKey, '.qwen', 'tmp');
-    for (let i = 0; i < subdirs; i++) {
-      const dir = path.join(tmpRoot, `cache-${i}`);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'item.bin'), 'x\n');
-    }
-
-    waivableProbe.calls = 0;
-    waivableProbe.caches.clear();
-    waivableProbe.lastCacheSize = 0;
-    waivableProbe.active = true;
-    try {
-      const digest = await checkoutChangeDigestForTesting(plan.lockKey);
-      expect(digest).toBe('');
-      expect(waivableProbe.calls).toBe(subdirs);
-      expect(waivableProbe.caches.size).toBe(1);
-      expect(waivableProbe.caches.has(undefined)).toBe(false);
-      expect(waivableProbe.lastCacheSize).toBe(1);
-    } finally {
-      waivableProbe.active = false;
-    }
-  });
-
-  it('waives ignored .qwen/tmp and .qwen/logs caches in checkoutChangeDigest under a broad .qwen/ rule while still hashing .qwen/skills and sibling checkouts (R2-5)', async () => {
-    fs.appendFileSync(path.join(repoRoot, '.gitignore'), '.qwen/\n');
-    git(repoRoot, 'add', '.gitignore');
-    git(repoRoot, 'commit', '-qm', 'ignore-broad-qwen', '--no-verify');
-
-    const plan = await planFor('digest-broad-qwen-cache');
-    const blobs = path.join(plan.lockKey, '.qwen', 'tmp', 'blobs');
-    const logs = path.join(plan.lockKey, '.qwen', 'logs');
-    const skills = path.join(plan.lockKey, '.qwen', 'skills', 'demo');
-    fs.mkdirSync(blobs, { recursive: true });
-    fs.mkdirSync(logs, { recursive: true });
-    fs.mkdirSync(skills, { recursive: true });
-    fs.writeFileSync(path.join(blobs, 'c1.bin'), 'v1\n');
-    fs.writeFileSync(path.join(logs, 'hook.log'), 'l1\n');
-    fs.writeFileSync(path.join(skills, 'SKILL.md'), 's1\n');
-
-    const before = await checkoutChangeDigestForTesting(plan.lockKey);
-    expect(before).not.toBeNull();
-    expect(before).not.toContain('.qwen/tmp/blobs/c1.bin');
-    expect(before).not.toContain('.qwen/logs/hook.log');
-    expect(before).toContain('.qwen/skills/demo/SKILL.md');
-
-    // Rewriting ignored cache files must not perturb the digest.
-    fs.writeFileSync(path.join(blobs, 'c1.bin'), 'v2\n');
-    fs.writeFileSync(path.join(logs, 'hook.log'), 'l2\n');
-    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
-
-    // Rewriting non-disposable .qwen/skills must perturb the digest.
-    fs.writeFileSync(path.join(skills, 'SKILL.md'), 's2\n');
-    expect(await checkoutChangeDigestForTesting(plan.lockKey)).not.toBe(before);
-
-    // Even with a nested checkout inside `.qwen/tmp/`, sibling plain cache
-    // files stay waived while the nested checkout itself is still hashed.
-    const nestedOrigin = path.join(repoParent, 'digest-nested-origin');
-    fs.mkdirSync(nestedOrigin, { recursive: true });
-    git(nestedOrigin, 'init', '-q', '-b', 'main');
-    git(nestedOrigin, 'config', 'user.email', 't@e.com');
-    git(nestedOrigin, 'config', 'user.name', 't');
-    git(nestedOrigin, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(nestedOrigin, 'seed.txt'), 'seed\n');
-    git(nestedOrigin, 'add', '.');
-    git(nestedOrigin, 'commit', '-qm', 'seed', '--no-verify');
-    const nestedWt = path.join(plan.lockKey, '.qwen', 'tmp', 'review-pr-1');
-    git(nestedOrigin, 'worktree', 'add', '-q', '-b', 'r1', nestedWt, 'HEAD');
-
-    const withNested = await checkoutChangeDigestForTesting(plan.lockKey);
-    expect(withNested).not.toBeNull();
-    expect(withNested).not.toContain('.qwen/tmp/blobs/c1.bin');
-    expect(withNested).toContain('.qwen/tmp/review-pr-1/seed.txt');
-
-    fs.writeFileSync(path.join(blobs, 'c1.bin'), 'v3\n');
-    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(withNested);
-
-    fs.writeFileSync(path.join(nestedWt, 'draft.md'), 'new-draft\n');
-    expect(await checkoutChangeDigestForTesting(plan.lockKey)).not.toBe(
-      withNested,
-    );
   });
 });

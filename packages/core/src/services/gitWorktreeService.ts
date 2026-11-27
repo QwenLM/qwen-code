@@ -154,22 +154,6 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Qwen's own regenerable caches under `.qwen/`: per-workspace scratch files
- * (`tmp`) and hook logs (`logs`). Their value is bounded by age rather than by
- * the session that wrote them, and a long-running workspace can accumulate
- * hundreds of thousands of entries. They are disposable **only where git
- * actually ignores them**: the predicate below is only consulted for `!!`
- * entries, so a tracked or non-ignored file under either directory is still
- * work, and the archive still carries it — the two geometries cannot disagree.
- * Every other `.qwen/` path (skills, commands, settings, drafts) is a stated
- * snapshot subject.
- */
-export const REGENERABLE_QWEN_CACHE_DIRS: ReadonlySet<string> = new Set([
-  'tmp',
-  'logs',
-]);
-
-/**
  * One path of the dirty overlay a creation carried, with the content
  * identity it had at carry time (R9-6). The managed-session has-work gate
  * waives a carried path only while its current state still matches this
@@ -203,11 +187,7 @@ export interface CarriedEntry {
  */
 export async function computeCarriedIdentities(
   worktreePath: string,
-  // Iterable, not `readonly string[]`: callers pass the Set they already built
-  // for the O(1) membership check rather than materializing it back to an array
-  // for this one call. The body only iterates, so the widened type adds no
-  // behaviour and every existing array caller still type-checks.
-  paths: Iterable<string>,
+  paths: readonly string[],
 ): Promise<CarriedEntry[]> {
   const entries: CarriedEntry[] = [];
   const present: Array<{ path: string; executable: boolean }> = [];
@@ -785,13 +765,10 @@ export async function worktreeHasPopulatedGitlink(
  * Runs `git status --porcelain --untracked-files=normal
  * --ignored=matching`: tracked, untracked and ignored entries all count
  * as work, except disposable build output ({@link DISPOSABLE_IGNORED_ROOTS}),
- * ignored regenerable Qwen caches ({@link REGENERABLE_QWEN_CACHE_DIRS}, i.e.
- * `.qwen/tmp/` and `.qwen/logs/`, only when `inspectCacheContainer` confirms
- * the entry overlaps no nested checkout, bare/separate git store, or
- * unreadable directory), symlinks (removing the checkout only unlinks them;
- * the target lives elsewhere — this is what keeps `worktree.symlinkDirectories`
- * checkouts reapable, nested values included, which git reports as a collapsed
- * parent holding nothing but links), and the session marker
+ * symlinks (removing the checkout only unlinks them; the target lives
+ * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
+ * reapable, nested values included, which git reports as a collapsed parent
+ * holding nothing but links), and the session marker
  * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
  * rule) or untracked (a fixture without one). A marker the repository tracks
  * counts as work like any other tracked change: an edit to a tracked path is
@@ -864,10 +841,6 @@ export async function worktreeHasWork(
       );
       return true;
     }
-    const cacheInspections = new Map<
-      string,
-      Promise<CacheContainerInspection>
-    >();
     for (const line of stdout.split('\n')) {
       if (line.trim().length === 0) continue;
       const entry = line.slice(3);
@@ -879,10 +852,7 @@ export async function worktreeHasWork(
           WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
-      } else if (
-        status === '!!' &&
-        (await isWaivableIgnoredEntry(worktreePath, entry, cacheInspections))
-      ) {
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
         waived = 'disposable-output';
       } else if (
         (status === '!!' || status === '??') &&
@@ -1015,10 +985,6 @@ async function hasNonCarriedWork(
       );
       return true;
     }
-    const cacheInspections = new Map<
-      string,
-      Promise<CacheContainerInspection>
-    >();
     for (const record of stdout.split('\0')) {
       if (record.length === 0) continue;
       const status = record.slice(0, 2);
@@ -1040,10 +1006,7 @@ async function hasNonCarriedWork(
           WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
-      } else if (
-        status === '!!' &&
-        (await isWaivableIgnoredEntry(worktreePath, entry, cacheInspections))
-      ) {
+      } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
         waived = 'disposable-output';
       } else if (
         (status === '!!' || status === '??') &&
@@ -1078,162 +1041,9 @@ async function hasNonCarriedWork(
  * deleting). The snapshot's exclusion matcher reads the same listing, so it
  * archives exactly this content rather than dropping it (R6-1).
  */
-/**
- * `.qwen/tmp` / `.qwen/logs` when `entry` names that container or sits inside
- * it; `undefined` for everything else.
- */
-export function regenerableCacheContainerOf(entry: string): string | undefined {
-  const segments = entry.replace(/\/$/, '').split('/');
-  if (segments[0] !== '.qwen') return undefined;
-  const dir = segments[1];
-  return dir !== undefined && REGENERABLE_QWEN_CACHE_DIRS.has(dir)
-    ? `.qwen/${dir}`
-    : undefined;
-}
-
-export interface CacheContainerInspection {
-  /** Worktree-relative POSIX paths (no trailing slash) of nested checkouts. */
-  checkouts: string[];
-  /** Bare / `--separate-git-dir` object stores under the container. */
-  gitDirs: string[];
-  /** Subtrees that could not be inspected (treated fail-closed). */
-  unreadableDirs: string[];
-}
-
-/**
- * Recursively inspect a regenerable cache container (`.qwen/tmp`,
- * `.qwen/logs`) without following symlinks. Finds:
- * - nested checkouts at any depth — including the container itself if it has
- *   a `.git` entry (stopping descent at each checkout root so its internal
- *   tree is not scanned);
- * - bare / `--separate-git-dir` object stores (`HEAD` file plus `objects/`,
- *   `refs/`, or `commondir`), stopping descent at the store root;
- * - unreadable directories, recorded so callers fail closed rather than
- *   dropping unverified content.
- */
-export async function inspectCacheContainer(
-  worktreePath: string,
-  container: string,
-): Promise<CacheContainerInspection> {
-  const checkouts: string[] = [];
-  const gitDirs: string[] = [];
-  const unreadableDirs: string[] = [];
-  const containerPath = path.join(worktreePath, container);
-  let containerStat;
-  try {
-    containerStat = await fs.lstat(containerPath);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return { checkouts, gitDirs, unreadableDirs };
-    }
-    return { checkouts, gitDirs, unreadableDirs: [container] };
-  }
-  if (!containerStat.isDirectory()) {
-    return { checkouts, gitDirs, unreadableDirs };
-  }
-
-  const visit = async (rel: string): Promise<void> => {
-    let entries: Array<import('node:fs').Dirent>;
-    try {
-      entries = await fs.readdir(path.join(worktreePath, rel), {
-        withFileTypes: true,
-      });
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return;
-      unreadableDirs.push(rel);
-      return;
-    }
-    let hasGitEntry = false;
-    let hasHeadFile = false;
-    let hasObjectsDir = false;
-    let hasRefsDir = false;
-    let hasCommondirFile = false;
-    for (const entry of entries) {
-      if (entry.name === '.git') {
-        hasGitEntry = true;
-      } else if (entry.name === 'HEAD' && entry.isFile()) {
-        hasHeadFile = true;
-      } else if (entry.name === 'objects' && entry.isDirectory()) {
-        hasObjectsDir = true;
-      } else if (entry.name === 'refs' && entry.isDirectory()) {
-        hasRefsDir = true;
-      } else if (entry.name === 'commondir' && entry.isFile()) {
-        hasCommondirFile = true;
-      }
-    }
-    if (hasGitEntry) {
-      checkouts.push(rel);
-      return;
-    }
-    if (hasHeadFile && (hasObjectsDir || hasRefsDir || hasCommondirFile)) {
-      gitDirs.push(rel);
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        await visit(`${rel}/${entry.name}`);
-      }
-    }
-  };
-
-  await visit(container);
-  return { checkouts, gitDirs, unreadableDirs };
-}
-
-function pathsOverlap(a: string, b: string): boolean {
-  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-}
-
-/**
- * Whether an ignored entry may still be waived as disposable. The pure
- * predicate below answers for build output, while a regenerable cache entry
- * that contains (or sits inside) a nested checkout, git object store, or
- * unreadable directory is NOT disposable — waiving it would let the gate read
- * nested work or commits as clean and delete them without a snapshot. Callers
- * walking a whole status listing pass a per-call `cache` map so each container
- * is scanned once instead of once per entry.
- */
-export async function isWaivableIgnoredEntry(
-  worktreePath: string,
-  entry: string,
-  cache?: Map<string, Promise<CacheContainerInspection>>,
-): Promise<boolean> {
-  if (!isDisposableIgnoredEntry(entry)) return false;
-  const container = regenerableCacheContainerOf(entry);
-  if (container === undefined) return true;
-  let inspectionPromise = cache?.get(container);
-  if (inspectionPromise === undefined) {
-    inspectionPromise = inspectCacheContainer(worktreePath, container);
-    cache?.set(container, inspectionPromise);
-  }
-  const inspection = await inspectionPromise;
-  const norm = entry.replace(/\/$/, '');
-  for (const checkout of inspection.checkouts) {
-    if (pathsOverlap(norm, checkout)) return false;
-  }
-  for (const gitDir of inspection.gitDirs) {
-    if (pathsOverlap(norm, gitDir)) return false;
-  }
-  for (const unreadable of inspection.unreadableDirs) {
-    if (pathsOverlap(norm, unreadable)) return false;
-  }
-  return true;
-}
-
 export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
   if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
-  // `.qwen/tmp/…` and `.qwen/logs/…`: regenerable caches, but only when git
-  // reports them ignored (callers pass `!!` entries only). A tracked edit under
-  // either directory keeps its ordinary status, so it is never waived here.
-  if (
-    segments[0] === '.qwen' &&
-    REGENERABLE_QWEN_CACHE_DIRS.has(segments[1] ?? '')
-  ) {
-    return true;
-  }
   return (
     entry.endsWith('/') &&
     DISPOSABLE_IGNORED_ROOTS.has(segments[segments.length - 1] ?? '')

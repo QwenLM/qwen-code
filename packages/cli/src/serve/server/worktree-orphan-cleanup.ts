@@ -13,7 +13,7 @@ import {
   carriedOverlayStillHeldBySource,
   computeCarriedIdentities,
   GitWorktreeService,
-  isWaivableIgnoredEntry,
+  isDisposableIgnoredEntry,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
@@ -25,7 +25,6 @@ import {
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
-import { regenerableCacheContainerOf } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
   selectWorktreeSnapshot,
   verifyRestoredWorktreeSnapshot,
@@ -560,9 +559,6 @@ async function checkoutChangeDigest(
       }
     }
     const originalStatusCount = pending.length;
-    const cacheInspections: NonNullable<
-      Parameters<typeof isWaivableIgnoredEntry>[2]
-    > = new Map();
     for (let i = 0; i < pending.length; i++) {
       const { xy, rel } = pending[i];
       // Disposable ignored output and daemon bookkeeping are waived by the
@@ -576,18 +572,12 @@ async function checkoutChangeDigest(
         continue;
       }
       // Only the ORIGINAL collapsed ignored entry can authorize a disposable
-      // waiver for general build roots (`node_modules`, `dist`, `coverage`): a
-      // non-disposable parent makes the tar include every child, including a
-      // nested `node_modules` subtree, so the digest must still see it. By
-      // contrast, regenerable Qwen caches (`.qwen/tmp/`, `.qwen/logs/`) under
-      // a collapsed `.qwen/` rule (or beside a nested checkout/git store inside
-      // `.qwen/tmp/`) ARE excluded by the archive whenever clean of nested git
-      // state, so waiving them here keeps the digest aligned with the archive.
+      // waiver. A non-disposable parent makes the tar include every child,
+      // including a nested node_modules subtree, so the digest must see it.
       if (
+        i < originalStatusCount &&
         xy === '!!' &&
-        (i < originalStatusCount ||
-          regenerableCacheContainerOf(rel) !== undefined) &&
-        (await isWaivableIgnoredEntry(worktreePath, rel, cacheInspections))
+        isDisposableIgnoredEntry(rel)
       ) {
         continue;
       }
