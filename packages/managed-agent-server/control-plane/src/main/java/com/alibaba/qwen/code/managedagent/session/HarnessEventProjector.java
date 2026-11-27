@@ -127,6 +127,10 @@ public class HarnessEventProjector {
         copyScalar(update, safe, "toolCallId");
         copyScalar(update, safe, "callId");
         copyScalar(update, safe, "title");
+        if (update.get("_meta") instanceof Map<?, ?> meta
+                && meta.get("titleIsMachine") instanceof Boolean titleIsMachine) {
+            safe.put("titleIsMachine", titleIsMachine);
+        }
         copyScalar(update, safe, "status");
         copyScalar(update, safe, "name");
         if (committed && "todo_write".equals(update.get("name"))

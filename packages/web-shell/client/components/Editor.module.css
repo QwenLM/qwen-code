@@ -14,7 +14,7 @@
 
 .borderTopLabel {
   position: absolute;
-  right: 2ch;
+  inset-inline-end: 2ch;
   top: 50%;
   max-width: min(48ch, calc(100% - 4ch));
   padding: 0 1ch;
@@ -38,7 +38,7 @@
   color: var(--agent-purple-400);
   font-weight: bold;
   flex-shrink: 0;
-  padding-right: 1ch;
+  padding-inline-end: 1ch;
   line-height: 1.6;
   user-select: none;
 }
@@ -182,7 +182,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -263,13 +263,15 @@
 }
 
 .tagLabel {
-  padding: 3px 0 3px 7px;
+  padding-block: 3px;
+  padding-inline: 7px 0;
   color: var(--agent-blue-500);
 }
 
 .tagValue {
   max-width: 32ch;
-  padding: 3px 0 3px 0.5ch;
+  padding-block: 3px;
+  padding-inline: 0.5ch 0;
   color: var(--muted-foreground);
 }
 
@@ -310,7 +312,7 @@
 .imageRemove {
   position: absolute;
   top: 0;
-  right: 0;
+  inset-inline-end: 0;
   width: 16px;
   height: 16px;
   font-size: 12px;
@@ -460,7 +462,7 @@
   font-style: normal;
   color: var(--muted-foreground);
   font-size: 13px;
-  margin-left: var(--web-shell-completion-column-gap);
+  margin-inline-start: var(--web-shell-completion-column-gap);
   opacity: 0.8;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -510,7 +512,7 @@
     li.cm-command-info-completion
     .cm-completionDetail
 ) {
-  margin-left: 0;
+  margin-inline-start: 0;
   white-space: nowrap;
 }
 

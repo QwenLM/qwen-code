@@ -246,7 +246,7 @@ export function WaitingMinigame({
   gamesEnabled = false,
   entryDelayMs = 5_000,
 }: WaitingMinigameProps) {
-  const { t, language } = useI18n();
+  const { t, language, isRtl } = useI18n();
   const [view, setView] = useState<CardView>('heatmap');
   const [game, setGame] = useState<WaitingMinigameState>(() =>
     createWaitingMinigame(),
@@ -748,7 +748,9 @@ export function WaitingMinigame({
         ? 'zh-TW'
         : language === 'ru'
           ? 'ru-RU'
-          : 'en';
+          : language === 'ar'
+            ? 'ar-SA'
+            : 'en';
   const { formatDay, formatMonth } = useMemo(() => {
     const dayFormatter = new Intl.DateTimeFormat(locale, {
       year: 'numeric',
@@ -804,6 +806,9 @@ export function WaitingMinigame({
   const hoveredDay = hoveredCell !== null ? days[hoveredCell] : undefined;
   const hoveredColumn =
     hoveredCell !== null ? Math.floor(hoveredCell / WAITING_ACTIVITY_DAYS) : 0;
+  const physicalHoveredColumn = isRtl
+    ? WAITING_ACTIVITY_WEEKS - 1 - hoveredColumn
+    : hoveredColumn;
   const totalTokens = tokenUsage.input + tokenUsage.output;
   const hasTokenUsage = totalTokens > 0 || tokenUsage.cached > 0;
   const contextPercent =
@@ -1052,17 +1057,17 @@ export function WaitingMinigame({
                 <div
                   className={styles.heatTooltip}
                   data-align={
-                    hoveredColumn < 4
+                    physicalHoveredColumn < 4
                       ? 'start'
-                      : hoveredColumn > WAITING_ACTIVITY_WEEKS - 5
+                      : physicalHoveredColumn > WAITING_ACTIVITY_WEEKS - 5
                         ? 'end'
                         : 'center'
                   }
                   style={
-                    hoveredColumn >= 4 &&
-                    hoveredColumn <= WAITING_ACTIVITY_WEEKS - 5
+                    physicalHoveredColumn >= 4 &&
+                    physicalHoveredColumn <= WAITING_ACTIVITY_WEEKS - 5
                       ? {
-                          left: `${((hoveredColumn + 0.5) / WAITING_ACTIVITY_WEEKS) * 100}%`,
+                          left: `${((physicalHoveredColumn + 0.5) / WAITING_ACTIVITY_WEEKS) * 100}%`,
                         }
                       : undefined
                   }

@@ -3528,10 +3528,8 @@ export class Session implements SessionContext {
         : buildPermissionRequestContent(confirmationDetails);
     // Resolves against the parent session's registry; per-agent MCP tools
     // fall back to the bare tool name (the mcp details still carry serverName).
-    const { title, locations, kind } = this.toolCallEmitter.resolveToolMetadata(
-      approval.name,
-      rawArgs,
-    );
+    const { title, titleIsMachine, locations, kind } =
+      this.toolCallEmitter.resolveToolMetadata(approval.name, rawArgs);
     const params: RequestPermissionRequest = {
       sessionId: this.sessionId,
       options: permissionOptions,
@@ -3548,6 +3546,7 @@ export class Session implements SessionContext {
         rawInput: rawArgs,
         _meta: {
           toolName: approval.name,
+          ...(titleIsMachine !== undefined ? { titleIsMachine } : {}),
           workflowApproval: true,
           ...(isBackgrounded ? { backgroundWorkflowApproval: true } : {}),
           ...(isBackgrounded && channelWorkflowOrigin
@@ -19037,6 +19036,9 @@ export class Session implements SessionContext {
                   // frame already ships _meta.toolName; mirror it here.
                   _meta: {
                     toolName,
+                    ...(this.toolCallEmitter.isMachineTitleTool(toolName, args)
+                      ? { titleIsMachine: true }
+                      : {}),
                     ...interactionMetaFields(confirmationDetails),
                     ...(qwenTodoApproval ? { qwenTodoApproval } : {}),
                   },

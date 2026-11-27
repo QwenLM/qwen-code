@@ -531,6 +531,8 @@ import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
   type getTranslator,
+  isRtlLanguage,
+  languageDirection,
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
@@ -1561,7 +1563,9 @@ export interface WebShellProps {
     | 'zh-MO'
     | 'zh-mo'
     | 'ru'
-    | 'ru-ru';
+    | 'ru-ru'
+    | 'ar'
+    | 'ar-sa';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -9334,12 +9338,12 @@ export function App({
       };
 
       const handlePointerMove = (moveEvent: PointerEvent) => {
+        const deltaX = isRtlLanguage(selectedLanguage)
+          ? moveEvent.clientX - startX
+          : -(moveEvent.clientX - startX);
         pendingWidth = Math.min(
           maxWidth,
-          Math.max(
-            MIN_ARTIFACT_PANEL_WIDTH,
-            startWidth - (moveEvent.clientX - startX),
-          ),
+          Math.max(MIN_ARTIFACT_PANEL_WIDTH, startWidth + deltaX),
         );
         if (animationFrame === null) {
           animationFrame = window.requestAnimationFrame(flushWidth);
@@ -9368,7 +9372,7 @@ export function App({
       window.addEventListener('pointerup', handlePointerUp);
       window.addEventListener('pointercancel', handlePointerUp);
     },
-    [artifactPanelWidth, getMaxArtifactPanelWidth],
+    [artifactPanelWidth, getMaxArtifactPanelWidth, selectedLanguage],
   );
   useEffect(() => () => artifactPanelResizeCleanupRef.current?.(), []);
   const rawPendingApproval = useMemo(
@@ -24418,6 +24422,7 @@ export function App({
         selectedTheme === WebShellThemeId.Dark,
       );
       portalRoot.lang = selectedLanguage;
+      portalRoot.dir = languageDirection(selectedLanguage);
       for (const [name, value] of nextVariables) {
         portalRoot.style.setProperty(name, value);
         portalHost?.style.setProperty(name, value);
@@ -24439,7 +24444,7 @@ export function App({
     while (element) {
       observer.observe(element, {
         attributes: true,
-        attributeFilter: ['class', 'style', 'data-theme', 'lang'],
+        attributeFilter: ['class', 'style', 'data-theme', 'lang', 'dir'],
       });
       element = element.parentElement;
     }
@@ -24801,6 +24806,7 @@ export function App({
           data-web-shell-shadcn
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
+          dir={languageDirection(selectedLanguage)}
         >
           <GeneratedUiRuntimeProvider>
           {mcpAppMessages.review}
@@ -25882,7 +25888,7 @@ export function App({
                       <Button
                         variant="outline"
                         size="sm"
-                        className="mr-3"
+                        className="me-3"
                         data-testid="open-workflow"
                         disabled={approvalOverlayActive}
                         onClick={openWorkflowInspector}
@@ -26054,7 +26060,11 @@ export function App({
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <svg
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                        className="rtl:-scale-x-100"
+                      >
                         <path
                           d="M15 5l-7 7 7 7"
                           fill="none"
@@ -26372,7 +26382,7 @@ export function App({
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : activePanel === 'live' ? (
-                      <div className="-mx-5 -mt-4">
+                      <div className="-mx-5 -mt-4" data-testid="live-settings-page">
                         <div className={styles.fullPageHeader}>
                           {!navigationRailVisible && (
                             <button
@@ -26381,7 +26391,10 @@ export function App({
                               onClick={returnToChat}
                               aria-label={t('common.back')}
                             >
-                              <ChevronLeftIcon size={18} />
+                              <ChevronLeftIcon
+                                size={18}
+                                className="rtl:-scale-x-100"
+                              />
                             </button>
                           )}
                           <h1
@@ -26468,6 +26481,7 @@ export function App({
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           aria-hidden="true"
+                          className="rtl:-scale-x-100"
                         >
                           <path d="M15 18l-6-6 6-6" />
                         </svg>
@@ -26583,6 +26597,7 @@ export function App({
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         aria-hidden="true"
+                        className="rtl:-scale-x-100"
                       >
                         <path d="M15 18l-6-6 6-6" />
                       </svg>
@@ -26643,6 +26658,7 @@ export function App({
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             aria-hidden="true"
+                            className="rtl:-scale-x-100"
                           >
                             <path d="M15 18l-6-6 6-6" />
                           </svg>
@@ -26697,6 +26713,7 @@ export function App({
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           aria-hidden="true"
+                          className="rtl:-scale-x-100"
                         >
                           <path d="M15 18l-6-6 6-6" />
                         </svg>
@@ -28400,7 +28417,7 @@ export function App({
               <Drawer
                 open
                 autoFocus={floatingArtifactDrawerAutoFocus}
-                direction="right"
+                direction={isRtlLanguage(selectedLanguage) ? 'left' : 'right'}
                 shouldScaleBackground={false}
                 onOpenChange={(open) => {
                   if (!open) closeArtifactPanel();
@@ -28422,8 +28439,8 @@ export function App({
                   }}
                   className={`${
                     artifactPanelFullscreen
-                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
-                      : 'shadow-2xl data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
+                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)] data-[vaul-drawer-direction=left]:w-full data-[vaul-drawer-direction=left]:sm:max-w-none data-[vaul-drawer-direction=left]:rounded-none data-[vaul-drawer-direction=left]:border-0 data-[vaul-drawer-direction=left]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=left]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=left]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=left]:pl-[env(safe-area-inset-left)]'
+                      : 'shadow-2xl data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px] data-[vaul-drawer-direction=left]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=left]:sm:max-w-[520px]'
                   } ${
                     suppressArtifactDockOpenAnimation
                       ? '!duration-0 !transition-none data-[state=open]:!animate-none'

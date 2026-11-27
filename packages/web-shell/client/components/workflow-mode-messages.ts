@@ -115,7 +115,39 @@ const RU: typeof EN = {
   clickToTurnOff: 'Нажмите, чтобы выключить.',
 };
 
+const AR: typeof EN = {
+  label: 'وضع سير العمل',
+  menuDescription: 'السماح للمهام الجديدة باستخدام مسارات العمل',
+  short: {
+    unbound: 'يتطلب جلسة نشطة',
+    updating: 'جارٍ التحديث…',
+    syncing: 'جارٍ المزامنة…',
+    unknown: 'الحالة غير مؤكدة',
+    onUnavailable: 'مفعّل، لكنه غير متاح الآن',
+    unavailable: 'غير متاح الآن',
+  },
+  details: 'تفاصيل وضع سير العمل',
+  unbound: 'أنشئ جلسة أو استأنفها للتحقق من التوفر.',
+  updating: 'جارٍ تحديث وضع سير العمل…',
+  syncing: 'جارٍ مزامنة وضع سير العمل…',
+  unknown: 'تعذر تأكيد وضع سير العمل.',
+  on: 'وضع سير العمل مفعّل.',
+  off: 'وضع سير العمل معطّل.',
+  onUnavailable: 'وضع سير العمل مفعّل، لكنه غير متاح حالياً.',
+  unavailable: 'وضع سير العمل غير متاح حالياً.',
+  initializing: 'لا تزال الجلسة قيد التهيئة.',
+  workflowUnavailable: 'أداة Workflow غير متاحة في هذه الجلسة.',
+  unsupported: 'لا تدعم هذه الجلسة وضع سير العمل.',
+  nextTurn:
+    'تنطبق التغييرات على الجولة الجديدة التالية دون مقاطعة الجولة الحالية أو تغيير الجهد.',
+  updateFailed: 'فشل تحديث وضع سير العمل',
+  clickToTurnOff: 'انقر للإيقاف.',
+};
+
 export function getWorkflowModeMessages(language: WebShellLanguage) {
   if (language === 'zh-TW') return ZH_TW;
-  return language === 'zh-CN' ? ZH : language === 'ru' ? RU : EN;
+  if (language === 'zh-CN') return ZH;
+  if (language === 'ru') return RU;
+  if (language === 'ar') return AR;
+  return EN;
 }

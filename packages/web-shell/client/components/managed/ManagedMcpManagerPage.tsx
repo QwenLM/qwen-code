@@ -335,7 +335,7 @@ function ManagedMcpManagerContent({
                 server ? setSelectedServer(undefined) : onClose?.()
               }
             >
-              <ArrowLeftIcon />
+              <ArrowLeftIcon className="rtl:-scale-x-100" />
             </Button>
           )}
           <h2 className="text-lg font-semibold">{t('managed.mcp.manage')}</h2>

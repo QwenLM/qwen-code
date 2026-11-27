@@ -14,7 +14,7 @@
   gap: 7px;
   min-width: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
   font: inherit;
 }
 
@@ -156,6 +156,10 @@
   transform: none;
 }
 
+:global([dir='rtl']) .chevronRight {
+  transform: scaleX(-1);
+}
+
 .chevronRight::before {
   top: calc(50% - 2px);
   left: calc(50% - 3px);
@@ -263,7 +267,7 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .row > * {
@@ -324,9 +328,9 @@
   color: var(--muted-foreground);
   white-space: nowrap;
   flex-shrink: 0;
-  margin-left: auto;
+  margin-inline-start: auto;
   min-width: 2.5em;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 
@@ -396,6 +400,12 @@
 
 .row[data-detail-mode='inline'][aria-expanded='true'] .rowAction {
   transform: rotate(90deg);
+}
+
+:global([dir='rtl'])
+  .row:not([data-detail-mode='inline'][aria-expanded='true'])
+  .rowAction {
+  transform: scaleX(-1);
 }
 
 .detail {

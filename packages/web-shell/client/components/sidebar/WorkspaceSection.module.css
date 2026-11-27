@@ -19,13 +19,14 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 4px 5px 8px;
+  padding-block: 5px;
+  padding-inline: 8px 4px;
   border: none;
   background: transparent;
   color: var(--sidebar-foreground);
   font-size: 13px;
   font-weight: 500;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -70,7 +71,7 @@
 
 .folderRemoteBadge {
   position: absolute;
-  right: -1px;
+  inset-inline-end: -1px;
   bottom: -1px;
   width: 8px;
   height: 8px;
@@ -112,13 +113,15 @@
 }
 
 .empty {
-  padding: 4px 8px 4px 26px;
+  padding-block: 4px;
+  padding-inline: 26px 8px;
   font-size: 12px;
   color: var(--muted-foreground);
 }
 
 .error {
-  padding: 4px 8px 4px 26px;
+  padding-block: 4px;
+  padding-inline: 26px 8px;
   color: var(--error-color);
   font-size: 13px;
 }
@@ -127,7 +130,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 26px;
+  margin-inline-start: 26px;
   padding: 4px 8px;
   border-radius: 8px;
   color: var(--muted-foreground);
@@ -151,6 +154,15 @@
   );
 }
 
+:global([dir='rtl']) .sessionName[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to left,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
 .sessionNameInner {
   display: inline-block;
   min-width: max-content;
@@ -164,6 +176,18 @@
 @keyframes sessionTitleScroll {
   to {
     transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@keyframes sessionTitleScrollRtl {
+  to {
+    transform: translateX(var(--session-title-scroll-distance, 0px));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global([dir='rtl']) .sessionItemReadOnly:hover .sessionNameInner {
+    animation-name: sessionTitleScrollRtl;
   }
 }
 

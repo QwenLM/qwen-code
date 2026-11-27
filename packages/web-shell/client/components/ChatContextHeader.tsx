@@ -129,7 +129,7 @@ export function ChatContextHeader({
       )}
       <div className={styles.content}>{content}</div>
       {location && (
-        <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
+        <div className="me-2 flex min-w-0 max-w-[40%] shrink items-center">
           {location}
         </div>
       )}
@@ -191,7 +191,7 @@ export function ChatContextHeader({
             title={t('chatHeader.toggleRightPanel')}
             onClick={onToggleRightPanel}
           >
-            <PanelRightIcon />
+            <PanelRightIcon className="rtl:-scale-x-100" />
           </button>
         )}
         {onOpenArtifacts &&

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { plural, ruPlural } from '../utils/plural.js';
+import { arPlural, plural, ruPlural } from '../utils/plural.js';
 
 export const MESSAGE_DELETION_MESSAGES_EN: Record<
   string,
@@ -100,4 +100,39 @@ export const MESSAGE_DELETION_MESSAGES_RU: Record<
     'Это сообщение нельзя безопасно сопоставить с сохранённой историей. Перезагрузите и попробуйте снова.',
   'messageDelete.reloadFailed':
     'Сообщения удалены, но историю не удалось перезагрузить. Перезагрузите сессию, чтобы обновить оставшиеся сообщения.',
+};
+
+export const MESSAGE_DELETION_MESSAGES_AR: Record<
+  string,
+  string | ((vars?: Record<string, string | number>) => string)
+> = {
+  'messageDelete.commandFailed': 'فشل تنفيذ الأمر.',
+  'messageDelete.entry': 'حذف الرسائل',
+  'messageDelete.selected': (vars) => {
+    const c = vars?.['count'] ?? 0;
+    return `تم تحديد ${arPlural(c, '0 مجموعات', 'مجموعة واحدة', 'مجموعتين', `${c} مجموعات`, `${c} مجموعة`, `${c} مجموعة`)}`;
+  },
+  'messageDelete.delete': 'حذف المحدد',
+  'messageDelete.confirm': 'حذف نهائي',
+  'messageDelete.confirmTitle': (vars) => {
+    const c = vars?.['count'] ?? 0;
+    return `حذف ${arPlural(c, '0 مجموعات رسائل', 'مجموعة رسائل واحدة', 'مجموعتي رسائل', `${c} مجموعات رسائل`, `${c} مجموعة رسائل`, `${c} مجموعة رسائل`)}؟`;
+  },
+  'messageDelete.confirmDescription':
+    'يحذف هذا الإجراء الرسائل الأصلية المحددة نهائياً من السجل. وتبقى الملخصات الحالية وتأثيرات الأوامر وملفات المشروع كما هي. قد تستمر المعلومات المضمنة بالفعل في أي ملخص في التأثير على الردود المستقبلية.',
+  'messageDelete.selectGroup': 'تحديد مجموعة الرسائل',
+  'messageDelete.processing': 'جارٍ المعالجة…',
+  'messageDelete.failed':
+    'تعذر حذف الرسائل. يُرجى إعادة التحميل والمحاولة مجدداً.',
+  'messageDelete.unsupported': 'حذف الرسائل المحفوظة غير مدعوم لهذه الجلسة.',
+  'messageDelete.conflict': 'تغيّر سجل الجلسة. أعد تحديد الرسائل قبل الحذف.',
+  'messageDelete.reopenRequired':
+    'تم حذف الرسائل. أعد فتح هذه الجلسة قبل إرسال رسالة أخرى.',
+  'messageDelete.busy': 'تعالج الجلسة دوراً حالياً. حاول مرة أخرى عند انتهائه.',
+  'messageDelete.invalidHistory':
+    'يفتقر هذا السجل إلى معرّفات موثوقة لازمة لحذف الرسائل المحددة بأمان.',
+  'messageDelete.unavailable':
+    'تعذرت مطابقة هذه الرسالة بأمان مع سجلها المحفوظ. يُرجى إعادة التحميل والمحاولة مجدداً.',
+  'messageDelete.reloadFailed':
+    'تم حذف الرسائل، ولكن تعذر إعادة تحميل السجل. أعد تحميل الجلسة لتحديث الرسائل المتبقية.',
 };

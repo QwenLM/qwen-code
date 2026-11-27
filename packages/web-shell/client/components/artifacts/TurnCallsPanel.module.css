@@ -23,7 +23,7 @@
 
 .item {
   min-width: 0;
-  margin-left: calc(var(--turn-call-depth, 0) * 10px);
+  margin-inline-start: calc(var(--turn-call-depth, 0) * 10px);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -43,7 +43,7 @@
   background: none;
   color: inherit;
   font: inherit;
-  text-align: left;
+  text-align: start;
 }
 
 .headerButton {
@@ -98,7 +98,7 @@
   flex: none;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  margin-inline-start: auto;
   font-size: 11px;
 }
 
@@ -116,7 +116,7 @@
 
 .descriptionRow > button {
   flex: none;
-  margin-left: 0;
+  margin-inline-start: 0;
   font-weight: 400;
 }
 
@@ -135,6 +135,10 @@
 
 .chevronExpanded {
   transform: rotate(90deg);
+}
+
+:global([dir='rtl']) .chevron:not(.chevronExpanded) {
+  transform: scaleX(-1);
 }
 
 .details {

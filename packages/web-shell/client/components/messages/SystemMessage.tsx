@@ -280,7 +280,7 @@ export const SystemMessage = memo(function SystemMessage({
         >
           {turn?.label ?? turn?.kind ?? content}
         </span>
-        <span className="ml-auto flex shrink-0 items-center gap-2">
+        <span className="ms-auto flex shrink-0 items-center gap-2">
           {onLocateBackgroundSource && turn?.toolUseId && (
             <Button
               type="button"
@@ -534,7 +534,7 @@ export const SystemMessage = memo(function SystemMessage({
           {taskI18nText ?? <Markdown content={content} />}
         </div>
         {notificationData?.['awaitingProcessing'] === true && (
-          <span className="ml-auto shrink-0 text-muted-foreground">
+          <span className="ms-auto shrink-0 text-muted-foreground">
             {t('background.pending')}
           </span>
         )}

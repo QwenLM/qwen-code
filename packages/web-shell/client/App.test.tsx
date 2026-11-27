@@ -52750,6 +52750,8 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui --project ar', 'ar', 'workspace'],
+    ['/language ui ar --global', 'ar', 'user'],
     ['/language ui zh-TW', 'zh-TW', 'user'],
   ])(
     'accepts UI language scope flags in %s',
@@ -59239,6 +59241,225 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(mockWorkspaceActions.setUiLanguage).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+});
+
+describe('Arabic RTL layout', () => {
+  it('sets dir="rtl" and lang="ar" on the shell and portal roots', async () => {
+    const { container } = renderApp({ language: 'ar' });
+    await flush();
+
+    const root = container.querySelector<HTMLElement>('[data-web-shell-root]');
+    const portal = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    expect(root?.getAttribute('lang')).toBe('ar');
+    expect(root?.getAttribute('dir')).toBe('rtl');
+    expect(portal?.getAttribute('lang')).toBe('ar');
+    expect(portal?.getAttribute('dir')).toBe('rtl');
+  });
+
+  it('opens the floating right panel drawer from the left edge in Arabic RTL mode', async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    try {
+      const { container } = renderApp({ language: 'ar' });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="تبديل اللوحة الجانبية"]',
+          )
+          ?.click();
+      });
+      await flush();
+
+      const drawerContent = document.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+      );
+      expect(drawerContent).not.toBeNull();
+      expect(drawerContent?.getAttribute('data-vaul-drawer-direction')).toBe(
+        'left',
+      );
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it('mirrors docked right-panel pointer drag resize deltas in Arabic RTL mode', async () => {
+    const originalInnerWidth = Object.getOwnPropertyDescriptor(
+      window,
+      'innerWidth',
+    );
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1400,
+    });
+    try {
+      const { container } = renderApp({ language: 'ar' });
+      await flush();
+
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="تبديل اللوحة الجانبية"]',
+          )
+          ?.click();
+      });
+      await flush();
+
+      const separator = container.querySelector<HTMLElement>(
+        '[role="separator"][aria-orientation="vertical"]',
+      );
+      expect(separator).not.toBeNull();
+      expect(separator?.getAttribute('aria-valuenow')).toBe('320');
+      if (!separator!.setPointerCapture) {
+        separator!.setPointerCapture = () => {};
+        separator!.hasPointerCapture = () => false;
+        separator!.releasePointerCapture = () => {};
+      }
+
+      act(() => {
+        separator!.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            clientX: 300,
+          }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 450 }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 450 }),
+        );
+      });
+      expect(separator?.getAttribute('aria-valuenow')).toBe('470');
+
+      act(() => {
+        separator!.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            clientX: 450,
+          }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 350 }),
+        );
+        window.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 350 }),
+        );
+      });
+      expect(separator?.getAttribute('aria-valuenow')).toBe('370');
+    } finally {
+      if (originalInnerWidth) {
+        Object.defineProperty(window, 'innerWidth', originalInnerWidth);
+      }
+    }
+  });
+
+  // The five full-page headers share one back control; four of them paint an
+  // inline SVG rather than the shared icon, so each needs its own mirror.
+  it('mirrors the back arrow on every full page in Arabic', async () => {
+    const originalInnerWidth = Object.getOwnPropertyDescriptor(
+      window,
+      'innerWidth',
+    );
+    // Below the rail breakpoint, where the back button is the way out.
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 700,
+    });
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+    };
+    try {
+      const { container } = renderApp({
+        language: 'ar',
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+      });
+      await flush();
+
+      const expectMirroredBack = (page: string) => {
+        const arrow = container.querySelector(
+          `[data-testid="${page}"] [class*="fullPageBack"] svg`,
+        );
+        expect(arrow).not.toBeNull();
+        expect(arrow!.getAttribute('class') ?? '').toContain(
+          'rtl:-scale-x-100',
+        );
+      };
+      const submit = async (command: string) => {
+        testState.prompt = command;
+        await clickSubmit(container);
+        await flush();
+      };
+
+      await submit('/schedule');
+      expectMirroredBack('scheduled-tasks-page');
+
+      await submit('/workflows');
+      expectMirroredBack('workflow-runs-page');
+
+      await submit('/goal');
+      expectMirroredBack('goals-page');
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expectMirroredBack('pr-watches-page');
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-live"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expectMirroredBack('live-settings-page');
+    } finally {
+      if (originalInnerWidth) {
+        Object.defineProperty(window, 'innerWidth', originalInnerWidth);
+      }
+    }
+  });
+
+  // The in-place panel header paints its own inline chevron instead of the
+  // shared icon, so the five full-page mirrors above never reach it.
+  it('mirrors the in-place panel back chevron in Arabic', async () => {
+    const { container } = renderApp({ language: 'ar' });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const arrow = container.querySelector('[data-testid="panel-back"] svg');
+    expect(arrow).not.toBeNull();
+    expect(arrow!.getAttribute('class') ?? '').toContain('rtl:-scale-x-100');
   });
 });
 

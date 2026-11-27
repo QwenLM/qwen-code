@@ -911,3 +911,361 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.description.worktree.maxRetained':
     'Для каждого управляемого корня с уникальным владельцем сохраняйте до N самых недавних worktree для сеансов (по умолчанию N = 15). Активные и закреплённые сессии не входят в квоту на удаление. Значение 0 отключает только автоматическую очистку, но не явное восстановление снимков. При неясном владельце, перекрывающихся корнях или нечитаемой конфигурации состояние сохраняется. Сиротские снимки не удаляются. Рабочие деревья инструментов и агентов не затрагиваются.',
 };
+
+export const SETTINGS_MESSAGES_AR: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'الواجهة المولّدة (Generated UI)',
+  'settings.description.experimental.generatedUi':
+    'عرض الواجهات التفاعلية من Generated UI المدمجة في الجلسات المحلية المدعومة مثل Web Shell. مفعّل افتراضياً. أعد تشغيل الجلسة المعنية لتطبيق التغييرات.',
+  'settings.models.editWindow': 'تعديل نافذة السياق',
+  'settings.models.windowHint':
+    'اتركه فارغاً للاستنتاج من معرّف النموذج. تحتاج الجلسات الحالية إلى إعادة تشغيل لاستخدام الحد الجديد.',
+  'settings.models.windowSaved':
+    'تم الحفظ. أعد تشغيل الجلسات الحالية لتطبيق التغيير.',
+  'settings.models.saved': 'تم الحفظ',
+  'settings.label.advisorModel': 'نموذج المستشار',
+  'settings.label.imageModel': 'نموذج الصور',
+  'settings.label.voiceModel': 'نموذج الصوت',
+  'settings.description.advisorModel':
+    'النموذج المستخدم لمراجعة تقدم المحادثة الأخيرة. اتركه فارغاً لاستخدام النموذج الرئيسي.',
+  'settings.description.imageModel':
+    'النموذج المستخدم لتوليد الصور. أضف نموذجاً مخصصاً بغرض توليد الصور، ثم اختره هنا.',
+  'settings.description.voiceModel':
+    'النموذج المستخدم لنسخ الصوت. أضف نموذجاً مخصصاً بغرض نسخ الصوت، ثم اختره هنا.',
+  'settings.title': 'الإعدادات',
+  'settings.loading': 'جارٍ تحميل الإعدادات...',
+  'settings.empty': 'لا توجد إعدادات متاحة.',
+  'settings.footer':
+    '↑↓ للتنقل  Enter للتبديل  Tab للنطاق  r للتحديث  ESC للإغلاق',
+  'settings.footer.edit': 'Enter للحفظ  ESC للإلغاء',
+  'settings.footer.theme': '↑↓ للتنقل  Enter للاختيار  ESC للرجوع',
+  'settings.scope.user': 'المستخدم',
+  'settings.scope.workspace': 'مساحة العمل',
+  'settings.value.on': 'مفعّل',
+  'settings.value.off': 'معطّل',
+  'settings.action.edit': 'تعديل',
+  'settings.action.select': 'اختيار',
+  'settings.action.save': 'حفظ',
+  'settings.modifiedIn': (v) => `(معدّل في ${v?.scope ?? ''})`,
+  'settings.alsoModifiedIn': (v) => `(معدّل أيضاً في ${v?.scope ?? ''})`,
+  'settings.invalidNumber': 'رقم غير صالح',
+  'settings.requiresRestart': 'يتطلب هذا التغيير إعادة التشغيل لتفعيله.',
+  'settings.localControl.title': 'التحكم المحلي',
+  'settings.localControl.description':
+    'تابع جلسة Qwen Code هذه من هاتف على نفس الشبكة الموثوقة.',
+  'settings.localControl.on': 'مفعّل',
+  'settings.localControl.off': 'معطّل',
+  'settings.localControl.network': 'الشبكة المحلية',
+  'settings.localControl.selectNetwork': 'اختر شبكة',
+  'settings.localControl.qr': 'رمز QR للتحكم المحلي',
+  'settings.localControl.enable': 'تشغيل التحكم المحلي',
+  'settings.localControl.disable': 'قطع وصول الهاتف',
+  'settings.localControl.explicitPick': 'محدّد عند بدء الخادم الخفي',
+  'settings.localControl.encrypted': 'مشفّر',
+  'settings.localControl.unencrypted':
+    'غير مشفّر — للشبكات الموثوقة فقط؛ أعد التفعيل بعد تغيّر الشبكة',
+  'settings.localControl.awake': 'سيبقى جهاز Mac هذا مستيقظاً',
+  'settings.localControl.maySleep': 'قد يدخل جهاز Mac هذا في وضع السكون',
+  'settings.localControl.urlRedacted':
+    'لا يُعرض رابط الاقتران هنا لأن هذا الخادم الخفي لا يملك bearer token. تم طباعته في الطرفية التي يعمل بها الخادم الخفي — أتمّ الاقتران من هناك.',
+  'settings.models.title': 'النماذج',
+  'settings.models.context': (v) => `السياق: ${v?.tokens ?? ''} رمز`,
+  'settings.models.credentialEnv': 'متغير بيئة المفتاح',
+  'settings.models.add': '+ إضافة نموذج',
+  'settings.models.addDisabled': 'أوقف المضيف إضافة النماذج.',
+  'settings.models.setCurrent': 'تعيين كحالي',
+  'settings.models.current': 'الحالي',
+  'settings.models.runtime': 'بيئة التشغيل',
+  'settings.models.savedConfiguration': 'تهيئة محفوظة',
+  'settings.models.ambiguousWindow':
+    'تتشارك عدة تهيئات في هذا المسار. لا يمكن تعديل نافذة السياق هنا.',
+  'settings.models.delete': 'حذف',
+  'settings.models.confirmDelete': 'تأكيد',
+  'settings.models.cancel': 'إلغاء',
+  'settings.models.empty': 'لا توجد نماذج مهيأة بعد.',
+  'settings.models.loading': 'جارٍ تحميل النماذج…',
+  'settings.models.deleteFailed': 'فشل حذف النموذج',
+  'settings.models.runtimeSyncFailed':
+    'تم حفظ التغيير، لكن تعذر تحديث الجلسات الجارية. أعد تشغيل qwen serve قبل استخدام قائمة النماذج المحدثة.',
+  'settings.models.fallbacks.title': 'نماذج الاحتياط',
+  'settings.models.fallbacks.hint': (v) =>
+    `اختر حتى ${v?.max ?? 3}؛ تُجرَّب بالترتيب عند بلوغ النموذج الرئيسي حد السعة.`,
+  'settings.models.fallbacks.confirm': 'تأكيد',
+  'settings.models.fallbacks.empty': 'لا توجد نماذج قابلة للاختيار.',
+  'settings.models.fallbacks.saveFailed': 'فشل حفظ نماذج الاحتياط',
+  'settings.models.fallbacks.limitReached': (v) =>
+    `تم اختيار الحد الأقصى وهو ${v?.max ?? 3} نماذج احتياط؛ ألغِ تحديد أحدها لاختيار آخر.`,
+  'settings.corrupted': (v) =>
+    `ملف الإعدادات تالف${v?.recovered === 'true' ? ' (تمت استعادته من النسخة الاحتياطية)' : ''}`,
+  'settings.label.ui.chatWidth': 'عرض المحادثة',
+  'settings.description.ui.chatWidth':
+    'إعداد واجهة أمامية فقط لعرض محتوى المحادثة. محفوظ في هذا المتصفح.',
+  'settings.option.ui.chatWidth.1000': 'عادي',
+  'settings.option.ui.chatWidth.wide': 'عريض جداً',
+  'settings.category.General': 'عام',
+  'settings.category.UI': 'الواجهة',
+  'settings.category.Privacy': 'الخصوصية',
+  'settings.category.Model': 'النموذج',
+  'settings.category.Context': 'السياق',
+  'settings.category.Tools': 'الأدوات',
+  'settings.category.Daemon': 'الخادم الخفي',
+  'settings.category.Connections': 'الاتصالات',
+  'settings.category.Archived': 'المحادثات المؤرشفة',
+  'settings.category.Experimental': 'تجريبي',
+  'settings.category.Advanced': 'متقدم',
+  'settings.label.general.enableAutoUpdate': 'تفعيل التحديث التلقائي',
+  'settings.description.general.enableAutoUpdate':
+    'التحقق التلقائي من التحديثات وتثبيتها عند بدء التشغيل.',
+  'settings.label.general.showSessionRecap': 'إظهار ملخص الجلسة',
+  'settings.description.general.showSessionRecap':
+    'إظهار ملخص موجز عند العودة بعد الابتعاد لفترة. معطّل افتراضياً. ويمكن تشغيله يدوياً في أي وقت عبر /recap.',
+  'settings.label.general.sessionRecapAwayThresholdMinutes':
+    'عتبة الغياب لملخص الجلسة (بالدقائق)',
+  'settings.description.general.sessionRecapAwayThresholdMinutes':
+    'عدد الدقائق بعد فقدان التركيز قبل تشغيل الملخص التلقائي عند العودة. الافتراضي 5 دقائق؛ يمكنك زيادتها إذا كنت تبدّل النوافذ لفترات قصيرة.',
+  'settings.label.general.cleanupPeriodDays': 'فترة التنظيف (أيام)',
+  'settings.description.general.cleanupPeriodDays':
+    'عدد أيام الاحتفاظ بنسخ الجلسات الاحتياطية في ~/.qwen/file-history/ للأمر /rewind وسجلات التصحيح في مجلد runtime debug/. يعمل التنظيف في الخلفية مرة واحدة يومياً على الأكثر. القيمة 0 تعني أقل مدة احتفاظ (ساعة واحدة تقريباً)، مع حماية الجلسات النشطة.',
+  'settings.label.general.gitCoAuthor.commit': 'الإسناد: الإيداعات',
+  'settings.description.general.gitCoAuthor.commit':
+    'إضافة سطر Co-authored-by وملاحظة git لنسبة الذكاء الاصطناعي لكل ملف عند إنشاء إيداعات Git بواسطة Qwen Code.',
+  'settings.label.general.gitCoAuthor.pr': 'الإسناد: طلبات السحب',
+  'settings.description.general.gitCoAuthor.pr':
+    'إضافة سطر نسبة Qwen Code إلى وصف طلب السحب عند إنشاء PR عبر gh pr create.',
+  'settings.label.general.language': 'اللغة: الواجهة',
+  'settings.description.general.language':
+    'لغة واجهة المستخدم. استخدم "auto" للاكتشاف التلقائي من إعدادات النظام، أو ضع ملفات لغة مخصصة في ~/.qwen/locales/.',
+  'settings.label.general.outputLanguage': 'اللغة: مخرجات النموذج',
+  'settings.description.general.outputLanguage':
+    'اللغة التي يرد بها النموذج. اتركه فارغاً لاتباع لغة إدخالك (auto). تعيد التغييرات كتابة output-language.md وتنطبق على الجلسة الجارية.',
+  'settings.placeholder.general.outputLanguage': 'تلقائي (متابعة الإدخال)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `استخدام "${v?.value ?? ''}"`,
+  'settings.label.general.preventSystemSleep': 'منع سكون النظام أثناء التشغيل',
+  'settings.description.general.preventSystemSleep':
+    'منع سكون النظام أثناء بث ردود النموذج أو تنفيذ الأدوات في Qwen Code.',
+  'settings.label.review.attribution': 'الإسناد: المراجعة',
+  'settings.description.review.attribution':
+    'تذييل الردود والتعليقات المنشورة على GitHub ببيان النموذج وإصدار CLI عند تشغيل /review. ينطبق في نطاقات User وSystem وSystemDefaults فقط.',
+  'settings.label.review.effort': 'الجهد الافتراضي: المراجعة',
+  'settings.description.review.effort':
+    'مستوى الجهد الافتراضي للأمر /review عند عدم تحديد --effort. القيمة "auto" تستخدم high لطلبات السحب وmedium للتغييرات المحلية.',
+  'settings.option.review.effort.auto':
+    'تلقائي (high لطلبات السحب، medium للمحلي)',
+  'settings.option.review.effort.low': 'منخفض',
+  'settings.option.review.effort.medium': 'متوسط',
+  'settings.option.review.effort.high': 'مرتفع',
+  'settings.label.review.comment': 'نشر التعليقات افتراضياً: المراجعة',
+  'settings.description.review.comment':
+    'التعامل مع كل /review لطلب سحب كما لو أن --comment محدد ونشر النتائج تلقائياً.',
+  'settings.label.review.severityFloor': 'الحد الأدنى لخطورة النشر: المراجعة',
+  'settings.description.review.severityFloor':
+    'أدنى مستوى خطورة يُنشر على GitHub عند تشغيل /review دون --severity-floor.',
+  'settings.option.review.severityFloor.auto':
+    'تلقائي (Critical فقط بعد الجولة 6)',
+  'settings.option.review.severityFloor.critical': 'Critical فقط (كل جولة)',
+  'settings.option.review.severityFloor.suggestion': 'Suggestion و Critical',
+  'settings.label.review.reverseAuditRounds':
+    'الحد الأقصى لجولات التدقيق العكسي: المراجعة',
+  'settings.description.review.reverseAuditRounds':
+    'تخفيض الحد الأقصى لجولات حلقة التدقيق العكسي في المراجعات عالية الجهد.',
+  'settings.label.output.showTimestamps': 'إظهار الطوابع الزمنية',
+  'settings.description.output.showTimestamps':
+    'عرض الطابع الزمني [HH:MM:SS] قبل كل رد من المساعد.',
+  'settings.label.review.sandbox': 'عزل الكود المُراجَع في بيئة عزل: المراجعة',
+  'settings.description.review.sandbox':
+    'تشغيل أوامر المستودع أثناء المراجعة داخل حاوية معزولة بدلاً من بيئتك المباشرة.',
+  'settings.option.review.sandbox.off': 'معطّل (تشغيل الكود مباشرة)',
+  'settings.option.review.sandbox.auto': 'تلقائي (استخدام حاوية عند توفرها)',
+  'settings.option.review.sandbox.required':
+    'إلزامي (عدم التشغيل خارج الحاوية)',
+  'settings.label.review.approachRounds': 'عتبة جولات تلميح النهج: المراجعة',
+  'settings.description.review.approachRounds':
+    'عدد جولات المراجعة قبل السماح بإضافة ملاحظة حول اتجاه التغيير نفسه بدلاً من الرقعة الحالية.',
+  'settings.label.ui.theme': 'السمة',
+  'settings.description.ui.theme': 'سمة الألوان لواجهة المستخدم.',
+  'settings.label.ui.allowedApprovalModes': 'أوضاع الموافقة في Web Shell',
+  'settings.description.ui.allowedApprovalModes':
+    'أوضاع الموافقة المعروضة في Web Shell. إبقاء القائمة فارغة لا يعرض خيارات، ويلتزم المضيف بما يسمح به.',
+  'settings.label.ui.hideTips': 'إخفاء النصائح',
+  'settings.description.ui.hideTips': 'إخفاء تلميحات المساعدة من الواجهة.',
+  'settings.label.ui.enableWelcomeBack': 'إظهار نافذة الترحيب بالعودة',
+  'settings.description.ui.enableWelcomeBack':
+    'إظهار نافذة الترحيب بالعودة عند الرجوع إلى مشروع له سجل محادثات.',
+  'settings.label.ui.enableUserFeedback': 'تفعيل ملاحظات المستخدم',
+  'settings.description.ui.enableUserFeedback':
+    'عرض نموذج تقييم اختياري بعد الردود للمساعدة في تحسين Qwen Code.',
+  'settings.label.ui.enableFollowupSuggestions': 'تفعيل اقتراحات المتابعة',
+  'settings.description.ui.enableFollowupSuggestions':
+    'عرض اقتراحات متابعة مرتبطة بالسياق بعد اكتمال المهمة. اضغط Tab أو سهم اليمين للإدراج، وEnter للقبول والإرسال.',
+  'settings.label.ui.compactMode': 'الوضع المضغوط',
+  'settings.description.ui.compactMode':
+    'مهجور: العرض المضغوط مفعّل دائماً في كل من TUI وWeb Shell.',
+  'settings.label.ui.shellOutputMaxLines': 'الحد الأقصى لأسطر مخرجات الصدفة',
+  'settings.description.ui.shellOutputMaxLines':
+    'أقصى عدد أسطر لمخرجات الصدفة المعروضة مباشرة؛ 0 لعرض المخرجات كاملة.',
+  'settings.label.ui.disableWorkflowKeywordTrigger':
+    'تعطيل التشغيل التلقائي بكلمة workflow',
+  'settings.description.ui.disableWorkflowKeywordTrigger':
+    'عند التفعيل، لن يوجّه ذكر كلمة workflow في الموجه هذه الجولة تلقائياً نحو أداة Workflow.',
+  'settings.label.ui.showStatusInTitle': 'إظهار الحالة في شريط العنوان',
+  'settings.description.ui.showStatusInTitle':
+    'عرض اسم جلسة Qwen Code وحالتها في عنوان نافذة الطرفية.',
+  'settings.label.ui.showResponseTokensPerSecond':
+    'إظهار الرموز/ثانية في الاستجابة',
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'تفعيل عبارات التحميل',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'عرض عبارات التحميل الدوّارة. أوقفه لإخفاء العبارات المدمجة وعبارات المضيف.',
+  'settings.description.ui.showResponseTokensPerSecond':
+    'عرض تقدير مباشر لمعدل الرموز في الثانية بجانب عداد الرموز أثناء البث.',
+  'settings.label.ui.showToolCallDetails': 'إظهار تفاصيل استدعاءات الأدوات',
+  'settings.description.ui.showToolCallDetails':
+    'عرض وسائط ونتائج الأدوات مضمّنة. عند إيقافه تظهر الاستدعاءات العادية كملخص من سطر واحد.',
+  'settings.label.privacy.usageStatisticsEnabled': 'تفعيل إحصائيات الاستخدام',
+  'settings.description.privacy.usageStatisticsEnabled':
+    'السماح بجمع إحصائيات الاستخدام.',
+  'settings.label.fastModel': 'النموذج السريع',
+  'settings.description.fastModel':
+    'نموذج لتوليد الاقتراحات والتنفيذ التخميني. اتركه فارغاً لاستخدام النموذج الرئيسي.',
+  'settings.label.visionModel': 'نموذج الرؤية',
+  'settings.description.visionModel':
+    'نموذج بقدرات صور يُستخدم لجسر الرؤية. اتركه فارغاً للاختيار التلقائي.',
+  'settings.label.modelFallbacks': 'نماذج الاحتياط',
+  'settings.description.modelFallbacks':
+    'قائمة معرّفات النماذج الاحتياطية مفصولة بفواصل (حتى 3) عند مواجهة أخطاء السعة في النموذج الرئيسي.',
+  'settings.label.model.reasoningEffort': 'جهد الاستدلال',
+  'settings.description.model.reasoningEffort':
+    'مستوى جهد التفكير للنماذج الداعمة للاستدلال. اضبطه عبر /effort.',
+  'settings.option.model.reasoningEffort.low': 'منخفض',
+  'settings.option.model.reasoningEffort.medium': 'متوسط',
+  'settings.option.model.reasoningEffort.high': 'مرتفع',
+  'settings.option.model.reasoningEffort.xhigh': 'مرتفع جداً',
+  'settings.option.model.reasoningEffort.max': 'الأقصى',
+  'settings.label.mcpServers': 'خوادم MCP',
+  'settings.description.mcpServers': 'تهيئة خوادم MCP.',
+  'settings.label.advisorMaxUses': 'حد استدعاءات المستشار بالجلسة',
+  'settings.description.advisorMaxUses':
+    'أقصى عدد من طلبات المستشار الأصلية لكل جلسة (0 يعني بلا حد).',
+  'settings.label.context.fileFiltering.respectGitIgnore': 'احترام .gitignore',
+  'settings.description.context.fileFiltering.respectGitIgnore':
+    'احترام ملفات .gitignore أثناء البحث.',
+  'settings.label.context.fileFiltering.respectQwenIgnore':
+    'احترام .qwenignore',
+  'settings.description.context.fileFiltering.respectQwenIgnore':
+    'احترام ملفات .qwenignore أثناء البحث.',
+  'settings.label.context.fileFiltering.enableFuzzySearch':
+    'تفعيل البحث الضبابي',
+  'settings.description.context.fileFiltering.enableFuzzySearch':
+    'استخدام البحث الضبابي عند البحث عن الملفات.',
+  'settings.label.tools.toolSearch.enabled': 'تفعيل ToolSearch',
+  'settings.description.tools.toolSearch.enabled':
+    'عند التفعيل، تفحص الأدوات المؤجلة مخططها عبر ToolSearch قبل استدعائها عبر ToolCall للحفاظ على استقرار قائمة الأدوات وذاكرة الموجه.',
+  'settings.label.tools.toolSearch.threshold':
+    'عتبة التحميل المسبق للأدوات المؤجلة (%)',
+  'settings.description.tools.toolSearch.threshold':
+    'نسبة نافذة السياق المخصصة للتحميل المسبق للأدوات المؤجلة عند بدء الجلسة.',
+  'settings.label.tools.webSearch.enabled': 'تفعيل WebSearch',
+  'settings.description.tools.webSearch.enabled':
+    'تعطيل أو تفعيل أداة web_search المدمجة للبحث على الويب.',
+  'settings.label.tools.webSearch.model': 'نموذج البحث',
+  'settings.description.tools.webSearch.model':
+    'محدّد نموذج مسار البحث الصريح ("modelId" أو "authType:modelId").',
+  'settings.label.tools.webSearch.webExtractor': 'فتح صفحات نتائج البحث',
+  'settings.description.tools.webSearch.webExtractor':
+    'السماح لوكيل البحث بفتح صفحات النتائج وقراءتها لدعم الإجابات بالأدلة.',
+  'settings.label.tools.webSearch.timeoutMs': 'مهلة البحث (مللي ثانية)',
+  'settings.description.tools.webSearch.timeoutMs':
+    'الميزانية الزمنية الإجمالية لاستدعاء web_search بالمللي ثانية (الافتراضي 120000، الحد الأقصى 600000).',
+  'settings.label.tools.webSearch.maxPerSession':
+    'الحد الأقصى لعمليات البحث في الجلسة',
+  'settings.description.tools.webSearch.maxPerSession':
+    'أقصى عدد استدعاءات web_search في جلسة واحدة (الافتراضي 200، الحد الأقصى 10000).',
+  'settings.label.tools.listDirectory.enabled': 'تفعيل ListDirectory',
+  'settings.description.tools.listDirectory.enabled':
+    'تفعيل أداة list_directory المدمجة لسرد محتويات المجلدات.',
+  'settings.label.tools.codeModeOnly': 'وضع الكود فقط (تجريبي)',
+  'settings.description.tools.codeModeOnly':
+    'تُعرَض الأدوات العادية للنموذج فقط عبر أداة JavaScript exec المعزولة.',
+  'settings.label.tools.todoWrite.enabled': 'تفعيل Todo Write',
+  'settings.description.tools.todoWrite.enabled':
+    'تفعيل أداة todo_write المدمجة وإرشاداتها في موجه النظام.',
+  'settings.label.tools.workflowsEnabled': 'سير العمل الديناميكي',
+  'settings.description.tools.workflowsEnabled':
+    'تفعيل أداة Workflow التي تتيح للنموذج كتابة سكربتات لتنسيق عدة وكلاء فرعيين على التوازي.',
+  'settings.label.tools.lspEnabled': 'ذكاء الكود LSP',
+  'settings.description.tools.lspEnabled':
+    'تجريبي. تفعيل خدمات ذكاء الكود LSP دون الراية ‎--experimental-lsp.',
+  'settings.label.tools.workflowSizeGuideline':
+    'إرشاد حجم سير العمل الديناميكي',
+  'settings.description.tools.workflowSizeGuideline':
+    'الإرشاد المقترح لعدد الوكلاء في مسارات العمل الديناميكية.',
+  'settings.option.tools.workflowSizeGuideline.small': 'صغير (أقل من 5 وكلاء)',
+  'settings.option.tools.workflowSizeGuideline.medium':
+    'متوسط (أقل من 15 وكيلاً)',
+  'settings.option.tools.workflowSizeGuideline.large':
+    'كبير (أقل من 50 وكيلاً)',
+  'settings.option.tools.workflowSizeGuideline.unrestricted': 'غير مقيّد',
+  'settings.label.tools.workflowNameOnly': 'السماح بسير العمل المسمّى فقط',
+  'settings.description.tools.workflowNameOnly':
+    'تقييد النموذج بتشغيل مسارات العمل المحفوظة والموسّعة بالاسم فقط.',
+  'settings.label.tools.shell.enableInteractiveShell': 'الصدفة التفاعلية (PTY)',
+  'settings.description.tools.shell.enableInteractiveShell':
+    'استخدام node-pty لتوفير تجربة صدفة تفاعلية.',
+  'settings.label.policy.permissionStrategy': 'استراتيجية تنسيق الأذونات',
+  'settings.description.policy.permissionStrategy':
+    'كيفية حسم طلبات الأذونات عند اتصال عدة عملاء. يتطلب إعادة تشغيل الخادم الخفي.',
+  'settings.option.policy.permissionStrategy.first-responder': 'أول مستجيب',
+  'settings.option.policy.permissionStrategy.designated': 'العميل المعيّن',
+  'settings.option.policy.permissionStrategy.consensus': 'نصاب التوافق',
+  'settings.option.policy.permissionStrategy.local-only': 'المحلي فقط',
+  'settings.label.serve.maxSessions': 'الحد الأقصى للجلسات المتزامنة',
+  'settings.description.serve.maxSessions':
+    'الحد الأقصى للجلسات النشطة معاً في مساحة العمل الواحدة (0 بلا حد).',
+  'settings.label.experimental.cron': 'تفعيل أدوات Cron/Loop',
+  'settings.description.experimental.cron':
+    'تفعيل أدوات الجدولة داخل الجلسة (cron_create وcron_list وcron_delete).',
+  'settings.label.experimental.sessionWorkflow':
+    'سير عمل الجلسة: التخطيط والمراجعة',
+  'settings.description.experimental.sessionWorkflow':
+    'إظهار مخطط سير العمل في الجلسة وعرض وضع التخطيط كخطة ومراجعة.',
+  'settings.label.experimental.emitToolUseSummaries': 'ملخصات استخدام الأدوات',
+  'settings.description.experimental.emitToolUseSummaries':
+    'توليد وسم مختصر بالذكاء الاصطناعي بعد كل دفعة أدوات. يتطلب تهيئة نموذج سريع.',
+  'settings.label.experimental.sessionWriterLease':
+    'تفعيل عقد الكتابة لجلسات ACP',
+  'settings.description.experimental.sessionWriterLease':
+    'تفعيل قفل الكتابة عبر العمليات لجلسات ACP والـ daemon المحفوظة.',
+  'settings.label.experimental.agentTeam': 'تفعيل فريق الوكلاء',
+  'settings.description.experimental.agentTeam':
+    'تفعيل أدوات تعاون فرق الوكلاء التجريبية (team_create وsend_message وغيرها).',
+  'settings.label.experimental.agentCollaboration': 'تفعيل تعاون الوكلاء',
+  'settings.description.experimental.agentCollaboration':
+    'تفعيل تعاون وكلاء مساحة العمل الدائمين عبر خيوط المهام المشتركة (تجريبي).',
+  'settings.label.experimental.unifiedAgentLoop': 'حلقة الوكيل الموحّدة',
+  'settings.description.experimental.unifiedAgentLoop':
+    'تشغيل الجلسات على حلقة الوكيل المشتركة الموحّدة عبر نقاط الدخول.',
+  'settings.label.experimental.eventBusAgentLoop': 'حلقة الوكيل بناقل الأحداث',
+  'settings.description.experimental.eventBusAgentLoop':
+    'تشغيل حلقة الوكيل المشتركة على بنية ناقل الأحداث (تجريبي).',
+  'settings.label.experimental.artifact': 'تفعيل المخرجات (Artifacts)',
+  'settings.description.experimental.artifact':
+    'تفعيل أداة نشر وعرض المخرجات التفاعلية في الجلسات.',
+  'settings.label.experimental.liveVoice.enabled': 'الصوت المباشر Live Voice',
+  'settings.description.experimental.liveVoice.enabled':
+    'تفعيل محادثة الصوت المباشر التجريبية في Web Shell على macOS.',
+  'settings.label.experimental.liveVoice.shortcut':
+    'اختصار الصوت المباشر العام',
+  'settings.description.experimental.liveVoice.shortcut':
+    'مفتاح الاختصار العام المسجّل عبر Qwen Live Host.',
+  'settings.label.goals.modelProposed': 'أهداف مقترحة من النموذج',
+  'settings.description.goals.modelProposed':
+    'التحكم بأداة propose_goal التي تتيح للنموذج اقتراح هدف جلسة لموافقتك.',
+  'settings.option.goals.modelProposed.alwaysAsk': 'السؤال دائماً',
+  'settings.option.goals.modelProposed.disabled': 'معطّل',
+  'settings.label.omni.enabled': 'تفعيل تسليم وسائط Omni',
+  'settings.description.omni.enabled':
+    'تفعيل خط أنابيب وسائط Omni لرفع الوسائط وتمريرها عبر عناوين oss:// بدلاً من base64.',
+  'settings.label.agents.arena.preserveArtifacts': 'الاحتفاظ بمخرجات الساحة',
+  'settings.description.agents.arena.preserveArtifacts':
+    'الاحتفاظ بأشجار العمل وملفات الحالة لجلسات Arena بعد انتهاء الجلسة.',
+};

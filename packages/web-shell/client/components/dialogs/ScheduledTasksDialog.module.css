@@ -95,7 +95,7 @@
 
 .required {
   color: var(--error-color);
-  margin-left: 2px;
+  margin-inline-start: 2px;
 }
 
 .fieldHint {
@@ -160,8 +160,7 @@
 .promptPlaceholder {
   position: absolute;
   top: 11px;
-  right: 11px;
-  left: 11px;
+  inset-inline: 11px;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: 13px;
@@ -192,7 +191,7 @@
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  margin-left: 7px;
+  margin-inline-start: 7px;
   background: currentColor;
   mask: var(--composer-tag-icon-url) center / contain no-repeat;
   -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
@@ -202,7 +201,8 @@
   min-width: 0;
   max-width: 30ch;
   overflow: hidden;
-  padding: 3px 7px 3px 0.5ch;
+  padding-block: 3px;
+  padding-inline: 0.5ch 7px;
   color: var(--foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -217,7 +217,7 @@
   align-items: center;
   justify-content: center;
   border: 0;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
   background: transparent;
   color: var(--muted-foreground);
   font-family: inherit;
@@ -303,7 +303,7 @@
   background: transparent;
   color: var(--foreground);
   font-family: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -541,7 +541,7 @@
 .toggleKnob {
   position: absolute;
   top: 2px;
-  left: 2px;
+  inset-inline-start: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -551,6 +551,10 @@
 
 .toggleOn .toggleKnob {
   transform: translateX(16px);
+}
+
+:global([dir='rtl']) .toggleOn .toggleKnob {
+  transform: translateX(-16px);
 }
 
 .cardPrompt {
@@ -647,7 +651,7 @@
 .lastFired {
   font-size: 11px;
   color: var(--muted-foreground);
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 /* ── Run history ─────────────────────────────────────────────── */

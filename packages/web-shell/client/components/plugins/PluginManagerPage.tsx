@@ -188,7 +188,7 @@ export function PluginManagerPage({
                 onClick={onClose}
                 aria-label={t('plugins.backToChat')}
               >
-                <ArrowLeftIcon />
+                <ArrowLeftIcon className="rtl:-scale-x-100" />
               </Button>
             ) : null}
             <TabsList className="h-8" aria-label={t('plugins.sections')}>

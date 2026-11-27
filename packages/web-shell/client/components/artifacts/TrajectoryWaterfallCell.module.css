@@ -44,11 +44,12 @@
 }
 
 .bar[data-at-end='true'] {
-  transform: translateX(-2px);
+  margin-inline-start: -2px;
 }
 .ttft {
   position: absolute;
-  inset: 0 auto 0 0;
+  inset-block: 0;
+  inset-inline: 0 auto;
   background: var(--traj-ttft);
 }
 .range {

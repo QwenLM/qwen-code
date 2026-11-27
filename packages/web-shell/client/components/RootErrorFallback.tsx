@@ -51,6 +51,12 @@ const COPY: Record<WebShellLanguage, FallbackCopy> = {
     retry: 'Повторить',
     reload: 'Перезагрузить страницу',
   },
+  ar: {
+    title: 'حدث خطأ ما',
+    body: 'وقع خطأ غير متوقع وتعذر عرض هذا المحتوى.',
+    retry: 'إعادة المحاولة',
+    reload: 'إعادة تحميل الصفحة',
+  },
 };
 
 // The boundary wraps the whole App, so this surface renders when the themed
@@ -109,7 +115,13 @@ export function RootErrorFallback({
 }: RootErrorFallbackProps) {
   const copy = COPY[language] ?? COPY.en;
   return (
-    <div role="alert" style={containerStyle} data-web-shell-error>
+    <div
+      role="alert"
+      style={containerStyle}
+      data-web-shell-error
+      lang={language}
+      dir={language === 'ar' ? 'rtl' : 'ltr'}
+    >
       <p style={titleStyle}>{copy.title}</p>
       <p style={bodyStyle}>{copy.body}</p>
       {/* Dev-only: end users (and embedded hosts) shouldn't see raw internal

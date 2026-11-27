@@ -41,6 +41,19 @@ import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-res
 
 const debugLogger = createDebugLogger('TOOL_CALL_EMITTER');
 
+// These built-in descriptions render paths/patterns/commands with machine
+// framing, not authored prose. Other tool titles keep the legacy display
+// fallback.
+const MACHINE_TITLE_TOOLS: ReadonlySet<string> = new Set([
+  ToolNames.READ_FILE,
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+  ToolNames.LS,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.SHELL,
+]);
+
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
   [Kind.Edit]: 'edit',
@@ -150,10 +163,7 @@ export class ToolCallEmitter extends BaseEmitter {
     } else if (params.phase !== 'preparing') {
       this.preparedLifecycles.delete(params.callId);
     }
-    const { title, locations, kind } = this.resolveToolMetadata(
-      params.toolName,
-      params.args,
-    );
+    const metadata = this.resolveToolMetadata(params.toolName, params.args);
     const provenance = ToolCallEmitter.resolveToolProvenance(
       params.toolName,
       params.subagentMeta,
@@ -168,7 +178,7 @@ export class ToolCallEmitter extends BaseEmitter {
         callId: params.callId,
         status: params.status || 'pending',
         args: params.args,
-        metadata: { title, locations, kind },
+        metadata,
         timestamp: params.timestamp,
         asUpdate: updatesPreparedCall,
         extra: {
@@ -460,6 +470,7 @@ export class ToolCallEmitter extends BaseEmitter {
           : '';
       return {
         title: description ? `${toolName}: ${description}` : toolName,
+        ...(description ? { titleIsMachine: false } : {}),
         locations: [],
         kind: 'other',
       };
@@ -468,6 +479,7 @@ export class ToolCallEmitter extends BaseEmitter {
     const tool = toolRegistry.getTool(toolName);
 
     let title = tool?.displayName ?? toolName;
+    let titleIsMachine: boolean | undefined;
     let locations: ToolCallLocation[] = [];
     let kind: ToolKind = 'other';
 
@@ -482,10 +494,14 @@ export class ToolCallEmitter extends BaseEmitter {
         }));
         // Pass tool name to handle special cases like exit_plan_mode -> switch_mode
         kind = this.mapToolKind(tool.kind, toolName);
+        if (MACHINE_TITLE_TOOLS.has(toolName)) {
+          titleIsMachine = this.isMachineTitleTool(toolName, args);
+        }
       } catch {
         // Fallback: use the description arg directly if available
         if (typeof args['description'] === 'string') {
           title = `${title}: ${args['description']}`;
+          titleIsMachine = false;
         }
         if (tool.kind) {
           kind = this.mapToolKind(tool.kind, toolName);
@@ -493,7 +509,24 @@ export class ToolCallEmitter extends BaseEmitter {
       }
     }
 
-    return { title, locations, kind };
+    return {
+      title,
+      locations,
+      kind,
+      ...(titleIsMachine !== undefined ? { titleIsMachine } : {}),
+    };
+  }
+
+  isMachineTitleTool(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): boolean {
+    // core appends the model's own prose to a shell description, so that title
+    // is not machine text even though the command it decorates is.
+    return (
+      MACHINE_TITLE_TOOLS.has(toolName) &&
+      !(toolName === ToolNames.SHELL && args?.['description'])
+    );
   }
 
   /**

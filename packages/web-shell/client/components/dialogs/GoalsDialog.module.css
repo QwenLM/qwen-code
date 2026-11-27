@@ -101,7 +101,7 @@
 
 .required {
   color: var(--error-color);
-  margin-left: 2px;
+  margin-inline-start: 2px;
 }
 
 .textarea {
@@ -402,7 +402,7 @@
   background: transparent;
   border: none;
   padding: 0;
-  margin-left: auto;
+  margin-inline-start: auto;
   font: inherit;
   font-size: 12px;
   font-weight: 500;

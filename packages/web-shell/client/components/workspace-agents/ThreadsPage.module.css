@@ -238,18 +238,18 @@
 }
 
 .squadRosterRow[data-squad-role='member'] .squadRosterWho {
-  padding-left: 22px;
+  padding-inline-start: 22px;
 }
 
 /* The elbow: from the row above down to this row's middle, then across. */
 .squadRosterRow[data-squad-role='member'] .squadRosterWho::before {
   position: absolute;
   top: calc(-1 * var(--squad-row-gap));
-  left: var(--squad-rail-x);
+  inset-inline-start: var(--squad-rail-x);
   width: 8px;
   height: calc(50% + var(--squad-row-gap));
   border-bottom: 1px solid var(--squad-rail-color);
-  border-left: 1px solid var(--squad-rail-color);
+  border-inline-start: 1px solid var(--squad-rail-color);
   content: '';
 }
 
@@ -259,8 +259,8 @@
   position: absolute;
   top: 50%;
   bottom: 0;
-  left: var(--squad-rail-x);
-  border-left: 1px solid var(--squad-rail-color);
+  inset-inline-start: var(--squad-rail-x);
+  border-inline-start: 1px solid var(--squad-rail-color);
   content: '';
 }
 

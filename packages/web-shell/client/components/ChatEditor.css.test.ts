@@ -196,13 +196,13 @@ describe('Plan chip close mark', () => {
   });
 });
 
-describe('Composer tag right inset', () => {
-  // The label and value keep the four-value shorthand with a 0 right
-  // component, and the remove button closes the chip when the tag has one. A
-  // chip whose tag is not removable has no such button, so it ends on
-  // `.tagContent`, which is the box that has to carry the inset itself
-  // (issue #11997). Moving the inset onto the text, or dropping this rule,
-  // is what the pair of assertions below rules out.
+describe('Composer tag trailing inset', () => {
+  // The label and value carry no trailing padding of their own, and the remove
+  // button closes the chip when the tag has one. A chip whose tag is not
+  // removable has no such button, so it ends on `.tagContent`, which is the box
+  // that has to carry the inset itself (issue #11997). Moving the inset onto
+  // the text, or dropping this rule, is what the pair of assertions below
+  // rules out.
   it('puts the inset on the content box that ends the chip', () => {
     expect(
       sorted(entries((selector) => selector === '.tagContent:last-child')),
@@ -210,21 +210,34 @@ describe('Composer tag right inset', () => {
       {
         at: '',
         selectors: ['.tagContent:last-child'],
-        decls: ['padding-right: 7px'],
+        decls: ['padding-inline-end: 7px'],
       },
     ]);
   });
 
-  it('leaves the text boxes without a right padding of their own', () => {
-    const shorthand = entries((selector) =>
+  it('leaves the text boxes without trailing padding of their own', () => {
+    const inlinePaddings = entries((selector) =>
       /^\.tag(Label|Value)$/.test(selector),
     )
-      .map((entry) => entry.decls.find((decl) => decl.startsWith('padding:')))
+      .map((entry) =>
+        entry.decls.find((decl) => decl.startsWith('padding-inline:')),
+      )
       .filter((decl): decl is string => decl !== undefined);
-    expect(shorthand).toEqual([
-      'padding: 3px 0 3px 7px',
-      'padding: 3px 0 3px 0.5ch',
+    expect(inlinePaddings).toEqual([
+      'padding-inline: 7px 0',
+      'padding-inline: 0.5ch 0',
     ]);
+  });
+
+  it('keeps the vertical half of the chip padding on both text boxes', () => {
+    const blockPaddings = entries((selector) =>
+      /^\.tag(Label|Value)$/.test(selector),
+    )
+      .map((entry) =>
+        entry.decls.find((decl) => decl.startsWith('padding-block:')),
+      )
+      .filter((decl): decl is string => decl !== undefined);
+    expect(blockPaddings).toEqual(['padding-block: 3px', 'padding-block: 3px']);
   });
 });
 

@@ -69,6 +69,7 @@ export interface DaemonMessageToolCall {
   /** Stable producer identity from the daemon tool-block projection only. */
   generatedUiToolCallId?: string;
   title?: string;
+  titleIsMachine?: boolean;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   toolResult?: components['schemas']['PublicToolResult'];

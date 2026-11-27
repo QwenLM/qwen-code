@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { WebShellLanguage } from '../../i18n';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
 import sidebarStyles from './WebShellSidebar.module.css';
@@ -119,6 +120,7 @@ function renderSidebar(
     strict?: boolean;
     showLive?: boolean;
     onOpenLive?: () => void;
+    language?: WebShellLanguage;
   } = {},
 ) {
   const sidebar = (
@@ -154,7 +156,7 @@ function renderSidebar(
   );
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={props.language ?? 'en'}>
         {props.strict ? <StrictMode>{sidebar}</StrictMode> : sidebar}
       </I18nProvider>,
     );
@@ -2966,6 +2968,45 @@ describe('WebShellSidebar rail navigation', () => {
     expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
       '420px',
     );
+  });
+
+  it('mirrors pointer drag resize deltas in Arabic RTL mode', async () => {
+    renderSidebar(false, { layout: 'rail', language: 'ar' });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '356px',
+    );
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 400,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 350, pointerId: 1 }),
+      );
+    });
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '406px',
+    );
+    act(() => {
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { clientX: 460, pointerId: 1 }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 460, pointerId: 1 }),
+      );
+    });
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '296px',
+    );
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('296');
   });
 });
 

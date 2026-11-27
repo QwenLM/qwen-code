@@ -1,5 +1,5 @@
 import { useEffect, useId } from 'react';
-import { useI18n } from '../../i18n';
+import { useI18n, type WebShellLanguage } from '../../i18n';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { Button } from '../ui/button';
@@ -52,7 +52,7 @@ const TEXT = {
 
 function localized(
   value: readonly [string, ...string[]],
-  language: 'en' | 'zh-CN' | 'zh-TW' | 'ru',
+  language: WebShellLanguage,
 ): string {
   const index = ['en', 'zh-CN', 'zh-TW', 'ru'].indexOf(language);
   return value[index] ?? value[0];

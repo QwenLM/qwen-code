@@ -505,6 +505,10 @@
 }
 
 .cells {
+  /* Cell indices and the snake/tetris arrow keys are LTR; inheriting RTL
+     would mirror the board and reverse the controls. The overlay is a
+     sibling, so its translated copy keeps the shell's direction. */
+  direction: ltr;
   display: grid;
   grid-auto-rows: 1fr;
   gap: 2px;

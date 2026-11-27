@@ -7,6 +7,7 @@ import {
 } from '@tanstack/react-table';
 
 import { cn } from '@/lib/utils';
+import { useI18n } from '../../i18n';
 import { Button } from './button';
 import {
   Select,
@@ -50,8 +51,14 @@ function fixedClassName<TData>(
   showLeftShadow: boolean,
   showRightShadow: boolean,
   fixedEnabled: boolean,
+  isRtl: boolean,
 ): string | undefined {
   if (!meta.fixed || !fixedEnabled) return undefined;
+  const physicalSide = isRtl
+    ? meta.fixed === 'left'
+      ? 'right'
+      : 'left'
+    : meta.fixed;
   const showShadow =
     meta.fixedEdge &&
     (meta.fixed === 'left' ? showLeftShadow : showRightShadow);
@@ -63,9 +70,9 @@ function fixedClassName<TData>(
     meta.fixedEdge &&
       "after:pointer-events-none after:absolute after:top-0 after:-bottom-px after:w-[30px] after:content-[''] after:transition-shadow",
     meta.fixedEdge &&
-      (meta.fixed === 'left' ? 'after:left-full' : 'after:right-full'),
+      (physicalSide === 'left' ? 'after:left-full' : 'after:right-full'),
     showShadow &&
-      (meta.fixed === 'left'
+      (physicalSide === 'left'
         ? 'after:shadow-[inset_10px_0_8px_-8px_var(--border)]'
         : 'after:shadow-[inset_-10px_0_8px_-8px_var(--border)]'),
   );
@@ -117,6 +124,7 @@ function columnStyle<TData>(
   fluidWeight: number,
   fixedOffset?: number,
   fixedEnabled = true,
+  isRtl = false,
 ): CSSProperties | undefined {
   const style =
     columnWidthStyle(
@@ -127,7 +135,12 @@ function columnStyle<TData>(
       fluidWeight,
     ) ?? {};
   if (meta.fixed && fixedEnabled) {
-    style[meta.fixed] = fixedOffset ?? meta.fixedOffset ?? 0;
+    const physicalSide = isRtl
+      ? meta.fixed === 'left'
+        ? 'right'
+        : 'left'
+      : meta.fixed;
+    style[physicalSide] = fixedOffset ?? meta.fixedOffset ?? 0;
   }
   return Object.keys(style).length > 0 ? style : undefined;
 }
@@ -148,6 +161,7 @@ export function DataTable<TData>({
   onRowClick?: (row: Row<TData>) => void;
   rowClassName?: string | ((row: Row<TData>) => string | undefined);
 }) {
+  const { isRtl } = useI18n();
   const viewportRef = useRef<HTMLDivElement>(null);
   const rowCount = table.getRowModel().rows.length;
   const visibleColumns = table.getVisibleLeafColumns();
@@ -229,10 +243,11 @@ export function DataTable<TData>({
     (scroller: HTMLElement) => {
       setAvailableWidth(scroller.clientWidth);
       setFluidLayout(scroller.clientWidth >= widthMetrics.minimum);
+      const scrollMagnitude = Math.abs(scroller.scrollLeft);
       const next = {
-        left: scroller.scrollLeft > 0,
+        left: scrollMagnitude > 0,
         right:
-          scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 1,
+          scrollMagnitude + scroller.clientWidth < scroller.scrollWidth - 1,
       };
       setFixedShadows((current) =>
         current.left === next.left && current.right === next.right
@@ -317,6 +332,7 @@ export function DataTable<TData>({
                         fixedShadows.left,
                         fixedShadows.right,
                         meta.fixed !== 'right' || pinRightColumns,
+                        isRtl,
                       ),
                     )}
                     style={columnStyle(
@@ -327,6 +343,7 @@ export function DataTable<TData>({
                       widthMetrics.fluidWeight,
                       fixedOffsets.get(header.column.id),
                       meta.fixed !== 'right' || pinRightColumns,
+                      isRtl,
                     )}
                   >
                     {header.isPlaceholder
@@ -390,6 +407,7 @@ export function DataTable<TData>({
                         fixedShadows.left,
                         fixedShadows.right,
                         meta.fixed !== 'right' || pinRightColumns,
+                        isRtl,
                       ),
                     )}
                     style={columnStyle(
@@ -400,6 +418,7 @@ export function DataTable<TData>({
                       widthMetrics.fluidWeight,
                       fixedOffsets.get(cell.column.id),
                       meta.fixed !== 'right' || pinRightColumns,
+                      isRtl,
                     )}
                     onClick={
                       meta.stopRowClick
@@ -451,7 +470,7 @@ export function DataTablePagination<TData>({
   onPageSizeChange?: (pageSize: number) => void;
 }) {
   return (
-    <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+    <div className="ms-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
       <span className="text-xs text-muted-foreground">
         {labels.rowsPerPage}
       </span>

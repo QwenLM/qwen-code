@@ -178,6 +178,51 @@ const RU: Record<keyof typeof EN, string> = {
   backgroundBusy: 'Дождитесь завершения фоновых задач перед очисткой.',
 };
 
+const AR: Record<keyof typeof EN, string> = {
+  mode: 'ملفات الجلسة',
+  current: 'المجلد الحالي',
+  isolated: 'Worktree مستقلة',
+  base: 'الفرع الأساسي أو الإيداع',
+  head: 'HEAD الحالي',
+  committed:
+    'يبدأ من الإصدار المودَع. وتبقى التغييرات غير المودَعة في المجلد الحالي.',
+  checking: 'جارٍ فحص دعم worktree…',
+  files:
+    'اختر ملفات مساحة العمل بعد جاهزية worktree. يجب إعادة اختيار إشارات الملفات الحالية.',
+  manage: 'أشجار عمل الجلسة',
+  retained:
+    'يُبقي إغلاق الجلسة أو أرشفتها أو حذفها على worktree الخاصة بها. يزيل التنظيف المجلد ويُبقي الفرع.',
+  empty: 'لا توجد أشجار عمل للجلسات في مساحة العمل هذه.',
+  inspect: 'فحص التنظيف',
+  cleanup: 'إزالة مجلد worktree',
+  confirm: 'هل تريد إزالة هذا المجلد؟',
+  confirmDescription:
+    'يجب أن تكون الجلسة مغلقة وأن تكون worktree نظيفة. ستتم إزالة المجلد؛ وسيتم الاحتفاظ بفرع Git الخاص به.',
+  blocked: 'التنظيف غير متاح',
+  session: 'الجلسة',
+  branch: 'الفرع',
+  baseCommit: 'الإيداع الأساسي',
+  preparing: 'جارٍ تحضير worktree',
+  ready: 'worktree جاهزة',
+  failed: 'فشل تحضير worktree',
+  blockedState: 'worktree تحتاج انتباهاً',
+  removing: 'جارٍ إزالة مجلد worktree',
+  removed: 'تمت إزالة المجلد والاحتفاظ بالفرع',
+  reasonUnavailable: 'عملية worktree هذه غير متاحة حالياً.',
+  workspaceBusy: 'في انتظار خمول مساحة العمل.',
+  unsupported: 'لا يدعم هذا النشر أو بيئة التشغيل أشجار عمل الجلسة.',
+  notGit: 'المجلد المحدد ليس داخل مستودع Git.',
+  layoutUnsupported:
+    'يجب أن يكون المستودع وبيانات Git الوصفية في نفس وحدة التخزين المخوّلة. اختر النسخة الأصلية.',
+  invalidRef: 'الفرع الأساسي أو الإيداع المحدد غير صالح.',
+  dirty:
+    'تحتوي worktree على تغييرات غير مودَعة أو ملفات غير متتبَّعة أو ملفات متجاهَلة. احفظها أو أزلها قبل التنظيف.',
+  identityConflict: 'مجلد worktree الأصلي مفقود أو تغيّر.',
+  stopUnverified: 'لم يتم تأكيد توقف عملية Git السابقة.',
+  sessionActive: 'أغلق الجلسة قبل إزالة worktree الخاصة بها.',
+  backgroundBusy: 'انتظر انتهاء مهام الخلفية قبل التنظيف.',
+};
+
 const REASON_KEYS: Record<string, keyof typeof EN> = {
   workspace_busy: 'workspaceBusy',
   worktree_unsupported: 'unsupported',
@@ -203,7 +248,9 @@ export function useManagedWorktreeText() {
         ? ZH
         : language === 'ru'
           ? RU
-          : EN)[key];
+          : language === 'ar'
+            ? AR
+            : EN)[key];
 }
 
 export function useManagedWorktreeReason() {

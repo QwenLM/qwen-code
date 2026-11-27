@@ -1039,7 +1039,7 @@ function ToolbarPopover({
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
   // Touch and narrow viewports have no room beside the popover for the model
@@ -1174,7 +1174,9 @@ function ToolbarPopover({
       enterKeyHint={touchSearchField ? 'search' : undefined}
       onChange={(event) => setSearchQuery(event.target.value)}
       onKeyDown={(event) => {
-        if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
+        if (!submenu || searchQuery) return;
+        const closeKey = isRtl ? 'ArrowRight' : 'ArrowLeft';
+        if (event.key !== closeKey) return;
         event.preventDefault();
         returningFromSubmenuRef.current = true;
         setSubmenuOpen(false);
@@ -1428,7 +1430,8 @@ function ToolbarPopover({
                     aria-expanded={submenuOpen}
                     aria-label={submenu.triggerAriaLabel}
                     onKeyDown={(event) => {
-                      if (event.key !== 'ArrowRight') return;
+                      const openKey = isRtl ? 'ArrowLeft' : 'ArrowRight';
+                      if (event.key !== openKey) return;
                       event.preventDefault();
                       setSubmenuOpen(true);
                     }}
@@ -1436,11 +1439,14 @@ function ToolbarPopover({
                     <span title={submenu.triggerLabel}>
                       {submenu.triggerLabel}
                     </span>
-                    <ChevronRightIcon aria-hidden="true" />
+                    <ChevronRightIcon
+                      className="rtl:-scale-x-100"
+                      aria-hidden="true"
+                    />
                   </button>
                 </PopoverTrigger>
                 <PopoverContent
-                  side="right"
+                  side={isRtl ? 'left' : 'right'}
                   align="end"
                   alignOffset={-10}
                   sideOffset={15}
@@ -5144,6 +5150,7 @@ export const ChatEditor = memo(
                                 {t('editor.pastedTextShowInEditor')}
                                 <ChevronRightIcon
                                   size={12}
+                                  className="rtl:-scale-x-100"
                                   aria-hidden="true"
                                 />
                               </button>

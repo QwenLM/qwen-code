@@ -111,6 +111,8 @@ export interface TranscriptReplayStateV1 {
 
 export interface TranscriptReplayToolMetadata {
   readonly title: string;
+  /** Present when the producer knows whether this title is machine text. */
+  readonly titleIsMachine?: boolean;
   readonly locations: readonly ToolCallLocation[];
   readonly kind: ToolKind;
 }
@@ -1044,6 +1046,9 @@ export function createTranscriptToolCallStartUpdate(
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
         ...(options.extra ?? {}),
+        ...(options.metadata.titleIsMachine !== undefined
+          ? { titleIsMachine: options.metadata.titleIsMachine }
+          : {}),
       },
     }),
   } as SessionUpdate;

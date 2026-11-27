@@ -320,7 +320,7 @@ function ExtensionInteractionDialog({
         showCloseButton={false}
         className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl"
       >
-        <DialogHeader className="items-start px-3 text-left">
+        <DialogHeader className="items-start px-3 text-start">
           <DialogTitle>
             {pendingInteraction?.interaction.kind === 'setting'
               ? pendingInteraction.interaction.setting.name
@@ -1302,7 +1302,7 @@ function NativeExtensionsManagerPage({
             onClick={onClose}
             aria-label={t('common.back')}
           >
-            <ArrowLeftIcon />
+            <ArrowLeftIcon className="rtl:-scale-x-100" />
           </Button>
         </BreadcrumbItem>
         <BreadcrumbItem>
@@ -1338,7 +1338,7 @@ function NativeExtensionsManagerPage({
                   onClick={embedded.onBack}
                   aria-label={t('common.back')}
                 >
-                  <ArrowLeftIcon />
+                  <ArrowLeftIcon className="rtl:-scale-x-100" />
                 </Button>
               </BreadcrumbItem>
             ) : null}
@@ -1735,7 +1735,7 @@ function NativeExtensionsManagerPage({
           }}
         >
           <AlertDialogContent>
-            <AlertDialogHeader className="place-items-start text-left">
+            <AlertDialogHeader className="place-items-start text-start">
               <AlertDialogTitle>
                 {t('extensions.manage.uninstallAction')}
               </AlertDialogTitle>
@@ -1848,7 +1848,7 @@ function NativeExtensionsManagerPage({
         {refreshNotice}
 
         <div className="relative">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+          <SearchIcon className="pointer-events-none absolute top-1/2 start-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             name="extension-search"
             aria-label={t('extensions.manage.search')}
@@ -1856,7 +1856,7 @@ function NativeExtensionsManagerPage({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t('extensions.manage.search')}
-            className="pl-9"
+            className="ps-9"
           />
         </div>
 
@@ -1976,7 +1976,7 @@ function NativeExtensionsManagerPage({
         }}
       >
         <AlertDialogContent size="middle">
-          <AlertDialogHeader className="place-items-start text-left">
+          <AlertDialogHeader className="place-items-start text-start">
             <AlertDialogTitle>
               {t('extensions.manage.installTitle')}
             </AlertDialogTitle>

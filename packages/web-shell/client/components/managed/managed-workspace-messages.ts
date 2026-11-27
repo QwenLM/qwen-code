@@ -79,3 +79,29 @@ export const WORKSPACE_REGISTRATION_MESSAGES_RU: Record<string, string> = {
   'managed.remoteWorkspaceUnconfirmed':
     'Регистрация не подтверждена. Продолжите подтверждение сохранённого запроса.',
 };
+
+export const WORKSPACE_REGISTRATION_MESSAGES_AR: Record<string, string> = {
+  'managed.remoteWorkspaceAdd': 'إضافة مساحة عمل',
+  'managed.remoteWorkspaceDescription':
+    'اختر جهازاً ومجلداً موجوداً لإضافته إلى قائمة مساحات العمل لديك.',
+  'managed.remoteWorkspaceMachine': 'الجهاز',
+  'managed.remoteWorkspaceChooseMachine': 'اختر جهازاً',
+  'managed.remoteWorkspaceDirectory': 'المجلد على هذا الجهاز',
+  'managed.remoteWorkspaceName': 'اسم مساحة العمل',
+  'managed.remoteWorkspaceCheck': 'فحص المجلد',
+  'managed.remoteWorkspaceRegister': 'تسجيل مساحة العمل',
+  'managed.remoteWorkspaceConfirm': 'متابعة تأكيد التسجيل',
+  'managed.remoteWorkspaceStartAnother': 'بدء تسجيل آخر',
+  'managed.remoteWorkspaceClose': 'إغلاق',
+  'managed.remoteWorkspaceWorking': 'جارٍ تأكيد مساحة العمل…',
+  'managed.remoteWorkspacePermission':
+    'لا يملك حسابك إذن استخدام هذا الجهاز أو مساحة العمل هذه.',
+  'managed.remoteWorkspaceInvalidDirectory':
+    'المجلد غير متوفر. تحقق من الجهاز والمجلد ثم حاول مجدداً.',
+  'managed.remoteWorkspaceFailed':
+    'فشل التسجيل. تحقق من الجهاز والمجلد قبل المحاولة مجدداً.',
+  'managed.remoteWorkspaceBlocked':
+    'لم يؤكد الجهاز هذا التسجيل بعد. سيكتمل أو يحرر المجلد تلقائياً فور استجابة الجهاز؛ وإذا بقي محجوباً فسيحتاج مراجعة المسؤول. يمكنك مسح مسودة المتصفح هذه لتسجيل مجلد آخر.',
+  'managed.remoteWorkspaceUnconfirmed':
+    'التسجيل غير مؤكد. تابع تأكيد الطلب المحفوظ.',
+};

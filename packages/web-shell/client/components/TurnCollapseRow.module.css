@@ -82,6 +82,10 @@
   transform: rotate(-45deg);
 }
 
+:global([dir='rtl']) .chevronRight {
+  transform: rotate(135deg);
+}
+
 .chevronDown {
   transform: rotate(45deg);
   margin-top: -3px;

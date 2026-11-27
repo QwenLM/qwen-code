@@ -32,7 +32,7 @@
   background: transparent;
   color: var(--foreground);
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -43,18 +43,19 @@
   background: var(--secondary);
 }
 
-/* Confirmed selection: stronger than the cursor — a left accent bar plus a blue
+/* Confirmed selection: stronger than the cursor — a leading accent bar plus a blue
    title, so the chosen row stays distinguishable from the row merely under the
    cursor (which only gets the gray background). */
 .itemSelected::before {
   content: '';
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 50%;
   transform: translateY(-50%);
   height: 60%;
   width: 3px;
-  border-radius: 0 3px 3px 0;
+  border-start-end-radius: 3px;
+  border-end-end-radius: 3px;
   background: var(--agent-blue-500, #4a9eff);
 }
 
@@ -110,7 +111,7 @@
 /* Inline failure text: toasts can be deduplicated by the app shell, so the
    dialog must show the error itself (mirrors delete/release's message hint). */
 .footerMessage {
-  margin-right: auto;
+  margin-inline-end: auto;
   color: var(--error-color);
   font-size: 12px;
 }

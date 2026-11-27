@@ -92,7 +92,7 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.5;
-  text-align: left;
+  text-align: start;
 }
 
 .scheduledTaskBubble {
@@ -365,7 +365,7 @@
   min-height: 28px;
   align-items: center;
   margin: 0 0.25ch;
-  padding-right: 8px;
+  padding-inline-end: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);
@@ -380,7 +380,7 @@
   position: absolute;
   z-index: calc(var(--web-shell-tooltip-z-index, 1000) + 1);
   top: calc(100% + 6px);
-  left: 0;
+  inset-inline-start: 0;
   min-width: 160px;
   max-width: min(320px, 80vw);
   padding: 8px 10px;
@@ -428,7 +428,7 @@
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   color: var(--muted-foreground);
   background: currentColor;
   mask: var(--user-message-tag-icon-url) center / contain no-repeat;
@@ -444,17 +444,19 @@
 }
 
 .messageTagLabel {
-  padding: 3px 0 3px 7px;
+  padding-block: 3px;
+  padding-inline: 7px 0;
   color: var(--agent-blue-500);
 }
 
 .messageTagIcon + .messageTagLabel {
-  padding-left: 0.5ch;
+  padding-inline-start: 0.5ch;
 }
 
 .messageTagValue {
   max-width: 32ch;
-  padding: 3px 0 3px 0.5ch;
+  padding-block: 3px;
+  padding-inline: 0.5ch 0;
   color: var(--foreground, #e4e4e4);
   opacity: 1;
 }
@@ -553,6 +555,6 @@
 
 .fileTagIcon {
   flex: 0 0 auto;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   color: var(--muted-foreground);
 }

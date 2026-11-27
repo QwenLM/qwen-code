@@ -109,6 +109,36 @@ const messages = {
   ],
 } as const satisfies Record<string, readonly [string, string, string, string]>;
 
+const AR_MESSAGES: Record<keyof typeof messages, string> = {
+  btw: 'سؤال جانبي',
+  recap: 'ملخص الجلسة',
+  private: 'يُحفظ بشكل خاص لحسابك. وتستمر المهمة الرئيسية في التشغيل.',
+  empty: 'لا توجد إجابات محفوظة بعد.',
+  older: 'إجابات أقدم',
+  question: 'اطرح سؤال متابعة',
+  send: 'اسأل',
+  generate: 'توليد ملخص',
+  stop: 'إيقاف',
+  retry: 'إعادة المحاولة',
+  confirm: 'تأكيد الإرسال الأصلي',
+  unconfirmed: 'لم يتم تأكيد الإرسال. أكّده باستخدام الطلب الأصلي.',
+  preparing: 'جارٍ التحضير',
+  running: 'جارٍ الإجابة',
+  completed: 'مكتمل',
+  failed: 'فشل',
+  cancelled: 'متوقف',
+  interrupted: 'تمت المقاطعة',
+  insufficient: 'لا توجد محادثة مكتملة كافية لتلخيصها.',
+  partial: 'هذه الإجابة غير مكتملة.',
+  unavailable: 'التوليد غير متاح لهذه الجلسة.',
+  storage: 'تخزين المتصفح غير متاح. لم يتم إرسال السؤال.',
+  automatic: 'تلخيص تلقائي بعد غيابي خمس دقائق',
+  automaticHint:
+    'معطّل افتراضياً. يعمل بعد خمول المهمة الرئيسية وقائمة الانتظار.',
+  source: 'أدوار المستخدم المكتملة',
+  boundary: 'حد رسالة المصدر',
+};
+
 export function ManagedSideQueryPanel({
   sideQueries,
   interactive,
@@ -118,15 +148,17 @@ export function ManagedSideQueryPanel({
 }) {
   const { language } = useI18n();
   const t = (key: keyof typeof messages) =>
-    messages[key][
-      language === 'zh-TW'
-        ? 2
-        : language === 'zh-CN'
-          ? 1
-          : language === 'ru'
-            ? 3
-            : 0
-    ];
+    language === 'ar'
+      ? AR_MESSAGES[key]
+      : messages[key][
+          language === 'zh-TW'
+            ? 2
+            : language === 'zh-CN'
+              ? 1
+              : language === 'ru'
+                ? 3
+                : 0
+        ];
   const kind = sideQueries.open;
   const [question, setQuestion] = useState('');
   useEffect(() => setQuestion(''), [sideQueries.identity]);

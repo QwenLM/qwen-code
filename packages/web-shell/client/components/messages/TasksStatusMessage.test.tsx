@@ -10,7 +10,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import {
   TranscriptRenderModeProvider,
   type TranscriptRenderMode,
@@ -166,6 +166,7 @@ function renderPanel(
     onOpenSubagent?: (tool: ACPToolCall) => void;
     onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     renderMode?: TranscriptRenderMode;
+    language?: WebShellLanguage;
   } = {},
 ): HTMLElement {
   const snapshot: DaemonSessionWorkflowTasksStatus = {
@@ -180,7 +181,7 @@ function renderPanel(
   mounted.push({ root, container });
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={options.language ?? 'en'}>
         <TranscriptRenderModeProvider
           value={options.renderMode ?? 'interactive'}
         >
@@ -222,7 +223,83 @@ it('keeps polling workflow tasks when an enabled panel opens empty', async () =>
   expect(getTasksMock).not.toHaveBeenCalled();
 });
 
+describe('shell task command direction', () => {
+  it.each(['interactive', 'document'] as const)(
+    'isolates only the command in %s rows and detail headings',
+    (renderMode) => {
+      const command = 'مجلد/run.sh --name "ملف عربي"';
+      const container = renderPanel(
+        [
+          {
+            kind: 'shell',
+            id: 'shell-rtl',
+            label: 'تشغيل',
+            description: 'وصف',
+            status: 'running',
+            startTime: 1000,
+            runtimeMs: 500,
+            command,
+            cwd: '/tmp',
+          },
+          agentTask('orphan', {
+            parentAgentId: 'gone',
+            parentName: 'المحرر',
+            depth: 2,
+          }),
+        ],
+        { language: 'ar', renderMode },
+      );
+      const name = Array.from(
+        container.querySelectorAll('[class*="nameCell"]'),
+      ).find((node) => node.textContent?.includes(command));
+      expect(name?.querySelector('bdi[dir="ltr"]')?.textContent).toBe(command);
+      expect(name?.hasAttribute('dir')).toBe(false);
+      expect(
+        container.querySelector('[class*="orphanNote"]')?.closest('bdi'),
+      ).toBeNull();
+      if (renderMode === 'interactive') {
+        const row = name?.closest('[role="button"]') as HTMLElement;
+        expect(row.textContent).toContain(command);
+        act(() => row.click());
+      }
+      if (renderMode === 'interactive') {
+        const title = Array.from(
+          container.querySelectorAll('[class*="title"]'),
+        ).find((node) => node.querySelector('bdi')?.textContent === command);
+        expect(title?.querySelector('bdi')?.getAttribute('dir')).toBe('ltr');
+        expect(title?.hasAttribute('dir')).toBe(false);
+        expect(title?.textContent).toContain(' › ' + command);
+      }
+      expect(container.textContent).not.toContain('[object Object]');
+    },
+  );
+});
+
 describe('TasksStatusMessage monitor details', () => {
+  it('pins explicit machine details but not localized agent type in Arabic documents', () => {
+    const container = renderPanel(
+      [
+        agentTask('agent-rtl', { outputFile: '/tmp/نتيجة/output.json' }),
+        monitorTask({ command: 'tail -f /tmp/سجل/server.log' }),
+      ],
+      { renderMode: 'document', language: 'ar' },
+    );
+    const values = Array.from(
+      container.querySelectorAll('[class*="detailContent"]'),
+    );
+    for (const text of [
+      '/tmp/نتيجة/output.json',
+      'tail -f /tmp/سجل/server.log',
+    ]) {
+      expect(
+        values.find((value) => value.textContent === text)?.getAttribute('dir'),
+      ).toBe('ltr');
+    }
+    expect(
+      values.some((value) => value.textContent && !value.hasAttribute('dir')),
+    ).toBe(true);
+  });
+
   it('renders a complete inert snapshot without polling in document mode', () => {
     vi.useFakeTimers();
     const tasks = Array.from({ length: 10 }, (_, index) =>
@@ -1341,10 +1418,10 @@ describe('TasksStatusMessage nested-agent tree', () => {
     ]);
     expect(container.textContent).toContain('↳');
     const indented = container.querySelector(
-      'span[style*="padding-left"]',
+      'span[style*="padding-inline-start"]',
     ) as HTMLElement | null;
     expect(indented).not.toBeNull();
-    expect(indented!.style.paddingLeft).toBe('16px');
+    expect(indented!.style.paddingInlineStart).toBe('16px');
     expect(indented!.textContent).toContain('label-child');
   });
 
@@ -1359,7 +1436,48 @@ describe('TasksStatusMessage nested-agent tree', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('↳');
     expect(text).toContain('from editor');
-    expect(container.querySelector('span[style*="padding-left"]')).toBeNull();
+    expect(
+      container.querySelector('span[style*="padding-inline-start"]'),
+    ).toBeNull();
+  });
+
+  it('closes the Arabic panel with the arrow its hint advertises', async () => {
+    const container = renderPanel([agentTask('solo')], { language: 'ar' });
+    expect(container.textContent).toContain('→/Esc إغلاق');
+    expect(container.textContent).not.toContain('←/Esc');
+
+    // The global keydown listener attaches after a 50 ms guard delay.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('label-solo'))!;
+    act(() => row.click());
+    expect(container.textContent).toContain('→ رجوع');
+    expect(container.textContent).not.toContain('← رجوع');
+
+    // Changing step re-arms the listener after the same guard delay.
+    const rearm = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+    await rearm();
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' })),
+    );
+    expect(container.textContent).toContain('→ رجوع');
+
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' })),
+    );
+    expect(container.textContent).toContain('→/Esc إغلاق');
+
+    await rearm();
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' })),
+    );
+    expect(container.querySelector('[data-keyboard-scope]')).toBeNull();
   });
 
   it('cancels a foreground child of a background parent on the first press', async () => {

@@ -30,6 +30,8 @@ vi.mock('./index.js', () => ({
       ko: 'Korean',
       fr: 'French',
       es: 'Spanish',
+      ar: 'Arabic',
+      'ar-sa': 'Arabic',
     };
     return map[locale.toLowerCase()] || 'English';
   }),
@@ -125,6 +127,11 @@ describe('languageUtils', () => {
 
     it('should convert "ja" to "Japanese"', () => {
       expect(normalizeOutputLanguage('ja')).toBe('Japanese');
+    });
+
+    it('should convert "ar" and "ar-SA" to "Arabic"', () => {
+      expect(normalizeOutputLanguage('ar')).toBe('Arabic');
+      expect(normalizeOutputLanguage('ar-SA')).toBe('Arabic');
     });
 
     it('should be case insensitive for locale codes', () => {

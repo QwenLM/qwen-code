@@ -272,6 +272,63 @@ describe('extractPendingPermission', () => {
     expect(result?.toolName).toBe('agent');
   });
 
+  it.each([true, false])(
+    'extracts title provenance (%s) from toolCall._meta',
+    (titleIsMachine) => {
+      const permission = {
+        id: 'perm-machine',
+        kind: 'permission',
+        sessionId: 'session-1',
+        requestId: 'request-machine',
+        resolved: undefined,
+        title: 'Writing to مجلد/ملف.ts',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'call-machine',
+          kind: 'edit',
+          _meta: { toolName: 'write_file', titleIsMachine },
+          rawInput: { file_path: 'مجلد/ملف.ts' },
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+        clientReceivedAt: 1,
+      } as DaemonTranscriptBlock;
+
+      const result = extractPendingPermission(state([permission]).blocks);
+      expect(result?.titleIsMachine).toBe(titleIsMachine);
+    },
+  );
+
+  it('ignores absent or non-boolean title provenance in toolCall._meta', () => {
+    for (const meta of [
+      { toolName: 'write_file' },
+      { titleIsMachine: 'yes' },
+    ]) {
+      const permission = {
+        id: 'perm-machine',
+        kind: 'permission',
+        sessionId: 'session-1',
+        requestId: 'request-machine',
+        resolved: undefined,
+        title: 'Writing to مجلد/ملف.ts',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'call-machine',
+          _meta: meta,
+          rawInput: {},
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+        clientReceivedAt: 1,
+      } as DaemonTranscriptBlock;
+
+      const result = extractPendingPermission(state([permission]).blocks);
+      expect(result).not.toHaveProperty('titleIsMachine');
+    }
+  });
+
   it('extracts the plan body from exit-plan permission content', () => {
     const permission = {
       id: 'perm-plan',

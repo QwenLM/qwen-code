@@ -77,7 +77,7 @@ export function GitDialog({
   onNewWorktreeSession?: () => void;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const { client, capabilities } = useWorkspace();
   const gitSessionId = gitCwd ? sessionId : undefined;
@@ -256,14 +256,16 @@ export function GitDialog({
   };
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const forwardKey = isRtl ? 'ArrowLeft' : 'ArrowRight';
+    const backwardKey = isRtl ? 'ArrowRight' : 'ArrowLeft';
     if (isCommit) {
-      // Commit is the rightmost tab. Arrow keys and Home move into the regular
+      // Commit is the trailing tab. Arrow keys and Home move into the regular
       // tabs so keyboard users aren't trapped on the commit tab; End stays put
       // because commit is already the last tab.
-      if (event.key === 'ArrowLeft') {
+      if (event.key === backwardKey) {
         event.preventDefault();
         selectAndFocus(tabViews[tabViews.length - 1]);
-      } else if (event.key === 'ArrowRight' || event.key === 'Home') {
+      } else if (event.key === forwardKey || event.key === 'Home') {
         event.preventDefault();
         selectAndFocus(tabViews[0]);
       } else if (event.key === 'End') {
@@ -274,7 +276,7 @@ export function GitDialog({
     const index = tabViews.indexOf(clampedTab as (typeof tabViews)[number]);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      const delta = event.key === 'ArrowRight' ? 1 : -1;
+      const delta = event.key === forwardKey ? 1 : -1;
       selectAndFocus(
         tabViews[(index + delta + tabViews.length) % tabViews.length],
       );

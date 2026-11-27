@@ -27,7 +27,7 @@
 
 .overflowHint {
   color: var(--muted-foreground);
-  padding-left: 2ch;
+  padding-inline-start: 2ch;
 }
 
 .header {
@@ -152,7 +152,7 @@
   gap: 8px;
   max-height: min(520px, 50vh);
   overflow-y: auto;
-  padding-right: 4px;
+  padding-inline-end: 4px;
 }
 
 .detailTop {
@@ -258,7 +258,7 @@
 .monitorActionError {
   color: var(--error-color);
   font-size: 12px;
-  text-align: right;
+  text-align: end;
 }
 
 .monitorMetrics {
@@ -361,6 +361,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--foreground);
+  direction: ltr;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
@@ -398,6 +399,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--foreground);
+  direction: ltr;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
@@ -425,7 +427,7 @@
 .embeddedPanel .detail {
   max-height: none;
   overflow: visible;
-  padding-right: 0;
+  padding-inline-end: 0;
 }
 
 .embeddedPanel .list {

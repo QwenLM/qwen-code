@@ -53,9 +53,10 @@ describe('TrajectoryWaterfallCell', () => {
     const viewport = { start: 800, end: 1600 };
     const a = bar(draw({ span: span(800, 1400), total: 4500, viewport }));
     const b = bar(draw({ span: span(1000, 1600), total: 4500, viewport }));
-    expect(a?.style.left).toBe('0%');
+    expect(a?.style.insetInlineStart).toBe('0%');
+    expect(a?.style.left).toBe('');
     expect(a?.style.width).toBe('75%');
-    expect(b?.style.left).toBe('25%');
+    expect(b?.style.insetInlineStart).toBe('25%');
     expect(b?.style.width).toBe('75%');
   });
   it('clips TTFT and the committed time range to the viewport', () => {
@@ -99,14 +100,15 @@ describe('TrajectoryWaterfallCell', () => {
   it('keeps zero timing finite and has no focusable controls', () => {
     const container = draw({ span: span(0, 0), total: 0 });
     expect(bar(container)?.dataset.zero).toBe('true');
-    expect(bar(container)?.style.left).toBe('0%');
+    expect(bar(container)?.style.insetInlineStart).toBe('0%');
     expect(container.innerHTML).not.toMatch(/NaN|Infinity/);
     expect(container.querySelector('button,[tabindex]')).toBeNull();
   });
-  it('retains the last zero-duration marker inside the right edge', () => {
+  it('retains the last zero-duration marker inside the end edge', () => {
     const container = draw({ span: span(1000, 1000), total: 1000 });
     expect(bar(container)?.dataset.atEnd).toBe('true');
-    expect(bar(container)?.style.left).toBe('100%');
+    expect(bar(container)?.style.insetInlineStart).toBe('100%');
+    expect(bar(container)?.style.left).toBe('');
   });
   it('shows no invented bar for missing timing', () => {
     const container = draw({ total: 1000 });

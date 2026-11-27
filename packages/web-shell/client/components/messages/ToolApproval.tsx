@@ -18,6 +18,7 @@ import { isExitPlanApprovalRequest } from '../../utils/todos';
 import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
+  isMachineToolDescription,
   localizeToolDisplayName,
   sanitizeControlChars,
 } from './toolFormatting';
@@ -36,6 +37,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
+import { MachineText } from '../ui/machine-text';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
@@ -446,6 +448,23 @@ export function ToolApproval({
         : localizeToolDisplayName(rawToolName, t);
   const descriptionText =
     showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
+  // The provenance flag describes the daemon title, not `rawInput.description`
+  // prose, so it applies only when the title is the text the card shows.
+  // Without provenance, reuse the transcript's machine-text heuristic.
+  const descriptionIsMachine =
+    descriptionText !== undefined &&
+    descriptionText === request.title &&
+    (request.titleIsMachine ??
+      isMachineToolDescription(
+        {
+          callId: request.toolCallId ?? request.id,
+          toolName: request.toolName ?? '',
+          status: 'pending',
+          title: request.title,
+          args: request.rawInput,
+        },
+        descriptionText,
+      ));
   const contentText = extractContentText(request);
   const goalObjective =
     typeof request.rawInput?.objective === 'string'
@@ -779,7 +798,11 @@ export function ToolApproval({
 
       {descriptionText && (
         <div className={styles.desc} id={descId} title={descriptionDisplay}>
-          {descriptionDisplay}
+          {descriptionIsMachine ? (
+            <MachineText>{descriptionDisplay}</MachineText>
+          ) : (
+            descriptionDisplay
+          )}
         </div>
       )}
 
@@ -804,6 +827,7 @@ export function ToolApproval({
           {execWarningsText && (
             <pre
               className={styles.content}
+              dir="ltr"
               id={contentId}
               title={execWarningsDisplay}
             >

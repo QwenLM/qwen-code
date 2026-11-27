@@ -18,7 +18,7 @@ This is the CLI’s UI localization layer (i18n/l10n): it controls the language 
 
 ### Web Shell and Desktop
 
-The Web Shell (including Qwen Code Desktop) reads the same `general.language` setting. Built-in UI catalogs are `en`, `zh-CN`, and `ru`. Custom packs in `~/.qwen/locales/` apply to the CLI only; they are not loaded by the Web Shell.
+The Web Shell (including Qwen Code Desktop) reads the same `general.language` setting. Built-in UI catalogs are `en`, `zh-CN`, `zh-TW`, `ru`, and `ar`; Arabic renders right-to-left, and keys it does not cover fall back to English. Custom packs in `~/.qwen/locales/` apply to the CLI only; they are not loaded by the Web Shell.
 
 ### Setting the UI Language
 

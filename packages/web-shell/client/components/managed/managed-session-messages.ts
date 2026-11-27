@@ -317,6 +317,8 @@ function appendManagedEvents(
       // The Harness titles each call itself; the approval card shows it as
       // the description, so keep it instead of dropping it on the floor.
       if (typeof data['title'] === 'string') tool.title = data['title'];
+      if (typeof data['titleIsMachine'] === 'boolean')
+        tool.titleIsMachine = data['titleIsMachine'];
       if (data['input'] !== undefined) {
         const input =
           typeof data['input'] === 'string' && data['truncated'] === true

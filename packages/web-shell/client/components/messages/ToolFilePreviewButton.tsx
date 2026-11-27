@@ -123,7 +123,7 @@ function AvailableFileButton({
       type="button"
       variant="ghost"
       size={iconOnly ? 'icon-xs' : 'xs'}
-      className="ml-auto text-muted-foreground"
+      className="ms-auto text-muted-foreground"
       title={t('tool.viewCurrentFile')}
       aria-label={t(
         getImageMimeTypeFromPath(filePath) ? 'tool.viewImage' : 'tool.viewFile',

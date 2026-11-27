@@ -779,6 +779,42 @@ describe('ComposerTaskChips', () => {
       });
       expect(document.activeElement).toBe(chips()[0]);
     });
+
+    it('mirrors the "?" arrow keys in Arabic', () => {
+      const onExplainTask = vi.fn();
+      act(() => {
+        root.render(
+          <I18nProvider language="ar">
+            <ComposerTaskChips
+              tasks={[workflow('wf-1'), shell('shell-1')]}
+              includeAgents
+              onSelectTask={vi.fn()}
+              onExplainTask={onExplainTask}
+            />
+          </I18nProvider>,
+        );
+      });
+      const explains = explainButtons();
+
+      // In RTL the "?" sits at the physical left of its chip, so ArrowLeft
+      // is the forward reading-order key and advances to the next chip.
+      act(() => explains[0].focus());
+      act(() => {
+        explains[0].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+        );
+      });
+      expect(document.activeElement).toBe(chips()[1]);
+
+      // ArrowRight is the backward key: it returns to the owning chip.
+      act(() => explains[1].focus());
+      act(() => {
+        explains[1].dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+        );
+      });
+      expect(document.activeElement).toBe(chips()[1]);
+    });
   });
 
   it('collapses an expanded multi-task chip when clicked again, even if blur fires with null relatedTarget', () => {

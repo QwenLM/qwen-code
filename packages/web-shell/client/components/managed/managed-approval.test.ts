@@ -320,6 +320,39 @@ describe('Managed approval presentation', () => {
     );
   });
 
+  it.each([true, false, undefined])(
+    'carries the tool row title provenance (%s) into the approval',
+    (titleIsMachine) => {
+      const messages = managedEventsToMessages(
+        [
+          {
+            id: 9,
+            at: 9,
+            type: 'tool_requested',
+            sessionId: 's1',
+            turnId: 'turn-2',
+            data: {
+              itemId: 'item_tool_1',
+              toolCallId: 'call-1',
+              toolName: 'write_file',
+              title: 'WriteFile: Writing to مجلد/ملف.ts',
+              ...(titleIsMachine !== undefined ? { titleIsMachine } : {}),
+              input: { file_path: 'مجلد/ملف.ts', content: 'x' },
+            },
+          },
+        ],
+        '[truncated]',
+      );
+      const request = toManagedPermissionRequest(action, messages);
+      expect(request.title).toBe('WriteFile: Writing to مجلد/ملف.ts');
+      if (titleIsMachine === undefined) {
+        expect(request).not.toHaveProperty('titleIsMachine');
+      } else {
+        expect(request.titleIsMachine).toBe(titleIsMachine);
+      }
+    },
+  );
+
   it('ignores a call with the same ID in a later Turn', () => {
     // Call IDs restart per Turn, so the later Turn's call must not win.
     const messages = [

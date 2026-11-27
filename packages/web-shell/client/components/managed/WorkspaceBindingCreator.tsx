@@ -2002,7 +2002,7 @@ export function WorkspaceBindingCreator({
                         {item.label}
                         {item.hostOrigin &&
                           item.hostOrigin !== window.location.origin && (
-                            <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                            <span className="ms-auto flex items-center gap-1.5 text-muted-foreground">
                               <HostLabel origin={item.hostOrigin} />
                             </span>
                           )}

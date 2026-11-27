@@ -333,8 +333,182 @@ export function getToolDescription(
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd);
-  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
+  return truncateText(fromArgs.text, MAX_DESCRIPTION_LENGTH);
+}
+
+// The producer reports whether it emitted machine text, so a decorated
+// command (` [background]`, ` [timeout: …ms]`, ` [in …]`) stays isolated.
+// Shell rows render the summary variant, which omits the timeout suffix.
+export function isMachineToolDescription(
+  tool: ACPToolCall,
+  description: string,
+  workspaceCwd?: string,
+): boolean {
+  if (!description) return false;
+  if (tool.titleIsMachine !== undefined) return tool.titleIsMachine;
+  const explicit = tool.args?.description;
+  // ACP can use explicit prose as the title when an invocation cannot be
+  // built; it is not machine text even when it matches the machine framing.
+  if (
+    typeof explicit === 'string' &&
+    explicit.trim() &&
+    getDescriptionFromTitle(tool, workspaceCwd) ===
+      formatDescriptionPaths(explicit, workspaceCwd)
+  ) {
+    return false;
+  }
+  const produced = getDescriptionFromArgs(
+    tool,
+    workspaceCwd,
+    isShellToolName(tool.toolName) ? { includeTimeout: false } : {},
+  );
+  if (!produced.machine || !produced.text) return false;
+
+  // core resolves the parameter (makeRelative) and frames it per tool, so the
+  // daemon title carries a prefix and a resolved path this browser's formatter
+  // does not reproduce. Accept the payload under a producer framing only:
+  // prose that merely ends with the same path is not machine text.
+  const shown = collapseDotSegments(description);
+  const matches = (candidate: string) => {
+    const text = truncateText(candidate, MAX_DESCRIPTION_LENGTH);
+    const target = collapseDotSegments(text);
+    return (
+      shown === target ||
+      description === truncateText(text, 120) ||
+      MACHINE_PATH_FRAMINGS.some((framing) => shown.endsWith(framing + target))
+    );
+  };
+  if (matches(produced.text)) return true;
+  // A legacy shell title carries core's decorations verbatim — the raw
+  // directory, ` [background]` and ` [timeout: …ms]` — while the browser
+  // rebuilds a friendly directory and drops the timeout from the summary.
+  if (
+    isShellToolName(tool.toolName) &&
+    tool.args?.command &&
+    matches(getDaemonShellDescription(tool))
+  ) {
+    return true;
+  }
+  const name = tool.toolName.toLowerCase();
+  const suffix =
+    name === 'read_file' || name === 'readfile' || name === 'read'
+      ? readFileTitleSuffix(tool.args)
+      : '';
+  const decorate = (path: string) => (suffix ? `${path} ${suffix}` : path);
+  const path = shortenReadFilePath(produced.text);
+  if (matches(decorate(produced.text)) || matches(decorate(path))) return true;
+  // A Windows-relative daemon title keeps its native separators.
+  if (
+    String(tool.args?.file_path ?? '').includes('\\') &&
+    matches(decorate(path.replaceAll('/', '\\')))
+  ) {
+    return true;
+  }
+
+  // Legacy search titles have no provenance flag. Recognize the daemon's
+  // pattern and filter framing without reimplementing its path formatting.
+  const searchTitle = getDaemonSearchDescription(tool, workspaceCwd);
+  return searchTitle !== null && matches(searchTitle);
+}
+
+// core's write-file/edit framings for a resolved path. A legacy title is
+// machine text only under one of these, never under arbitrary prose.
+const MACHINE_PATH_FRAMINGS = ['Writing to ', 'Create ', 'No file changes to '];
+
+// Match only a decoration supported by the original arguments or by a
+// replayed file_read preview's 1-based inclusive range.
+function readFileTitleSuffix(args: ACPToolCall['args']): string {
+  const pages = getStringArg(args, 'pages');
+  if (pages) return `(pages ${pages})`;
+  const { offset, limit, range } = args ?? {};
+  if (typeof offset === 'number') {
+    return typeof limit === 'number'
+      ? `(lines ${offset + 1}-${offset + limit})`
+      : `(from line ${offset + 1})`;
+  }
+  if (typeof limit === 'number') return `(first ${limit} lines)`;
+  if (
+    Array.isArray(range) &&
+    range.length === 2 &&
+    range.every(Number.isInteger)
+  ) {
+    return `(lines ${range[0]}-${range[1]})`;
+  }
   return '';
+}
+
+// Mirror core's 80-character ReadFile path budget without importing Node
+// path utilities into the browser. Keep the first and as many trailing
+// segments as fit, or keep exactly 38 characters from each end.
+function shortenReadFilePath(path: string): string {
+  if (path.length <= 80) return path;
+  const first = path.indexOf('/');
+  const prefix = path.slice(0, first) + '/.../';
+  const last = path.indexOf(
+    '/',
+    Math.max(first + 1, path.length + prefix.length - 81),
+  );
+  return first >= 0 && last >= 0
+    ? prefix + path.slice(last + 1)
+    : `${path.slice(0, 38)}...${path.slice(-38)}`;
+}
+
+// core collapses dot segments before rendering a path; pathForDisplay only
+// normalizes separators, so the comparison collapses them on both sides.
+function collapseDotSegments(text: string): string {
+  const kept: string[] = [];
+  for (const segment of text.split('/')) {
+    if (segment === '.') continue;
+    if (segment === '..' && kept.length > 0) {
+      kept.pop();
+      continue;
+    }
+    kept.push(segment);
+  }
+  return kept.join('/');
+}
+
+// core interpolates the shell directory raw and keeps every decoration it
+// appends; the browser's own variant displays a friendly directory and omits
+// the timeout, so a legacy title needs the producer's framing to compare.
+function getDaemonShellDescription(tool: ACPToolCall): string {
+  const args = tool.args ?? {};
+  let description = String(args.command);
+  if (args.directory) description += ` [in ${String(args.directory)}]`;
+  if (args.is_background) description += ' [background]';
+  else if (args.timeout) description += ` [timeout: ${String(args.timeout)}ms]`;
+  return description;
+}
+
+function getDaemonSearchDescription(
+  tool: ACPToolCall,
+  workspaceCwd?: string,
+): string | null {
+  const name = tool.toolName.toLowerCase();
+  const grep = name === 'grep' || name === 'grep_search';
+  const args = tool.args;
+  if (!grep && (name !== 'glob' || !args?.path)) return null;
+  const pattern = args?.pattern ?? (grep ? args?.query : undefined);
+  if (typeof pattern !== 'string' || !pattern) return null;
+
+  const title = getDescriptionFromTitle(tool, workspaceCwd);
+  if (!title) return null;
+
+  const prefix = formatDescriptionPaths(`'${pattern}'`, workspaceCwd);
+  const filter =
+    grep && typeof args?.glob === 'string' && args.glob
+      ? ' ' + formatDescriptionPaths(`(filter: '${args.glob}')`, workspaceCwd)
+      : '';
+  // RipGrep can omit an unset path; the JS grep implementation uses ".".
+  if (!args?.path && title === prefix + filter) return title;
+  const pathPrefix = `${prefix} in `;
+  if (!title.startsWith(pathPrefix) || !title.endsWith(filter)) return null;
+
+  // core's formatDisplayPath renders the path (relative, home-elided or
+  // middle-compressed) and the browser cannot reproduce it. The verbatim
+  // pattern/filter and explicit-description guard identify the wire framing.
+  const path = title.slice(pathPrefix.length, title.length - filter.length);
+  return path ? title : null;
 }
 
 export function getToolSummaryDescription(
@@ -351,8 +525,7 @@ export function getToolSummaryDescription(
   const fromArgs = getDescriptionFromArgs(tool, workspaceCwd, {
     includeTimeout: false,
   });
-  if (fromArgs) return truncateText(fromArgs, MAX_DESCRIPTION_LENGTH);
-  return '';
+  return truncateText(fromArgs.text, MAX_DESCRIPTION_LENGTH);
 }
 
 export function getShellToolSemanticDescription(tool: ACPToolCall): string {
@@ -575,7 +748,7 @@ function getDescriptionFromArgs(
   tool: ACPToolCall,
   workspaceCwd?: string,
   options: { includeTimeout?: boolean } = {},
-): string {
+): { text: string; machine: boolean } {
   const args = tool.args || {};
   const name = tool.toolName.toLowerCase();
   const includeTimeout = options.includeTimeout ?? true;
@@ -594,7 +767,10 @@ function getDescriptionFromArgs(
     if (argDescription) {
       description += ` (${argDescription})`;
     }
-    return truncateText(description, MAX_DESCRIPTION_LENGTH);
+    return {
+      text: truncateText(description, MAX_DESCRIPTION_LENGTH),
+      machine: !argDescription,
+    };
   }
   if (name === 'grep_search' || name === 'grep' || name === 'search') {
     const pattern = args.pattern ?? args.query;
@@ -606,7 +782,7 @@ function getDescriptionFromArgs(
         description += ` in path './'`;
       }
       if (args.glob) description += ` (filter: '${String(args.glob)}')`;
-      return description;
+      return { text: description, machine: true };
     }
   }
   if (name === 'glob' && args.pattern) {
@@ -614,29 +790,40 @@ function getDescriptionFromArgs(
     if (args.path) {
       description += ` in path '${String(args.path)}'`;
     }
-    return description;
+    return { text: description, machine: true };
   }
   if (args.file_path) {
     const description = getStringArg(args, 'description');
-    if (description) return description;
-    return pathForDisplay(String(args.file_path), workspaceCwd);
+    if (description) return { text: description, machine: false };
+    return {
+      text: pathForDisplay(String(args.file_path), workspaceCwd),
+      machine: true,
+    };
   }
   if (args.url) {
     const url = String(args.url);
     const prompt =
       typeof args.prompt === 'string' ? (args.prompt as string) : undefined;
     const desc = prompt ? `${url} — "${truncateText(prompt, 40)}"` : url;
-    return truncateText(desc, 80);
+    return { text: truncateText(desc, 80), machine: !prompt };
   }
-  if (args.path) return pathForDisplay(String(args.path), workspaceCwd);
+  if (args.path) {
+    return {
+      text: pathForDisplay(String(args.path), workspaceCwd),
+      machine: true,
+    };
+  }
   if (args.query) {
-    return truncateText(String(args.query), 60);
+    return { text: truncateText(String(args.query), 60), machine: false };
   }
   if (name === 'list_directory' || name === 'listfiles') {
     const candidate = args.path || args.directory || '';
-    return pathForDisplay(String(candidate), workspaceCwd);
+    return {
+      text: pathForDisplay(String(candidate), workspaceCwd),
+      machine: true,
+    };
   }
-  return getStringArg(args, 'description');
+  return { text: getStringArg(args, 'description'), machine: false };
 }
 
 function getStringArg(

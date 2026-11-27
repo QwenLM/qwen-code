@@ -241,6 +241,11 @@
   background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
 }
 
+:global([dir='rtl']) .frozenColumnShadow {
+  transform: translateX(1px);
+  background: linear-gradient(270deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
+}
+
 .table {
   --action-column-width: 40px;
 
@@ -293,11 +298,11 @@
   background: var(--card);
   color: var(--foreground);
   font-weight: 600;
-  text-align: left;
+  text-align: start;
 }
 
 .frozenHeaderCell {
-  left: var(--action-column-width);
+  inset-inline-start: var(--action-column-width);
   z-index: 5;
 }
 
@@ -368,7 +373,7 @@
 .resizeHandle {
   position: absolute;
   top: 0;
-  right: 0;
+  inset-inline-end: 0;
   z-index: 7;
   width: 6px;
   height: 100%;
@@ -410,7 +415,7 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 
@@ -427,7 +432,7 @@
   background: var(--card);
   color: var(--foreground);
   line-height: var(--table-line-height, 1.45);
-  text-align: left;
+  text-align: start;
   vertical-align: middle;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -486,7 +491,7 @@ tr:hover .selectedCell {
 .stickyActionHeaderCell,
 .stickyActionCell {
   position: sticky;
-  left: 0;
+  inset-inline-start: 0;
   z-index: 6;
 }
 
@@ -504,13 +509,18 @@ tr:hover .selectedCell {
 
 .frozenCell {
   position: sticky;
-  left: var(--action-column-width);
+  inset-inline-start: var(--action-column-width);
   z-index: 4;
 }
 
 .hasFrozenColumn .frozenHeaderCell,
 .hasFrozenColumn .frozenCell {
   box-shadow: inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
+}
+
+:global([dir='rtl']) .hasFrozenColumn .frozenHeaderCell,
+:global([dir='rtl']) .hasFrozenColumn .frozenCell {
+  box-shadow: inset 1px 0 0 var(--border, rgb(255 255 255 / 18%));
 }
 
 .stickyActionHeaderCell,
@@ -543,6 +553,15 @@ tr:hover .frozenCell.selectedCell {
     var(--card);
   box-shadow:
     8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset 0 0 0 1px var(--agent-blue-500);
+}
+
+:global([dir='rtl']) .stickyActionCell.selectedCell,
+:global([dir='rtl']) .frozenCell.selectedCell,
+:global([dir='rtl']) tr:hover .stickyActionCell.selectedCell,
+:global([dir='rtl']) tr:hover .frozenCell.selectedCell {
+  box-shadow:
+    -8px 0 14px -12px rgb(0 0 0 / 55%),
     inset 0 0 0 1px var(--agent-blue-500);
 }
 
@@ -590,7 +609,7 @@ tr:hover .frozenCell.selectedCell {
 
 .detailPanel {
   position: sticky;
-  left: 0;
+  inset-inline-start: 0;
   display: grid;
   box-sizing: border-box;
   grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 300px));
@@ -599,7 +618,7 @@ tr:hover .frozenCell.selectedCell {
   row-gap: var(--table-detail-gap, 3px);
   width: 100cqw;
   padding: var(--table-detail-padding, 9px 11px);
-  padding-left: calc(
+  padding-inline-start: calc(
     var(--action-column-width) + var(--table-cell-padding-inline, 14px)
   );
 }

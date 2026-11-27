@@ -301,6 +301,17 @@ describe('ModelManagementSection', () => {
     expect(container.textContent).not.toContain('Video');
     expect(container.textContent).toContain('CUSTOM_MODEL_KEY');
   });
+  it('isolates model IDs and URLs without pinning display names', () => {
+    const { container } = renderSection();
+    for (const marker of ['modelId', 'modelBaseUrl']) {
+      const value = container.querySelector(`[class*="${marker}"]`);
+      expect(value?.tagName).toBe('BDI');
+      expect(value?.getAttribute('dir')).toBe('ltr');
+    }
+    expect(
+      container.querySelector('[class*="modelName"]')?.hasAttribute('dir'),
+    ).toBe(false);
+  });
   it('lists models grouped by provider', () => {
     const { container } = renderSection();
     expect(container.textContent).toContain('GPT-4o');

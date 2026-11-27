@@ -29,6 +29,10 @@ describe('subscription quota i18n', () => {
       'zh-TW',
       '週額度已用完，預計將於1天 2小時後恢復。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
     ],
+    [
+      'ar',
+      'لقد استنفدت رصيدك الأسبوعي ومن المتوقع إعادة تعيين رصيدك خلال يوم واحد وساعتين. يمكنك الانتظار أو تشغيل /upgrade للحصول على رصيد إضافي.',
+    ],
   ])(
     'uses the %s catalog for the complete notice',
     async (language, expected) => {
@@ -56,6 +60,12 @@ describe('subscription quota i18n', () => {
     ],
     ['zh', '1小时', '2天 1小时', '额度已用完，请在额度恢复后重试。'],
     ['zh-TW', '1小時', '2天 1小時', '額度已用完，請在額度恢復後重試。'],
+    [
+      'ar',
+      'ساعة واحدة',
+      'يومين وساعة واحدة',
+      'لقد استنفدت رصيدك. يُرجى المحاولة مرة أخرى بعد إعادة التعيين.',
+    ],
   ])(
     'translates units and the no-upgrade fallback in %s',
     async (language, hour, days, fallback) => {
@@ -82,6 +92,18 @@ describe('subscription quota i18n', () => {
       ).toBe(fallback);
     },
   );
+
+  it('inflects Arabic quota counts through the CLDR plural forms', async () => {
+    await initializeI18n('ar');
+    expect(t('{{count}} days', { count: '2' })).toBe('يومين');
+    expect(t('{{count}} hours', { count: '2' })).toBe('ساعتين');
+    expect(t('{{count}} days', { count: '3' })).toBe('3 أيام');
+    expect(t('{{count}} hours', { count: '10' })).toBe('10 ساعات');
+    expect(t('{{count}} days', { count: '11' })).toBe('11 يوماً');
+    expect(t('{{count}} hours', { count: '99' })).toBe('99 ساعة');
+    expect(t('{{count}} days', { count: '100' })).toBe('100 يوم');
+    expect(t('{{count}} hours', { count: '100' })).toBe('100 ساعة');
+  });
 
   it.each([
     [1, 0, '1 день и 0 часов'],

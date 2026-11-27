@@ -255,15 +255,78 @@ const IMPLICIT_SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   ],
 };
 
-function commandTree(language: WebShellLanguage) {
+const SUBCOMMAND_TREE_AR: Record<string, SubcommandNode[]> = {
+  agents: [
+    { name: 'manage', description: 'إدارة الوكلاء الفرعيين الحاليين' },
+    { name: 'create', description: 'إنشاء وكيل فرعي جديد' },
+  ],
+  theme: [
+    { name: 'light', description: 'التبديل إلى السمة الفاتحة' },
+    { name: 'dark', description: 'التبديل إلى السمة الداكنة' },
+  ],
+  export: [
+    { name: 'md', description: 'التصدير بصيغة Markdown' },
+    { name: 'html', description: 'التصدير بصيغة HTML' },
+    { name: 'json', description: 'التصدير بصيغة JSON' },
+    { name: 'jsonl', description: 'التصدير بصيغة JSONL' },
+  ],
+  language: [
+    {
+      name: 'ui',
+      description: 'تعيين لغة الواجهة',
+      children: LANGUAGE_OPTIONS,
+    },
+    {
+      name: 'output',
+      description: 'تعيين لغة مخرجات النموذج',
+      argumentHint: '<اللغة>',
+    },
+  ],
+  extensions: [
+    { name: 'manage', description: 'إدارة الإضافات المثبتة' },
+    {
+      name: 'install',
+      description: 'تثبيت إضافة من مصدر',
+      argumentHint: '<المصدر>',
+    },
+  ],
+};
+
+const IMPLICIT_SUBCOMMAND_TREE_AR: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: 'عرض تفاصيل السياق' }],
+  copy: [
+    { name: 'code', description: 'نسخ مقاطع الكود' },
+    { name: 'latex', description: 'نسخ معادلة LaTeX' },
+    { name: 'inline-latex', description: 'نسخ معادلة LaTeX المضمّنة' },
+  ],
+  tools: [{ name: 'desc', description: 'إظهار أوصاف الأدوات' }],
+  stats: [
+    { name: 'model', description: 'عرض إحصائيات الاستخدام لكل نموذج' },
+    { name: 'tools', description: 'عرض إحصائيات استخدام الأدوات' },
+  ],
+  mcp: [
+    { name: 'desc', description: 'إظهار أوصاف خوادم وأدوات MCP' },
+    { name: 'nodesc', description: 'إخفاء أوصاف خوادم وأدوات MCP' },
+    { name: 'schema', description: 'عرض مخططات معاملات الأدوات' },
+  ],
+  memory: [
+    { name: 'show', description: 'عرض ملفات الذاكرة' },
+    { name: 'add', description: 'إضافة إلى الذاكرة' },
+    { name: 'refresh', description: 'تحديث ملفات الذاكرة' },
+  ],
+};
+
+function getSubcommandTree(language: WebShellLanguage) {
   if (language === 'zh-TW') return SUBCOMMAND_TREE_ZH_TW;
   if (language === 'zh-CN') return SUBCOMMAND_TREE_ZH;
+  if (language === 'ar') return SUBCOMMAND_TREE_AR;
   return SUBCOMMAND_TREE_EN;
 }
 
-function implicitCommandTree(language: WebShellLanguage) {
+function getImplicitSubcommandTree(language: WebShellLanguage) {
   if (language === 'zh-TW') return IMPLICIT_SUBCOMMAND_TREE_ZH_TW;
   if (language === 'zh-CN') return IMPLICIT_SUBCOMMAND_TREE_ZH;
+  if (language === 'ar') return IMPLICIT_SUBCOMMAND_TREE_AR;
   return IMPLICIT_SUBCOMMAND_TREE_EN;
 }
 
@@ -284,11 +347,11 @@ function resolveSubcommands(
     }));
   }
 
-  const tree = commandTree(language);
+  const tree = getSubcommandTree(language);
   let nodes = tree[cmdName];
 
   if (!nodes) {
-    const implicitTree = implicitCommandTree(language);
+    const implicitTree = getImplicitSubcommandTree(language);
     nodes = implicitTree[cmdName];
   }
 
@@ -356,7 +419,7 @@ function hasSubcommandPicker(
   command: CommandInfo,
   language: WebShellLanguage,
 ): boolean {
-  const tree = commandTree(language);
+  const tree = getSubcommandTree(language);
   return (
     command.name === 'skills' ||
     Boolean(command.subcommands?.length) ||
@@ -415,12 +478,12 @@ export function getImplicitTabCompletion(
   const cmdName = match[1];
   const cmd = commands.find((c) => c.name === cmdName);
   if (cmd?.source === 'skill') return null;
-  const tree = commandTree(language);
+  const tree = getSubcommandTree(language);
   if (cmd?.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
     return null;
   }
 
-  const implicitTree = implicitCommandTree(language);
+  const implicitTree = getImplicitSubcommandTree(language);
   const nodes = implicitTree[cmdName];
   if (!nodes || nodes.length === 0) return null;
 
@@ -486,12 +549,12 @@ export function getSlashCommandArgumentHint(
   const argumentHint = cmd.argumentHint?.trim();
   if (argumentHint) return argumentHint;
 
-  const tree = commandTree(language);
+  const tree = getSubcommandTree(language);
   if (cmd.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
     return null;
   }
 
-  const implicitTree = implicitCommandTree(language);
+  const implicitTree = getImplicitSubcommandTree(language);
   const nodes = implicitTree[cmdName];
   if (!nodes || nodes.length === 0) return null;
 
@@ -763,8 +826,8 @@ export function getSlashCommandCompletionResult(
     const [, cmdName, rest] = subMatch;
     const cmd = commands.find((c) => c.name === cmdName);
     if (cmd?.source === 'skill') return null;
-    const tree = commandTree(language);
-    const implicitTree = implicitCommandTree(language);
+    const tree = getSubcommandTree(language);
+    const implicitTree = getImplicitSubcommandTree(language);
     const hasTree = !!tree[cmdName] || cmdName === 'skills';
     const hasImplicitTree = !!implicitTree[cmdName];
     if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree) {
@@ -911,8 +974,8 @@ export function slashCompletionSource(
       const cmd = commands.find((c) => c.name === cmdName);
       if (cmd?.source === 'skill') return null;
       const language = getLanguage();
-      const tree = commandTree(language);
-      const implicitTree = implicitCommandTree(language);
+      const tree = getSubcommandTree(language);
+      const implicitTree = getImplicitSubcommandTree(language);
       const hasTree = !!tree[cmdName] || cmdName === 'skills';
       const hasImplicitTree = !!implicitTree[cmdName];
       if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree)

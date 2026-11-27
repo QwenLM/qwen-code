@@ -781,6 +781,7 @@ export const UserMessage = memo(function UserMessage({
               >
                 <div
                   ref={contentRef}
+                  dir="auto"
                   className={`${styles.chatContent} ${
                     heightOverflowing &&
                     !documentMode &&
@@ -967,7 +968,12 @@ export function ReadonlyComposerTag({
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}
           {tagValue ? (
-            <span className={styles.messageTagValue}>{tagValue}</span>
+            <span
+              className={styles.messageTagValue}
+              dir={tag.kind === 'file' ? 'ltr' : undefined}
+            >
+              {tagValue}
+            </span>
           ) : !tagLabel ? (
             <span className={styles.messageTagLabel}>{fallback}</span>
           ) : null}

@@ -7,3 +7,4 @@
 export const TRAJECTORY_FILTER_MESSAGES_EN = {};
 export const TRAJECTORY_FILTER_MESSAGES_ZH = {};
 export const TRAJECTORY_FILTER_MESSAGES_RU = {};
+export const TRAJECTORY_FILTER_MESSAGES_AR = {};

@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../../i18n';
 import { formatElapsed } from './agents-view-logic';
 import {
+  COLLAB_MESSAGES_AR,
   COLLAB_MESSAGES_EN,
   COLLAB_MESSAGES_RU,
   COLLAB_MESSAGES_ZH,
@@ -45,14 +46,17 @@ describe('collaboration messages', () => {
     ).toBe(true);
     expect(Object.keys(COLLAB_MESSAGES_ZH).sort()).toEqual([...en].sort());
     expect(Object.keys(COLLAB_MESSAGES_RU).sort()).toEqual([...en].sort());
+    expect(Object.keys(COLLAB_MESSAGES_AR).sort()).toEqual([...en].sort());
   });
 
   it('are replaced by a stub of the same shape in the transcript build', () => {
     expect(Object.keys(transcriptStub).sort()).toEqual([
+      'COLLAB_MESSAGES_AR',
       'COLLAB_MESSAGES_EN',
       'COLLAB_MESSAGES_RU',
       'COLLAB_MESSAGES_ZH',
     ]);
+    expect(transcriptStub.COLLAB_MESSAGES_AR).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_EN).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_ZH).toEqual({});
     expect(transcriptStub.COLLAB_MESSAGES_RU).toEqual({});
@@ -72,22 +76,24 @@ describe('collaboration messages', () => {
 describe('the join notices', () => {
   const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
   const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
+  const ar = COLLAB_MESSAGES_AR['collab.runtime.notSavedHere'];
   const tw = getTranslator('zh-TW');
 
   it('advises a rerun only when the credential recorded the join', () => {
     // An older daemon sends no `recorded`: absent means unknown, and the
     // rerun it would be advised to make can be refused.
     const cases = [
-      [undefined, '', '', ''],
-      ['false', '', '', ''],
+      [undefined, '', '', '', ''],
+      ['false', '', '', '', ''],
       [
         'true',
         ' Run the same join command again to save it.',
         '再运行一次同样的加入命令即可保存。',
+        ' أعد تشغيل أمر الانضمام نفسه لحفظه.',
         '再執行一次同樣的加入命令即可儲存。',
       ],
     ] as const;
-    for (const [recorded, remedyEn, remedyZh, remedyTw] of cases) {
+    for (const [recorded, remedyEn, remedyZh, remedyAr, remedyTw] of cases) {
       expect(
         typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
       ).toBe(
@@ -97,6 +103,11 @@ describe('the join notices', () => {
         typeof zh === 'function' ? zh({ error: 'disk full', recorded }) : zh,
       ).toBe(
         `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连：disk full。${remedyZh}`,
+      );
+      expect(
+        typeof ar === 'function' ? ar({ error: 'disk full', recorded }) : ar,
+      ).toBe(
+        `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل: disk full.${remedyAr}`,
       );
       expect(
         tw('collab.runtime.notSavedHere', { error: 'disk full', recorded }),

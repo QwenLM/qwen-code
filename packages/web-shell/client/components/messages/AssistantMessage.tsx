@@ -663,7 +663,9 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               translateContent={thinkingActive ? undefined : content}
               showTranslateButton={
                 !documentMode &&
-                (language === 'zh-CN' || language === 'zh-TW') &&
+                (language === 'zh-CN' ||
+                  language === 'zh-TW' ||
+                  language === 'ar') &&
                 !thinkingActive &&
                 generateContent !== undefined
               }
@@ -767,7 +769,9 @@ export function ThinkingTranslateButton({
             ? 'Traditional Chinese'
             : language === 'zh-CN'
               ? 'Simplified Chinese'
-              : 'English';
+              : language === 'ar'
+                ? 'Arabic'
+                : 'English';
         const prompt =
           mode === 'explain-shell'
             ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``

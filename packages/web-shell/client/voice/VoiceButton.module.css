@@ -58,7 +58,8 @@
   align-items: center;
   gap: 8px;
   height: 28px;
-  padding: 0 10px 0 9px;
+  padding-block: 0;
+  padding-inline: 9px 10px;
   border: none;
   border-radius: 14px;
   background: var(--secondary);
@@ -105,7 +106,7 @@
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
-  text-align: right;
+  text-align: end;
 }
 
 .stop {
@@ -127,7 +128,7 @@
 /* Live interim transcript / error preview, floating above the control. */
 .interim {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   bottom: calc(100% + 8px);
   z-index: 120;
   width: max-content;
@@ -155,7 +156,8 @@
 
 .feedback {
   max-width: min(280px, calc(100vw - 80px));
-  padding: 8px 34px 8px 10px;
+  padding-block: 8px;
+  padding-inline: 10px 34px;
   white-space: normal;
   overflow-wrap: anywhere;
   pointer-events: auto;
@@ -164,7 +166,7 @@
 .dismiss {
   position: absolute;
   top: 2px;
-  right: 2px;
+  inset-inline-end: 2px;
   color: inherit;
 }
 

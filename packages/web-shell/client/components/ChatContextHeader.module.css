@@ -5,7 +5,8 @@
   flex: 1 1 auto;
   align-items: center;
   gap: 0;
-  padding: 8px 20px 8px 12px;
+  padding-block: 8px;
+  padding-inline: 12px 20px;
 }
 
 .content {
@@ -33,7 +34,7 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  margin-right: 2px;
+  margin-inline-end: 2px;
   padding: 0;
   border: 0;
   border-radius: 10px;
@@ -128,7 +129,7 @@ button.workspaceIcon {
 .activityDot {
   position: absolute;
   top: 4px;
-  right: 4px;
+  inset-inline-end: 4px;
   width: 6px;
   height: 6px;
   border-radius: 999px;

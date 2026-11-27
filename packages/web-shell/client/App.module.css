@@ -128,7 +128,7 @@
 .contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
   box-sizing: border-box;
   width: calc(100% + 332px);
-  padding-right: 352px;
+  padding-inline-end: 352px;
 }
 
 .chatPane {
@@ -145,7 +145,7 @@
 .artifactResizeHandle {
   flex: 0 0 8px;
   width: 8px;
-  margin-left: -4px;
+  margin-inline-start: -4px;
   cursor: col-resize;
   position: relative;
   z-index: 2;
@@ -266,7 +266,7 @@
 }
 .splitApprovalNotice button {
   appearance: none;
-  margin-left: auto;
+  margin-inline-start: auto;
   border: 1px solid var(--warning-border);
   background: transparent;
   color: inherit;
@@ -306,7 +306,7 @@
    hidden (collapsed rail, closed compact drawer): keeps call controls
    reachable from the Live page header. */
 .liveVoicePageSlot {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 .fullPageBody {
   flex: 1 1 auto;
@@ -425,7 +425,7 @@
 .app[data-compact-sidebar] .hamburgerButtonFloating {
   position: absolute;
   top: 12px;
-  left: 12px;
+  inset-inline-start: 12px;
   z-index: 10;
 }
 .appChatEmpty.appWithSidebar {
@@ -1222,7 +1222,7 @@
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-  margin-left: 8px;
+  margin-inline-start: 8px;
   color: var(--secondary-foreground);
   white-space: nowrap;
 }
@@ -1329,7 +1329,7 @@
   justify-content: center;
   width: 20px;
   height: 24px;
-  margin-left: -5px;
+  margin-inline-start: -5px;
   flex-shrink: 0;
   margin-top: 8px;
   padding: 0;

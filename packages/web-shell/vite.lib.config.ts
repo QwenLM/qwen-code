@@ -385,6 +385,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
     [
+      './client/i18n/ar-interactive.ts',
+      './client/i18n/ar-interactive.transcript-stub.ts',
+    ],
+    [
       './client/components/managed/managed-artifact-library-messages.ts',
       './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
     ],

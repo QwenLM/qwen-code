@@ -561,7 +561,7 @@ export function ActivityView({
                 DEFAULT_ACTIVITY_PREFERENCES[key as keyof ActivityPreferences],
             ) && (
               <DropdownMenuItem
-                className="ml-auto size-7 justify-center p-0"
+                className="ms-auto size-7 justify-center p-0"
                 aria-label={t('activity.reset')}
                 title={t('activity.reset')}
                 onSelect={(event) => {

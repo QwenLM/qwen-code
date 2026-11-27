@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
 import { AskUserQuestion, type AskUserQuestionDraft } from './AskUserQuestion';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
@@ -102,10 +102,11 @@ function rerender(
   req: PermissionRequest = request,
   onAskDetails?: () => void,
   disabled?: boolean,
+  language: WebShellLanguage = 'en',
 ): void {
   act(() =>
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <AskUserQuestion
           request={req}
           onConfirm={onConfirm}
@@ -124,11 +125,12 @@ function render(
   req: PermissionRequest = request,
   onAskDetails?: () => void,
   disabled?: boolean,
+  language: WebShellLanguage = 'en',
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, onAskDetails, disabled);
+  rerender(keyboardActive, req, onAskDetails, disabled, language);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -916,6 +918,21 @@ describe('AskUserQuestion multiple questions', () => {
     pressKey(optionButtons()[0]!, 'ArrowRight');
     expect(container!.textContent).toContain('Pick a size');
     expect(container!.textContent).not.toContain('→ next');
+  });
+
+  it('mirrors the horizontal arrows and the previous hint in Arabic', () => {
+    render(undefined, multipleQuestionsRequest, undefined, undefined, 'ar');
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(container!.textContent).toContain('→ السابق');
+    expect(container!.textContent).not.toContain('← السابق');
+
+    pressKey(optionButtons()[0]!, 'ArrowRight');
+    expect(container!.textContent).toContain('Pick a color');
+    expect(container!.textContent).not.toContain('→ السابق');
+
+    pressKey(optionButtons()[0]!, 'ArrowLeft');
+    expect(container!.textContent).toContain('Pick a size');
   });
 
   it('moves between questions with horizontal arrows from an action button', () => {

@@ -750,3 +750,239 @@ export const COLLAB_MESSAGES_RU: Record<string, CollabMessage> = {
     'Эта ссылка присоединения использует обычный HTTP. Отметьте «Разрешить обычный HTTP», если сеть доверенная, или используйте ссылку HTTPS.',
   'collab.runtime.joinCli': 'Или из терминала на этом компьютере:',
 };
+
+export const COLLAB_MESSAGES_AR: Record<string, CollabMessage> = {
+  'agents.description':
+    'إدارة تعريفات الوكلاء القابلة لإعادة الاستخدام للمهام وفرق الوكلاء والتعاون عبر الإشارة بـ @ في المحادثة.',
+  'collab.elapsed.seconds': (v) => `${v?.count ?? 0}ث`,
+  'collab.elapsed.minutes': (v) => `${v?.minutes ?? 0}د ${v?.seconds ?? 0}ث`,
+  'collab.run.queued': (v) =>
+    `${v?.agent} في قائمة الانتظار وسيبدأ عندما يتفرغ`,
+  'collab.run.queuedBehind': (v) =>
+    `${v?.agent} في الانتظار، وأمامه ${v?.count}`,
+  'collab.run.stopping': (v) => `جارٍ إيقاف ${v?.agent}…`,
+  'collab.run.stalled': (v) =>
+    `لم يُظهر ${v?.agent} أي تقدم منذ ${v?.elapsed}. قد يكون عالقاً.`,
+  'collab.run.stop': 'إيقاف',
+  'collab.run.retry': 'إعادة المحاولة',
+  'collab.run.retrying': 'جارٍ إعادة المحاولة…',
+  'collab.run.dismiss': 'تجاهل',
+  'collab.run.pendingRecord':
+    'سيظهر هذا الرد في المحادثة عند انتهاء الرد الحالي.',
+  'collab.session.working': (v) => `${v?.agent} يعمل…`,
+  'collab.session.thinking': (v) => `${v?.agent} يفكّر…`,
+  'collab.session.awaitingApproval': (v) => `${v?.agent} ينتظر موافقتك`,
+  'collab.session.offline': (v) => `بيئة تشغيل ${v?.agent} غير متصلة`,
+  'collab.session.cancelled': (v) => `تم إيقاف ${v?.agent}`,
+  'collab.session.stopAll': 'إيقاف جميع الوكلاء',
+  'collab.squad.new': 'فريق جديد',
+  'collab.squad.empty': 'لا توجد فرق بعد.',
+  'collab.squad.name': 'الاسم',
+  'collab.squad.nameHint': 'يُستدعى بصيغة @name في المحادثات',
+  'collab.squad.calledAs': (v) => `يُستدعى بصيغة @${v?.name} في المحادثات`,
+  'collab.squad.description': 'الوصف (اختياري)',
+  'collab.squad.instructions': 'تعليمات للقائد (اختياري)',
+  'collab.squad.leader': 'القائد',
+  'collab.squad.leads': 'يقود',
+  'collab.squad.leaderPick': 'اختر قائداً',
+  'collab.squad.members': 'الأعضاء',
+  'collab.squad.role': 'الدور (اختياري)',
+  'collab.squad.save': 'حفظ الفريق',
+  'collab.squad.edit': 'تعديل',
+  'collab.squad.retire': 'إحالة للتقاعد',
+  'collab.squad.retireConfirm': (v) =>
+    `هل تريد إحالة الفريق "${v?.name}" للتقاعد؟ سيحتفظ بسجله ولن يستقبل أعمالاً جديدة.`,
+  'collab.squad.retired': 'متقاعد',
+  'collab.squad.needsLeader': 'يحتاج إلى قائد جديد',
+  'collab.squad.leaderPaused': 'القائد متوقف مؤقتاً',
+  'collab.squad.summary': (v) => `القائد ${v?.leader} · ${v?.count} أعضاء`,
+  'collab.squad.engagement': (v) => `الفريق ${v?.squad}`,
+  'collab.squad.memberWorking': 'يعمل',
+  'collab.squad.memberReplied': 'أجاب',
+  'collab.squad.leaderDeciding': 'يقرّر',
+  'collab.mention.squad': 'فريق',
+  'collab.mention.noSession': 'تعذر بدء جلسة لهذه الرسالة. حاول مرة أخرى.',
+  'collab.runtime.addTitle': 'إضافة بيئة تشغيل',
+  'collab.runtime.addDescription':
+    'السماح لحاسوب آخر بتشغيل وكلاء Qwen Code لمساحة العمل هذه.',
+  'collab.runtime.replaceTitle': (v) => `استبدال ${v?.name}`,
+  'collab.runtime.replaceDescription': (v) =>
+    `استبدال ${v?.name} بمضيف جديد باستخدام أمر انضمام لمرة واحدة.`,
+  'collab.runtime.replaceEffects':
+    'بعد تسجيل المضيف الجديد، تُبطَل بيانات الاعتماد القديمة وتنتقل ارتباطات الوكلاء إلى المضيف الجديد. تفشل المهام قيد التشغيل أو الإلغاء على المضيف القديم؛ وتُحفظ النتائج التي يجري إنهاؤها.',
+  'collab.runtime.replaceRecovery': (v) =>
+    `جارٍ استئناف استبدال ${v?.name} (${v?.id}). لا يلغي انتهاء صلاحية الرابط الاستبدال المعلق ولا يتراجع عن الارتباطات المنقولة. إذا انتهت صلاحية الأمر، أنشئ أمراً جديداً هنا وشغّله على الجهاز البديل.`,
+  'collab.runtime.refreshReplacement': 'تحديث أمر الاستبدال',
+  'collab.runtime.methodCommand': 'تشغيل أمر واحد هناك',
+  'collab.runtime.methodExisting': 'لدي عنوانه ورمزه',
+  'collab.runtime.address': 'عنوان هذا الحاسوب كما يراه الحاسوب الآخر',
+  'collab.runtime.addressHint':
+    'يتصل الحاسوب الآخر بهذا العنوان، لذا يكفي أن يكون قابلاً للوصول من هناك.',
+  'collab.runtime.loopbackHint':
+    'يعمل localhost على هذا الحاسوب فقط. استخدم عنوانه على الشبكة (مثل http://192.168.1.8:4170) ليتمكن الحاسوب الآخر من الوصول إليه.',
+  'collab.runtime.generate': 'إنشاء أمر انضمام',
+  'collab.runtime.runThis': 'على الحاسوب الآخر، شغّل هذا في مجلد المشروع:',
+  'collab.runtime.noQwen': 'Qwen Code غير مثبّت هناك؟ يعمل هذا أيضاً:',
+  'collab.runtime.copy': 'نسخ',
+  'collab.runtime.copied': 'تم النسخ',
+  'collab.runtime.expires': (v) =>
+    `يعمل الرابط لمرة واحدة وتنتهي صلاحيته خلال ${v?.minutes ?? 0} دقيقة.`,
+  'collab.runtime.httpHint':
+    'يستخدم HTTP غير مشفّر، لذا استخدمه فقط على شبكة تثق بها.',
+  'collab.runtime.waiting': 'في انتظار اتصاله…',
+  'collab.runtime.waitingFor': (v) =>
+    `${v?.seconds ?? 0}ث حتى الآن. سيتحدث هذا تلقائياً عند الاتصال.`,
+  'collab.runtime.closeKeepLink': 'إغلاق (يظل الرابط صالحاً)',
+  'collab.runtime.connected': (v) => `تم اتصال ${v?.name}`,
+  'collab.runtime.replaced': (v) => `تم استبدال ${v?.oldName} بـ ${v?.name}`,
+  'collab.runtime.replaceCompleted':
+    'تم إبطال بيانات الاعتماد القديمة وترحيل ارتباطات الوكلاء. تمت تسوية التشغيلات النشطة القديمة؛ وحُفظت النتائج التي كانت قيد الإنهاء.',
+  'collab.runtime.offers': (v) => `يوفّر ${v?.programs}`,
+  'collab.runtime.done': 'تم',
+  'collab.runtime.createAgentOn': (v) => `إنشاء وكيل على ${v?.name}`,
+  'collab.runtime.remoteUrl': 'عنوان Qwen Code الخاص به',
+  'collab.runtime.remoteToken': 'رمز الوصول الخاص به',
+  'collab.runtime.remoteCwd': 'مجلد المشروع على ذلك الحاسوب',
+  'collab.runtime.program': 'البرنامج',
+  'collab.runtime.allowHttp':
+    'السماح بـ HTTP العادي (للشبكات الموثوقة فقط؛ الرمز والمهام غير مشفرة)',
+  'collab.runtime.connect': 'اتصال',
+  'collab.share.title': (v) => `مشاركة ${v?.name}`,
+  'collab.share.description':
+    'يمكن لأي شخص لديه الرمز إرسال عمل إلى هذا الوكيل عبر A2A. يعمل حيثما هو معيّن حالياً، في مساحة عمل بيئة التشغيل تلك، بتعليماته وأدواته الحالية. وتسري التغييرات اللاحقة — بما في ذلك نقله بين هذا الحاسوب وبيئة تشغيل منضمة — على المشاركات الصادرة بالفعل.',
+  'collab.share.copy': 'نسخ',
+  'collab.share.copied': 'تم النسخ',
+  'collab.share.done': 'تم',
+  'collab.share.create': 'إنشاء رابط',
+  'collab.share.endpoint': 'نقطة نهاية A2A',
+  'collab.share.token': 'الرمز',
+  'collab.share.try': 'جرّبه',
+  'collab.share.once': 'يظهر الرمز الآن فقط؛ يمكنك إبطاله هنا في أي وقت.',
+  'collab.share.onceUntil': (v) =>
+    `يظهر الرمز الآن فقط. تنتهي صلاحيته في ${v?.date}؛ ويمكنك إبطاله هنا في أي وقت.`,
+  'collab.share.loopback':
+    'يعمل هذا العنوان على هذا الحاسوب فقط. افتح Web Shell عبر عنوان يمكن للمتصل الوصول إليه، ثم أنشئ المشاركة.',
+  'collab.share.active': (v) => `المشاركات النشطة (${v?.count ?? 0})`,
+  'collab.share.until': (v) => `حتى ${v?.date}`,
+  'collab.share.revoke': 'إبطال',
+  'collab.agent.share': 'مشاركة',
+  'collab.tabs.agents': 'الوكلاء',
+  'collab.tabs.squads': 'الفرق',
+  'collab.tabs.runtime': 'بيئات التشغيل',
+  'collab.tabs.agentsHint':
+    'الوكلاء هم زملاء فريق تنشئهم. يعمل كل منهم على بيئة تشغيل ببرنامج واحد. أشر إلى الوكيل بـ @ في أي محادثة لإحضاره؛ ويمكنه إحضار آخرين.',
+  'collab.tabs.runtimeHint':
+    'بيئات التشغيل هي الحواسيب التي يعمل عليها الوكلاء: هذا الحاسوب، وأي حاسوب انضم برابط.',
+  'collab.tabs.squadsHint':
+    'يتكون الفريق من قائد ووكلاء يسند إليهم العمل. أشر إلى الفريق بـ @ في أي محادثة وسيتولى القائد تقسيم العمل ورفع النتائج.',
+  'collab.agent.new': 'وكيل جديد',
+  'collab.agent.roles': 'قوالب الأدوار',
+  'collab.agent.mentionIt': 'إشارة في المحادثة',
+  'collab.agent.more': (v) => `مزيد من الإجراءات لـ ${v?.name}`,
+  'collab.agent.configure': 'تهيئة',
+  'collab.agent.pause': 'إيقاف مؤقت',
+  'collab.agent.resume': 'استئناف',
+  'collab.agent.retire': 'إحالة للتقاعد',
+  'collab.agent.retireConfirm': (v) =>
+    `إحالة ${v?.name} للتقاعد؟ لن يستقبل مزيداً من العمل. ستبقى رسائله واسمه محجوزين فلا يمكن لأحد غيره النشر بهويته.`,
+  'collab.agent.joins': (v) => `ينضم إلى فريق ${v?.project}.`,
+  'collab.agent.nameHelp': 'يظهر في المحادثات. أشر إليه بـ @name لإحضاره.',
+  'collab.agent.role': 'ابدأ من دور',
+  'collab.agent.roleNone': 'بدون دور',
+  'collab.agent.roleHint':
+    'يوفر الدور من .qwen/agents التعليمات والأدوات الأساسية؛ وما تكتبه أدناه يضاف إليه.',
+  'collab.agent.instructions': 'تعليمات العمل (اختياري)',
+  'collab.agent.instructionsHint': 'ما المسؤول عنه وكيف يجب أن يسلم النتائج.',
+  'collab.agent.description': 'متى ينبغي للوكلاء الآخرين إحضاره؟ (اختياري)',
+  'collab.agent.concurrency': 'المحادثات المتزامنة',
+  'collab.agent.concurrencyInvalid':
+    'يجب أن يكون عدد المحادثات المتزامنة بين 1 و8.',
+  'collab.agent.runsOn': 'يعمل على',
+  'collab.agent.thisComputer': 'هذا الحاسوب',
+  'collab.agent.cwdUnknown': 'لم يُبلغ عن المجلد بعد',
+  'collab.agent.hostPersona':
+    'يستخدم الوكلاء البعيدون نموذج بيئة التشغيل وتعليماتك هنا. وتجاوزات الدور والنموذج المحلية غير متاحة.',
+  'collab.agent.runsOnHint':
+    'تعمل بيئة التشغيل المنضمة في مجلدها الخاص الظاهر تحت اسمها. ولا تُنسخ الملفات هنا إليها.',
+  'collab.agent.programLocal': 'يعمل فقط على بيئة تشغيل منضمة',
+  'collab.agent.programMissing': 'غير موجود على بيئة التشغيل هذه',
+  'collab.error.dispatchAfterSave': (v) =>
+    `تم حفظ التغيير، ولكن فشلت المعالجة في الخلفية: ${v?.error}`,
+  'collab.agent.afterCreate': 'يبدأ العمل عندما تشير إليه في محادثة.',
+  'collab.noWorkspace': 'افتح مساحة عمل للتعاون مع الوكلاء.',
+  'collab.agent.empty':
+    'لا يوجد وكلاء بعد. أنشئ واحداً، ثم أشر إليه بـ @ في أي محادثة.',
+  'collab.runtime.localNote':
+    'هذا الحاسوب. يعمل وكلاؤه في مساحة العمل هذه باستخدام Qwen Code.',
+  'collab.runtime.remoteNote':
+    'حاسوب آخر انضم إلى مساحة العمل هذه. يعمل الوكلاء المعينون له هناك.',
+  'collab.runtime.programs': 'البرامج',
+  'collab.runtime.empty': 'لا توجد بيئة تشغيل بعد.',
+  'collab.runtime.emptyHint':
+    'أضف بيئة تشغيل للسماح لحاسوب آخر بتشغيل الوكلاء، ثم أنشئ وكيلاً عليها.',
+  'collab.runtime.badAddress': 'أدخل عنواناً مثل http://192.168.1.8:4170.',
+  'collab.run.failed': (v) => `توقف ${v?.agent} بسبب خطأ`,
+  'collab.run.steps': (v) => `خطوات ${v?.agent}`,
+  'collab.mention.provider': 'الوكلاء',
+  'collab.mention.newAgent': 'وكيل جديد…',
+  'collab.mention.noAttachments':
+    'لا يمكن إرسال مرفقات إلى وكيل بعد. أرسل نصاً للبدء.',
+  'collab.agentStatus.idle': 'خامل',
+  'collab.agentStatus.working': 'يعمل',
+  'collab.agentStatus.offline': 'بيئة التشغيل غير متصلة',
+  'collab.agentStatus.error': 'يتطلب انتباهاً',
+  'collab.agentStatus.paused': 'متوقف مؤقتاً',
+  'collab.agentStatus.retired': 'متقاعد',
+  'collab.sharedThreads': 'تعاون الوكلاء',
+  'collab.approval.title': (v) => `يريد ${v?.agent} تشغيل أداة`,
+  'collab.agent.waiting': (v) => `${v?.count} بانتظار الرد`,
+  'collab.form.cancel': 'إلغاء',
+  'collab.config.description': 'الدور',
+  'collab.config.descriptionHint':
+    'مثال: مراجعة الكود والإبلاغ عن المشكلات للقائد',
+  'collab.config.instructions': 'التعليمات',
+  'collab.config.instructionsHint':
+    'كيفية العمل وما المطلوب تسليمه. لا يمكن للتعليمات توسيع صلاحيات الأدوات.',
+  'collab.config.agentType': 'قالب الدور',
+  'collab.config.workspaceDefault': 'افتراضي مساحة العمل',
+  'collab.config.model': 'النموذج',
+  'collab.config.maxRuns': 'المحادثات المتزامنة',
+  'collab.config.note': 'اترك الحقل فارغاً لاستخدام افتراضي قالب الدور.',
+  'collab.config.save': 'حفظ',
+  'collab.agentStatus.online': 'متصل',
+  'collab.config.runtimes': 'يعمل على',
+  'collab.config.runtimesHint': 'عند عدم اختيار أي جهاز، يشغّله هذا الحاسوب.',
+  'collab.runtime.folder': 'مجلد العمل',
+  'collab.runtime.agents': 'الوكلاء',
+  'collab.runtime.running': 'قيد التشغيل',
+  'collab.runtime.queued': 'في الانتظار',
+  'collab.runtime.technical': 'تفاصيل تقنية',
+  'collab.runtime.id': (v) => `معرّف بيئة التشغيل: ${v?.id}`,
+  'collab.runtime.sessions': (v) => `الجلسات: ${v?.count}`,
+  'collab.runtime.lastSeen': (v) => `آخر نبضة اتصال: ${v?.time}`,
+  'collab.runtime.replace': 'استبدال المضيف',
+  'collab.runtime.remove': 'إزالة',
+  'collab.runtime.removeConfirm': (v) =>
+    `إزالة “${v?.name}”؟ سينتقل الوكلاء المعيّنون له فقط إلى هذا الحاسوب، وستتوقف تشغيلاته النشطة.`,
+  'collab.runtime.methodJoin': 'الانضمام إلى منسّق',
+  'collab.runtime.joinDescription':
+    'اجعل هذا الحاسوب بيئة تشغيل لـ Qwen Code آخر: الصق رابط الانضمام والرمز المعروضين هناك تحت بيئات التشغيل ‹ إضافة بيئة تشغيل.',
+  'collab.runtime.joinLink': 'رابط الانضمام',
+  'collab.runtime.joinToken': 'رمز الانضمام',
+  'collab.runtime.joinBadLink':
+    'هذا ليس رابط انضمام. يبدو مثل https://host:4170/join/<workspace>.',
+  'collab.runtime.joinConnected': (v) =>
+    `انضم هذا الحاسوب إلى ${v?.server} كبيئة تشغيل.`,
+  'collab.runtime.notSavedHere': (v) =>
+    `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'true' ? ' أعد تشغيل أمر الانضمام نفسه لحفظه.' : ''}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `اتصل ذلك الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `لا توجد استجابة من الخادم الخفي لهذا الحاسوب${v?.error ? ` (${v.error})` : ''}. قد يكون لا يزال قيد الانضمام: تحقق من المنسّق قبل المحاولة مجدداً برمز انضمام جديد إذا لم ينضم.`,
+  'collab.runtime.joinFailed': (v) => `انضمام هذا الحاسوب: ${v?.error ?? ''}`,
+  'collab.runtime.connectingHint':
+    'جارٍ توصيل بيئة تشغيل… الإجراءات التي تغادر هذه الصفحة ستنتظر حتى يكتمل.',
+  'collab.runtime.joinNeedsHttp':
+    'يستخدم رابط الانضمام هذا HTTP غير مشفّر. حدّد “السماح بـ HTTP العادي” إذا كانت هذه الشبكة موثوقة، أو استخدم رابط HTTPS.',
+  'collab.runtime.joinCli': 'أو من طرفية على هذا الحاسوب:',
+};

@@ -1139,7 +1139,11 @@ function upsertToolBlock(
       existing.subagentSessionReady =
         existing.subagentSessionReady === true || event.subagentSessionReady;
     }
-    if (event.title !== undefined) existing.title = event.title;
+    if (event.title !== undefined) {
+      existing.title = event.title;
+      if (event.titleIsMachine === undefined) delete existing.titleIsMachine;
+      else existing.titleIsMachine = event.titleIsMachine;
+    }
     if (event.status !== undefined) existing.status = event.status;
     if (event.rawInput !== undefined) {
       existing.preview = createDaemonToolPreview(event.rawInput, {
@@ -1289,6 +1293,9 @@ function upsertToolBlock(
     ...(event.startedAt !== undefined ? { startedAt: event.startedAt } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
     title: event.title ?? toolName ?? event.toolKind ?? 'Tool',
+    ...(event.title !== undefined && event.titleIsMachine !== undefined
+      ? { titleIsMachine: event.titleIsMachine }
+      : {}),
     status: event.status ?? 'pending',
     preview: createDaemonToolPreview(event.rawInput, {
       title: event.title,

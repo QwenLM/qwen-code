@@ -88,6 +88,9 @@ export function toManagedPermissionRequest(
       ? { toolKind: 'switch_mode' as const }
       : {}),
     title: tool?.title ?? action.toolName,
+    ...(tool?.titleIsMachine !== undefined
+      ? { titleIsMachine: tool.titleIsMachine }
+      : {}),
     content: rawInput
       ? [
           {

@@ -16,6 +16,7 @@ export type SupportedLanguage =
   | 'pt'
   | 'fr'
   | 'ca'
+  | 'ar'
   | string;
 
 export interface LanguageDefinition {
@@ -40,7 +41,7 @@ export interface LanguageDefinition {
  * output-language table in core, so the CLI's settings and the Goal
  * verifier's closed set can never drift apart.
  */
-const STRICT_PARITY_CODES = new Set<SupportedLanguage>(['zh', 'zh-TW']);
+const STRICT_PARITY_CODES = new Set<SupportedLanguage>(['zh', 'zh-TW', 'ar']);
 
 export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] =
   OUTPUT_LANGUAGE_TABLE.map((entry) => ({

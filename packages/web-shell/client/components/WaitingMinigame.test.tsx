@@ -3,7 +3,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider, type WebShellLanguage } from '../i18n';
-import { buildWaitingActivity } from '../utils/waitingActivity';
+import {
+  buildWaitingActivity,
+  WAITING_ACTIVITY_DAYS,
+  WAITING_ACTIVITY_WEEKS,
+} from '../utils/waitingActivity';
 import {
   WaitingMinigame,
   WaitingMinigameButton,
@@ -267,6 +271,32 @@ describe('WaitingMinigame', () => {
     expect(container.querySelector('[data-intro="true"]')).toBeNull();
     expect(container.textContent).toContain('Arrows / WASD turn');
   });
+
+  it.each([
+    { column: 0, align: 'end', left: '' },
+    {
+      column: 10,
+      align: 'center',
+      left: `${((WAITING_ACTIVITY_WEEKS - 10 - 0.5) / WAITING_ACTIVITY_WEEKS) * 100}%`,
+    },
+    { column: WAITING_ACTIVITY_WEEKS - 1, align: 'start', left: '' },
+  ])(
+    'anchors the RTL activity tooltip to physical column $column',
+    ({ column, align, left }) => {
+      const { container } = render({}, 'ar');
+      const cell = container.querySelector<HTMLElement>(
+        `[data-day="${column * WAITING_ACTIVITY_DAYS}"]`,
+      );
+      expect(cell).not.toBeNull();
+      act(() => {
+        cell!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      });
+      const tooltip = container.querySelector<HTMLElement>('[role="tooltip"]');
+      expect(tooltip).not.toBeNull();
+      expect(tooltip!.dataset.align).toBe(align);
+      expect(tooltip!.style.left).toBe(left);
+    },
+  );
 
   it('shows day details on hover and locates the clicked day', () => {
     const onSelectActivity = vi.fn();

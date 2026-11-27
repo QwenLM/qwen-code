@@ -2,7 +2,7 @@
   color: var(--foreground);
   overflow: auto;
   margin-bottom: 12px;
-  margin-left: 14px;
+  margin-inline-start: 14px;
   padding: 8px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -40,6 +40,7 @@
 }
 
 .command {
+  direction: ltr;
   color: var(--muted-foreground);
   min-width: 0;
   overflow: hidden;
@@ -49,6 +50,7 @@
 }
 
 .output {
+  direction: ltr;
   margin: 0;
   padding: 8px 14px 10px;
   color: var(--muted-foreground);

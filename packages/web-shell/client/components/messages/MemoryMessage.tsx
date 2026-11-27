@@ -324,7 +324,9 @@ export function MemoryMessage({
       <section className={styles.detail}>
         <header className={styles.detailHeader}>
           <div className={styles.detailTitleWrap}>
-            <div className={styles.detailPath}>{path}</div>
+            <div className={styles.detailPath} dir="ltr">
+              {path}
+            </div>
           </div>
           <div className={styles.actions}>
             <button

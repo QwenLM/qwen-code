@@ -782,10 +782,12 @@ describe('ToolApproval accessibility', () => {
       content: [{ type: 'text', text: warnings }],
       rawInput: { command: 'ls -la', description: 'List files' },
     });
+    container!.dir = 'rtl';
     const warningPre = Array.from(container!.querySelectorAll('pre')).find(
       (el) => el.textContent!.includes('Runs outside the workspace'),
     )!;
     expect(warningPre).toBeTruthy();
+    expect(warningPre.dir).toBe('ltr');
     const rendered = warningPre.textContent!;
     expect(rendered).not.toContain('\u202e');
     expect(rendered).not.toContain('\u001b');
@@ -2322,5 +2324,171 @@ describe('floating variant scroll layout', () => {
       '[aria-label="File diff"]',
     )!;
     expect(diffRegion.className).not.toContain('linesFill');
+  });
+});
+
+describe('ToolApproval RTL description isolation', () => {
+  it('isolates a machine tool title in the description under an RTL UI', () => {
+    // The transcript row for the same call wraps the daemon title in
+    // MachineText; the approval card must not bidi-reorder the very string
+    // the user is asked to approve.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'Writing to مجلد/ملف.ts',
+        rawInput: { file_path: 'مجلد/ملف.ts', content: 'x' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'Writing to مجلد/ملف.ts',
+    );
+  });
+
+  it('isolates the description when the request carries machine provenance', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: true,
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'WriteFile: مجلد/ملف.ts',
+    );
+  });
+
+  it('isolates a decorated shell command the producer stamped as machine text', () => {
+    // core decorates the command with ` [timeout: …ms]` / ` [in …]` /
+    // ` [background]`; the card shows that whole title, so the provenance the
+    // producer stamps must isolate it rather than the browser re-deriving it.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'run_shell_command',
+        title: 'npm test [timeout: 60000ms]',
+        titleIsMachine: true,
+        rawInput: { command: 'npm test', timeout: 60000 },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'npm test [timeout: 60000ms]',
+    );
+  });
+
+  // Legacy rows and older daemons carry no flag, so the card falls back to the
+  // transcript heuristic. core interpolates the directory raw and keeps every
+  // decoration it appends, while the browser rebuilds a friendly directory and
+  // drops the timeout, so the heuristic must accept the producer's framing.
+  it.each([
+    {
+      name: 'timeout',
+      toolName: 'run_shell_command',
+      title: 'npm test [timeout: 60000ms]',
+      rawInput: { command: 'npm test', timeout: 60000 },
+    },
+    {
+      name: 'raw directory',
+      toolName: 'run_shell_command',
+      title: 'ls [in /workspace/مجلد]',
+      rawInput: { command: 'ls', directory: '/workspace/مجلد' },
+    },
+    {
+      name: 'shell alias directory',
+      toolName: 'shell',
+      title: 'ls [in /workspace/مجلد]',
+      rawInput: { command: 'ls', directory: '/workspace/مجلد' },
+    },
+    {
+      name: 'directory and timeout',
+      toolName: 'run_shell_command',
+      title: 'ls [in /workspace/مجلد] [timeout: 5000ms]',
+      rawInput: {
+        command: 'ls',
+        directory: '/workspace/مجلد',
+        timeout: 5000,
+      },
+    },
+  ])(
+    'isolates a legacy decorated shell command ($name) without provenance',
+    ({ toolName, title, rawInput }) => {
+      render(undefined, { ...request, toolName, title, rawInput }, [], 'ar');
+      container!.dir = 'rtl';
+      const desc = container!.querySelector(`.${styles.desc}`)!;
+      expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(title);
+    },
+  );
+
+  it('keeps the description unisolated when the producer says it is prose', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: false,
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('WriteFile: مجلد/ملف.ts');
+  });
+
+  it('does not isolate model-supplied description prose even with provenance', () => {
+    // The flag describes the daemon title; `rawInput.description` overrides
+    // the shown text with authored prose, which must keep the UI direction.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'write_file',
+        title: 'WriteFile: مجلد/ملف.ts',
+        titleIsMachine: true,
+        rawInput: { description: 'اكتب الملف المطلوب' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('اكتب الملف المطلوب');
+  });
+
+  it('does not isolate a prose title without machine framing', () => {
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'agent',
+        title: 'Agent: research the codebase',
+        rawInput: { prompt: 'research the codebase' },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi')).toBeNull();
+    expect(desc.textContent).toBe('Agent: research the codebase');
   });
 });

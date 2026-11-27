@@ -150,7 +150,7 @@
   gap: 10px;
   align-items: center;
   padding: 7px 14px;
-  text-align: left;
+  text-align: start;
 }
 
 .fileRow:hover {

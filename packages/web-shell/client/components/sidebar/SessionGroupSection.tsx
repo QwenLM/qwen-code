@@ -98,7 +98,11 @@ export function SessionGroupSection({
           <span className={styles.sessionGroupTitle}>{label}</span>
           <span className={styles.sessionGroupCount}>· {count}</span>
           <span className={styles.sessionGroupChevron} aria-hidden="true">
-            {expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
+            {expanded ? (
+              <ChevronDownIcon />
+            ) : (
+              <ChevronRightIcon className="rtl:-scale-x-100" />
+            )}
           </span>
         </button>
         {(onRename || onDelete) && (

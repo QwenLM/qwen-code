@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Storage } from '@qwen-code/qwen-code-core';
 
 describe('bundled locale fallback', () => {
@@ -135,6 +136,22 @@ describe('language normalization', () => {
     expect(getCurrentLanguage()).toBe('pt');
     expect(t('show version info')).toBe('mostrar informações de versão');
   });
+
+  it('normalizes Arabic locale variants before loading translations', async () => {
+    const { initializeI18n, getCurrentLanguage, t } = await import(
+      './index.js'
+    );
+    const { resolveSupportedLanguage } = await import('./languages.js');
+
+    expect(resolveSupportedLanguage('ar')).toBe('ar');
+    expect(resolveSupportedLanguage('ar-SA')).toBe('ar');
+    expect(resolveSupportedLanguage('ar_EG.UTF-8')).toBe('ar');
+
+    await initializeI18n('ar_EG.UTF-8');
+
+    expect(getCurrentLanguage()).toBe('ar');
+    expect(t('show version info')).toBe('عرض معلومات الإصدار');
+  });
 });
 
 describe('supported language resolution', () => {
@@ -151,6 +168,39 @@ describe('supported language resolution', () => {
 
     expect(resolveSupportedLanguage('zh-CN')).toBe('zh');
     expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
+  });
+
+  // Without the registration check-i18n only warns about a missing or extra
+  // Arabic key, so the shipped catalog could drift with a green checker.
+  it('holds the in-tree Arabic catalog to exact en.js key parity', async () => {
+    const { SUPPORTED_LANGUAGES } = await import('./languages.js');
+
+    expect(
+      SUPPORTED_LANGUAGES.find((language) => language.code === 'ar')
+        ?.strictParity,
+    ).toBe(true);
+  });
+
+  // A merge can add English keys without touching ar.js, and only check-i18n
+  // would notice, so pin the shipped catalog here too.
+  it('keeps the shipped Arabic catalog key-for-key with en.js', async () => {
+    const localesDir = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'locales',
+    );
+    const load = async (code: string): Promise<Record<string, unknown>> => {
+      const file = pathToFileURL(path.join(localesDir, `${code}.js`)).href;
+      const module = (await import(file)) as {
+        default?: Record<string, unknown>;
+      };
+      return module.default ?? {};
+    };
+
+    const en = await load('en');
+    const ar = await load('ar');
+
+    expect(Object.keys(ar).filter((key) => !(key in en))).toEqual([]);
+    expect(Object.keys(en).filter((key) => !(key in ar))).toEqual([]);
   });
 });
 
@@ -202,7 +252,7 @@ describe('localizeToolDisplayName', () => {
   // Both translating locales, not just zh: `t()` has no cross-locale
   // fallback, so a tool added to zh.js alone renders its raw English badge
   // in a zh-TW session, next to fully-translated siblings.
-  it.each(['zh', 'zh-TW'] as const)(
+  it.each(['zh', 'zh-TW', 'ar'] as const)(
     'has a %s translation for every core tool display name',
     async (locale) => {
       const { setLanguageAsync, localizeToolDisplayName } = await import(
@@ -217,6 +267,11 @@ describe('localizeToolDisplayName', () => {
           !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
       );
       expect(untranslated).toEqual([]);
+
+      const badges = Object.values(ToolDisplayNames)
+        .filter((name) => !KEEP_ENGLISH.has(name))
+        .map((name) => localizeToolDisplayName(name));
+      expect(new Set(badges).size).toBe(badges.length);
     },
   );
 

@@ -415,7 +415,7 @@ export function LiveVoiceSettingsCard({
             >
               {t('settings.liveSetup.apiKey')}
               {keyRequired && (
-                <span className="ml-1 text-destructive" aria-hidden="true">
+                <span className="ms-1 text-destructive" aria-hidden="true">
                   *
                 </span>
               )}

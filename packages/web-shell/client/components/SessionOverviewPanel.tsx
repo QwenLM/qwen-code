@@ -1646,7 +1646,7 @@ function SessionOverviewPanelInner({
                     <SessionDetailsTooltip {...sessionDetailsProps(card)}>
                       <button
                         type="button"
-                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-left text-sm leading-5 text-current"
+                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-start text-sm leading-5 text-current"
                         data-web-shell-session-title
                         onClick={(event) => {
                           event.stopPropagation();
@@ -2094,12 +2094,12 @@ function SessionOverviewPanelInner({
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative w-full max-w-[300px]">
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <SearchIcon className="pointer-events-none absolute top-1/2 start-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={searchQuery}
           onChange={(event) => setSearchQuery(event.target.value)}
           placeholder={t('sessionsOverview.searchPlaceholder')}
-          className="h-7 w-full pl-7 text-xs"
+          className="h-7 w-full ps-7 text-xs"
           aria-label={t('sessionsOverview.searchPlaceholder')}
         />
       </div>
@@ -2193,7 +2193,7 @@ function SessionOverviewPanelInner({
         type="button"
         size="sm"
         variant="outline"
-        className="ml-auto"
+        className="ms-auto"
         disabled={refreshing}
         onClick={refresh}
       >

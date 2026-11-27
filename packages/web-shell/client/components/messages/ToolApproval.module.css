@@ -91,7 +91,8 @@
 }
 
 .footerWithExplanation {
-  margin: 16px 0 0 24px;
+  margin-block: 16px 0;
+  margin-inline: 24px 0;
   padding-top: 12px;
   border-top: 1px dashed var(--border);
 }
@@ -208,6 +209,7 @@
 
 .codeBlock {
   margin: 0;
+  direction: ltr;
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--foreground);
@@ -244,8 +246,9 @@
   flex-wrap: wrap;
   gap: 16px;
   min-width: 0;
-  margin: 0 0 0 auto;
-  padding-left: 0;
+  margin-block: 0;
+  margin-inline: auto 0;
+  padding-inline-start: 0;
 }
 
 /* Keep action styles above the scoped preflight reset even if it loads later. */
@@ -344,7 +347,7 @@ button.menuTrigger {
 @media (max-width: 760px) {
   .options {
     flex: 1 0 100%;
-    margin-left: 0;
+    margin-inline-start: 0;
   }
 }
 

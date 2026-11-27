@@ -86,9 +86,12 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
 // catalogs; the export entry inlines the whole table (see above), so none of
 // that PR's component code reaches the document entry and the forbidden-input
-// guard still passes. Re-track against the 2,157,683-byte measurement with the
-// same margins: 2,158,396 / 2,159,396.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_396;
+// guard still passes.
+// The Arabic catalog keeps this branch above that shared-tree baseline: the
+// branch measured 2,207,336 against the 2,155,573 baseline (+51,763), and
+// main has since grown +2,110 to 2,157,683, so the merged tree is estimated
+// at 2,209,446. Re-track with the same margins: 2,210,159 / 2,211,159.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_210_159;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -165,6 +168,22 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_396;
 // to the warning and 1,671 to the ceiling. (A local build against the worktree's
 // own node_modules measures lower — 2,138,797 — but the lane's absolute number
 // is what these constants track.)
+// Arabic transcript strings and RTL runtime wiring are retained in the
+// document bundle; interactive-only Arabic and Traditional Chinese are stubbed.
+// With the same installed dependencies on Node 24.22.3, main d83fa2154e
+// measures 2,146,529 JS bytes and Arabic head 15d3a19824 measures 2,191,830.
+// Their merge plus the RTL fixes measures 2,195,499 (+48,970 over main,
+// +3,669 over the Arabic head). Third-party input bytes are unchanged and
+// the forbidden-input guard passes for all three. The warning sits 501
+// bytes above the merged measurement and the ceiling 1,501 above it.
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no bytes here. Merging
+// main c5247e9727 (its transcript-reachable copy since d83fa2154e) measures
+// 2,196,205 JS bytes on Node 22.23.2 with the workflow's installed
+// dependencies (CSS 2,438,122, separate); the forbidden-input guard passes
+// and the third-party input mix is unchanged. Re-track: the warning sits
+// 795 above that measurement and the ceiling 1,795 above it.
 //
 // The restart recovery inbox (#17677: panel copy and state strings across
 // three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
@@ -204,6 +223,26 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_396;
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
 //
+// Merging main e92f3090e8 into the Arabic branch measures 2,199,754 JS bytes
+// on Node 22.23.2 (CSS 2,439,556, separate); the forbidden-input guard passes
+// and the third-party input mix is unchanged. Re-track: the warning sits 946
+// above that measurement and the ceiling 1,946 above it.
+// A paired local Node 24 build of PR head 27c2ee57 before and after merging
+// main 2421ad2c measures the same 2,138,480 JS and 2,439,280 separate CSS
+// bytes in both trees. This merge keeps the Arabic branch's existing cap.
+//
+// The machine-title provenance work after that measurement (toolFormatting's
+// framing-aware classifier and its emitter/adapter wiring) is transcript
+// reachable and outgrew the cap: CI measures 2,202,708 JS bytes on head
+// b107d7b1d3, identically on the TUI-parity and both Managed-loop lanes, 1,008
+// above the previous 2,201,700 ceiling. A local Node 22.23.2 build of that head
+// measures 2,201,546, and 2,201,617 with this round's framing narrowing (+71);
+// CSS is unchanged at 2,439,556 in both and the forbidden-input guard passes,
+// so the ~1,162-byte spread is the install/Node difference this file already
+// tracks, not new inputs. Re-track against the lane figure: the warning sits
+// 992 above it and the ceiling 1,992 above it, leaving 1,921 above this tree's
+// expected 2,202,779.
+//
 // The ChatSurface chat column (#17952) then grows the transcript dictionary
 // past that ceiling: the Build lane measures 2,151,214 bytes on main
 // 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
@@ -215,6 +254,24 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_158_396;
 // component graph is not wired into any column and useDaemonChatController
 // has no importer, so no component code reaches the document entry; the
 // forbidden-input guard passes and the third-party input mix is unchanged.
+// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
+//
+// Merging main 39f15664e3 (the ChatSurface copy above, the ThinkingBody
+// transcript stub and the continuation-badge sidebar labels) measures
+// 2,203,610 JS bytes on Node 22.23.2 with the workflow's installed
+// dependencies, with 2,440,868 bytes of separate CSS; the forbidden-input
+// guard passes. Applying the ~1,162-byte install spread measured above puts
+// the lane near 2,204,772, 72 above the previous ceiling, so re-track against
+// that expected lane figure: the warning sits 1,028 above it and the ceiling
+// 2,028 above it, leaving 2,190 and 3,190 above this local measurement.
+// Merging main 91a14e3349 (touch-composer follow-ups, compact automatic
+// trigger messages, managed telemetry attribution) measures 2,207,336 JS
+// bytes on Node 22.23.2 with the workflow's installed dependencies, with
+// 2,442,003 bytes of separate CSS; the forbidden-input guard passes and the
+// third-party input mix is unchanged. Re-track with the house margins: the
+// warning sits 713 above that measurement and the coupled ceiling 1,713
+// above it, which still leaves 551 bytes below the ceiling for the
+// ~1,162-byte install spread tracked above if the lane measures higher.
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,

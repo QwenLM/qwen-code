@@ -144,3 +144,52 @@ export const MANAGED_LIFECYCLE_MESSAGES_RU = {
   'managed.lifecycle.storageUnavailable':
     'Хранилище браузера недоступно. Операцию нельзя было безопасно сохранить.',
 };
+
+export const MANAGED_LIFECYCLE_MESSAGES_AR = {
+  'managed.sessionActions': 'إجراءات الجلسة',
+  'managed.historyFilter': 'تصفية سجل الجلسات',
+  'managed.history.unarchived': 'الجلسات',
+  'managed.history.archived': 'المؤرشفة',
+  'managed.exportHtml': 'تصدير HTML',
+  'managed.exportMarkdown': 'تصدير Markdown',
+  'managed.exportHtmlDescription':
+    'قراءة دون اتصال؛ يتم حظر السكربتات والصور البعيدة.',
+  'managed.exportMarkdownDescription':
+    'قد يحتوي المصدر الأصلي على HTML وروابط صور بعيدة. استخدم عارضاً يحظر السكربتات والطلبات البعيدة.',
+  'managed.exportFailed':
+    'تعذر تصدير هذه المحادثة. تحقق من الصلاحيات والاتصال ثم أعد المحاولة.',
+  'managed.exporting': 'جارٍ تحضير التصدير…',
+  'managed.exportNotReady':
+    'لا يزال سجل المحادثة قيد المزامنة. أعد المحاولة بعد قليل.',
+  'managed.exportTooLarge': 'تتجاوز هذه المحادثة حد التصدير البالغ 32 MiB.',
+  'managed.exportChanged': 'لم تعد لقطة التصدير متاحة. ابدأ تصديراً جديداً.',
+  'managed.sessionState.active': 'نشطة',
+  'managed.sessionState.closing': 'قيد الإغلاق',
+  'managed.sessionState.closed': 'مغلقة · للقراءة فقط',
+  'managed.sessionState.archived': 'مؤرشفة · للقراءة فقط',
+  'managed.sessionState.deleting': 'قيد الحذف',
+  'managed.sessionState.deleted': 'محذوفة',
+  'managed.lifecycle.close': 'إغلاق الجلسة',
+  'managed.lifecycle.close_archive': 'إغلاق وأرشفة',
+  'managed.lifecycle.archive': 'أرشفة',
+  'managed.lifecycle.unarchive': 'استعادة من الأرشيف',
+  'managed.lifecycle.delete': 'حذف الجلسة',
+  'managed.lifecycle.submitting': 'جارٍ إرسال العملية',
+  'managed.lifecycle.pending': 'تم قبول العملية',
+  'managed.lifecycle.running': 'قيد المعالجة',
+  'managed.lifecycle.recovery_blocked': 'في انتظار الاسترداد',
+  'managed.lifecycle.failed': 'فشلت العملية',
+  'managed.lifecycle.unconfirmed': 'النتيجة غير مؤكدة',
+  'managed.lifecycle.retry': 'إعادة محاولة العملية',
+  'managed.lifecycle.confirm': 'التحقق من العملية',
+  'managed.lifecycle.deleteDescription':
+    'هل تريد حذف هذه الجلسة نهائياً؟ يتم الاحتفاظ بملفات مساحة العمل المشتركة والجلسات الأخرى.',
+  'managed.lifecycle.closeDescription':
+    'ستصبح هذه الجلسة للقراءة فقط. يمكنك عرض سجلها وتصديره، لكن لا يمكنك متابعة المحادثة. ويتم الاحتفاظ بملفات مساحة العمل المشتركة.',
+  'managed.lifecycle.archiveIncomplete': 'الجلسة مغلقة؛ ولم تكتمل الأرشفة بعد.',
+  'managed.lifecycle.openTask': 'فتح المهمة',
+  'managed.lifecycle.stopFirst':
+    'أوقف المهمة قيد التشغيل أولاً، ثم حاول مجدداً.',
+  'managed.lifecycle.storageUnavailable':
+    'تخزين المتصفح غير متاح. تعذر حفظ العملية بأمان.',
+};

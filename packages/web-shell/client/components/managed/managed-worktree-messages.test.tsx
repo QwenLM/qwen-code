@@ -18,4 +18,13 @@ describe('managed worktree copy', () => {
     expect(t('unsupported')).toBe('當前部署或執行環境不支援會話 worktree。');
     expect(t('sessionActive')).toBe('請先關閉會話，再刪除它的 worktree。');
   });
+  it('preserves the Arabic table after adding Traditional Chinese', () => {
+    const { result } = renderHook(() => useManagedWorktreeText(), {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <I18nProvider language="ar">{children}</I18nProvider>
+      ),
+    });
+    expect(result.current('mode')).toBe('ملفات الجلسة');
+    expect(result.current('cleanup')).toBe('إزالة مجلد worktree');
+  });
 });

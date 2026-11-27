@@ -12,3 +12,4 @@
 export const LIVE_MESSAGES_EN = {};
 export const LIVE_MESSAGES_ZH = {};
 export const LIVE_MESSAGES_RU = {};
+export const LIVE_MESSAGES_AR = {};

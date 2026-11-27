@@ -2678,7 +2678,8 @@ const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
 type SessionTimelineTooltip = {
   entry: SessionTimelineEntry;
   top: number;
-  left: number;
+  left?: number;
+  right?: number;
   clamped: boolean;
   themeVars: CSSProperties;
 };
@@ -2709,7 +2710,7 @@ const SessionTimeline = memo(function SessionTimeline({
   onSelect: (turnId: string) => void;
 }) {
   const portalRoot = useWebShellPortalRoot();
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const panelRef = useRef<HTMLElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -2737,11 +2738,16 @@ const SessionTimeline = memo(function SessionTimeline({
       if (!panel) return null;
       const computedStyle = getComputedStyle(panel);
       const rect = el.getBoundingClientRect();
+      // Anchor to the 28px hovered tick, not the full-width button. The tick
+      // sits at the button's inline start: rect.left in LTR, rect.right in RTL,
+      // where the card opens toward the content from the right edge instead.
+      const anchor = isRtl
+        ? { right: window.innerWidth - (rect.right - 28 - 8) }
+        : { left: rect.left + 28 + 8 };
       return {
         entry,
         top: rect.top + rect.height / 2,
-        // Anchor to the 28px hovered tick, not the full-width button.
-        left: rect.left + 28 + 8,
+        ...anchor,
         clamped: false,
         themeVars: Object.fromEntries(
           SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
@@ -2751,7 +2757,7 @@ const SessionTimeline = memo(function SessionTimeline({
         ) as CSSProperties,
       };
     },
-    [],
+    [isRtl],
   );
 
   const findTooltipAnchor = useCallback((entry: SessionTimelineEntry) => {
@@ -2991,6 +2997,7 @@ const SessionTimeline = memo(function SessionTimeline({
                 ...tooltip.themeVars,
                 top: tooltip.top,
                 left: tooltip.left,
+                right: tooltip.right,
               }}
             >
               <span className={styles.sessionTimelineDetailsTitle}>

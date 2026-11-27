@@ -3339,12 +3339,59 @@ describe('Session', () => {
         content: [],
         _meta: {
           toolName: 'run_shell_command',
+          titleIsMachine: true,
           workflowApproval: true,
           backgroundWorkflowApproval: true,
           [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
           approvalOutcome: 'approved',
         },
       },
+    });
+  });
+
+  it('stamps machine-title provenance on a workflow approval frame', async () => {
+    mockToolRegistry.getTool.mockReturnValue({
+      displayName: 'WriteFile',
+      kind: core.Kind.Edit,
+      build: vi.fn().mockReturnValue({
+        getDescription: vi.fn().mockReturnValue('Writing to مجلد/ملف.ts'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }),
+    });
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback | undefined;
+    expect(callback).toBeTypeOf('function');
+
+    await callback?.(
+      { runId: 'wf_machine' } as core.WorkflowTask,
+      {
+        approvalId: 'wfap_machine',
+        subagentId: 'agent-1',
+        callId: 'call-1',
+        name: 'write_file',
+        description: 'Write file',
+        confirmationDetails: {
+          type: 'edit',
+          title: 'Write file',
+          fileName: 'ملف.ts',
+          filePath: '/repo/مجلد/ملف.ts',
+          fileDiff: '+x',
+          originalContent: '',
+          newContent: 'x',
+          hideAlwaysAllow: true,
+        },
+        at: 1,
+      },
+      { file_path: '/repo/مجلد/ملف.ts', content: 'x' },
+      new AbortController().signal,
+    );
+
+    const request = vi.mocked(mockClient.requestPermission).mock.calls[0]?.[0];
+    expect(request?.toolCall.title).toBe('WriteFile: Writing to مجلد/ملف.ts');
+    expect(request?.toolCall._meta).toMatchObject({
+      toolName: 'write_file',
+      workflowApproval: true,
+      titleIsMachine: true,
     });
   });
 
@@ -45500,6 +45547,84 @@ describe('Session', () => {
       );
     });
 
+    it.each([
+      [
+        'a decorated command',
+        { command: 'npm test', timeout: 60000 },
+        'npm test [timeout: 60000ms]',
+        true,
+      ],
+      [
+        'a command carrying model prose',
+        { command: 'npm test', description: 'شغّل الاختبارات' },
+        'npm test (شغّل الاختبارات)',
+        false,
+      ],
+    ] as const)(
+      'stamps shell approval provenance for %s',
+      async (_label, args, title, machine) => {
+        const invocation = {
+          params: args,
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Confirm shell command',
+            command: 'npm test',
+            rootCommand: 'npm',
+            onConfirm: vi.fn(),
+          }),
+          getDescription: vi.fn().mockReturnValue(title),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn(),
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.SHELL,
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockClient.requestPermission = vi.fn().mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-shell-provenance',
+                    name: core.ToolNames.SHELL,
+                    args,
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run the tests' }],
+        });
+
+        const request = vi.mocked(mockClient.requestPermission).mock
+          .calls[0]![0];
+        expect(request.toolCall.title).toBe(title);
+        if (machine) {
+          expect(request.toolCall._meta).toMatchObject({
+            toolName: core.ToolNames.SHELL,
+            titleIsMachine: true,
+          });
+        } else {
+          expect(request.toolCall._meta).not.toHaveProperty('titleIsMachine');
+        }
+      },
+    );
+
     it('keeps the amend approval human-only in ACP', async () => {
       const command = 'git commit --amend --no-edit';
       const onConfirm = vi.fn();
@@ -54200,6 +54325,41 @@ describe('Session', () => {
       expect(mockClient.requestPermission).toHaveBeenCalledOnce();
       expect(result.parts[0]?.functionResponse?.response).toEqual({
         output: 'executed',
+      });
+    });
+
+    it('stamps machine-title provenance on the permission frame', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'executed',
+        returnDisplay: 'executed',
+      });
+      const tool = mockConfirmingTool('write_file', execute);
+      tool.displayName = 'WriteFile';
+      const invocation = tool.build();
+      invocation.getDescription.mockReturnValue('Writing to مجلد/ملف.ts');
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      vi.spyOn(core, 'logToolCall').mockImplementation(() => {});
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'machine-title-prompt',
+        [
+          {
+            id: 'machine-title-call',
+            name: 'write_file',
+            args: { file_path: 'مجلد/ملف.ts', content: 'x' },
+          },
+        ],
+      );
+      const request = vi.mocked(mockClient.requestPermission).mock
+        .calls[0]?.[0];
+      expect(request?.toolCall).toMatchObject({
+        toolCallId: 'machine-title-call',
+        title: 'Writing to مجلد/ملف.ts',
+        _meta: { toolName: 'write_file', titleIsMachine: true },
       });
     });
 

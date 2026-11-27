@@ -345,7 +345,7 @@ export class SubAgentTracker {
         },
       } as unknown as ToolCallConfirmationDetails;
 
-      const { title, locations, kind } =
+      const { title, titleIsMachine, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
       const permissionOptions = toPermissionOptions(
@@ -374,6 +374,7 @@ export class SubAgentTracker {
           // path.
           _meta: {
             toolName: event.name,
+            ...(titleIsMachine !== undefined ? { titleIsMachine } : {}),
             ...interactionMetaFields(fullConfirmationDetails),
           },
         },

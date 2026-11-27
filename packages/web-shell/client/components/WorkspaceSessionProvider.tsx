@@ -24,6 +24,7 @@ import {
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import {
+  languageDirection,
   normalizeLanguage,
   useTranslator,
   type WebShellLanguage,
@@ -154,7 +155,8 @@ function ResolvedWorkspaceSessionProvider(
   ) {
     standaloneGateActiveRef.current = true;
   }
-  const t = useTranslator(surfaceLanguage(webShellProps.language));
+  const resolvedLanguage = surfaceLanguage(webShellProps.language);
+  const t = useTranslator(resolvedLanguage);
   const contextConflictsWithWorkspace =
     sessionContext?.kind !== undefined &&
     sessionContext.kind !== 'workspace' &&
@@ -166,6 +168,7 @@ function ResolvedWorkspaceSessionProvider(
         title={t('session.loadFailed')}
         description={t('session.contextConflict')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
       />
     );
@@ -265,7 +268,9 @@ function WorkspaceSessionProviderWorkspace({
     : workspace.capabilities?.workspaces?.find(
         (entry) => entry.id === effectiveWorkspaceId,
       );
-  const t = useTranslator(surfaceLanguage(webShellProps.language));
+  const resolvedLanguage = surfaceLanguage(webShellProps.language);
+  const resolvedDir = languageDirection(resolvedLanguage);
+  const t = useTranslator(resolvedLanguage);
 
   useEffect(() => {
     if (!lockWorkspaceCwd || !workspace.capabilities || pathWorkspace) return;
@@ -353,6 +358,7 @@ function WorkspaceSessionProviderWorkspace({
         }
         actionLabel={t('common.retry')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
         onAction={() => {
           if (availability && availability.getSnapshot() !== 'available') {
@@ -373,6 +379,8 @@ function WorkspaceSessionProviderWorkspace({
       <div
         data-web-shell-root
         data-web-shell-shadcn
+        lang={resolvedLanguage}
+        dir={resolvedDir}
         className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
@@ -393,6 +401,7 @@ function WorkspaceSessionProviderWorkspace({
         description={t('workspace.loadFailedDescription')}
         actionLabel={t('common.retry')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
         onAction={() => {
           registrationRef.current = undefined;
@@ -406,6 +415,8 @@ function WorkspaceSessionProviderWorkspace({
       <div
         data-web-shell-root
         data-web-shell-shadcn
+        lang={resolvedLanguage}
+        dir={resolvedDir}
         className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
@@ -428,6 +439,7 @@ function WorkspaceSessionProviderWorkspace({
         description={t('workspace.notFoundDescription')}
         actionLabel={t('session.new')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         onAction={() => {
           navigation?.beginSessionNavigation();
           setUsePrimaryNewSession(true);
@@ -517,7 +529,9 @@ function StandaloneSessionGate({
   );
   const [resolutionSessionId, setResolutionSessionId] = useState(sessionId);
   const resolutionGenerationRef = useRef(0);
-  const t = useTranslator(surfaceLanguage(webShellProps.language));
+  const resolvedLanguage = surfaceLanguage(webShellProps.language);
+  const resolvedDir = languageDirection(resolvedLanguage);
+  const t = useTranslator(resolvedLanguage);
 
   const standaloneSupported =
     workspace.capabilities?.features?.includes(
@@ -640,6 +654,7 @@ function StandaloneSessionGate({
         description={t('session.capabilitiesFailed')}
         actionLabel={t('common.retry')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
         onAction={() => {
           if (availability && availability.getSnapshot() !== 'available') {
@@ -656,6 +671,8 @@ function StandaloneSessionGate({
       <div
         data-web-shell-root
         data-web-shell-shadcn
+        lang={resolvedLanguage}
+        dir={resolvedDir}
         className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
@@ -671,6 +688,7 @@ function StandaloneSessionGate({
         title={t('session.standaloneUnavailable')}
         description={t('session.standaloneUpgradeRequired')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
       />
     );
@@ -694,6 +712,8 @@ function StandaloneSessionGate({
       <div
         data-web-shell-root
         data-web-shell-shadcn
+        lang={resolvedLanguage}
+        dir={resolvedDir}
         className={`flex min-h-32 w-full items-center justify-center gap-2 text-sm text-muted-foreground ${surfaceTheme(webShellProps.theme) === 'dark' ? 'dark' : ''}`}
         role="status"
         aria-live="polite"
@@ -712,6 +732,7 @@ function StandaloneSessionGate({
           webShellProps.onSessionIdChange ? t('session.new') : undefined
         }
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
         onAction={
           webShellProps.onSessionIdChange
@@ -740,6 +761,7 @@ function StandaloneSessionGate({
         }
         actionLabel={t('common.retry')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         icon={<WifiOffIcon />}
         onAction={() => setAttempt((current) => current + 1)}
       />
@@ -752,6 +774,7 @@ function StandaloneSessionGate({
         description={t('session.archivedDescription')}
         actionLabel={t('session.unarchive')}
         theme={surfaceTheme(webShellProps.theme)}
+        language={resolvedLanguage}
         onAction={() => {
           const requestedSessionId = sessionId!;
           const normalizedSessionId = requestedSessionId.toLowerCase();
