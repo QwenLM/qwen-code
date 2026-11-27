@@ -24,6 +24,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_ZH } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -5148,4 +5149,5 @@ export const ZH: Messages = {
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
+  ...ARCHIVED_SESSIONS_MESSAGES_ZH,
 };

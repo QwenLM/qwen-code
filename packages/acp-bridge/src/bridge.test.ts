@@ -18799,6 +18799,40 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('forwards a prompt source only from trusted user-prompt context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const forged = { sessionId: 'forged', workspaceCwd: '/forged' };
+      const source = { sessionId: 'sender', workspaceCwd: WS_B };
+      const req = {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'delegated task' }],
+        _meta: { 'qwen.daemon.promptSource': forged },
+      } as PromptRequest;
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        userPrompt: true,
+      });
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptSource'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        promptSource: source,
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.promptSource'],
+      ).toBeUndefined();
+      await bridge.sendPrompt(session.sessionId, req, undefined, {
+        userPrompt: true,
+        promptSource: source,
+      });
+      expect(handle.agent.promptCalls[2]?._meta).toMatchObject({
+        'qwen.daemon.userPrompt': true,
+        'qwen.daemon.promptSource': source,
+      });
+      await bridge.shutdown();
+    });
+
     it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
       // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
       // so a forged key must not reach the child; only the authenticated
@@ -22589,6 +22623,46 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       },
     );
+  });
+
+  describe('turn_complete promptBlocked', () => {
+    it.each([
+      [true, true],
+      ['yes', false],
+    ])('publishes promptBlocked for metadata %j: %s', async (value, valid) => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        promptImpl: () =>
+          ({
+            stopReason: 'end_turn',
+            _meta: { 'qwen.promptBlocked': value },
+          }) as PromptResponse,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'block me' }],
+      });
+      await vi.waitFor(() =>
+        expect(events.some((event) => event.type === 'turn_complete')).toBe(
+          true,
+        ),
+      );
+      const terminal = events.find((event) => event.type === 'turn_complete');
+      if (valid) {
+        expect(terminal?.data).toHaveProperty('promptBlocked', true);
+      } else {
+        expect(terminal?.data).not.toHaveProperty('promptBlocked');
+      }
+      await bridge.shutdown();
+    });
   });
 
   describe('turn_complete branchPoint', () => {

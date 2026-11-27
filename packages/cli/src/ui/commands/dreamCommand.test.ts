@@ -97,6 +97,8 @@ describe('dreamCommand', () => {
       projectRoot,
       context.services.config,
       'session-1',
+      undefined,
+      undefined,
     );
     expect(buildConsolidationPrompt).not.toHaveBeenCalled();
     expect(result).toEqual({
@@ -125,7 +127,12 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
+    expect(writeDreamManualRun).toHaveBeenCalledWith(
+      projectRoot,
+      'session-1',
+      undefined,
+      undefined,
+    );
     expect(result).toEqual({ type: 'submit_prompt', content: 'dream prompt' });
     expect(result).not.toHaveProperty('onComplete');
   });
