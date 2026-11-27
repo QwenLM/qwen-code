@@ -66,6 +66,11 @@ import {
   sessionArtifactSummarySidecarPath,
   writeSessionArtifactSummarySidecar,
 } from './session-artifact-summary-sidecar.js';
+import {
+  removeSessionPromptTimeSidecar,
+  sessionPromptTimeSidecarPath,
+  writeSessionPromptTimeSidecar,
+} from './session-prompt-time-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -1676,6 +1681,80 @@ export class ChatRecordingService {
     );
   }
 
+  private promptTimeSidecarPath(legacyConversationFile?: string): string {
+    return sessionPromptTimeSidecarPath(
+      legacyConversationFile
+        ? path.dirname(legacyConversationFile)
+        : this.ensureChatsDir(),
+      legacyConversationFile
+        ? path.basename(legacyConversationFile, '.jsonl')
+        : this.getSessionId(),
+    );
+  }
+
+  private updatePromptTimeSidecar(
+    record: ChatRecord,
+    promptTime: string | undefined,
+    legacyConversationFile: string | undefined,
+    updateActiveTail: boolean,
+  ): void {
+    const sidecarPath = this.promptTimeSidecarPath(legacyConversationFile);
+    if (record.subtype === 'rewind') {
+      removeSessionPromptTimeSidecar(sidecarPath);
+      return;
+    }
+    if (
+      promptTime === undefined ||
+      !updateActiveTail ||
+      this.managedSink ||
+      typeof record.cwd !== 'string' ||
+      record.cwd.length === 0
+    ) {
+      return;
+    }
+    const transcriptPath =
+      legacyConversationFile ??
+      this.binding?.lease.transcriptPath ??
+      path.join(this.ensureChatsDir(), `${this.getSessionId()}.jsonl`);
+    try {
+      const stats = fs.statSync(transcriptPath);
+      let tailHex: string | undefined;
+      if (stats.size > 0) {
+        const tailLen = Math.min(64, stats.size);
+        const fd = fs.openSync(transcriptPath, 'r');
+        try {
+          const buf = Buffer.allocUnsafe(tailLen);
+          const bytesRead = fs.readSync(
+            fd,
+            buf,
+            0,
+            tailLen,
+            stats.size - tailLen,
+          );
+          if (bytesRead === tailLen) {
+            tailHex = buf.toString('hex');
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+      writeSessionPromptTimeSidecar(sidecarPath, {
+        fileIdentity: { dev: stats.dev, ino: stats.ino },
+        snapshotSize: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        lastUserPromptAt: promptTime,
+        leafUuid: record.uuid,
+        firstRecordOwner: {
+          sessionId: record.sessionId,
+          cwd: record.cwd,
+        },
+        ...(tailHex !== undefined ? { tailHex } : {}),
+      });
+    } catch {
+      // Best-effort: a missing sidecar must never fail transcript recording.
+    }
+  }
+
   /**
    * Keeps the session list label independent of the transcript's head. A
    * transcript can be rebuilt without its first records (the writer recreates
@@ -2192,6 +2271,14 @@ export class ChatRecordingService {
             }
             await jsonl.writeLine(legacyConversationFile, record);
             lock.assertHeld();
+            if (changesPromptTime) {
+              this.updatePromptTimeSidecar(
+                record,
+                promptTime,
+                legacyConversationFile,
+                updateActiveTail,
+              );
+            }
             afterWrite?.(legacyConversationFile);
           } finally {
             await lock.release();
@@ -2199,7 +2286,17 @@ export class ChatRecordingService {
         } else {
           throw new SessionWriterUnavailableError();
         }
-        if (managedSink || lease) afterWrite?.();
+        if (managedSink || lease) {
+          if (changesPromptTime) {
+            this.updatePromptTimeSidecar(
+              record,
+              promptTime,
+              undefined,
+              updateActiveTail,
+            );
+          }
+          afterWrite?.();
+        }
         if (updateActiveTail) {
           this.lastPersistedRecordUuid = record.uuid;
         }
@@ -2695,6 +2792,7 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
+        removeSessionPromptTimeSidecar(this.promptTimeSidecarPath());
         this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
         this.userDisplayTextsForTitle.length = 0;
         this.modPromptKeysForTitle.clear();

@@ -189,8 +189,10 @@ import {
 import {
   clearSessionTranscriptIndexCacheEntriesForTest,
   encodeSessionTranscriptCursor,
+  getSessionTranscriptBuildSemaphoreStatsForTest,
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
@@ -202,22 +204,28 @@ import {
   setSessionTranscriptCooperativeReadBudgetForTest,
   setSessionTranscriptExpandedPageBytesForTest,
   setSessionTranscriptMaxAllReplayBytesForTest,
+  setSessionTranscriptMaxConcurrentBuildsForTest,
   setSessionTranscriptMaxIndexEstimateBytesForTest,
   setSessionTranscriptMaxLineBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexBuildModeHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
+  setSessionTranscriptPromptTimeScanModeHookForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptReader,
+  type PromptTimeScanModeEvent,
   type SelectiveSessionRestoreOptions,
   type SessionTranscriptCursorState,
   type SessionTranscriptReadPageOptions,
   type SessionTranscriptRecordPage,
+  type TranscriptIndexBuildModeEvent,
 } from './session-transcript-reader.js';
+import { sessionPromptTimeSidecarPath } from './session-prompt-time-sidecar.js';
 import {
   content,
   fnCall,
@@ -7123,6 +7131,609 @@ describe('SessionTranscriptReader', () => {
         expect.objectContaining({ turnId: 'u1', label: 'Prompt' }),
       ]);
       expect(JSON.stringify(page.turns)).not.toContain(token);
+    });
+  });
+
+  describe('prompt-time sidecar, lightweight scan, concurrency gate, abort, and incremental index (#17889)', () => {
+    it('uses lightweight scan (zero full index builds) on cold prompt read and hits sidecar_exact after restart', async () => {
+      const u1 = record('u1', null, 'hello');
+      const a1 = record('a1', u1.uuid, 'reply');
+      const file = await writeRecords([u1, a1]);
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+
+      const indexBuilds: TranscriptIndexBuildModeEvent[] = [];
+      const promptScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => indexBuilds.push(e));
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        promptScans.push(e),
+      );
+
+      const reader = newReader();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(u1.timestamp);
+      expect(indexBuilds).toEqual([]);
+      expect(promptScans).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+      expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+
+      // Simulate daemon restart by clearing all in-memory caches while keeping disk sidecar.
+      resetSessionTranscriptIndexCacheForTest();
+      const postRestartBuilds: TranscriptIndexBuildModeEvent[] = [];
+      const postRestartScans: PromptTimeScanModeEvent[] = [];
+      let hookCalls = 0;
+      setSessionTranscriptIndexBuildModeHookForTest((e) =>
+        postRestartBuilds.push(e),
+      );
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        postRestartScans.push(e),
+      );
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        hookCalls += 1;
+      });
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      expect(postRestartBuilds).toEqual([]);
+      expect(hookCalls).toBe(0);
+      expect(postRestartScans).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_exact',
+        }),
+      ]);
+    });
+
+    it('tail-extends from the persisted sidecar offset on linear appends and falls back cleanly on rewind or corrupt sidecar', async () => {
+      const u1 = record('u1', null, 'first question');
+      const a1 = record('a1', u1.uuid, 'first answer');
+      const file = await writeRecords([u1, a1]);
+      const prefixSize1 = (await fs.stat(file)).size;
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+
+      // Append an assistant turn and clear memory caches -> must scan ONLY from prefixSize1.
+      const a2 = record('a2', a1.uuid, 'follow-up assistant note');
+      await appendRecords(file, a2);
+      const prefixSize2 = (await fs.stat(file)).size;
+      resetSessionTranscriptIndexCacheForTest();
+      const scans1: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans1.push(e));
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      expect(scans1).toEqual([
+        {
+          filePath: file,
+          mode: 'sidecar_tail',
+          startOffset: prefixSize1,
+          snapshotSize: prefixSize2,
+        },
+      ]);
+
+      // Append a new user prompt and clear memory caches -> must tail-extend from prefixSize2 and return u2.
+      const u2 = record('u2', a2.uuid, 'second question');
+      await appendRecords(file, u2);
+      const prefixSize3 = (await fs.stat(file)).size;
+      resetSessionTranscriptIndexCacheForTest();
+      const scans2: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans2.push(e));
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u2.timestamp,
+      );
+      expect(scans2).toEqual([
+        {
+          filePath: file,
+          mode: 'sidecar_tail',
+          startOffset: prefixSize2,
+          snapshotSize: prefixSize3,
+        },
+      ]);
+
+      // Append a non-linear rewind jumping back to a1 (dropping u2 from active chain) -> must fall back to lightweight_scan and return u1.
+      const r1: ChatRecord = {
+        ...record('r1', a1.uuid, 'rewound'),
+        type: 'system',
+        subtype: 'rewind',
+      };
+      await appendRecords(file, r1);
+      resetSessionTranscriptIndexCacheForTest();
+      const scans3: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans3.push(e));
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      expect(scans3).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // Corrupt sidecar must fail closed to lightweight_scan.
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+      await fs.writeFile(sidecarPath, '{corrupt', 'utf8');
+      resetSessionTranscriptIndexCacheForTest();
+      const scans4: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans4.push(e));
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      expect(scans4).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // In-place rewrite with different prefix + extra newline on the same inode must fail tailHex check and fall back to lightweight_scan.
+      const prevSize = (await fs.stat(file)).size;
+      const rewritten = {
+        ...record('u-rewritten', null, 'rewritten prompt'),
+        timestamp: '2026-09-01T00:00:00.000Z',
+      };
+      const rewrittenLine = `${JSON.stringify(rewritten)}\n`;
+      // Pad with spaces before the newline at prevSize - 1 so byte prevSize - 1 is STILL '\n', then append another blank line.
+      const paddedPrefix =
+        rewrittenLine.length < prevSize
+          ? `${rewrittenLine}${' '.repeat(prevSize - rewrittenLine.length - 1)}\n`
+          : rewrittenLine;
+      await fs.writeFile(file, `${paddedPrefix}\n`, 'utf8');
+      resetSessionTranscriptIndexCacheForTest();
+      const scans5: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans5.push(e));
+
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        rewritten.timestamp,
+      );
+      expect(scans5).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+    });
+
+    it('never writes a prompt-time sidecar when allowSidecarWrite is false or transcript belongs to a foreign workspace', async () => {
+      const u1 = record('u1', null, 'hello');
+      const file = await writeRecords([u1]);
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+
+      expect(
+        await newReader().getLastUserPromptAt(sessionId, 'active', {
+          allowSidecarWrite: false,
+        }),
+      ).toBe(u1.timestamp);
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      resetSessionTranscriptIndexCacheForTest();
+      const foreign = { ...record('u2', null, 'foreign'), cwd: '/other/repo' };
+      await writeRecords([foreign]);
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        foreign.timestamp,
+      );
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('aborts an in-flight cold prompt scan early when the sole waiter aborts, and isolates concurrent sharers', async () => {
+      const records = longTurn(20, () => 'payload '.repeat(64));
+      await writeRecords(records);
+
+      // Case 1: sole waiter aborts on the first cooperative yield.
+      const soleAbort = new AbortController();
+      let soleYields = 0;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        soleYields += 1;
+        if (soleYields === 1) {
+          soleAbort.abort(new DOMException('client gone', 'AbortError'));
+        }
+      });
+
+      await expect(
+        newReader().getLastUserPromptAt(sessionId, 'active', {
+          signal: soleAbort.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(soleYields).toBe(1);
+
+      // A subsequent read recovers cleanly after the aborted slot is cleaned up.
+      setSessionTranscriptCooperativeReadBudgetForTest(2 * 1024 * 1024, 10_000);
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        records[0]!.timestamp,
+      );
+
+      // Case 2: two concurrent waiters share one cold scan; aborting waiter A keeps the scan alive for waiter B.
+      resetSessionTranscriptIndexCacheForTest();
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(newReader().getSessionFilePath(sessionId)),
+        sessionId,
+      );
+      await fs.rm(sidecarPath, { force: true });
+
+      const waiterA = new AbortController();
+      const waiterB = new AbortController();
+      let sharedYields = 0;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        sharedYields += 1;
+        if (sharedYields === 1) {
+          waiterA.abort(new DOMException('waiter A cancelled', 'AbortError'));
+        }
+      });
+
+      const reader = newReader();
+      const [resA, resB] = await Promise.allSettled([
+        reader.getLastUserPromptAt(sessionId, 'active', {
+          signal: waiterA.signal,
+        }),
+        reader.getLastUserPromptAt(sessionId, 'active', {
+          signal: waiterB.signal,
+        }),
+      ]);
+      expect(resA.status).toBe('rejected');
+      expect(resB).toEqual({
+        status: 'fulfilled',
+        value: records[0]!.timestamp,
+      });
+    });
+
+    it('bounds process-wide concurrent cold builds across workspaces and drops aborted queued waiters immediately', async () => {
+      setSessionTranscriptMaxConcurrentBuildsForTest(2);
+
+      const sessions: Array<{
+        workspace: string;
+        sid: string;
+        timestamp: string;
+      }> = [];
+      for (let i = 0; i < 6; i += 1) {
+        const ws = path.join(runtimeDir, `ws-gate-${i}`);
+        const sid = `11111111-1111-4111-8111-11111111110${i}`;
+        const r = new SessionTranscriptReader(ws);
+        const filePath = r.getSessionFilePath(sid);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        const rec1 = {
+          ...record(`u-${i}-1`, null, `prompt ${i}`),
+          sessionId: sid,
+          cwd: ws,
+        };
+        const rec2 = {
+          ...record(`a-${i}-1`, rec1.uuid, `reply ${i}`),
+          sessionId: sid,
+          cwd: ws,
+        };
+        await fs.writeFile(
+          filePath,
+          `${JSON.stringify(rec1)}\n${JSON.stringify(rec2)}\n`,
+          'utf8',
+        );
+        sessions.push({ workspace: ws, sid, timestamp: rec1.timestamp });
+      }
+
+      const scannedFiles = new Set<string>();
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => {
+        scannedFiles.add(e.filePath);
+      });
+
+      let maxActive = 0;
+      let maxQueued = 0;
+      const queuedAbort = new AbortController();
+      let abortedQueued = false;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        const stats = getSessionTranscriptBuildSemaphoreStatsForTest();
+        maxActive = Math.max(maxActive, stats.active);
+        maxQueued = Math.max(maxQueued, stats.queued);
+        if (!abortedQueued && stats.queued > 0) {
+          abortedQueued = true;
+          queuedAbort.abort(new DOMException('queued abort', 'AbortError'));
+        }
+      });
+
+      const promises = sessions.map((s, idx) =>
+        new SessionTranscriptReader(s.workspace).getLastUserPromptAt(
+          s.sid,
+          'active',
+          idx === 5 ? { signal: queuedAbort.signal } : {},
+        ),
+      );
+      const results = await Promise.allSettled(promises);
+
+      expect(abortedQueued).toBe(true);
+      expect(maxActive).toBeLessThanOrEqual(2);
+      expect(maxActive).toBe(2);
+      expect(maxQueued).toBeGreaterThanOrEqual(1);
+      expect(getSessionTranscriptBuildSemaphoreStatsForTest()).toEqual({
+        active: 0,
+        queued: 0,
+      });
+      for (let i = 0; i < 5; i += 1) {
+        expect(results[i]).toEqual({
+          status: 'fulfilled',
+          value: sessions[i]!.timestamp,
+        });
+      }
+      expect(results[5]!.status).toBe('rejected');
+      expect(
+        scannedFiles.has(
+          new SessionTranscriptReader(
+            sessions[5]!.workspace,
+          ).getSessionFilePath(sessions[5]!.sid),
+        ),
+      ).toBe(false);
+    });
+
+    it('extends cached TranscriptIndex incrementally on append with full-rebuild parity, preserving frozen base cursors and handling rewinds + fragments', async () => {
+      const u1 = record('u1', null, 'turn one');
+      const a1 = record('a1', u1.uuid, 'answer one');
+      const u2 = record('u2', a1.uuid, 'turn two');
+      const a2 = record('a2', u2.uuid, 'answer two');
+      const cp1 = {
+        ...record('cp1', a2.uuid, ''),
+        type: 'system' as const,
+        subtype: 'branch_checkpoint',
+        message: undefined,
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: a1.uuid,
+          assistantRecordUuid: a2.uuid,
+        },
+      } as ChatRecord;
+      const file = await writeRecords([u1, a1, u2, a2, cp1]);
+      const size1 = (await fs.stat(file)).size;
+
+      const buildEvents: TranscriptIndexBuildModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => buildEvents.push(e));
+
+      const reader = newReader();
+      const page1 = await reader.readPage(sessionId, { limit: 2 });
+      expect(buildEvents).toEqual([
+        {
+          filePath: file,
+          mode: 'full',
+          startOffset: 0,
+          snapshotSize: size1,
+        },
+      ]);
+      const frozenTurnIndex1 = await reader.readTurnIndexPage(sessionId);
+      expect(frozenTurnIndex1.turns.map((t) => t.turnId)).toEqual(['u1', 'u2']);
+
+      // 1. Linear append with a new turn + branch checkpoint -> must extend incrementally from size1.
+      const u3 = record('u3', cp1.uuid, 'turn three');
+      const a3 = record('a3', u3.uuid, 'answer three');
+      await appendRecords(file, u3, a3);
+      const size2 = (await fs.stat(file)).size;
+
+      const page2 = await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents.at(-1)).toEqual({
+        filePath: file,
+        mode: 'incremental',
+        startOffset: size1,
+        snapshotSize: size2,
+      });
+
+      // Frozen cursor from S1 must still page S1 cleanly without bleeding into S2 (baseIndex was never mutated).
+      const frozenNext = await readAfter(reader, page1.nextCursorState!, {
+        limit: 10,
+      });
+      expect(frozenNext.records.map((r) => r.uuid)).toEqual([
+        'u2',
+        'a2',
+        'cp1',
+      ]);
+
+      // 2. Append a rewind branching back to a1 (dropping u2/u3) + a new turn u4 + a fragment of u1.
+      const u1Frag = {
+        ...record('u1', null, ' extra fragment'),
+        timestamp: '2026-01-01T00:05:00.000Z',
+      };
+      const r1: ChatRecord = {
+        ...record('r1', a1.uuid, ''),
+        type: 'system',
+        subtype: 'rewind',
+        message: undefined,
+      };
+      const u4 = record('u4', r1.uuid, 'turn four after rewind');
+      const a4 = record('a4', u4.uuid, 'answer four');
+      await appendRecords(file, u1Frag, r1, u4, a4);
+      const size3 = (await fs.stat(file)).size;
+
+      const incPage3 = await reader.readPage(sessionId, { limit: 10 });
+      const incTurns3 = await reader.readTurnIndexPage(sessionId);
+      expect(buildEvents.at(-1)).toEqual({
+        filePath: file,
+        mode: 'incremental',
+        startOffset: size2,
+        snapshotSize: size3,
+      });
+      // Stale navigationOrdinal for rewound turn u2 must be cleared in the incremental index.
+      await expect(
+        reader.readPage(sessionId, {
+          snapshot: incTurns3.snapshot,
+          atRecordId: 'u2',
+          limit: 2,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptTurnAnchorError);
+      // Frozen S1 snapshot must still recognize u2 (proving S1 baseIndex was untouched).
+      const frozenStillHasU2 = await reader.readPage(sessionId, {
+        snapshot: frozenTurnIndex1.snapshot,
+        atRecordId: 'u2',
+        limit: 2,
+      });
+      expect(frozenStillHasU2.records.map((r) => r.uuid)).toContain('u2');
+
+      // Compare incremental result against a fresh cold full rebuild field-for-field.
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const fullPage3 = await reader.readPage(sessionId, { limit: 10 });
+      const fullTurns3 = await reader.readTurnIndexPage(sessionId);
+      expect(buildEvents.at(-1)).toEqual({
+        filePath: file,
+        mode: 'full',
+        startOffset: 0,
+        snapshotSize: size3,
+      });
+      expect(incPage3.records).toEqual(fullPage3.records);
+      expect(incPage3.branchPointsByAssistantUuid).toEqual(
+        fullPage3.branchPointsByAssistantUuid,
+      );
+      expect(incTurns3.turns).toEqual(fullTurns3.turns);
+      expect(page2.records.map((r) => r.uuid)).toEqual([
+        'u1',
+        'a1',
+        'u2',
+        'a2',
+        'cp1',
+        'u3',
+        'a3',
+      ]);
+    });
+
+    it('falls back from incremental extension to full build when prefix bytes are rewritten in place longer on the same inode', async () => {
+      const u1 = record('u1', null, 'original turn');
+      const file = await writeRecords([u1]);
+      const buildEvents: TranscriptIndexBuildModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => buildEvents.push(e));
+
+      const reader = newReader();
+      await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents.at(-1)?.mode).toBe('full');
+
+      // Overwrite the SAME file in place (same inode) with different content that is strictly longer.
+      const uNew1 = record('u-new-1', null, 'rewritten turn one');
+      const uNew2 = record('u-new-2', uNew1.uuid, 'rewritten turn two');
+      await fs.writeFile(
+        file,
+        `${JSON.stringify(uNew1)}\n${JSON.stringify(uNew2)}\n`,
+        'utf8',
+      );
+
+      const page = await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents.at(-1)?.mode).toBe('full');
+      expect(buildEvents.at(-1)?.startOffset).toBe(0);
+      expect(page.records.map((r) => r.uuid)).toEqual(['u-new-1', 'u-new-2']);
+    });
+
+    it('maintains prompt-time sidecar through ChatRecordingService write, rewind, archive, unarchive, and removal', async () => {
+      const config = {
+        storage: new Storage(workspaceDir),
+        getTargetDir: () => workspaceDir,
+        getSessionId: () => sessionId,
+        getProjectRoot: () => workspaceDir,
+        getCliVersion: () => 'test',
+        getModel: () => 'test',
+        getAuthType: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getResumedSessionData: () => undefined,
+      } as unknown as Config;
+      const recorder = new ChatRecordingService(config, undefined, false);
+      recorder.recordUserMessage([{ text: 'recorded prompt' }]);
+      await recorder.flush();
+
+      const activeFile = newReader().getSessionFilePath(sessionId, 'active');
+      const activeSidecar = sessionPromptTimeSidecarPath(
+        path.dirname(activeFile),
+        sessionId,
+      );
+      await expect(fs.stat(activeSidecar)).resolves.toBeDefined();
+
+      // Cold reader immediately hits sidecar_exact without scanning JSONL.
+      resetSessionTranscriptIndexCacheForTest();
+      const scans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans.push(e));
+      const ts = await newReader().getLastUserPromptAt(sessionId);
+      expect(ts).toBeDefined();
+      expect(scans).toEqual([
+        expect.objectContaining({
+          filePath: activeFile,
+          mode: 'sidecar_exact',
+        }),
+      ]);
+
+      // Rewind removes the sidecar so readers recompute from the active branch.
+      recorder.recordAssistantTurn({
+        model: 'test',
+        message: [{ text: 'answer' }],
+      });
+      await recorder.flush();
+      recorder.rewindRecording(1, { truncatedCount: 1 });
+      await recorder.flush();
+      await expect(fs.stat(activeSidecar)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      // Recording another prompt writes a fresh sidecar.
+      recorder.recordUserMessage([{ text: 'after rewind prompt' }]);
+      await recorder.flush();
+      await expect(fs.stat(activeSidecar)).resolves.toBeDefined();
+      resetSessionTranscriptIndexCacheForTest();
+      const postRewindTs = await newReader().getLastUserPromptAt(sessionId);
+      expect(postRewindTs).toBeDefined();
+
+      // Archive moves the sidecar into archive/ so archived reads also hit sidecar_exact.
+      const service = svc();
+      expect((await service.archiveSessions([sessionId])).errors).toEqual([]);
+      const archivedFile = newReader().getSessionFilePath(
+        sessionId,
+        'archived',
+      );
+      const archivedSidecar = sessionPromptTimeSidecarPath(
+        path.dirname(archivedFile),
+        sessionId,
+      );
+      await expect(fs.stat(activeSidecar)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(fs.stat(archivedSidecar)).resolves.toBeDefined();
+
+      resetSessionTranscriptIndexCacheForTest();
+      const archivedScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        archivedScans.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId, 'archived')).toBe(
+        postRewindTs,
+      );
+      expect(archivedScans).toEqual([
+        expect.objectContaining({
+          filePath: archivedFile,
+          mode: 'sidecar_exact',
+        }),
+      ]);
+
+      // Unarchive moves the sidecar back to active/, and removeSessions cleans it up.
+      expect((await service.unarchiveSessions([sessionId])).errors).toEqual([]);
+      await expect(fs.stat(activeSidecar)).resolves.toBeDefined();
+      await expect(fs.stat(archivedSidecar)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect((await service.removeSessions([sessionId])).errors).toEqual([]);
+      await expect(fs.stat(activeSidecar)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
   });
 });

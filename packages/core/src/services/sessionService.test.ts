@@ -1641,9 +1641,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      // One fence check per cleanup step: main's goal + artifact-summary
-      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
+      // One fence check per cleanup step: main's goal + artifact-summary +
+      // branch sidecars (11) plus prompt-time sidecar removal (1) → 12.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(12);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
