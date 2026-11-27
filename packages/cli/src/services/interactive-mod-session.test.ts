@@ -207,6 +207,16 @@ describe('interactive Mod owner', () => {
     expect(second).toHaveBeenCalledExactlyOnceWith('[Mod mod] next');
     owner.setPresentation({ isFullscreen: true, columns: 120 });
     expect(host.presentation()).toEqual({ isFullscreen: true, columns: 120 });
+    vi.stubEnv('NO_COLOR', '1');
+    try {
+      expect(host.presentation()).toEqual({
+        isFullscreen: true,
+        columns: 120,
+        isColorless: true,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('sanitizes plugin labels and startup errors without flattening transcript logs', async () => {

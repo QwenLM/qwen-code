@@ -82,8 +82,8 @@ To use the same `/hello Qwen` command in the terminal UI, start `qwen` without
 `-p`. Both Ink and OpenTUI load Mod commands with the same opt-in setting.
 Interactive `session.start` receives `surface: 'terminal'` and
 `isInteractive: true`; `command.run` receives `origin: { kind: 'composer' }`
-and `presentation: { isFullscreen, columns }` from the active renderer. These
-host fields stay pinned. Headless sessions retain `surface: null`,
+and `presentation: { isFullscreen, columns }` from the active renderer, with
+`isColorless: true` when `NO_COLOR` is set. These host fields stay pinned. Headless sessions retain `surface: null`,
 `isInteractive: false`, and `origin: { kind: 'sdk' }`.
 
 Interactive transcript logs appear as informational messages and never enter
@@ -172,9 +172,10 @@ does not.
 | Commands   | Register during `session.start` using name, description, optional argumentHint and aliases; intercept registered Mod commands across plugins; return `{text}` or `{}`                                   |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                                               |
-| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                                             |
+| API events | `command.register`, `ui.log`, `ui.invalidate`, the reads, and the session and clock methods pass through the middleware chain with host-supplied origin                                                 |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                                            |
 | Store      | `$.store` keeps each plugin's JSON values between sessions, described in [The store](#the-store)                                                                                                        |
+| Reads      | `$.env.get`, `$.settings.read` and `$.telemetry.log` and `mark`, described in [Environment, settings and telemetry](#environment-settings-and-telemetry)                                                |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits and those a Mod submits, described in [Turn events](#turn-events)                                                     |
 | Model      | `$.model.complete` runs one completion on the session's client, described in [Model calls](#model-calls)                                                                                                |
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                          |
@@ -459,7 +460,7 @@ recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
 the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
-arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, or `{}` for the other session and clock methods. Return `next(e)`,
+arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, `{name}` for `env.get`, `{source?, layers}` for `settings.read`, the entry for `telemetry.log` and `telemetry.mark`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -683,6 +684,68 @@ store in place.
 The calls are API events, so another plugin's hooks hear them with `{key}` or
 `{key, value}`. A hook may pass on another `value` for `store.set`, answer with
 `{value}`, or `{deny}` the call. The key is pinned.
+
+## Environment, settings and telemetry
+
+A Mod reads the session's environment and settings, and may log telemetry:
+
+```javascript
+export function register(on) {
+  on('session.start', async ($, e, next) => {
+    const home = await $.env.get('HOME');
+    const vim = await $.settings.read({ key: 'general' });
+    $.ui.log(`home ${home}, vim mode ${vim?.vimMode === true}`, {
+      to: 'debug',
+    });
+    await $.telemetry.mark({ feature: 'greeting', kind: 'ok' });
+    return next(e);
+  });
+}
+```
+
+| Method                                   | Resolves to                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------ |
+| `$.env.get(name)`                        | the variable's value in the Qwen Code process, or `undefined` when it is unset |
+| `$.settings.read()`                      | the settings the session runs under, merged over every source                  |
+| `$.settings.read({ source })`            | one source's settings as loaded, or `{}` when it has none                      |
+| `$.settings.read({ key, source? })`      | one top-level key of that object, or `undefined`                               |
+| `$.telemetry.log(entry)`, `.mark(entry)` | `undefined`, once the hooks have answered                                      |
+
+Credentials are kept from Mods, which could otherwise carry them out through the
+model, a prompt or the store:
+
+- `$.env.get` answers `undefined` for a variable whose name marks a credential
+  (`TOKEN`, `SECRET`, `API_KEY`, `PASSWORD` and the like, such as
+  `OPENAI_API_KEY`), and for each variable that a settings `envKey`,
+  `credentialEnv` or `apiKeyEnv` names in any source.
+- `$.settings.read` leaves out every string under a key named the same way
+  (`apiKey`, an `Authorization` header), those variables in `env`, and each MCP
+  server's `env` and `headers`.
+
+The settings are keyed as a Qwen Code `settings.json` is. The sources are
+`user` (`~/.qwen/settings.json`), `project` (the workspace's
+`.qwen/settings.json`, left out where the folder is not trusted) and `policy`
+(the system settings, which override the rest). `local` and `flag` have no
+counterpart in Qwen Code and read as `{}`. The system defaults count in the
+merge but are not a source of their own. Each read is a snapshot of the
+settings at that moment; a change takes effect for the session as it always
+does, not through the read.
+
+The calls are API events. Another plugin's hooks hear `env.get` with `{name}`,
+which is pinned, and `settings.read` with `{source?, layers}`, where `layers`
+lists what each source holds, lowest precedence first. Both are pinned. A hook
+may answer with another `{value}` or `{deny}` the call; its answer is what the
+calling Mod reads, never what the session runs under.
+
+`$.telemetry.log({ event, props })` is a row for first-party analytics,
+`to: 'anthropic'` when the entry leaves `to` out. `{ to: 'collector', event,
+attributes, loggedAt, span? }` is a record for an operator's collector.
+`$.telemetry.mark({ feature, kind, reason?, props })` marks one use of a
+feature, with `kind` one of `ok`, `sad` and `bad`. A property is a number, a
+boolean or `{ value, of }`, a value chosen from its list. Qwen Code sends none
+of them anywhere: once the hooks have answered, the entry is written to the
+debug log as `telemetry.log (not sent): …`. A hook hears it with `to` pinned,
+and may `{deny}` it, which rejects the call.
 
 ## Model calls
 

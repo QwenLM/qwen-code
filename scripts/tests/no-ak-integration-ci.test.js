@@ -237,6 +237,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/tool-hook-updated-input.test.ts',
       './cli/mods-prompt-submit.test.ts',
       './cli/mods-claude-332.test.ts',
+      './cli/mods-env-settings-telemetry.test.ts',
       './cli/mods-acp.test.ts',
       './cli/qwen-serve-conversations-root.test.ts',
       './cli/qwen-serve-routes.test.ts',

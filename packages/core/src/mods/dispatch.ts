@@ -29,6 +29,7 @@ export const MOD_METHODS = [
   'clock.now',
   'clock.sleep',
   'command.register',
+  'env.get',
   'model.complete',
   'prompt.submit',
   'session.cwd',
@@ -40,10 +41,13 @@ export const MOD_METHODS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'settings.read',
   'store.delete',
   'store.get',
   'store.keys',
   'store.set',
+  'telemetry.log',
+  'telemetry.mark',
   'turn.abort',
   'ui.invalidate',
   'ui.log',
@@ -53,6 +57,7 @@ export const MOD_EVENTS = [
   'clock.sleep',
   'command.register',
   'command.run',
+  'env.get',
   'model.complete',
   'prompt.submit',
   'session.cwd',
@@ -66,10 +71,13 @@ export const MOD_EVENTS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'settings.read',
   'store.delete',
   'store.get',
   'store.keys',
   'store.set',
+  'telemetry.log',
+  'telemetry.mark',
   'tool.call',
   'tool.check',
   'turn.abort',
@@ -80,8 +88,8 @@ export const MOD_EVENTS = [
   'ui.render',
 ] as const;
 // Events only some hosts raise: the load request names the sites a host
-// draws, whether it raises `prompt.submit` and the tool events, and whether it
-// keeps a store.
+// draws, whether it raises `prompt.submit` and the tool events, whether it
+// keeps a store, and whether it answers reads of its environment and settings.
 export const MOD_TOOL_EVENTS: readonly ModEvent[] = ['tool.call', 'tool.check'];
 export const MOD_STORE_EVENTS: readonly ModEvent[] = [
   'store.delete',
@@ -89,11 +97,16 @@ export const MOD_STORE_EVENTS: readonly ModEvent[] = [
   'store.keys',
   'store.set',
 ];
+export const MOD_HOST_READ_EVENTS: readonly ModEvent[] = [
+  'env.get',
+  'settings.read',
+];
 export const MOD_HOST_EVENTS: readonly ModEvent[] = [
   'prompt.submit',
   'ui.render',
   ...MOD_TOOL_EVENTS,
   ...MOD_STORE_EVENTS,
+  ...MOD_HOST_READ_EVENTS,
 ];
 // `$` methods that read rather than dispatch, so no hook hears them.
 export const MOD_READS = ['ui.resolve'] as const;
@@ -442,6 +455,40 @@ export function validateInput(
       throw new Error(
         'Mod ui.invalidate takes ui.render or a cached-answer event.',
       );
+  } else if (event === 'env.get') {
+    if (!only(value, ['name']) || !envName(value['name']))
+      throw new Error('Mod env.get takes the name of a variable.');
+    if (Object.keys(original).length && value['name'] !== original['name'])
+      throw new Error('Mod hook changed pinned event fields.');
+  } else if (event === 'settings.read') {
+    if (
+      !only(value, ['source', 'layers']) ||
+      (value['source'] !== undefined &&
+        !MOD_SETTINGS_SOURCES.includes(value['source'] as string)) ||
+      !Array.isArray(value['layers'])
+    )
+      throw new Error(
+        `Mod settings.read takes { source?, key? } with source one of ${MOD_SETTINGS_SOURCES.join(', ')}.`,
+      );
+    // The host's layers reach every hook as the host read them.
+    if (
+      Object.keys(original).length &&
+      (value['source'] !== original['source'] ||
+        !isDeepStrictEqual(value['layers'], original['layers']))
+    )
+      throw new Error('Mod hook changed pinned event fields.');
+  } else if (event === 'telemetry.log') {
+    if (!validTelemetryLog(value))
+      throw new Error(
+        'Mod telemetry.log takes { to?: "anthropic", event, props? } or { to: "collector", event, attributes, loggedAt, span? }.',
+      );
+    if (Object.keys(original).length && value['to'] !== original['to'])
+      throw new Error('Mod hook changed pinned event fields.');
+  } else if (event === 'telemetry.mark') {
+    if (!validTelemetryMark(value))
+      throw new Error(
+        'Mod telemetry.mark takes { feature, kind: "ok" | "sad" | "bad", reason?, props? }.',
+      );
   } else if (event === 'model.complete') {
     validateModelInput(value);
   } else if (MOD_STORE_EVENTS.includes(event)) {
@@ -453,6 +500,93 @@ export function validateInput(
   if (Buffer.byteLength(JSON.stringify(value)) > MOD_MAX_BYTES)
     throw new Error('Mod event is too large.');
 }
+
+// A name `process.env` can hold.
+const envName = (value: unknown) =>
+  typeof value === 'string' && /^[^=\0]{1,1024}$/.test(value);
+
+/** The settings sources a Mod names, lowest precedence first. */
+export const MOD_SETTINGS_SOURCES: readonly string[] = [
+  'user',
+  'project',
+  'local',
+  'flag',
+  'policy',
+];
+
+/**
+ * The event input a `$.settings.read(args)` call raises once the host has
+ * read its layers: what a caller passes as `layers` is replaced, and a read
+ * of one source holds that source's layer alone.
+ */
+export function settingsReadCall(
+  value: unknown,
+  layers: readonly ModInput[],
+): ModInput {
+  if (!record(value) || !only(value, ['source', 'layers']))
+    throw new Error('Mod settings.read takes { source?, key? }.');
+  const source = value['source'];
+  return {
+    ...(source !== undefined && { source }),
+    layers:
+      source === undefined
+        ? layers
+        : layers.filter((layer) => layer['source'] === source),
+  };
+}
+
+// A property of a row or a mark: a number, a boolean, or a value chosen
+// from its list.
+const telemetryProps = (value: unknown) =>
+  value === undefined ||
+  (record(value) &&
+    Object.values(value).every(
+      (prop) =>
+        (typeof prop === 'number' && Number.isFinite(prop)) ||
+        typeof prop === 'boolean' ||
+        (record(prop) &&
+          only(prop, ['value', 'of']) &&
+          Array.isArray(prop['of']) &&
+          prop['of'].every(text) &&
+          (prop['of'] as unknown[]).includes(prop['value'])),
+    ));
+
+const telemetryAttribute = (value: unknown) =>
+  text(value) ||
+  (typeof value === 'number' && Number.isFinite(value)) ||
+  typeof value === 'boolean' ||
+  (Array.isArray(value) && value.every(text));
+
+function validTelemetryLog(value: ModInput): boolean {
+  if (value['to'] === 'anthropic')
+    return (
+      only(value, ['to', 'event', 'props']) &&
+      text(value['event']) &&
+      telemetryProps(value['props'])
+    );
+  const span = value['span'];
+  return (
+    value['to'] === 'collector' &&
+    only(value, ['to', 'event', 'attributes', 'loggedAt', 'span']) &&
+    text(value['event']) &&
+    record(value['attributes']) &&
+    Object.values(value['attributes']).every(telemetryAttribute) &&
+    text(value['loggedAt']) &&
+    (span === undefined ||
+      (record(span) &&
+        only(span, ['traceId', 'spanId', 'traceFlags']) &&
+        text(span['traceId']) &&
+        text(span['spanId']) &&
+        Number.isSafeInteger(span['traceFlags'])))
+  );
+}
+
+const validTelemetryMark = (value: ModInput) =>
+  only(value, ['feature', 'kind', 'reason', 'props']) &&
+  text(value['feature']) &&
+  ['ok', 'sad', 'bad'].includes(value['kind'] as string) &&
+  (value['reason'] === undefined || text(value['reason'])) &&
+  telemetryProps(value['props']);
 
 // A store call names its key; a hook above may write another value, never
 // another key.
@@ -660,6 +794,7 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'clock.sleep': (value) => value === undefined,
   'command.register': (value) =>
     record(value) && typeof value['command'] === 'string',
+  'env.get': (value) => value === undefined || text(value),
   'session.cwd': text,
   'session.id': text,
   'session.model': text,
@@ -671,11 +806,14 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'session.usage': validUsage,
   'session.version': (value) =>
     record(value) && typeof value['version'] === 'string',
+  'settings.read': record,
   'store.delete': (value) => value === undefined,
   // Any JSON value, or undefined for a key never set.
   'store.get': () => true,
   'store.keys': (value) => Array.isArray(value) && value.every(text),
   'store.set': (value) => value === undefined,
+  'telemetry.log': (value) => value === undefined,
+  'telemetry.mark': (value) => value === undefined,
   'turn.abort': (value) => value === undefined,
   'ui.invalidate': (value) => value === undefined,
   'model.complete': validModelResult,

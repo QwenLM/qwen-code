@@ -44,6 +44,7 @@ import {
   MOD_MAX_BYTES,
   type ModCommand,
   type ModCommandPresentation,
+  type ModHostReads,
   type ModLog,
   type ModModelHost,
   type ModReply,
@@ -153,6 +154,7 @@ export class ModRuntime {
     private readonly queuePrompt?: ModPromptQueue,
     private readonly completeModel?: ModModelHost,
     private readonly store?: ModStore,
+    private readonly reads?: ModHostReads,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -178,6 +180,7 @@ export class ModRuntime {
         this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'prompt-queue')
         this.answerPromptQueue(reply, root.id);
+      else if (reply.type === 'read') this.answerRead(reply, root.id);
       else if (reply.type === 'store') {
         const remainingMs = reply.deadline - performance.now();
         if (remainingMs <= 0) return;
@@ -264,6 +267,8 @@ export class ModRuntime {
     store?: ModStore,
     // Whether this host raises `tool.call` and `tool.check`.
     tools = true,
+    // Answers `$.env.get` and `$.settings.read`; absent, Mods read neither.
+    reads?: ModHostReads,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -295,6 +300,7 @@ export class ModRuntime {
       queuePrompt,
       completeModel,
       store,
+      reads,
     );
     try {
       const result = await runtime.request(
@@ -310,6 +316,7 @@ export class ModRuntime {
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
           stores: store !== undefined,
+          reads: reads !== undefined,
         },
         signal,
         60_000,
@@ -828,6 +835,42 @@ export class ModRuntime {
       ).slice(0, 4000);
     }
     this.post({ type: 'prompt-queue-result', id: reply.id, refused }, root);
+  }
+
+  private answerRead(
+    reply: Extract<ModReply, { type: 'read' }>,
+    root: number,
+  ): void {
+    let value: unknown;
+    let error: string | undefined;
+    try {
+      if (!this.reads)
+        throw new Error('This host gives Mods no environment or settings.');
+      value =
+        reply.read.method === 'env.get'
+          ? this.reads.env(reply.read.name)
+          : this.reads.settings();
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    try {
+      this.post({ type: 'read-result', id: reply.id, value, error }, root);
+    } catch (caught) {
+      this.post(
+        {
+          type: 'read-result',
+          id: reply.id,
+          error: (caught instanceof Error
+            ? caught.message
+            : String(caught)
+          ).slice(0, 4000),
+        },
+        root,
+      );
+    }
   }
 
   private async answerStore(

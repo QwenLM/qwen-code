@@ -102,7 +102,11 @@ export class InteractiveModSession implements ICommandLoader {
     this.startup.catch(() => {});
     this.session = ModSession.create(config, settings, {
       surface: 'terminal',
-      presentation: () => this.presentation,
+      // NO_COLOR turns off color in both terminal UIs.
+      presentation: () =>
+        process.env['NO_COLOR']
+          ? { ...this.presentation, isColorless: true }
+          : this.presentation,
       sites: () => this.sites,
       prompts: () => this.prompts,
       runsPrompts: () => this.runsPrompts,

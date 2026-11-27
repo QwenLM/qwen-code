@@ -39,6 +39,7 @@ import {
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
   ModCommandPresentation,
+  ModHostReads,
   ModLog,
   ModPromptSubmit,
   ModQueuedPrompt,
@@ -77,6 +78,7 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
+import { modHostReads } from './mod-host-reads.js';
 import {
   ModRows,
   type ModRowAuthorization,
@@ -295,6 +297,8 @@ export class ModSession implements ICommandLoader {
       extensions: boolean;
       translation?: DisplayTranslationTarget;
     } = { extensions: true },
+    // What Mods read of the environment and settings; absent, neither.
+    private readonly reads?: ModHostReads,
   ) {
     this.sessionId = config.getSessionId();
     allowTelemetryListener(1);
@@ -325,6 +329,7 @@ export class ModSession implements ICommandLoader {
             settings.system.settings.pluginConfigs,
           ],
           { extensions, translation },
+          modHostReads(settings),
         )
       : undefined;
   }
@@ -531,6 +536,7 @@ export class ModSession implements ICommandLoader {
             ),
           new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
           !this.acp,
+          this.reads,
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({

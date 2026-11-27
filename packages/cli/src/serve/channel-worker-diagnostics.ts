@@ -7,6 +7,7 @@
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import stripAnsi from 'strip-ansi';
+import { isCredentialName } from '../utils/credential-names.js';
 
 const WORKER_LOG_INVISIBLE_RE = /[\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
 // eslint-disable-next-line no-control-regex
@@ -22,10 +23,8 @@ function escapeRegExp(value: string): string {
 }
 
 function sensitiveEnvValues(env: Readonly<NodeJS.ProcessEnv>): string[] {
-  const sensitiveKey =
-    /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
   return Object.entries(env)
-    .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
+    .filter(([key, value]) => isCredentialName(key) && value !== undefined)
     .flatMap(([, value]) => {
       const lines = value!.split('\n').filter((line) => line.length >= 4);
       return lines.length > 0 ? [value!, ...lines] : [value!];
