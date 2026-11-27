@@ -2985,93 +2985,144 @@ describe('worktree retention with real repositories', () => {
     expect(fs.existsSync(middle.worktreePath)).toBe(true);
   });
 
-  it('sweeps a checkout with a clean linked worktree and sibling cache in .qwen/tmp once without leaving extra archives', async () => {
+  it('stops an in-flight sweep when maxRetained is raised instead of deleting remaining candidates against a stale plan (R1-2)', async () => {
     const primary = makeRetentionRepo(root, 'primary');
-    fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
-    git(primary.repo, primary.home, 'add', '.gitignore');
-    git(
-      primary.repo,
-      primary.home,
-      'commit',
-      '-qm',
-      'ignore-qwen-tmp',
-      '--no-verify',
-    );
-    primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
     configureRetention(primary, 1);
-
     const oldest = await makeRetainedSession(primary, {
-      slug: 'clean-cache-wt-old',
+      slug: 'raised-mid-sweep-oldest',
       dirty: true,
       activity: '2026-01-01T00:00:00.000Z',
     });
-    await makeRetainedSession(primary, {
-      slug: 'clean-cache-wt-new',
+    const middle = await makeRetainedSession(primary, {
+      slug: 'raised-mid-sweep-middle',
+      dirty: true,
       activity: '2026-01-02T00:00:00.000Z',
     });
-
-    const externalOrigin = path.join(root, 'external-origin-clean');
-    fs.mkdirSync(externalOrigin, { recursive: true });
-    git(externalOrigin, primary.home, 'init', '-q', '-b', 'main');
-    git(externalOrigin, primary.home, 'config', 'user.email', 't@e.com');
-    git(externalOrigin, primary.home, 'config', 'user.name', 't');
-    git(externalOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
-    fs.writeFileSync(path.join(externalOrigin, 'seed.txt'), 'seed\n');
-    git(externalOrigin, primary.home, 'add', '.');
-    git(externalOrigin, primary.home, 'commit', '-qm', 'seed', '--no-verify');
-
-    const nestedClean = path.join(
-      oldest.worktreePath,
-      '.qwen',
-      'tmp',
-      'review-pr-123',
-    );
-    git(
-      externalOrigin,
-      primary.home,
-      'worktree',
-      'add',
-      '-q',
-      '-b',
-      'review-pr-123',
-      nestedClean,
-      'HEAD',
-    );
-    const blobsDir = path.join(oldest.worktreePath, '.qwen', 'tmp', 'blobs');
-    fs.mkdirSync(blobsDir, { recursive: true });
-    for (let i = 0; i < 512; i++) {
-      fs.writeFileSync(path.join(blobsDir, `cache-${i}.bin`), `c${i}\n`);
-    }
-
-    const chatsDir = path.dirname(oldest.sidecarPath);
-    const archives = () =>
-      fs
-        .readdirSync(chatsDir)
-        .filter((f) => f.endsWith('.worktree-snapshot.tar.gz'));
-
-    const first = await sweep(primary);
-    expect(first.removed).toEqual([oldest.id]);
-    expect(first.skipped).toEqual([]);
-    expect(first.issues).toEqual([]);
-    expect(fs.existsSync(oldest.worktreePath)).toBe(false);
-    expect(archives()).toHaveLength(1);
-
-    const members: string[] = [];
-    await tar.t({
-      file: path.join(chatsDir, archives()[0]!),
-      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    const newest = await makeRetainedSession(primary, {
+      slug: 'raised-mid-sweep-newest',
+      activity: '2026-01-03T00:00:00.000Z',
     });
-    expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
-    expect(members.some((m) => m.startsWith('.qwen/tmp/review-pr-123/'))).toBe(
-      false,
-    );
 
-    const second = await sweep(primary);
-    expect(second.removed).toEqual([]);
-    expect(second.skipped).toEqual([]);
-    expect(second.issues).toEqual([]);
-    expect(archives()).toHaveLength(1);
+    const snapshotService = await import(
+      '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+    );
+    const actualSnapshotService = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+    >('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js');
+    let captures = 0;
+    const spy = vi
+      .spyOn(snapshotService, 'captureWorktreeSnapshot')
+      .mockImplementation(async (...args) => {
+        captures += 1;
+        const result = await actualSnapshotService.captureWorktreeSnapshot(
+          ...args,
+        );
+        if (captures >= 1) configureRetention(primary, 5);
+        return result;
+      });
+    try {
+      const report = await sweep(primary);
+      expect(captures).toBe(1);
+      expect(report.removed).toEqual([oldest.id]);
+      expect(report.skipped).toContain('retention limit changed during sweep');
+      expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+      expect(fs.existsSync(middle.worktreePath)).toBe(true);
+      expect(fs.existsSync(newest.worktreePath)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
+
+  it.each(['.qwen/tmp/\n', '.qwen/tmp/*\n'])(
+    'sweeps a checkout with a clean linked worktree and sibling cache in .qwen/tmp once without leaving extra archives under %j',
+    async (ignoreRule) => {
+      const primary = makeRetentionRepo(root, 'primary');
+      fs.writeFileSync(path.join(primary.repo, '.gitignore'), ignoreRule);
+      git(primary.repo, primary.home, 'add', '.gitignore');
+      git(
+        primary.repo,
+        primary.home,
+        'commit',
+        '-qm',
+        'ignore-qwen-tmp',
+        '--no-verify',
+      );
+      primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+      configureRetention(primary, 1);
+
+      const oldest = await makeRetainedSession(primary, {
+        slug: 'clean-cache-wt-old',
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(primary, {
+        slug: 'clean-cache-wt-new',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+
+      const externalOrigin = path.join(root, 'external-origin-clean');
+      fs.mkdirSync(externalOrigin, { recursive: true });
+      git(externalOrigin, primary.home, 'init', '-q', '-b', 'main');
+      git(externalOrigin, primary.home, 'config', 'user.email', 't@e.com');
+      git(externalOrigin, primary.home, 'config', 'user.name', 't');
+      git(externalOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(externalOrigin, 'seed.txt'), 'seed\n');
+      git(externalOrigin, primary.home, 'add', '.');
+      git(externalOrigin, primary.home, 'commit', '-qm', 'seed', '--no-verify');
+
+      const nestedClean = path.join(
+        oldest.worktreePath,
+        '.qwen',
+        'tmp',
+        'review-pr-123',
+      );
+      git(
+        externalOrigin,
+        primary.home,
+        'worktree',
+        'add',
+        '-q',
+        '-b',
+        'review-pr-123',
+        nestedClean,
+        'HEAD',
+      );
+      const blobsDir = path.join(oldest.worktreePath, '.qwen', 'tmp', 'blobs');
+      fs.mkdirSync(blobsDir, { recursive: true });
+      for (let i = 0; i < 512; i++) {
+        fs.writeFileSync(path.join(blobsDir, `cache-${i}.bin`), `c${i}\n`);
+      }
+
+      const chatsDir = path.dirname(oldest.sidecarPath);
+      const archives = () =>
+        fs
+          .readdirSync(chatsDir)
+          .filter((f) => f.endsWith('.worktree-snapshot.tar.gz'));
+
+      const first = await sweep(primary);
+      expect(first.removed).toEqual([oldest.id]);
+      expect(first.skipped).toEqual([]);
+      expect(first.issues).toEqual([]);
+      expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+      expect(archives()).toHaveLength(1);
+
+      const members: string[] = [];
+      await tar.t({
+        file: path.join(chatsDir, archives()[0]!),
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
+      expect(
+        members.some((m) => m.startsWith('.qwen/tmp/review-pr-123/')),
+      ).toBe(false);
+
+      const second = await sweep(primary);
+      expect(second.removed).toEqual([]);
+      expect(second.skipped).toEqual([]);
+      expect(second.issues).toEqual([]);
+      expect(archives()).toHaveLength(1);
+    },
+  );
 
   it.each(['self', 'deep'] as const)(
     'preserves the parent checkout when a detached worktree with a draft sits at .qwen/tmp (%s)',
@@ -3221,6 +3272,167 @@ describe('worktree retention with real repositories', () => {
     expect(
       git(inner, primary.home, 'show', `${firstCommit}:previous.txt`),
     ).toBe('first-version');
+  });
+
+  it('preserves the parent checkout when a clean named nested worktree hides a third-level worktree inside its ignored dist/', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    configureRetention(primary, 1);
+
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'three-level-old',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'three-level-new',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const middleOrigin = path.join(root, 'middle-origin-dist');
+    fs.mkdirSync(middleOrigin, { recursive: true });
+    git(middleOrigin, primary.home, 'init', '-q', '-b', 'main');
+    git(middleOrigin, primary.home, 'config', 'user.email', 't@e.com');
+    git(middleOrigin, primary.home, 'config', 'user.name', 't');
+    git(middleOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(middleOrigin, '.gitignore'), 'dist/\n');
+    fs.writeFileSync(path.join(middleOrigin, 'seed.txt'), 'seed\n');
+    git(middleOrigin, primary.home, 'add', '.');
+    git(middleOrigin, primary.home, 'commit', '-qm', 'seed', '--no-verify');
+
+    const inner = path.join(oldest.worktreePath, '.qwen', 'worktrees', 'inner');
+    git(
+      middleOrigin,
+      primary.home,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'inner-branch',
+      inner,
+      'HEAD',
+    );
+
+    const leafOrigin = path.join(root, 'leaf-origin');
+    fs.mkdirSync(leafOrigin, { recursive: true });
+    git(leafOrigin, primary.home, 'init', '-q', '-b', 'main');
+    git(leafOrigin, primary.home, 'config', 'user.email', 't@e.com');
+    git(leafOrigin, primary.home, 'config', 'user.name', 't');
+    git(leafOrigin, primary.home, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(leafOrigin, 'leaf.txt'), 'leaf\n');
+    git(leafOrigin, primary.home, 'add', '.');
+    git(leafOrigin, primary.home, 'commit', '-qm', 'leaf', '--no-verify');
+
+    const vendorDemo = path.join(inner, 'dist', 'vendor-demo');
+    git(
+      leafOrigin,
+      primary.home,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'vendor-demo',
+      vendorDemo,
+      'HEAD',
+    );
+    fs.writeFileSync(
+      path.join(vendorDemo, 'unique-draft.md'),
+      'do-not-lose-me\n',
+    );
+
+    const report = await sweep(primary);
+    expect(report.removed).toEqual([]);
+    expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(vendorDemo, 'unique-draft.md'), 'utf8'),
+    ).toBe('do-not-lose-me\n');
+  });
+
+  it('preserves the parent checkout when a new branch commit lands in dist/inner.git between capture and removal', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    fs.writeFileSync(path.join(primary.repo, '.gitignore'), 'dist/\n');
+    git(primary.repo, primary.home, 'add', '.gitignore');
+    git(
+      primary.repo,
+      primary.home,
+      'commit',
+      '-qm',
+      'ignore-dist',
+      '--no-verify',
+    );
+    primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+    configureRetention(primary, 1);
+
+    const oldest = await makeRetainedSession(primary, {
+      slug: 'late-dist-gitdir-old',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'late-dist-gitdir-new',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const inner = path.join(oldest.worktreePath, '.qwen', 'worktrees', 'inner');
+    const store = path.join(oldest.worktreePath, 'dist', 'inner.git');
+    fs.mkdirSync(inner, { recursive: true });
+    fs.mkdirSync(path.dirname(store), { recursive: true });
+    git(
+      inner,
+      primary.home,
+      'init',
+      '-q',
+      '-b',
+      'main',
+      `--separate-git-dir=${store}`,
+    );
+    git(inner, primary.home, 'config', 'user.email', 't@e.com');
+    git(inner, primary.home, 'config', 'user.name', 't');
+    git(inner, primary.home, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(inner, 'file.txt'), 'v1\n');
+    git(inner, primary.home, 'add', '.');
+    git(inner, primary.home, 'commit', '-qm', 'c1', '--no-verify');
+
+    const snapshotService = await import(
+      '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js'
+    );
+    const actualSnapshotService = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+    >('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js');
+    let wipSha = '';
+    const spy = vi
+      .spyOn(snapshotService, 'captureWorktreeSnapshot')
+      .mockImplementation(async (...args) => {
+        const result = await actualSnapshotService.captureWorktreeSnapshot(
+          ...args,
+        );
+        // After snapshot capture completes and before final verification/removal,
+        // create a commit + branch ref `wip` inside `dist/inner.git` without
+        // modifying any already-archived file (`HEAD`, `refs/heads/main`, or
+        // working files).
+        const treeOid = git(inner, primary.home, 'rev-parse', 'HEAD^{tree}');
+        const parentOid = git(inner, primary.home, 'rev-parse', 'HEAD');
+        wipSha = git(
+          inner,
+          primary.home,
+          'commit-tree',
+          treeOid,
+          '-p',
+          parentOid,
+          '-m',
+          'late-wip-commit',
+        );
+        git(inner, primary.home, 'update-ref', 'refs/heads/wip', wipSha);
+        return result;
+      });
+    try {
+      const report = await sweep(primary);
+      expect(report.removed).toEqual([]);
+      expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+      expect(wipSha.length).toBeGreaterThan(0);
+      expect(git(inner, primary.home, 'rev-parse', 'wip')).toBe(wipSha);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it.each([false, null, 'off', []] as const)(

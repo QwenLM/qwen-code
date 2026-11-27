@@ -785,10 +785,13 @@ export async function worktreeHasPopulatedGitlink(
  * Runs `git status --porcelain --untracked-files=normal
  * --ignored=matching`: tracked, untracked and ignored entries all count
  * as work, except disposable build output ({@link DISPOSABLE_IGNORED_ROOTS}),
- * symlinks (removing the checkout only unlinks them; the target lives
- * elsewhere — this is what keeps `worktree.symlinkDirectories` checkouts
- * reapable, nested values included, which git reports as a collapsed parent
- * holding nothing but links), and the session marker
+ * ignored regenerable Qwen caches ({@link REGENERABLE_QWEN_CACHE_DIRS}, i.e.
+ * `.qwen/tmp/` and `.qwen/logs/`, only when `inspectCacheContainer` confirms
+ * the entry overlaps no nested checkout, bare/separate git store, or
+ * unreadable directory), symlinks (removing the checkout only unlinks them;
+ * the target lives elsewhere — this is what keeps `worktree.symlinkDirectories`
+ * checkouts reapable, nested values included, which git reports as a collapsed
+ * parent holding nothing but links), and the session marker
  * ({@link WORKTREE_SESSION_FILE}) when git lists it as ignored (its exclude
  * rule) or untracked (a fixture without one). A marker the repository tracks
  * counts as work like any other tracked change: an edit to a tracked path is

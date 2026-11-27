@@ -25,6 +25,7 @@ import {
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
+import { regenerableCacheContainerOf } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
   selectWorktreeSnapshot,
   verifyRestoredWorktreeSnapshot,
@@ -575,11 +576,17 @@ async function checkoutChangeDigest(
         continue;
       }
       // Only the ORIGINAL collapsed ignored entry can authorize a disposable
-      // waiver. A non-disposable parent makes the tar include every child,
-      // including a nested node_modules subtree, so the digest must see it.
+      // waiver for general build roots (`node_modules`, `dist`, `coverage`): a
+      // non-disposable parent makes the tar include every child, including a
+      // nested `node_modules` subtree, so the digest must still see it. By
+      // contrast, regenerable Qwen caches (`.qwen/tmp/`, `.qwen/logs/`) under
+      // a collapsed `.qwen/` rule (or beside a nested checkout/git store inside
+      // `.qwen/tmp/`) ARE excluded by the archive whenever clean of nested git
+      // state, so waiving them here keeps the digest aligned with the archive.
       if (
-        i < originalStatusCount &&
         xy === '!!' &&
+        (i < originalStatusCount ||
+          regenerableCacheContainerOf(rel) !== undefined) &&
         (await isWaivableIgnoredEntry(worktreePath, rel, cacheInspections))
       ) {
         continue;

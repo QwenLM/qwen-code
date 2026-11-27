@@ -971,10 +971,9 @@ async function sweepWorktreeRetentionOnceInStorage(
       }
       // Re-read the limit for every candidate: a capture is minutes of work
       // on a large checkout, so retention may have been disabled
-      // (`worktree.maxRetained: 0`) since this sweep started. Without this
-      // re-check the sweep kept capturing-and-discarding snapshots for every
-      // remaining candidate, only to reject removal in beforePhysicalRemoval
-      // after the capture had already run.
+      // (`worktree.maxRetained: 0`) or raised since this sweep started.
+      // Without this re-check the sweep kept capturing and removing remaining
+      // candidates against a stale plan.
       let sweepLimit: number;
       try {
         sweepLimit = retentionLimit(runtime);
@@ -986,6 +985,10 @@ async function sweepWorktreeRetentionOnceInStorage(
       }
       if (sweepLimit === 0) {
         report.skipped.push('retention disabled during sweep');
+        break;
+      }
+      if (sweepLimit !== scope.limit) {
+        report.skipped.push('retention limit changed during sweep');
         break;
       }
       try {

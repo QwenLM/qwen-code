@@ -429,22 +429,12 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       )
     ).computeCarriedIdentities;
     let genuine: Awaited<ReturnType<typeof genuineImpl>> | undefined;
-    vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
-      async (worktreePath, paths) => {
-        genuine ??= await genuineImpl(worktreePath, paths);
-        return Array.from({ length: REPEAT }, () => genuine!).flat();
-      },
-    );
-
     let ticks = 0;
     let maxGapMs = 0;
     let last = Date.now();
-    // Arm the timer from `afterCreate`, i.e. once the archive is written: the
-    // window then covers only the hashing plus the membership loop. Running it
-    // across the whole capture let the tar step and its disk I/O set the bound,
-    // which is a load-sensitive number that has nothing to do with the scan.
     let timer: ReturnType<typeof setInterval> | undefined;
-    captureTiming.afterCreate = async () => {
+    const armMembershipTimer = () => {
+      if (timer) return;
       last = Date.now();
       timer = setInterval(() => {
         ticks += 1;
@@ -453,6 +443,19 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         last = now;
       }, 20);
     };
+    vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
+      async (worktreePath, paths) => {
+        genuine ??= await genuineImpl(worktreePath, paths);
+        const repeated = Array.from({ length: REPEAT }, () => genuine!).flat();
+        // Arm only once the genuine hash-object batch and the 300k-element
+        // array are already in memory, so the timer window spans ONLY the
+        // membership check loop + tar verification rather than disk I/O or
+        // child-process scheduling under heavy CI contention (R1-3).
+        armMembershipTimer();
+        return repeated;
+      },
+    );
+
     try {
       const result = await captureWorktreeSnapshot({
         worktreePath: worktree,
@@ -462,26 +465,16 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       expect(result.checkoutMatchesCapture).toBe(true);
     } finally {
       if (timer) clearInterval(timer);
-      captureTiming.afterCreate = undefined;
       vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
         genuineImpl,
       );
     }
     expect(ticks).toBeGreaterThan(0);
-    // Longest synchronous gap on this fixture (3000 files x 100 repeats = 3e5
-    // identities), with the window armed after the archive is written:
-    //
-    //                        idle        6 busy loops / 10 cores
-    //   Set membership        54ms        53ms
-    //   regularFiles.includes 1529ms      1901ms
-    //
-    // The green arm does not move under load because tar and its disk I/O are
-    // outside the window. 200ms leaves more than 3x on the green arm while the
-    // linear scan misses it by more than 7x.
+    // With `regularFileSet.has` the membership loop is ~15-40ms; mutating it
+    // back to `regularFiles.includes` blocks synchronously for >500ms.
     expect(maxGapMs).toBeLessThan(200);
     // The assertion above bounds a STALL, not the test's duration: total time
-    // scales with the fixture and the capture path (this case went from ~1s to
-    // double-digit seconds as the capture grew), so the runner's default
+    // scales with the fixture and the capture path, so the runner's default
     // timeout must not become a second, implicit assertion. Explicit headroom
     // keeps a slow host from reading as a regression to the linear scan.
   }, 60_000);
@@ -995,6 +988,190 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).rejects.toThrow(/nested checkout \.qwen\/tmp\/runs\/inner holds work/);
   });
 
+  it('refuses capture when a clean named nested worktree hides a deeper checkout inside its own ignored dist/', async () => {
+    // Three-level layout: parent -> .qwen/worktrees/inner (clean named branch,
+    // ignores `dist/`) -> inner/dist/vendor-demo (third-level worktree holding
+    // `unique-draft.md`). `worktreeHasWork(inner)` waives `!! dist/`, so
+    // wholesale exclusion must inspect inner's ignored directories first.
+    const innerOrigin = path.join(root, 'inner-origin-dist');
+    await fs.mkdir(innerOrigin, { recursive: true });
+    git(innerOrigin, 'init', '-q', '-b', 'main');
+    git(innerOrigin, 'config', 'user.email', 't@e.com');
+    git(innerOrigin, 'config', 'user.name', 't');
+    git(innerOrigin, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(innerOrigin, '.gitignore'), 'dist/\n');
+    await fs.writeFile(path.join(innerOrigin, 'seed.txt'), 'seed\n');
+    git(innerOrigin, 'add', '.');
+    git(innerOrigin, 'commit', '-qm', 'seed', '--no-verify');
+
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    git(
+      innerOrigin,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'inner-named',
+      inner,
+      'HEAD',
+    );
+
+    const vendorDemo = path.join(inner, 'dist', 'vendor-demo');
+    await addNestedWorktree(vendorDemo, 'vendor-demo');
+    await fs.writeFile(
+      path.join(vendorDemo, 'unique-draft.md'),
+      'third-level-draft\n',
+    );
+
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(
+      /nested checkout \.qwen\/worktrees\/inner contains nested git state inside ignored path dist\/vendor-demo/,
+    );
+  });
+
+  it('detects a late commit in a --separate-git-dir store under ignored dist/ during post-capture verification', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), 'dist/\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-dist', '--no-verify');
+
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    const storeDir = path.join(worktree, 'dist', 'inner.git');
+    await fs.mkdir(inner, { recursive: true });
+    await fs.mkdir(path.dirname(storeDir), { recursive: true });
+    git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${storeDir}`);
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    git(inner, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(inner, 'file.txt'), 'v1\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'c1', '--no-verify');
+
+    const { snapshotPath, metaPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+    expect(checkoutMatchesCapture).toBe(true);
+    const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath,
+        meta: savedMeta,
+      }),
+    ).toBe(true);
+
+    // Create a new commit + branch ref `wip` inside `dist/inner.git` using
+    // `commit-tree` + `update-ref` so NO previously archived file (`HEAD`,
+    // `refs/heads/main`, `index`, or working files) is modified — only new
+    // object and ref files appear inside ignored `dist/inner.git`.
+    const treeOid = git(inner, 'rev-parse', 'HEAD^{tree}');
+    const parentOid = git(inner, 'rev-parse', 'HEAD');
+    const wipSha = git(
+      inner,
+      'commit-tree',
+      treeOid,
+      '-p',
+      parentOid,
+      '-m',
+      'wip-only',
+    );
+    git(inner, 'update-ref', 'refs/heads/wip', wipSha);
+
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath,
+        meta: savedMeta,
+      }),
+    ).toBe(false);
+  });
+
+  it.each(['.qwen/tmp/*\n', ''])(
+    'refuses capture when .qwen/tmp itself is a detached external linked worktree under ignore rule %j',
+    async (ignoreRule) => {
+      if (ignoreRule.length > 0) {
+        await fs.writeFile(path.join(worktree, '.gitignore'), ignoreRule);
+        git(worktree, 'add', '.gitignore');
+        git(worktree, 'commit', '-qm', 'ignore-rule', '--no-verify');
+      }
+      const tmpCheckout = path.join(worktree, '.qwen', 'tmp');
+      await addNestedWorktree(tmpCheckout, '', true);
+      git(tmpCheckout, 'config', 'user.email', 't@e.com');
+      git(tmpCheckout, 'config', 'user.name', 't');
+      git(tmpCheckout, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(tmpCheckout, 'draft.md'), 'keep\n');
+      git(tmpCheckout, 'add', 'draft.md');
+      git(tmpCheckout, 'commit', '-qm', 'detached-tmp-self', '--no-verify');
+      const detachedSha = git(tmpCheckout, 'rev-parse', 'HEAD');
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow(
+        /nested checkout \.qwen\/tmp has a detached or non-branch HEAD/,
+      );
+
+      const origin = path.join(root, 'nested-origin');
+      git(origin, 'worktree', 'prune', '--expire=now');
+      expect(git(tmpCheckout, 'rev-parse', 'HEAD')).toBe(detachedSha);
+    },
+  );
+
+  it('matches thousands of .qwen/tmp/* ignored directories in O(depth) without stalling the event loop', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/*\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-tmp-star', '--no-verify');
+
+    const DIRS = 1500;
+    const tmpRoot = path.join(worktree, '.qwen', 'tmp');
+    await fs.mkdir(tmpRoot, { recursive: true });
+    for (let i = 0; i < DIRS; i += 100) {
+      await Promise.all(
+        Array.from({ length: Math.min(100, DIRS - i) }, async (_, off) => {
+          const dir = path.join(tmpRoot, `d-${i + off}`);
+          await fs.mkdir(dir);
+          await fs.writeFile(path.join(dir, 'item.bin'), 'x\n');
+        }),
+      );
+    }
+
+    let maxGapMs = 0;
+    let last = Date.now();
+    const timer = setInterval(() => {
+      const now = Date.now();
+      maxGapMs = Math.max(maxGapMs, now - last);
+      last = now;
+    }, 20);
+    try {
+      const { snapshotPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members.some((m) => m.startsWith('.qwen/tmp/d-'))).toBe(false);
+    } finally {
+      clearInterval(timer);
+    }
+    expect(maxGapMs).toBeLessThan(250);
+  }, 60_000);
+
   it('refuses capture and reports work when .qwen/tmp itself is a dirty or detached linked worktree', async () => {
     await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
     git(worktree, 'add', '.gitignore');
@@ -1014,6 +1191,109 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).rejects.toThrow(
       /nested checkout \.qwen\/tmp has a detached or non-branch HEAD/,
     );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'archives a nested repo whose .git file points through an external symlink back into .qwen/tmp',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-qwen', '--no-verify');
+
+      const realStore = path.join(worktree, '.qwen', 'tmp', 'secret-git');
+      const extLink = path.join(root, 'external-link-to-store');
+      const inner = path.join(worktree, '.qwen', 'worktrees', 'sneaky');
+      await fs.mkdir(inner, { recursive: true });
+      await fs.mkdir(path.dirname(realStore), { recursive: true });
+      git(
+        inner,
+        'init',
+        '-q',
+        '-b',
+        'sneaky',
+        `--separate-git-dir=${realStore}`,
+      );
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'only.txt'), 'secret-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'secret-init', '--no-verify');
+
+      await fs.symlink(realStore, extLink);
+      await fs.writeFile(path.join(inner, '.git'), `gitdir: ${extLink}\n`);
+
+      const { snapshotPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members).toContain('.qwen/worktrees/sneaky/only.txt');
+      expect(
+        members.some((m) => m.startsWith('.qwen/tmp/secret-git/objects/')),
+      ).toBe(true);
+    },
+  );
+
+  it('refuses capture when a nested checkout stores its git metadata inside this worktree admin dir', async () => {
+    const parentWt = path.join(root, 'parent-linked-wt');
+    git(
+      worktree,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'parent-linked',
+      parentWt,
+      'HEAD',
+    );
+    const parentGitFile = await fs.readFile(
+      path.join(parentWt, '.git'),
+      'utf8',
+    );
+    const parentAdminDir = path.resolve(
+      parentWt,
+      /^gitdir:\s*(.+)$/m.exec(parentGitFile)![1].trim(),
+    );
+    const child = path.join(parentWt, '.qwen', 'worktrees', 'submod-like');
+    const childGitDir = path.join(parentAdminDir, 'modules', 'submod-like');
+    await fs.mkdir(child, { recursive: true });
+    await fs.mkdir(path.dirname(childGitDir), { recursive: true });
+    git(
+      child,
+      'init',
+      '-q',
+      '-b',
+      'sub-branch',
+      `--separate-git-dir=${childGitDir}`,
+    );
+    git(child, 'config', 'user.email', 't@e.com');
+    git(child, 'config', 'user.name', 't');
+    git(child, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(child, 'mod.txt'), 'mod\n');
+    git(child, 'add', '.');
+    git(child, 'commit', '-qm', 'mod', '--no-verify');
+
+    const head = git(parentWt, 'rev-parse', 'HEAD');
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: parentWt,
+        snapshotDir,
+        meta: {
+          ...meta(),
+          baseCommit: head,
+          headCommit: head,
+          branch: 'parent-linked',
+        },
+      }),
+    ).rejects.toThrow(/stores git metadata inside this worktree's admin dir/);
   });
 
   it.skipIf(process.platform === 'win32')(

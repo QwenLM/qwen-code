@@ -136,41 +136,45 @@ function isProtectedRel(norm: string): boolean {
  * buffer.
  */
 interface DisposableIgnoredMatcher {
-  dirs: string[];
+  /** Normalized without trailing slash, looked up via ancestor walk in O(depth). */
+  dirs: ReadonlySet<string>;
   files: ReadonlySet<string>;
   /**
-   * Subtrees excluded beyond the `!!` listing, each one rebuildable or
-   * preserved outside this checkout: an ignored Qwen cache container
-   * (`.qwen/tmp/`, `.qwen/logs/`), and a nested checkout under
-   * `.qwen/worktrees/` whose git dir lives outside this checkout and whose
-   * HEAD is a verified branch with no uncommitted work. A nested checkout that
-   * cannot survive cleanup refuses capture instead; independent repos and
-   * in-tree git object stores stay in the archive via `preservedDirs`.
+   * Subtrees excluded beyond the `!!` listing (normalized without trailing
+   * slash), each one rebuildable or preserved outside this checkout: an
+   * ignored Qwen cache container (`.qwen/tmp`, `.qwen/logs`), and a nested
+   * checkout under `.qwen/worktrees/` whose git dir lives outside this
+   * checkout, whose HEAD is a verified branch, and which holds neither
+   * uncommitted work nor hidden git state inside its own ignored directories.
    */
-  neverDirs: readonly string[];
+  neverDirs: ReadonlySet<string>;
   /**
    * Worktree-relative POSIX paths (without trailing slash) that must stay in
-   * the archive even when a broader cache exclusion covers their container
-   * (e.g., independent repos, `--separate-git-dir` object stores, unreadable
-   * subtrees, or archived legacy checkouts during verification). Strict
-   * ancestors are also left unexcluded so tar and verification can reach them
-   * while sibling plain cache entries remain excluded.
+   * the archive even when a broader cache or build-output exclusion covers
+   * their container (e.g., independent repos, `--separate-git-dir` object
+   * stores, unreadable subtrees, or archived legacy checkouts during
+   * verification).
    */
-  preservedDirs: readonly string[];
+  preservedDirs: ReadonlySet<string>;
+  /** Strict ancestors of `preservedDirs`, precomputed for O(1) traversal. */
+  preservedAncestors: ReadonlySet<string>;
 }
 
-function isPathPreserved(
-  norm: string,
-  preservedDirs: readonly string[],
-): boolean {
-  for (const kept of preservedDirs) {
-    if (
-      norm === kept ||
-      norm.startsWith(`${kept}/`) ||
-      kept.startsWith(`${norm}/`)
-    ) {
-      return true;
-    }
+function addStrictAncestors(target: Set<string>, norm: string): void {
+  let idx = norm.indexOf('/');
+  while (idx !== -1) {
+    target.add(norm.slice(0, idx));
+    idx = norm.indexOf('/', idx + 1);
+  }
+}
+
+function matchesDirSet(norm: string, dirSet: ReadonlySet<string>): boolean {
+  if (dirSet.size === 0) return false;
+  if (dirSet.has(norm)) return true;
+  let idx = norm.indexOf('/');
+  while (idx !== -1) {
+    if (dirSet.has(norm.slice(0, idx))) return true;
+    idx = norm.indexOf('/', idx + 1);
   }
   return false;
 }
@@ -181,7 +185,8 @@ function isPathPreserved(
  * excluded. Paths in `preservedDirs` (and their strict ancestors so tar can
  * traverse to them) are never excluded. Everything else is excluded only when
  * it matches `neverDirs` or an ignored disposable file/directory from the same
- * `!!` listing the has-work gate waives.
+ * `!!` listing the has-work gate waives, all in O(path depth) without scanning
+ * `dirs` linearly.
  */
 function isExcludedFromSnapshot(
   relativePath: string,
@@ -191,17 +196,15 @@ function isExcludedFromSnapshot(
   if (norm.length === 0) return false;
   if (norm === '.git' || norm.startsWith('.git/')) return true;
   if (norm === WORKTREE_SESSION_FILE) return true;
-  if (isPathPreserved(norm, matcher.preservedDirs)) return false;
   if (
-    matcher.neverDirs.some(
-      (dir) => norm === dir.replace(/\/$/, '') || norm.startsWith(dir),
-    )
+    matcher.preservedAncestors.has(norm) ||
+    matchesDirSet(norm, matcher.preservedDirs)
   ) {
-    return true;
+    return false;
   }
+  if (matchesDirSet(norm, matcher.neverDirs)) return true;
   if (matcher.files.has(norm)) return true;
-  const withSlash = `${norm}/`;
-  return matcher.dirs.some((dir) => withSlash.startsWith(dir));
+  return matchesDirSet(norm, matcher.dirs);
 }
 
 /**
@@ -725,6 +728,7 @@ async function readSnapshotExclusions(
     64 * 1024 * 1024,
   );
   const ignoredEntries: string[] = [];
+  const untrackedRepoDirs: string[] = [];
   const records = statusOut.split('\0');
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
@@ -755,24 +759,38 @@ async function readSnapshotExclusions(
     if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
       i += 1;
     }
-    if (xy === '!!') ignoredEntries.push(record.slice(3));
+    if (xy === '!!') {
+      ignoredEntries.push(record.slice(3));
+    } else if (xy === '??' && record.slice(3).endsWith('/')) {
+      // With `--untracked-files=all`, git only emits a directory-collapsed
+      // `?? <dir>/` entry for an untracked nested git repository/worktree
+      // (for example `.qwen/tmp/` itself when `.gitignore` is `.qwen/tmp/*`
+      // or absent).
+      if (relativePath.length > 0) untrackedRepoDirs.push(relativePath);
+    }
   }
-  const { neverDirs, preservedDirs } = await boundedSnapshotExclusions(
-    worktreePath,
-    ignoredEntries,
-    archived,
-  );
+  const { neverDirs, preservedDirs, preservedAncestors } =
+    await boundedSnapshotExclusions(
+      worktreePath,
+      ignoredEntries,
+      untrackedRepoDirs,
+      archived,
+    );
+  const dirs = new Set<string>();
+  const files = new Set<string>();
+  for (const entry of ignoredEntries) {
+    if (!isDisposableIgnoredEntry(entry)) continue;
+    const norm = normalizeRel(entry).replace(/\/+$/, '');
+    if (norm.length === 0) continue;
+    if (entry.endsWith('/')) dirs.add(norm);
+    else files.add(norm);
+  }
   const matcher: DisposableIgnoredMatcher = {
-    dirs: ignoredEntries.filter(
-      (e) => e.endsWith('/') && isDisposableIgnoredEntry(e),
-    ),
-    files: new Set(
-      ignoredEntries.filter(
-        (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
-      ),
-    ),
+    dirs,
+    files,
     neverDirs,
     preservedDirs,
+    preservedAncestors,
   };
   if (checkProtectedCaseVariants) {
     await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
@@ -790,16 +808,6 @@ function relativePosixIfInside(
     return undefined;
   }
   return rel.split(path.sep).join('/');
-}
-
-function isCoveredByIgnored(
-  relNoSlash: string,
-  ignoredEntries: readonly string[],
-): boolean {
-  const withSlash = `${relNoSlash}/`;
-  return ignoredEntries.some((entry) =>
-    entry.endsWith('/') ? withSlash.startsWith(entry) : entry === relNoSlash,
-  );
 }
 
 type NestedCheckoutDisposition =
@@ -825,43 +833,30 @@ async function resolveWorktreeAdminDir(
     .catch(() => undefined);
 }
 
-/**
- * Decide whether a nested checkout under `worktreePath` can be safely excluded,
- * must be archived (along with any in-tree `--separate-git-dir` store), or must
- * refuse capture so cleanup preserves the parent checkout.
- *
- * A checkout is excludable only when deleting the parent leaves both its object
- * store and a verified local branch ref intact (surviving `git worktree prune`)
- * and it holds no uncommitted work. An external linked worktree with work, a
- * detached HEAD, or a missing branch ref cannot survive parent deletion plus
- * `git worktree prune`, even if its working files were archived, so capture
- * refuses it fail-closed.
- */
-async function classifyNestedCheckout(
+interface ResolvedGitFileTargets {
+  realGitDir: string;
+  realCommonDir: string | undefined;
+  inTreeStorePaths: string[];
+  insideWorktree: boolean;
+}
+
+async function resolveGitFileTargets(
   childPath: string,
-  childRel: string,
   realWorktree: string,
   resolvedWorktree: string,
-  realParentAdminDir: string | undefined,
-): Promise<NestedCheckoutDisposition> {
+): Promise<ResolvedGitFileTargets | undefined> {
   const marker = await fs
     .lstat(path.join(childPath, '.git'))
     .catch(() => undefined);
-  if (marker === undefined) return { kind: 'not-checkout' };
-  // `lstat`, never a followed probe: `.git` as a DIRECTORY is an independent
-  // repository whose entire object database lives inside this directory and is
-  // archived intact when the child stays unexcluded.
-  if (!marker.isFile()) return { kind: 'archive', preserveRelPaths: [] };
+  if (marker === undefined || !marker.isFile()) return undefined;
   const gitFile = await fs
     .readFile(path.join(childPath, '.git'), 'utf8')
     .catch(() => '');
   const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1]?.trim();
-  if (!declared) return { kind: 'archive', preserveRelPaths: [] };
+  if (!declared) return undefined;
   const rawGitDir = path.resolve(childPath, declared);
   const realGitDir = await fs.realpath(rawGitDir).catch(() => undefined);
-  if (realGitDir === undefined) {
-    return { kind: 'archive', preserveRelPaths: [] };
-  }
+  if (realGitDir === undefined) return undefined;
   const commonDirRaw = await fs
     .readFile(path.join(realGitDir, 'commondir'), 'utf8')
     .catch(() => undefined);
@@ -879,8 +874,10 @@ async function classifyNestedCheckout(
     realCommonDir !== undefined
       ? relativePosixIfInside(realWorktree, realCommonDir)
       : undefined;
-  if (gitDirInside !== undefined || commonDirInside !== undefined) {
-    const preserveRelPaths: string[] = [];
+  const insideWorktree =
+    gitDirInside !== undefined || commonDirInside !== undefined;
+  const inTreeStorePaths: string[] = [];
+  if (insideWorktree) {
     for (const candidate of [gitDirInside, rawGitDirInside, commonDirInside]) {
       if (
         candidate !== undefined &&
@@ -888,11 +885,126 @@ async function classifyNestedCheckout(
         candidate !== '.git' &&
         !candidate.startsWith('.git/')
       ) {
-        preserveRelPaths.push(candidate);
+        inTreeStorePaths.push(candidate);
       }
     }
-    return { kind: 'archive', preserveRelPaths };
   }
+  return { realGitDir, realCommonDir, inTreeStorePaths, insideWorktree };
+}
+
+/**
+ * Extract any in-tree git object-store paths (`gitdir` / `commondir`) pointed
+ * to by `childPath/.git` when that store lies inside `worktreePath` (outside
+ * top-level `.git/`). Called during verification even when the archive already
+ * carries `childPath/` so a `--separate-git-dir` store inside an ignored dir
+ * (e.g. `dist/inner.git`) stays unexcluded and late commits cannot slip past
+ * the final pre-removal check.
+ */
+async function resolveInTreeGitStorePaths(
+  childPath: string,
+  realWorktree: string,
+  resolvedWorktree: string,
+): Promise<string[]> {
+  const targets = await resolveGitFileTargets(
+    childPath,
+    realWorktree,
+    resolvedWorktree,
+  );
+  return targets?.inTreeStorePaths ?? [];
+}
+
+/**
+ * Before marking a nested checkout wholesale-excludable, inspect every ignored
+ * directory inside it (including build roots like `dist/`, `node_modules/`,
+ * `coverage/` that `worktreeHasWork` waives) without following symlinks. A
+ * third-level checkout or bare git store hidden inside `inner/dist/vendor-demo`
+ * would otherwise be deleted along with `inner` and omitted from the archive.
+ */
+async function nestedCheckoutHasIgnoredGitState(
+  childPath: string,
+): Promise<string | undefined> {
+  let statusOut: string;
+  try {
+    statusOut = await runGit(
+      childPath,
+      [
+        ...NO_EXEC_CONFIG,
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '--untracked-files=normal',
+        '--ignored=matching',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
+  } catch {
+    return '.';
+  }
+  const records = statusOut.split('\0');
+  const inspected = new Set<string>();
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (record.length === 0) continue;
+    const xy = record.slice(0, 2);
+    if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+      i += 1;
+      continue;
+    }
+    if (xy !== '!!') continue;
+    const rel = record.slice(3);
+    if (!rel.endsWith('/')) continue;
+    const dirRel = normalizeRel(rel).replace(/\/+$/, '');
+    if (dirRel.length === 0 || inspected.has(dirRel)) continue;
+    inspected.add(dirRel);
+    const inspection = await inspectCacheContainer(childPath, dirRel);
+    const hit =
+      inspection.checkouts[0] ??
+      inspection.gitDirs[0] ??
+      inspection.unreadableDirs[0];
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * Decide whether a nested checkout under `worktreePath` can be safely excluded,
+ * must be archived (along with any in-tree `--separate-git-dir` store), or must
+ * refuse capture so cleanup preserves the parent checkout.
+ *
+ * A checkout is excludable only when deleting the parent leaves both its object
+ * store and a verified local branch ref intact (surviving `git worktree prune`),
+ * it holds no uncommitted work, and none of its own ignored directories hold a
+ * deeper nested checkout, git object store, or unreadable directory.
+ */
+async function classifyNestedCheckout(
+  childPath: string,
+  childRel: string,
+  realWorktree: string,
+  resolvedWorktree: string,
+  realParentAdminDir: string | undefined,
+): Promise<NestedCheckoutDisposition> {
+  const marker = await fs
+    .lstat(path.join(childPath, '.git'))
+    .catch(() => undefined);
+  if (marker === undefined) return { kind: 'not-checkout' };
+  // `lstat`, never a followed probe: `.git` as a DIRECTORY is an independent
+  // repository whose entire object database lives inside this directory and is
+  // archived intact when the child stays unexcluded.
+  if (!marker.isFile()) return { kind: 'archive', preserveRelPaths: [] };
+  const targets = await resolveGitFileTargets(
+    childPath,
+    realWorktree,
+    resolvedWorktree,
+  );
+  if (targets === undefined) {
+    return { kind: 'archive', preserveRelPaths: [] };
+  }
+  if (targets.insideWorktree) {
+    return { kind: 'archive', preserveRelPaths: targets.inTreeStorePaths };
+  }
+  const { realGitDir, realCommonDir } = targets;
 
   if (
     realParentAdminDir !== undefined &&
@@ -945,53 +1057,76 @@ async function classifyNestedCheckout(
       reason: `nested checkout ${childRel} holds work; refusing to capture a parent that would delete it`,
     };
   }
+  const ignoredGitHit = await nestedCheckoutHasIgnoredGitState(childPath);
+  if (ignoredGitHit !== undefined) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} contains nested git state inside ignored path ${ignoredGitHit}; refusing to capture a parent that would delete it`,
+    };
+  }
   return { kind: 'excludable-external' };
 }
 
 /**
  * The `neverDirs` and `preservedDirs` halves of the matcher: subtrees this
  * checkout owns that can be left out because something outside it can rebuild
- * them, paired with the exact subtrees inside ignored caches (independent
- * repos, bare/`--separate-git-dir` object stores, unreadable dirs, archived
- * legacy checkouts) that must remain in the archive while sibling caches stay
- * excluded.
+ * them, paired with the exact subtrees inside ignored caches or build dirs
+ * (independent repos, bare/`--separate-git-dir` object stores, unreadable
+ * dirs, archived legacy checkouts) that must remain in the archive while
+ * sibling caches stay excluded.
  *
  * `archived` is the member set of an archive being verified. Verification
  * checks membership at each checkout's own path (never bailing out on the
- * parent cache container) so an archive carrying a sibling object store or a
- * tracked file under `.qwen/tmp/` still verifies an excluded clean worktree
- * beside it, and a legacy archive carrying a nested checkout verifies it
- * instead of tripping capture-time refusals.
+ * parent cache container) and still records any in-tree `--separate-git-dir`
+ * store paths so late commits/branches in a store inside an ignored dir like
+ * `dist/inner.git` cannot slip past the final verification before deletion.
  */
 async function boundedSnapshotExclusions(
   worktreePath: string,
   ignoredEntries: readonly string[],
+  untrackedRepoDirs: readonly string[],
   archived?: SnapshotPathKinds,
 ): Promise<{
-  neverDirs: readonly string[];
-  preservedDirs: readonly string[];
+  neverDirs: ReadonlySet<string>;
+  preservedDirs: ReadonlySet<string>;
+  preservedAncestors: ReadonlySet<string>;
 }> {
   const realWorktree = await fs
     .realpath(worktreePath)
     .catch(() => path.resolve(worktreePath));
   const resolvedWorktree = path.resolve(worktreePath);
   const realParentAdminDir = await resolveWorktreeAdminDir(worktreePath);
-  const neverDirs: string[] = [];
-  const preservedDirSet = new Set<string>();
+  const neverDirs = new Set<string>();
+  const preservedDirs = new Set<string>();
+  const preservedAncestors = new Set<string>();
+  const handledCheckouts = new Set<string>();
   const preserve = (rel: string): void => {
     const norm = normalizeRel(rel).replace(/\/+$/, '');
-    if (norm.length > 0) preservedDirSet.add(norm);
+    if (norm.length === 0 || preservedDirs.has(norm)) return;
+    preservedDirs.add(norm);
+    addStrictAncestors(preservedAncestors, norm);
   };
+
+  // Pre-index ignored entries into O(depth)/O(1) sets so `.qwen/tmp/*` with
+  // thousands of cache directories never scales quadratically.
+  const ignoredDirSet = new Set<string>();
+  const ignoredFileSet = new Set<string>();
+  const ignoredAncestors = new Set<string>();
+  for (const entry of ignoredEntries) {
+    const norm = normalizeRel(entry).replace(/\/+$/, '');
+    if (norm.length === 0) continue;
+    if (entry.endsWith('/')) ignoredDirSet.add(norm);
+    else ignoredFileSet.add(norm);
+    addStrictAncestors(ignoredAncestors, norm);
+  }
 
   for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
     const container = `.qwen/${cacheDir}`;
-    const trailing = `${container}/`;
-    const containerCollapsed = ignoredEntries.some(
-      (entry) => entry.endsWith('/') && trailing.startsWith(entry),
-    );
-    const hasIgnoredInside = ignoredEntries.some(
-      (entry) => entry === container || entry.startsWith(trailing),
-    );
+    const containerCollapsed = matchesDirSet(container, ignoredDirSet);
+    const hasIgnoredInside =
+      ignoredFileSet.has(container) ||
+      ignoredDirSet.has(container) ||
+      ignoredAncestors.has(container);
     if (!containerCollapsed && !hasIgnoredInside) continue;
 
     const inspection = await inspectCacheContainer(worktreePath, container);
@@ -1002,15 +1137,25 @@ async function boundedSnapshotExclusions(
       preserve(gitDir);
     }
     for (const checkoutRel of inspection.checkouts) {
-      const covered = isCoveredByIgnored(checkoutRel, ignoredEntries);
+      handledCheckouts.add(checkoutRel);
+      const covered =
+        ignoredFileSet.has(checkoutRel) ||
+        matchesDirSet(checkoutRel, ignoredDirSet);
       if (!covered) {
-        if (ignoredEntries.some((e) => e.startsWith(`${checkoutRel}/`))) {
+        if (ignoredAncestors.has(checkoutRel)) {
           preserve(checkoutRel);
         }
         continue;
       }
       if (archived?.directories.has(`${checkoutRel}/`)) {
         preserve(checkoutRel);
+        for (const p of await resolveInTreeGitStorePaths(
+          path.join(worktreePath, checkoutRel),
+          realWorktree,
+          resolvedWorktree,
+        )) {
+          preserve(p);
+        }
         continue;
       }
       const disposition = await classifyNestedCheckout(
@@ -1033,7 +1178,7 @@ async function boundedSnapshotExclusions(
       }
     }
     if (containerCollapsed) {
-      neverDirs.push(trailing);
+      neverDirs.add(container);
     }
   }
 
@@ -1054,7 +1199,17 @@ async function boundedSnapshotExclusions(
       const childPath = path.join(managedDir, entry.name);
       const childRel = `${managedRelative}${entry.name}`;
       const relative = `${childRel}/`;
-      if (archived?.directories.has(relative)) continue;
+      handledCheckouts.add(childRel);
+      if (archived?.directories.has(relative)) {
+        for (const p of await resolveInTreeGitStorePaths(
+          childPath,
+          realWorktree,
+          resolvedWorktree,
+        )) {
+          preserve(p);
+        }
+        continue;
+      }
       const disposition = await classifyNestedCheckout(
         childPath,
         childRel,
@@ -1063,7 +1218,7 @@ async function boundedSnapshotExclusions(
         realParentAdminDir,
       );
       if (disposition.kind === 'excludable-external') {
-        neverDirs.push(relative);
+        neverDirs.add(childRel);
       } else if (disposition.kind === 'refuse-external') {
         if (archived === undefined) {
           throw new Error(`Worktree snapshot: ${disposition.reason}`);
@@ -1076,7 +1231,44 @@ async function boundedSnapshotExclusions(
     }
   }
 
-  return { neverDirs, preservedDirs: [...preservedDirSet] };
+  // Also classify untracked nested repositories reported as `?? <dir>/` by
+  // `git status --untracked-files=all` (for example `.qwen/tmp` itself when
+  // `.gitignore` is `.qwen/tmp/*` or absent, or an unignored nested repo
+  // whose `--separate-git-dir` lives in an ignored dir): never exclude them,
+  // but refuse unrecoverable external linked worktrees and preserve any
+  // in-tree `--separate-git-dir` object store.
+  for (const repoRel of untrackedRepoDirs) {
+    if (handledCheckouts.has(repoRel)) continue;
+    const repoPath = path.join(worktreePath, repoRel);
+    if (archived?.directories.has(`${repoRel}/`)) {
+      for (const p of await resolveInTreeGitStorePaths(
+        repoPath,
+        realWorktree,
+        resolvedWorktree,
+      )) {
+        preserve(p);
+      }
+      continue;
+    }
+    const disposition = await classifyNestedCheckout(
+      repoPath,
+      repoRel,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+    );
+    if (disposition.kind === 'refuse-external') {
+      if (archived === undefined) {
+        throw new Error(`Worktree snapshot: ${disposition.reason}`);
+      }
+    } else if (disposition.kind === 'archive') {
+      for (const p of disposition.preserveRelPaths) {
+        preserve(p);
+      }
+    }
+  }
+
+  return { neverDirs, preservedDirs, preservedAncestors };
 }
 
 export async function verifyRestoredWorktreeSnapshot(options: {
