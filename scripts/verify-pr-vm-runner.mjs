@@ -28,13 +28,13 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -1480,6 +1480,14 @@ export async function runHardwareRound({
       };
     }
     try {
+      const entropyHex =
+        roundInput.entropyHex ?? randomBytes(32).toString('hex');
+      if (
+        typeof entropyHex !== 'string' ||
+        /^[0-9a-f]{64}$/.exec(entropyHex)?.[0] !== entropyHex
+      ) {
+        throw new Error('entropyHex must be a 64-char lowercase hex string');
+      }
       let bundleInfo;
       const prebuiltHashBudget = Math.min(
         maxBundleBytes,
@@ -1491,9 +1499,7 @@ export async function runHardwareRound({
           baseRefOid: contextSnapshot.baseRefOid,
           headRefOid: contextSnapshot.headRefOid,
           outPath: join(realLauncher, 'round-input.bundle'),
-          ...(roundInput.maxBundleBytes !== undefined
-            ? { maxBundleBytes: roundInput.maxBundleBytes }
-            : {}),
+          maxBundleBytes: prebuiltHashBudget,
         });
       } else {
         const bHash = sha256RegularFile(
@@ -1545,6 +1551,22 @@ export async function runHardwareRound({
           realLauncher,
           `.round-input.bundle.tmp.${process.pid}`,
         );
+        let existingPrivate = null;
+        try {
+          existingPrivate = lstatSync(privateBundle);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (
+          existingPrivate &&
+          (!existingPrivate.isFile() ||
+            existingPrivate.isSymbolicLink() ||
+            existingPrivate.nlink !== 1)
+        ) {
+          throw new Error(
+            'refusing to overwrite a non-regular or multi-link private bundle',
+          );
+        }
         let sourceFd;
         let stagedFd;
         let stagedIdentity;
@@ -1615,7 +1637,7 @@ export async function runHardwareRound({
               'roundInput.bundlePath changed while its private copy was made',
             );
           }
-          linkSync(stagedBundle, privateBundle);
+          renameSync(stagedBundle, privateBundle);
           bundleInfo = {
             bundlePath: privateBundle,
             bundleSha256: copiedSha256,
@@ -1673,7 +1695,7 @@ export async function runHardwareRound({
         bundleSha256: bundleInfo.bundleSha256,
         bundleBytes: bundleInfo.bundleBytes,
         modelProxy: manifestModelProxy,
-        entropyHex: roundInput.entropyHex ?? null,
+        entropyHex,
       });
       if (
         trustedInputDigest !== null &&

@@ -69,6 +69,9 @@ const COPY_BOUNDARY_DRIVER = fileURLToPath(
 const PREBUILT_SNAPSHOT_DRIVER = fileURLToPath(
   new URL('./verify-pr-vm-prebuilt-snapshot-driver.cjs', import.meta.url),
 );
+const ROUND_PREP_DRIVER = fileURLToPath(
+  new URL('./verify-pr-vm-round-prep-driver.cjs', import.meta.url),
+);
 
 const BASE_OID = 'a'.repeat(40);
 const HEAD_OID = 'b'.repeat(40);
@@ -703,10 +706,86 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
         mode,
         injected: true,
         allocations: 0,
-        finalSize: 1024 * 1024 + (mode === 'replacement' ? 1 : 128),
-        readBytes: mode === 'replacement' ? 0 : 1024 * 1024 + 128,
         pass: true,
       });
+      expect(report.finalSize).toBe(
+        1024 * 1024 +
+          (mode === 'replacement' ? 1 : report.growthAppends * 128 * 1024),
+      );
+      if (mode === 'growth') {
+        expect(report.growthAppends).toBeGreaterThan(0);
+        expect(report.growthAppends).toBeLessThanOrEqual(12);
+        expect(report.readBytes).toBeGreaterThan(1024 * 1024);
+        expect(report.readBytes).toBeLessThanOrEqual(1024 * 1024 + 256 * 1024);
+        expect(report.readBytes).toBeLessThan(report.finalSize);
+      } else {
+        expect(report.readBytes).toBe(0);
+      }
+    }
+  });
+
+  it('rejects a same-size prebuilt rewrite after the source was hashed', () => {
+    const child = spawnSync(
+      process.execPath,
+      [COPY_BOUNDARY_DRIVER, RUNNER_SCRIPT, 'copy-rewrite'],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+    const report = JSON.parse(child.stdout);
+    expect(report).toMatchObject({
+      mode: 'copy-rewrite',
+      injected: true,
+      copiedAfterHashWithSameSize: true,
+      allocations: 0,
+      copiedBytes: 64,
+      stagedExistsAfter: false,
+      pass: true,
+    });
+    expect(report.sourceShaAfter).toBe(report.expectedSourceSha);
+    expect(report.errors.join('\n')).toContain(
+      'roundInput.bundlePath changed while its private copy was made',
+    );
+  });
+
+  it('allows private prebuilt reuse and refuses unsafe existing targets', () => {
+    for (const mode of [
+      'private-retry',
+      'private-multi-link',
+      'private-symlink',
+    ]) {
+      const child = spawnSync(
+        process.execPath,
+        [COPY_BOUNDARY_DRIVER, RUNNER_SCRIPT, mode],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+        },
+      );
+      expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+      const report = JSON.parse(child.stdout);
+      expect(report).toMatchObject({
+        mode,
+        allocations: mode === 'private-retry' ? 2 : 0,
+        privateTargetPreserved: true,
+        stagedExistsAfter: false,
+        pass: true,
+      });
+      expect(report.rounds).toHaveLength(mode === 'private-retry' ? 2 : 1);
+      if (mode === 'private-retry') {
+        for (const round of report.rounds) {
+          expect(round.errors.join('\n')).toContain('allocation-sentinel');
+          expect(round.errors.join('\n')).not.toContain('round-input-rejected');
+        }
+      } else {
+        expect(report.errors.join('\n')).toContain(
+          'refusing to overwrite a non-regular or multi-link private bundle',
+        );
+      }
     }
   });
 
@@ -737,6 +816,37 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
       expect(report.errors.join('\n')).toContain(
         mode === 'copy-growth' ? 'bundle-size-budget:1024' : 'EEXIST',
       );
+    }
+  });
+
+  it('bounds repository generation diagnostics and validates entropy before reading a bundle', () => {
+    const child = spawnSync(
+      process.execPath,
+      [ROUND_PREP_DRIVER, fileURLToPath(new URL('../..', import.meta.url))],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+    const report = JSON.parse(child.stdout);
+    expect(report).toMatchObject({
+      realBundleVerified: true,
+      fixtureGitStderrBytes: 48 * 1024,
+      allocations: 1,
+      pass: true,
+    });
+    expect(report.bundleBuffers).toEqual(report.expectedBuffers);
+    expect(report.repoErrors.join('\n')).toContain(
+      'round-prep-allocation-sentinel',
+    );
+    expect(report.entropyErrors).toHaveLength(3);
+    for (const errors of report.entropyErrors) {
+      expect(errors.join('\n')).toContain(
+        'entropyHex must be a 64-char lowercase hex string',
+      );
+      expect(errors.join('\n')).not.toContain('allocation-sentinel');
     }
   });
 

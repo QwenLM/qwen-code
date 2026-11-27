@@ -223,7 +223,7 @@ describe('verify-pr-vm-channel input packaging and manifest', () => {
       bundleTooLarge = error;
     }
     expect(bundleTooLarge).toBeInstanceOf(Error);
-    expect(bundleTooLarge.message).toContain('exceeds allowed range');
+    expect(bundleTooLarge.message).toContain('exceeds allowed range (1..10)');
     expect(bundleTooLarge.code).toBe('ENOBUFS');
     expect(bundleTooLarge.cause?.code).toBe('ENOBUFS');
     expect(existsSync(join(root, 'tiny.bundle'))).toBe(false);
@@ -1258,6 +1258,27 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
           },
         ],
         [
+          'oversize-manifest-bundle-bytes',
+          (manifest) => {
+            manifest.bundleBytes = 128 * 1024 * 1024 + 1;
+            return 'bundleBytes';
+          },
+        ],
+        [
+          'unsupported-manifest-schema',
+          (manifest) => {
+            manifest.schemaVersion = 'verify-pr-input-v2';
+            return 'unsupported manifest schema';
+          },
+        ],
+        [
+          'missing-manifest-schema',
+          (manifest) => {
+            delete manifest.schemaVersion;
+            return 'unsupported manifest schema';
+          },
+        ],
+        [
           'fractional-bundle-bytes',
           (manifest) => {
             manifest.bundleBytes = 4.5;
@@ -1369,11 +1390,11 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
             '--unix',
             socketPath,
             '--out',
-            outDir,
+            join(outDir, 'python'),
           ]);
           const nodeResult = await fetchRoundInputFromSocket({
             socketPath,
-            outDir,
+            outDir: join(outDir, 'node'),
           }).then(
             (value) => ({ value }),
             (error) => ({ error }),
@@ -1382,20 +1403,32 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
             expect(result.status, result.stderr).toBe(0);
             expect(nodeResult.error).toBeUndefined();
             expect(nodeResult.value.manifest).toEqual(JSON.parse(manifestText));
-            expect(readFileSync(join(outDir, 'manifest.json'), 'utf8')).toBe(
-              manifestText,
-            );
-            expect(readFileSync(join(outDir, 'round.bundle'))).toEqual(bundle);
+            for (const clientOut of ['python', 'node']) {
+              expect(
+                readFileSync(join(outDir, clientOut, 'manifest.json'), 'utf8'),
+              ).toBe(manifestText);
+              expect(
+                readFileSync(join(outDir, clientOut, 'round.bundle')),
+              ).toEqual(bundle);
+              expect(
+                readFileSync(join(outDir, clientOut, 'entropy.hex'), 'utf8'),
+              ).toBe(`${changed.entropyHex}\n`);
+            }
             expect(requests).toBe(4);
           } else {
             expect(result.status, result.stderr).toBe(1);
-            expect(result.stderr).toContain('invalid manifest');
+            expect(result.stderr).toContain(
+              expectedField === 'unsupported manifest schema'
+                ? expectedField
+                : 'invalid manifest',
+            );
             expect(result.stderr).toContain(expectedField);
             expect(nodeResult.error).toBeInstanceOf(Error);
             expect(nodeResult.error.message).toContain(
               nodeExpectedField ?? expectedField,
             );
-            expect(readdirSync(outDir)).toEqual([]);
+            expect(readdirSync(join(outDir, 'python'))).toEqual([]);
+            expect(readdirSync(join(outDir, 'node'))).toEqual([]);
             expect(requests).toBe(2);
           }
         } finally {
@@ -1528,6 +1561,178 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
     },
   );
 
+  for (const innerRelayFailure of [false, true]) {
+    it.skipIf(process.platform === 'win32')(
+      `releases a bridge slot when ${innerRelayFailure ? 'relay' : 'client'} thread startup fails and recovers echo`,
+      async () => {
+        const root = mkdtempSync('/tmp/qc-bridge-start-failure-');
+        const upstreamPath = join(root, 'upstream.sock');
+        const failureCountPath = join(root, 'start-failure-count');
+        const relayDonePath = join(root, 'relay-done');
+        const upstreamSockets = new Set();
+        const upstream = net.createServer((socket) => {
+          upstreamSockets.add(socket);
+          socket.once('close', () => upstreamSockets.delete(socket));
+          socket.on('error', () => {});
+          socket.on('data', (data) => socket.end(data));
+        });
+        const clients = new Set();
+        await new Promise((resolve, reject) => {
+          upstream.once('error', reject);
+          upstream.listen(upstreamPath, resolve);
+        });
+        cleanups.push(async () => {
+          for (const client of clients) client.destroy();
+          for (const socket of upstreamSockets) socket.destroy();
+          if (upstream.listening) {
+            await new Promise((resolve) => upstream.close(resolve));
+          }
+          rmSync(root, { recursive: true, force: true });
+        });
+        writeFileSync(
+          join(root, 'sitecustomize.py'),
+          `import os
+import threading
+
+failure_count_path = os.environ['QC_FIXTURE_THREAD_FAILURE_COUNT']
+relay_done_path = os.environ['QC_FIXTURE_RELAY_DONE_PATH']
+failure_target = os.environ['QC_FIXTURE_THREAD_FAILURE_TARGET']
+failure_after = int(os.environ['QC_FIXTURE_THREAD_FAILURE_AFTER'])
+failed = 0
+injected = False
+
+class StartFailureThread(threading.Thread):
+    def start(self):
+        global failed, injected
+        target = getattr(self._target, '__name__', None)
+        if target == failure_target and not injected:
+            failed += 1
+            if failed > failure_after:
+                injected = True
+                with open(failure_count_path, 'w', encoding='ascii') as output:
+                    output.write(str(failed))
+                raise RuntimeError('fixture: requested thread cannot start')
+        return super().start()
+
+    def run(self):
+        handles_relay = getattr(self._target, '__name__', None) == 'relay_half'
+        try:
+            return super().run()
+        finally:
+            if handles_relay:
+                with open(relay_done_path, 'a', encoding='ascii') as output:
+                    output.write('relay-done\\n')
+
+threading.Thread = StartFailureThread
+`,
+        );
+        const fixturePath = join(root, 'sitecustomize.py');
+        const syntax = spawnSync(
+          'python3',
+          [
+            '-c',
+            'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))',
+            fixturePath,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(syntax.status, syntax.stderr).toBe(0);
+        const bridge = spawn(
+          'python3',
+          [
+            GUEST_VSOCK_PY,
+            'model-bridge',
+            '--unix',
+            upstreamPath,
+            '--listen',
+            '127.0.0.1',
+            '--local-port',
+            '0',
+          ],
+          {
+            env: {
+              PATH: process.env.PATH ?? '/usr/bin:/bin',
+              PYTHONPATH: root,
+              QC_FIXTURE_THREAD_FAILURE_COUNT: failureCountPath,
+              QC_FIXTURE_RELAY_DONE_PATH: relayDonePath,
+              QC_FIXTURE_THREAD_FAILURE_TARGET: innerRelayFailure
+                ? 'relay_half'
+                : 'handle_bridge_client',
+              QC_FIXTURE_THREAD_FAILURE_AFTER: innerRelayFailure ? '1' : '0',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        cleanups.push(async () => {
+          if (bridge.exitCode === null && bridge.signalCode === null) {
+            const exited = once(bridge, 'exit');
+            bridge.kill('SIGTERM');
+            await exited;
+          }
+        });
+        let stderr = '';
+        bridge.stderr.on('data', (chunk) => {
+          stderr += chunk.toString('utf8');
+        });
+        const [ready] = await Promise.race([
+          once(bridge.stdout, 'data'),
+          once(bridge, 'exit').then(([code]) => {
+            throw new Error(`bridge exited ${code}: ${stderr}`);
+          }),
+        ]);
+        const address = JSON.parse(ready.toString('utf8').trim());
+        const connectClient = async () => {
+          const client = net.createConnection(address.port, '127.0.0.1');
+          clients.add(client);
+          client.on('error', () => {});
+          const closed = new Promise((resolve) =>
+            client.once('close', resolve),
+          );
+          await new Promise((resolve, reject) => {
+            client.once('connect', resolve);
+            client.once('error', reject);
+          });
+          return { client, closed };
+        };
+        const failed = await connectClient();
+        await expect
+          .poll(() => existsSync(failureCountPath), { timeout: 5_000 })
+          .toBe(true);
+        await failed.closed;
+        expect(failed.client.destroyed).toBe(true);
+        expect(readFileSync(failureCountPath, 'utf8')).toBe(
+          innerRelayFailure ? '2' : '1',
+        );
+        const completedRelays = () =>
+          existsSync(relayDonePath)
+            ? readFileSync(relayDonePath, 'utf8')
+                .trim()
+                .split('\n')
+                .filter(Boolean).length
+            : 0;
+        const failedRelaysBeforeRecovery = innerRelayFailure ? 1 : 0;
+        await expect
+          .poll(completedRelays, { timeout: 5_000 })
+          .toBe(failedRelaysBeforeRecovery);
+        await expect.poll(() => bridge.exitCode, { timeout: 5_000 }).toBeNull();
+        for (let index = 0; index < 2; index += 1) {
+          const healthy = await connectClient();
+          const echoed = once(healthy.client, 'data');
+          healthy.client.end(`healthy-after-start-failure-${index}`);
+          expect((await echoed)[0].toString('utf8')).toBe(
+            `healthy-after-start-failure-${index}`,
+          );
+          await healthy.closed;
+        }
+        await expect
+          .poll(completedRelays, { timeout: 5_000 })
+          .toBe(failedRelaysBeforeRecovery + 4);
+        expect(bridge.exitCode).toBeNull();
+        expect(stderr).toBe('');
+      },
+    );
+  }
+
   it.skipIf(process.platform === 'win32')(
     'bounds guest bridge concurrency and restores capacity after bursts',
     async () => {
@@ -1564,12 +1769,17 @@ describe('verify-pr-vm-channel input server, revocation, replacement protection,
       writeFileSync(
         join(root, 'sitecustomize.py'),
         `import atexit
+import faulthandler
 import json
 import os
+import signal
 import socket
 import sys
 import threading
 import time
+
+thread_dump = os.fdopen(os.open(os.path.join(os.environ['PYTHONPATH'], 'python-threads.txt'), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), 'a', buffering=1)
+faulthandler.register(signal.SIGUSR1, file=thread_dump, all_threads=True)
 
 sys.setswitchinterval(0.000001)
 trace_fd = os.open(os.environ['QC_ATTRIB_PY_TRACE'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -1861,6 +2071,23 @@ atexit.register(write_final_counts)
           'model bridge: connection limit 64 reached; refusing extra client\n',
         );
       } catch (error) {
+        let threadDumpError = null;
+        const threadDumpPath = join(root, 'python-threads.txt');
+        if (bridge.exitCode === null && bridge.signalCode === null) {
+          try {
+            process.kill(bridge.pid, 'SIGUSR1');
+            await expect
+              .poll(
+                () =>
+                  existsSync(threadDumpPath) &&
+                  readFileSync(threadDumpPath, 'utf8').includes('thread'),
+                { timeout: 1_000, interval: 20 },
+              )
+              .toBe(true);
+          } catch (dumpError) {
+            threadDumpError = dumpError.message;
+          }
+        }
         const directory = mkdtempSync('/tmp/qc-bridge-attribution-');
         const peerTracePath = join(root, 'python-attribution.jsonl');
         let currentEpoch;
@@ -1894,6 +2121,10 @@ atexit.register(write_final_counts)
           peerEvents: existsSync(peerTracePath)
             ? readFileSync(peerTracePath, 'utf8')
             : null,
+          threadDump: existsSync(threadDumpPath)
+            ? readFileSync(threadDumpPath, 'utf8')
+            : null,
+          threadDumpError,
           stderr,
         };
         try {

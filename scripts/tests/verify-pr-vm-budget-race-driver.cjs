@@ -21,6 +21,9 @@ if (!['replacement', 'growth'].includes(mode)) {
   const originalReadSync = fs.readSync;
   let injected = false;
   let readBytes = 0;
+  let growthAppends = 0;
+  const appendBytes = 128 * 1024;
+  const maxGrowthAppends = 12;
   let initialIdentity;
   let fdIdentity;
   const bundleFds = new Set();
@@ -50,15 +53,17 @@ if (!['replacement', 'growth'].includes(mode)) {
       return originalOpenSync(file, flags, ...rest);
     };
     fs.readSync = (fd, buffer, ...rest) => {
-      const bytes = originalReadSync(fd, buffer, ...rest);
-      if (bundleFds.has(fd)) {
-        readBytes += bytes;
-        if (bytes > 0 && mode === 'growth' && !injected) {
-          fdIdentity = copy(fs.fstatSync(fd));
-          fs.appendFileSync(bundlePath, Buffer.alloc(128, 0x32));
-          injected = true;
-        }
+      if (
+        bundleFds.has(fd) &&
+        mode === 'growth' &&
+        growthAppends < maxGrowthAppends
+      ) {
+        fs.appendFileSync(bundlePath, Buffer.alloc(appendBytes, 0x32));
+        growthAppends += 1;
+        injected = true;
       }
+      const bytes = originalReadSync(fd, buffer, ...rest);
+      if (bundleFds.has(fd)) readBytes += bytes;
       return bytes;
     };
     syncBuiltinESMExports();
@@ -114,14 +119,22 @@ if (!['replacement', 'growth'].includes(mode)) {
       verifyLivePid: false,
     });
     const finalSize = fs.lstatSync(bundlePath).size;
+    const expectedGrowthSize = budget + appendBytes * growthAppends;
     const errors = result.errors.join('\n');
     const identityChanged =
       initialIdentity.dev !== fdIdentity.dev ||
       initialIdentity.ino !== fdIdentity.ino;
     const pass =
       injected &&
-      finalSize === budget + (mode === 'replacement' ? 1 : 128) &&
-      readBytes === (mode === 'replacement' ? 0 : budget + 128) &&
+      finalSize ===
+        (mode === 'replacement' ? budget + 1 : expectedGrowthSize) &&
+      (mode === 'replacement'
+        ? readBytes === 0
+        : readBytes > budget &&
+          readBytes <= budget + 256 * 1024 &&
+          readBytes < expectedGrowthSize &&
+          growthAppends > 0 &&
+          growthAppends <= maxGrowthAppends) &&
       identityChanged === (mode === 'replacement') &&
       errors.includes(`bundle-size-budget:${budget}`) &&
       allocations === 0 &&
@@ -130,11 +143,19 @@ if (!['replacement', 'growth'].includes(mode)) {
       JSON.stringify({
         mode,
         injected,
+        growthAppends,
         initialIdentity,
         fdIdentity,
         finalSize,
         readBytes,
         allocations,
+        expectedGrowthSize,
+        identityChanged,
+        tokenExistsAfter: fs.existsSync(join(root, 'launcher', 'token.json')),
+        budgetRead:
+          readBytes > budget &&
+          readBytes <= budget + 256 * 1024 &&
+          readBytes < expectedGrowthSize,
         errors: result.errors,
         pass,
       }),

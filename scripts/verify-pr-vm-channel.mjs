@@ -155,6 +155,7 @@ function runHardenedGit(
     cwd = undefined,
     env = process.env,
     maxBuffer = 16 * 1024 * 1024,
+    payloadLimit = maxBuffer,
     encoding = 'utf8',
   } = {},
 ) {
@@ -172,7 +173,7 @@ function runHardenedGit(
     if (res.error.code === 'ENOBUFS') {
       // Preserve the public bundle-budget error while keeping the cause.
       const error = new Error(
-        `ENOBUFS: bundle size exceeds allowed range (1..${maxBuffer})`,
+        `ENOBUFS: bundle size or diagnostic output exceeds allowed range (1..${payloadLimit})`,
       );
       error.cause = res.error;
       error.code = res.error.code;
@@ -269,16 +270,27 @@ export function createRoundInputBundle({
         'refs/verify/base',
         'refs/verify/head',
       ],
-      // Cap stdout before the temporary file consumes any disk space.
-      { maxBuffer: maxBundleBytes, encoding: null },
+      // Bound stderr within the total spawnSync cap without enlarging the payload.
+      {
+        maxBuffer: maxBundleBytes + 64 * 1024,
+        payloadLimit: maxBundleBytes,
+        encoding: null,
+      },
     );
     writeFileSync(tmpOut, bundleBytes, { mode: 0o600 });
     chmodSync(tmpOut, 0o600);
     const { digest, bytes } = sha256FileChunked(tmpOut);
     if (bytes === 0 || bytes > maxBundleBytes) {
-      throw new Error(
+      // Noisy diagnostics may avoid a native ENOBUFS while the payload still
+      // exceeds its own cap; preserve the public budget error in either case.
+      const cause = new Error(`bundle byte budget ${maxBundleBytes} exceeded`);
+      cause.code = bytes > maxBundleBytes ? 'ENOBUFS' : 'EMPTY_BUNDLE';
+      const error = new Error(
         `bundle size ${bytes} bytes exceeds allowed range (1..${maxBundleBytes})`,
+        { cause },
       );
+      error.code = cause.code;
+      throw error;
     }
     renameSync(tmpOut, absOut);
     return {

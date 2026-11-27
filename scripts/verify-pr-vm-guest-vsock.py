@@ -293,10 +293,18 @@ def handle_bridge_client(client, args, on_done):
         client.settimeout(None)
         t1 = threading.Thread(target=relay_half, args=(client, upstream), daemon=True)
         t2 = threading.Thread(target=relay_half, args=(upstream, client), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        try:
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        except RuntimeError:
+            # A relay which has already started may be blocked on a peer recv.
+            for sock in (client, upstream):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
     except OSError:
         pass
     finally:
@@ -361,11 +369,19 @@ def cmd_model_bridge(args):
                     client.close()
                     continue
                 active_connections += 1
-            threading.Thread(
-                target=handle_bridge_client,
-                args=(client, args, finish_client),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=handle_bridge_client,
+                    args=(client, args, finish_client),
+                    daemon=True,
+                ).start()
+            except RuntimeError:
+                finish_client()
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
     finally:
         server.close()
     return 0
