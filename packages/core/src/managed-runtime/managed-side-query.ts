@@ -15,7 +15,10 @@ import {
   RECAP_SYSTEM_PROMPT,
   takeRecentDialog,
 } from '../services/sessionRecap.js';
-import { estimateContentTokens } from '../services/tokenEstimation.js';
+import {
+  estimateContentTokens,
+  estimateContextTextTokens,
+} from '../services/tokenEstimation.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import {
   defaultOutputCeiling,
@@ -183,14 +186,16 @@ export async function prepareManagedSideQuery(
       },
     ],
   };
+  const routeLimits = getHuggingFaceRoute(model.model, model.baseUrl)?.limits;
   const configuredOutput = model.samplingParams?.max_tokens;
   const outputCeiling = recap
     ? 300
-    : (configuredOutput ?? defaultOutputCeiling(model.model, model.baseUrl));
+    : Math.min(
+        configuredOutput ?? defaultOutputCeiling(model.model, model.baseUrl),
+        routeLimits?.output ?? Infinity,
+      );
   const adaptiveOutput =
-    !recap &&
-    configuredOutput == null &&
-    getHuggingFaceRoute(model.model, model.baseUrl)?.limits !== undefined;
+    !recap && configuredOutput == null && routeLimits !== undefined;
   const reservedOutput = adaptiveOutput
     ? Math.min(outputCeiling, MIN_CLAMPED_OUTPUT_TOKENS)
     : outputCeiling;
@@ -200,6 +205,29 @@ export async function prepareManagedSideQuery(
   const headroom = adaptiveOutput
     ? Math.min(outputClampMargin(window), Math.floor(window / 4))
     : 1_024;
+  const system: Content = {
+    role: 'user',
+    parts: [{ text: systemInstruction }],
+  };
+  // The fit search revisits retained messages. Count their text density once.
+  const estimatedTokens = new WeakMap<Content, number>();
+  const promptTokens = (contents: Content[]): number => {
+    if (!routeLimits) return 2 * estimateContentTokens(contents);
+    let total = 0;
+    for (const content of contents) {
+      let estimate = estimatedTokens.get(content);
+      if (estimate === undefined) {
+        estimate = estimateContentTokens(
+          [content],
+          undefined,
+          estimateContextTextTokens,
+        );
+        estimatedTokens.set(content, estimate);
+      }
+      total += estimate;
+    }
+    return total;
+  };
   const assemble = (): Content[] => [
     ...main.flat(),
     ...privateHistory.flat(),
@@ -207,13 +235,12 @@ export async function prepareManagedSideQuery(
   ];
   const outputRoom = (mainDrop: number, privateDrop: number): number =>
     window -
-    2 *
-      estimateContentTokens([
-        { role: 'user', parts: [{ text: systemInstruction }] },
-        ...main.slice(mainDrop).flat(),
-        ...privateHistory.slice(privateDrop).flat(),
-        question,
-      ]) -
+    promptTokens([
+      system,
+      ...main.slice(mainDrop).flat(),
+      ...privateHistory.slice(privateDrop).flat(),
+      question,
+    ]) -
     headroom;
   const fitsWith = (mainDrop: number, privateDrop: number): boolean =>
     outputRoom(mainDrop, privateDrop) >= reservedOutput;

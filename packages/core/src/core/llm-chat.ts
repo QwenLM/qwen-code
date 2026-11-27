@@ -6674,10 +6674,12 @@ export class LlmChat {
       const window =
         contentGeneratorConfig?.contextWindowSize ??
         tokenLimit(wireModel, 'input', baseUrl);
+      // The primary request's budget was sized for its own context window.
+      const { explicitOutputCeiling } = outputClamp;
       const outputCeiling = Math.min(
-        params.config?.maxOutputTokens ?? Infinity,
+        explicitOutputCeiling ?? Infinity,
         contentGeneratorConfig?.samplingParams?.max_tokens ??
-          outputClamp.explicitOutputCeiling ??
+          explicitOutputCeiling ??
           defaultOutputCeiling(wireModel, baseUrl),
         route?.limits?.output ?? Infinity,
       );

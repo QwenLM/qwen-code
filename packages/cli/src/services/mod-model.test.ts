@@ -219,9 +219,23 @@ describe('completeModModel', () => {
       [fakeConfig(), GLM_MODEL],
     ] as const) {
       await expect(
-        completeModModel(target.config, { ...input, model }, signal),
-      ).rejects.toThrow('output limit of 131072');
+        completeModModel(
+          target.config,
+          { ...input, model, maxTokens: 1_000_000 },
+          signal,
+        ),
+      ).rejects.toThrow('output limit of 943718');
       expect(target.generateText).not.toHaveBeenCalled();
+
+      await expect(
+        completeModModel(target.config, { ...input, model }, signal),
+      ).resolves.toMatchObject({ isAnswered: true });
+      expect(target.generateText).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ maxOutputTokens: 200_000 }),
+        }),
+      );
+      target.generateText.mockClear();
     }
 
     await expect(

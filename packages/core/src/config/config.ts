@@ -94,7 +94,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import {
   getRuntimeContentGenerator,
   isTopLevelSession,
@@ -8079,14 +8080,47 @@ export class Config {
     const explicit = this.resolveVisionModelSelection();
     if (explicit) return explicit;
     const contentGeneratorConfig = this.getContentGeneratorConfig();
-    return selectVisionBridgeModel(
-      this.getModel(),
-      this.getAllConfiguredModels(),
-      {
-        authType: contentGeneratorConfig?.authType,
-        baseUrl: contentGeneratorConfig?.baseUrl,
-      },
-    );
+    const primary = this.getModel();
+    const baseUrl = contentGeneratorConfig?.baseUrl;
+    // A same-provider Chat candidate can inherit the primary's model override.
+    const listed = this.getAllConfiguredModels();
+    const candidates = listed.flatMap((model, index) => {
+      if (
+        !isHuggingFaceRouterUrl(baseUrl) ||
+        model.baseUrl !== baseUrl ||
+        model.authType !== AuthType.USE_OPENAI ||
+        model.id === primary ||
+        model.isRuntimeModel ||
+        model.voiceOnly ||
+        model.imageOnly ||
+        listed.some(
+          (other, otherIndex) =>
+            otherIndex !== index &&
+            other.id === model.id &&
+            other.authType === model.authType &&
+            other.baseUrl === model.baseUrl,
+        )
+      ) {
+        return [model];
+      }
+      try {
+        const { modalities } = buildAgentContentGeneratorConfig(
+          this,
+          model.id,
+          {
+            authType: model.authType,
+            baseUrl: model.baseUrl,
+          },
+        );
+        return [{ ...model, modalities }];
+      } catch {
+        return [];
+      }
+    });
+    return selectVisionBridgeModel(primary, candidates, {
+      authType: contentGeneratorConfig?.authType,
+      baseUrl,
+    });
   }
 
   /**

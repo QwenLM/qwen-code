@@ -8160,6 +8160,18 @@ describe('LlmChat', async () => {
 
     const hfBaseUrl = 'https://router.huggingface.co/v1';
     const digitalOceanModel = 'MiniMaxAI/MiniMax-M2.5:digitalocean';
+    const glmModel = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const widePrimary = {
+      model: glmModel,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: hfBaseUrl,
+      contextWindowSize: 1_048_576,
+    };
+    const narrowPrimary = {
+      ...widePrimary,
+      model: digitalOceanModel,
+      contextWindowSize: 65_536,
+    };
     const unverifiedModel = 'deepseek-ai/DeepSeek-V4.1-Flash:fastest';
     it.each([
       {
@@ -8201,10 +8213,30 @@ describe('LlmChat', async () => {
         target: { baseUrl: hfBaseUrl, extra_body: { model: unverifiedModel } },
         expected: 32_000,
       },
+      {
+        name: 'a wider verified fallback',
+        primary: narrowPrimary,
+        target: { baseUrl: hfBaseUrl, extra_body: { model: glmModel } },
+        primaryLimit: 14_286,
+        expected: 64_000,
+      },
+      {
+        name: 'the caller ceiling when the primary window could not fit it',
+        primary: narrowPrimary,
+        target: { baseUrl: hfBaseUrl, extra_body: { model: glmModel } },
+        callerLimit: 48_000,
+        primaryLimit: 14_286,
+        expected: 48_000,
+      },
     ])(
       'sizes the fallback request against $name',
-      async ({ target, callerLimit, expected }) => {
-        const primaryModel = 'zai-org/GLM-5.3-Flash:deepinfra';
+      async ({
+        target,
+        primary = widePrimary,
+        callerLimit,
+        primaryLimit = callerLimit ?? 64_000,
+        expected,
+      }) => {
         const fallbackModel = 'fallback-model';
         const fallback = vi
           .fn()
@@ -8218,18 +8250,13 @@ describe('LlmChat', async () => {
               ...target,
             }),
           ),
-          {
-            model: primaryModel,
-            authType: AuthType.USE_OPENAI,
-            baseUrl: hfBaseUrl,
-            contextWindowSize: 1_048_576,
-          },
+          primary,
         );
         streamMock().mockRejectedValueOnce(tpmCapacityError());
 
         await drain(
           await chat.sendMessageStream(
-            primaryModel,
+            primary.model,
             {
               message: ' cat'.repeat(21_250),
               config: { maxOutputTokens: callerLimit },
@@ -8239,7 +8266,7 @@ describe('LlmChat', async () => {
         );
 
         expect(streamMock().mock.calls[0][0].config?.maxOutputTokens).toBe(
-          callerLimit ?? 64_000,
+          primaryLimit,
         );
         expect(fallback.mock.calls[0][0]).toMatchObject({
           model: fallbackModel,

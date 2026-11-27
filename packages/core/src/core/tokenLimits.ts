@@ -529,16 +529,14 @@ export function knownTokenLimit(
   const route = getHuggingFaceRoute(model, baseUrl);
   if (!route) return findTokenLimit(model, type);
   const providerLimit = route.limits?.[type];
+  if (providerLimit !== undefined) return providerLimit;
   if (type === 'output') {
-    const ceiling =
-      providerLimit ??
-      Math.min(
-        findTokenLimit(model, type) ?? DEFAULT_OUTPUT_TOKEN_LIMIT,
-        DEFAULT_OUTPUT_TOKEN_LIMIT,
-      );
+    const ceiling = Math.min(
+      findTokenLimit(model, type) ?? DEFAULT_OUTPUT_TOKEN_LIMIT,
+      DEFAULT_OUTPUT_TOKEN_LIMIT,
+    );
     return Math.min(findTokenLimit(route.model, type) ?? ceiling, ceiling);
   }
-  if (providerLimit !== undefined) return providerLimit;
 
   // A family window can narrow the default when the selected provider's
   // window is unknown.
@@ -585,8 +583,15 @@ export function defaultOutputCeiling(
   model: Model,
   baseUrl?: string,
 ): TokenCount {
-  const outputLimit = tokenLimit(model, 'output', baseUrl);
-  const normalized = normalize(model, baseUrl);
+  const route = getHuggingFaceRoute(model, baseUrl);
+  // A verified provider's maximum can exceed the automatic family budget.
+  const outputLimit = route?.limits
+    ? Math.min(
+        route.limits.output,
+        findTokenLimit(route.model, 'output') ?? route.limits.output,
+      )
+    : tokenLimit(model, 'output', baseUrl);
+  const normalized = normalize(route?.model ?? model);
   if (
     CLAUDE_OPUS_EXTENDED.test(normalized) ||
     QWEN4_OUTPUT_EXTENDED.test(normalized)

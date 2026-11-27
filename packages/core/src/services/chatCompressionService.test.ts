@@ -56,7 +56,10 @@ import {
 } from '../test-utils/model-fixtures.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
-vi.mock('../core/tokenLimits.js');
+vi.mock('../core/tokenLimits.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/tokenLimits.js')>()),
+  tokenLimit: vi.fn(),
+}));
 vi.mock('../telemetry/loggers.js');
 
 /** Lines the service writes through its module-level COMPRESSION logger. */
@@ -1439,6 +1442,8 @@ describe('ChatCompressionService.compress cache sharing', () => {
     configuredModels?: Array<{
       id: string;
       contextWindowSize: number;
+      authType?: AuthType;
+      baseUrl?: string;
       registryBaseUrl?: string;
     }>;
     enableCacheControl?: boolean;
@@ -1456,7 +1461,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
       usage: { ...usage(170_000, 500), cachedContentTokenCount: 160_000 },
       hadToolCall: false,
     });
-    const baseLlmClient = { generateText } as unknown as BaseLlmClient;
+    const resolveForModel = vi.fn();
+    const baseLlmClient = {
+      generateText,
+      resolveForModel,
+    } as unknown as BaseLlmClient;
     const chat = {
       getHistory,
       getHistoryShallow: getHistory,
@@ -1511,7 +1520,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     const run = (o: Partial<CompressOptions> = {}) =>
       compressWith(chat, config, o);
 
-    return { chat, config, generateText, run };
+    return { chat, config, generateText, resolveForModel, run };
   }
 
   const spyCold = () =>
@@ -1676,6 +1685,50 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(result.info.warning).toContain('too small');
     expectCacheLog(config, true, true);
   });
+
+  it.each([
+    { inputTokens: 60_000, usesFallback: true },
+    { inputTokens: 25_000, usesFallback: false },
+  ])(
+    'uses the resolved HF compaction window for $inputTokens input tokens',
+    async ({ inputTokens, usesFallback }) => {
+      const baseUrl = 'https://router.huggingface.co/v1';
+      const model = 'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra';
+      const selector = `openai:${model}\0${baseUrl}`;
+      const { resolveForModel, run } = makeFixture({
+        history: turns('x'.repeat(inputTokens * 4), 'ack'),
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example/v1',
+        compactionModel: selector,
+        contextWindowSize: 600_000,
+        enableCacheControl: false,
+        configuredModels: [
+          {
+            id: model,
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+            contextWindowSize: 1_048_576,
+          },
+        ],
+      });
+      resolveForModel.mockResolvedValue({
+        model,
+        contentGeneratorConfig: { model, baseUrl },
+        contextWindowSize: 65_536,
+      });
+      const coldSpy = spyCold();
+
+      const result = await run();
+
+      expect(resolveForModel).toHaveBeenCalledWith(selector);
+      expect(coldSpy.mock.calls[0]![1].model).toBe(
+        usesFallback ? 'test-model' : selector,
+      );
+      if (usesFallback) expect(result.info.warning).toContain('65,536');
+      expectCompressed(result);
+    },
+  );
 
   it('uses the cold path when removing a prior hint changes the warmed prefix', async () => {
     const hint = buildCompactionTranscriptHint('/stale/session.jsonl');

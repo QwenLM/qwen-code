@@ -1160,6 +1160,36 @@ describe('ContentGenerationPipeline', () => {
     );
 
     it.each([
+      [125_000, false, 125_000],
+      [180_000, false, 180_000],
+      [180_000, true, 180_000],
+      [1_000_000, false, 943_718],
+      [1_000_000, true, 943_718],
+    ])(
+      'uses the verified GLM output limit for %i with sampling=%s',
+      async (maxOutputTokens, withTemperature, expected) => {
+        mockClient.baseURL = 'https://router.huggingface.co/v1';
+        const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+        const apiCall = await executeWith(
+          {
+            baseUrl: mockClient.baseURL,
+            model,
+            samplingParams: withTemperature ? { temperature: 0.8 } : undefined,
+          },
+          userRequest(model, { maxOutputTokens }),
+          'prompt-id',
+          DefaultOpenAICompatibleProvider,
+        );
+
+        expectFields(apiCall, {
+          model,
+          max_tokens: expected,
+          ...(withTemperature && { temperature: 0.8 }),
+        });
+      },
+    );
+
+    it.each([
       ['extra_body', null],
       ['extra_body', 0],
       ['samplingParams', null],

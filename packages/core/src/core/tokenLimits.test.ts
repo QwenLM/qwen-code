@@ -73,15 +73,7 @@ describe('normalize', () => {
     ).toBe('262144');
   });
 
-  it('looks up family output limits and smaller family windows for HF router IDs', () => {
-    for (const [id, base] of [
-      ['zai-org/GLM-5.3-Flash:deepinfra', 'zai-org/GLM-5.3-Flash'],
-      ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 'deepseek-v4.1-flash'],
-    ]) {
-      expect(tokenLimit(id, 'output', HF_ROUTER_URL)).toBe(
-        tokenLimit(base, 'output'),
-      );
-    }
+  it('uses smaller family limits for unverified HF router IDs', () => {
     expect(
       tokenLimit('org/Twin-Model-V2.1:together', 'input', HF_ROUTER_URL),
     ).toBe(122_222);
@@ -101,15 +93,21 @@ describe('normalize', () => {
   });
 
   it.each([
-    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144, 32_768],
-    ['Qwen/Qwen3.8-27B:cerebras', 65_536, 32_768],
-    ['MiniMaxAI/MiniMax-M2.5:digitalocean', 65_536, 58_982],
-  ])('uses both published HF limits for %s', (model, context, output) => {
-    expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(context);
-    expect(tokenLimit(model, 'output', HF_ROUTER_URL)).toBe(output);
-    expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(output);
-    expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(true);
-  });
+    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144, 32_768, 32_768],
+    ['Qwen/Qwen3.8-27B:cerebras', 65_536, 32_768, 32_768],
+    ['MiniMaxAI/MiniMax-M2.5:digitalocean', 65_536, 58_982, 58_982],
+    ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 1_048_576, 393_216, 64_000],
+    ['zai-org/GLM-5.3-Flash:deepinfra', 1_048_576, 943_718, 64_000],
+    ['moonshotai/Kimi-K3:fireworks', 1_048_576, 943_718, 64_000],
+  ])(
+    'uses the published limits and automatic output ceiling for %s',
+    (model, context, output, automatic) => {
+      expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(context);
+      expect(tokenLimit(model, 'output', HF_ROUTER_URL)).toBe(output);
+      expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(automatic);
+      expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(true);
+    },
+  );
 
   it.each([
     'deepseek-ai/DeepSeek-V4.1-Flash:fastest',

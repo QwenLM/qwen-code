@@ -3259,6 +3259,71 @@ describe('Server Config (config.ts)', () => {
       ).toEqual(sameProviderRoute);
     });
 
+    const hfUrl = 'https://router.huggingface.co/v1';
+    const hfVision = 'zai-org/GLM-5.3-Flash:deepinfra';
+    const hfText = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+    it.each([
+      {
+        name: 'an image-capable name with a text-only override',
+        candidate: hfVision,
+        override: hfText,
+        accepted: false,
+      },
+      {
+        name: 'a text-only name with an image-capable override',
+        candidate: hfText,
+        override: hfVision,
+        accepted: true,
+      },
+      {
+        name: 'an inherited text-only override',
+        candidate: hfVision,
+        primaryOverride: hfText,
+        accepted: false,
+      },
+      {
+        name: 'an explicit image opt-out',
+        candidate: hfText,
+        override: hfVision,
+        modalities: { image: false },
+        accepted: false,
+      },
+    ])('selects the Hugging Face bridge using $name', (fixture) => {
+      const primary = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      const config = makeConfig({
+        model: primary,
+        authType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: fixture.candidate,
+              baseUrl: hfUrl,
+              generationConfig: {
+                ...(fixture.override && {
+                  extra_body: { model: fixture.override },
+                }),
+                modalities: fixture.modalities,
+              },
+            },
+          ],
+        },
+      });
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+        model: primary,
+        authType: AuthType.USE_OPENAI,
+        baseUrl: hfUrl,
+        ...(fixture.primaryOverride && {
+          extra_body: { model: fixture.primaryOverride },
+        }),
+      });
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual(
+        fixture.accepted
+          ? { id: `openai:${fixture.candidate}`, baseUrl: hfUrl }
+          : undefined,
+      );
+    });
+
     it('honors an authType-qualified visionModel against the matching provider only', () => {
       // Same model id on two providers; the 'anthropic:' qualifier must bind to
       // the anthropic row, not the same-provider openai one.

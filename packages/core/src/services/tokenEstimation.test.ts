@@ -84,6 +84,22 @@ describe('estimateContentTokens', () => {
     const result = estimateContentTokens([c]);
     expect(result).toBeGreaterThan(0);
   });
+
+  it('applies the text estimator to serialized tool output and keeps the image budget', () => {
+    const response = { result: { text: '記錄要留喺原處。' } };
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { functionResponse: { name: 'lookup', response } },
+          { inlineData: { mimeType: 'image/png', data: 'xxx' } },
+        ],
+      },
+    ];
+    expect(estimateContentTokens(contents, 77, estimateContextTextTokens)).toBe(
+      77 + 16 + estimateContextTextTokens(JSON.stringify(response)),
+    );
+  });
 });
 
 describe('estimatePromptTokens', () => {

@@ -61,10 +61,18 @@ export function estimateContextTextTokens(text: string): number {
 export function estimateContentTokens(
   contents: Content[],
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimateTextTokens?: (text: string) => number,
 ): number {
+  const measureText =
+    estimateTextTokens &&
+    ((text: string) => estimateTextTokens(text) * CHARS_PER_TOKEN);
   let totalChars = 0;
   for (const content of contents) {
-    totalChars += estimateContentChars(content, imageTokenEstimate);
+    totalChars += estimateContentChars(
+      content,
+      imageTokenEstimate,
+      measureText,
+    );
   }
   return Math.ceil(totalChars / CHARS_PER_TOKEN);
 }
