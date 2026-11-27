@@ -873,7 +873,6 @@ export default {
   'Screen Reader Mode': 'وضع قارئ الشاشة',
   'Max Session Turns': 'الحد الأقصى لجولات الجلسة',
   'Skip Next Speaker Check': 'تخطي فحص المتحدث التالي',
-  'Skip Loop Detection': 'تخطي اكتشاف الحلقات',
   'Skip Startup Context': 'تخطي سياق البدء',
   'Enable OpenAI Logging': 'تفعيل سجل OpenAI',
   'OpenAI Logging Directory': 'مجلد سجل OpenAI',
@@ -1179,7 +1178,10 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': 'إدارة خطافات (hooks) Qwen Code',
   'List all configured hooks': 'سرد جميع الخطافات المهيّأة',
+  'No hooks were loaded.': 'لم يتم تحميل أي خطافات.',
+  'skipped (unsupported args)': 'تم التخطي (وسائط غير مدعومة)',
   Hooks: 'الخطافات (Hooks)',
+  'A hook stopped the turn: {{reason}}': 'أوقف أحد الخطافات الدور: {{reason}}',
   'Loading hooks...': 'جارٍ تحميل الخطافات...',
   'Error loading hooks:': 'خطأ في تحميل الخطافات:',
   'Press Escape to close': 'اضغط Escape للإغلاق',
@@ -2578,6 +2580,8 @@ export default {
     'شغّل ‎/context detail لعرض التفصيل لكل عنصر.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'عرض تفصيل استخدام نافذة السياق. استخدم "/context detail" لعرض التفصيل لكل عنصر.',
+  'Save the context window for the current model.':
+    'احفظ نافذة السياق للنموذج الحالي.',
   'body loaded': 'المحتوى محمّل',
   memory: 'الذاكرة',
   '{{region}} configuration updated successfully.':
