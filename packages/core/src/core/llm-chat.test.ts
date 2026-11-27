@@ -8683,6 +8683,38 @@ describe('LlmChat', async () => {
         body: { chat_template_kwargs: reportTemplateArgs },
         output: 32_000,
       },
+      {
+        name: 'the default generation prompt after the body override',
+        sampling: { add_generation_prompt: false },
+        body: { add_generation_prompt: true },
+        output: 32_000,
+      },
+      {
+        name: 'the default final-message continuation',
+        sampling: { continue_final_message: false },
+        output: 32_000,
+      },
+      {
+        name: 'the default special-token setting',
+        body: { add_special_tokens: false },
+        output: 32_000,
+      },
+      {
+        name: 'a disabled generation prompt',
+        body: { add_generation_prompt: false },
+        output: 4_000,
+      },
+      {
+        name: 'a continued final message',
+        primaryBody: { add_generation_prompt: false },
+        body: { add_generation_prompt: false, continue_final_message: true },
+        output: 4_000,
+      },
+      {
+        name: 'additional special tokens',
+        body: { add_special_tokens: true },
+        output: 4_000,
+      },
     ])(
       'matches warmed fallback usage against $name',
       async ({ primaryBody, body, sampling, output }) => {

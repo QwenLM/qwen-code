@@ -1036,7 +1036,14 @@ function openAIChatPromptSource(
     ...filterIsolatedModelOverrides(config.samplingParams),
     ...extraBody,
   };
-  const { messages, tools } = body;
+  // Omitted vLLM render flags have the same effect as their protocol defaults.
+  const {
+    messages,
+    tools,
+    add_generation_prompt: addGenerationPrompt = true,
+    continue_final_message: continueFinalMessage = false,
+    add_special_tokens: addSpecialTokens = false,
+  } = body;
   const rawMessages = Array.isArray(messages) ? messages : undefined;
   const templateKwargs = body['chat_template_kwargs'] ?? undefined;
   // Empty template arguments contribute no variables to the renderer.
@@ -1060,9 +1067,9 @@ function openAIChatPromptSource(
       chat_template: body['chat_template'],
       chat_template_kwargs: emptyTemplateKwargs ? undefined : templateKwargs,
       documents: body['documents'],
-      add_generation_prompt: body['add_generation_prompt'],
-      continue_final_message: body['continue_final_message'],
-      add_special_tokens: body['add_special_tokens'],
+      add_generation_prompt: addGenerationPrompt,
+      continue_final_message: continueFinalMessage,
+      add_special_tokens: addSpecialTokens,
       mm_processor_kwargs: body['mm_processor_kwargs'],
       truncate_prompt_tokens: body['truncate_prompt_tokens'],
     },
