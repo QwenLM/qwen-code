@@ -199,6 +199,7 @@ function profileReasoning(
 function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   capabilities: ResolvedReasoning | undefined,
+  baseUrl: string | undefined,
 ): OpenAI.Chat.ChatCompletionCreateParams {
   if (capabilities?.profile) {
     const loose = request as unknown as Record<string, unknown>;
@@ -247,7 +248,7 @@ function applyConfiguredReasoningEffort(
     );
   }
   // GPT flattens after raw overrides merge in the provider.
-  if (effort && getGptReasoningCapabilities(loose['model'] as string))
+  if (effort && getGptReasoningCapabilities(loose['model'] as string, baseUrl))
     return request;
   const { effort: _drop, ...rest } = reasoning;
   const next = { ...loose };
@@ -1495,6 +1496,7 @@ export class ContentGenerationPipeline {
       baseRequest = applyConfiguredReasoningEffort(
         baseRequest,
         reasoningCapabilities,
+        this.contentGeneratorConfig.baseUrl,
       );
     }
 
@@ -1576,10 +1578,13 @@ export class ContentGenerationPipeline {
       reasoningCapabilities?.canDisable === false ||
       this.requiresThinking(model);
     const profile = reasoningCapabilities?.profile;
+    const gptReasoning = getGptReasoningCapabilities(
+      model,
+      this.contentGeneratorConfig.baseUrl,
+    );
     const thinkingMandatory =
       explicitThinkingMandatory ||
-      (!profile &&
-        getGptReasoningCapabilities(model)?.thinkingMandatory === true);
+      (!profile && gptReasoning?.thinkingMandatory === true);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -1701,7 +1706,6 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
-      const gptReasoning = getGptReasoningCapabilities(model);
       if (
         gptReasoning &&
         !reasoningCapabilities &&
@@ -2049,6 +2053,7 @@ export class ContentGenerationPipeline {
       const samplingParams =
         getGptReasoningCapabilities(
           request.model || this.contentGeneratorConfig.model,
+          this.contentGeneratorConfig.baseUrl,
         ) &&
         configSamplingParams['reasoning'] === undefined &&
         (isReasoningEffortPlaceholder(

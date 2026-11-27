@@ -183,6 +183,25 @@ const ENV_NAMES = [
 ];
 
 describe('trimModelsDevCatalog', () => {
+  it('preserves catalog keys independently of endpoint-specific routing', () => {
+    const { models } = trimModelsDevCatalog(
+      {
+        google: {
+          models: {
+            enterprise: chat('google/gemini-2.5-flash:enterprise', {
+              context: 524_288,
+            }),
+          },
+        },
+      },
+      NOW,
+    );
+
+    expect(models).toEqual({
+      enterprise: { context: 524_288, modalities: {} },
+    });
+  });
+
   it('keeps limits from allowlisted providers and unions modalities across all of them, keyed by normalized id', () => {
     expect(trimModelsDevCatalog(api, NOW)).toEqual({
       source: MODELS_DEV_URL,
@@ -739,8 +758,11 @@ describe('refreshModelCatalog', () => {
       output: 1_000,
     });
     for (const model of ['org/1.1-x1.1', 'org/1.1-x1.1:novita']) {
-      expect(tokenLimit(model, 'input')).toBe(DEFAULT_TOKEN_LIMIT);
-      expect(tokenLimit(model, 'output')).toBe(DEFAULT_OUTPUT_TOKEN_LIMIT);
+      const baseUrl = 'https://router.huggingface.co/v1';
+      expect(tokenLimit(model, 'input', baseUrl)).toBe(DEFAULT_TOKEN_LIMIT);
+      expect(tokenLimit(model, 'output', baseUrl)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
     }
   });
 

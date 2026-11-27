@@ -221,6 +221,8 @@ function budgetOutputTokensForWindow(
 ): GenerateContentConfig {
   if (requestConfig.maxOutputTokens !== undefined) return requestConfig;
 
+  const baseUrl = contentGeneratorConfig?.baseUrl;
+
   // The env override is an operator ceiling, not a licence to emit above the
   // model's own output maximum. Two wires apply no output clamp of their own —
   // Gemini/Vertex, and OpenAI Responses, which assigns `max_output_tokens`
@@ -241,8 +243,8 @@ function budgetOutputTokensForWindow(
       ? undefined
       : Math.min(
           envCeiling,
-          hasExplicitOutputLimit(model)
-            ? tokenLimit(model, 'output')
+          hasExplicitOutputLimit(model, baseUrl)
+            ? tokenLimit(model, 'output', baseUrl)
             : Number.POSITIVE_INFINITY,
         ));
   // `<= 0` means "not configured", the reading `config.ts` gives this same
@@ -253,7 +255,7 @@ function budgetOutputTokensForWindow(
     contentGeneratorConfig?.contextWindowSize,
   ].find((v): v is number => typeof v === 'number' && v > 0);
   const room =
-    (declaredWindow ?? tokenLimit(model, 'input')) -
+    (declaredWindow ?? tokenLimit(model, 'input', baseUrl)) -
     // The operator's resolved estimate, not `DEFAULT_IMAGE_TOKEN_ESTIMATE`:
     // every other estimator on the send path uses it, and pricing a kept image
     // low here over-states the room, which is the 400 this budget exists to
@@ -274,7 +276,7 @@ function budgetOutputTokensForWindow(
   // can itself exceed a tight window, which is what this path must not do.
   if (room < 256) return requestConfig;
 
-  const ceiling = explicitCeiling ?? defaultOutputCeiling(model);
+  const ceiling = explicitCeiling ?? defaultOutputCeiling(model, baseUrl);
   // Only the window term is this layer's business: when it does not bind,
   // leave the request alone so each wire keeps applying whatever output limit
   // it applied before side queries were budgeted. Two wires apply none at all —
@@ -945,7 +947,7 @@ export class BaseLlmClient {
       contextWindowSize: fellBackToSessionGenerator
         ? undefined
         : (resolvedModel?.generationConfig?.contextWindowSize ??
-          tokenLimit(targetModel, 'input')),
+          tokenLimit(targetModel, 'input', contentGeneratorConfig?.baseUrl)),
     };
   }
 

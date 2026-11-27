@@ -371,7 +371,8 @@ export class ModelRegistry {
         authType: model.authType,
         isVision: model.capabilities?.vision ?? false,
         contextWindowSize:
-          model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
+          model.generationConfig.contextWindowSize ??
+          tokenLimit(model.id, 'input', model.baseUrl),
         // `modalities` is auto-filled in `resolveModelConfig`, so it is
         // always defined on `ResolvedModelConfig` — no fallback needed here.
         modalities: model.generationConfig.modalities,
@@ -458,26 +459,28 @@ export class ModelRegistry {
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
+    const baseUrl = config.baseUrl || this.getDefaultBaseUrl(authType);
     const generationConfig = { ...(config.generationConfig ?? {}) };
     // Auto-fill modalities from the model name when the provider didn't set
     // them explicitly. Without this, downstream consumers that read straight
     // from the registry (e.g. sub-agents via getResolvedModel) would inherit
     // the parent session's modalities instead of the agent's own.
-    if (
+    const modalitiesInferred =
       generationConfig.modalities === undefined ||
       (authType !== AuthType.QWEN_SUBSCRIPTION &&
-        shouldUseCanonicalModalities(config.id))
-    ) {
-      generationConfig.modalities = defaultModalities(config.id);
+        shouldUseCanonicalModalities(config.id));
+    if (modalitiesInferred) {
+      generationConfig.modalities = defaultModalities(config.id, baseUrl);
     }
 
     return {
       ...config,
       authType,
       name: config.name || config.id,
-      baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      baseUrl,
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
+      ...(modalitiesInferred ? { modalitiesInferred: true } : {}),
       capabilities: config.capabilities || {},
     };
   }

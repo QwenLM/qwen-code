@@ -161,7 +161,7 @@ function offeredReasoningEfforts(
     );
     if (resolved) return reasoningEffortsForCapability(resolved);
     return (
-      getGptReasoningCapabilities(target.model)?.efforts ??
+      getGptReasoningCapabilities(target.model, target.baseUrl)?.efforts ??
       REASONING_EFFORT_TIERS
     );
   }
@@ -181,7 +181,8 @@ function offeredReasoningEfforts(
     if (declared) return reasoningEffortsForCapability(declared);
   }
   return (
-    getGptReasoningCapabilities(target.model)?.efforts ?? REASONING_EFFORT_TIERS
+    getGptReasoningCapabilities(target.model, target.baseUrl)?.efforts ??
+    REASONING_EFFORT_TIERS
   );
 }
 

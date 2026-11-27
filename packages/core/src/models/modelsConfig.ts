@@ -502,8 +502,9 @@ export class ModelsConfig {
    * support and send unsupported inline media.
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
+    const { baseUrl } = this._generationConfig;
     if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
+      this._generationConfig.modalities = defaultModalities(modelId, baseUrl);
       this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -511,7 +512,11 @@ export class ModelsConfig {
     }
 
     if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
-      this._generationConfig.contextWindowSize = tokenLimit(modelId, 'input');
+      this._generationConfig.contextWindowSize = tokenLimit(
+        modelId,
+        'input',
+        baseUrl,
+      );
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -923,7 +928,10 @@ export class ModelsConfig {
   /**
    * Apply resolved model config to generation config
    */
-  private applyResolvedModelDefaults(model: ResolvedModelConfig): void {
+  private applyResolvedModelDefaults(
+    model: ResolvedModelConfig,
+    baseUrl = model.baseUrl,
+  ): void {
     this.strictModelProviderSelection = true;
     this.currentRegistryBaseUrl = model.registryBaseUrl ?? null;
     // We're explicitly applying modelProvider defaults now, so manual overrides
@@ -1000,7 +1008,7 @@ export class ModelsConfig {
     }
 
     // Base URL
-    this._generationConfig.baseUrl = model.baseUrl;
+    this._generationConfig.baseUrl = baseUrl;
     this.generationConfigSources['baseUrl'] = {
       kind: 'modelProviders',
       authType: model.authType,
@@ -1023,7 +1031,11 @@ export class ModelsConfig {
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
     if (gc.contextWindowSize === undefined) {
-      this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
+      this._generationConfig.contextWindowSize = tokenLimit(
+        model.id,
+        'input',
+        baseUrl,
+      );
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -1031,8 +1043,11 @@ export class ModelsConfig {
     }
 
     // modalities fallback: auto-detect from model when not set by provider
-    if (gc.modalities === undefined) {
-      this._generationConfig.modalities = defaultModalities(model.id);
+    if (
+      gc.modalities === undefined ||
+      (model.modalitiesInferred && baseUrl !== model.baseUrl)
+    ) {
+      this._generationConfig.modalities = defaultModalities(model.id, baseUrl);
       this.generationConfigSources['modalities'] = {
         kind: 'computed',
         detail: 'auto-detected from model',
@@ -1206,7 +1221,7 @@ export class ModelsConfig {
           : undefined
         : undefined;
 
-      this.applyResolvedModelDefaults(resolved);
+      this.applyResolvedModelDefaults(resolved, savedBaseUrl);
 
       // Restore the previously-resolved apiKey if applyResolvedModelDefaults
       // cleared it (env var not found) and this is the same model.
@@ -1216,11 +1231,8 @@ export class ModelsConfig {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
         }
       }
-      if (savedBaseUrl) {
-        this._generationConfig.baseUrl = savedBaseUrl;
-        if (savedBaseUrlSource) {
-          this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
-        }
+      if (savedBaseUrlSource) {
+        this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
       }
 
       this.strictModelProviderSelection = true;

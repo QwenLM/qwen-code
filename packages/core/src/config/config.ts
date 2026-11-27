@@ -5977,10 +5977,16 @@ export class Config {
   }
 
   getModelContextWindowSize(): number {
+    const config = this.getContentGeneratorConfig();
+    const modelConfig = this.modelsConfig.getGenerationConfig();
     return (
-      this.getContentGeneratorConfig()?.contextWindowSize ??
-      this.modelsConfig.getGenerationConfig().contextWindowSize ??
-      tokenLimit(this.getModel(), 'input')
+      config?.contextWindowSize ??
+      modelConfig.contextWindowSize ??
+      tokenLimit(
+        this.getModel(),
+        'input',
+        config?.baseUrl ?? modelConfig.baseUrl,
+      )
     );
   }
 
@@ -7276,7 +7282,11 @@ export class Config {
   getModelPreferenceContextLimit(): number {
     return (
       this.modelPreferenceDefaults?.contextWindowSize ??
-      tokenLimit(stripRuntimeSnapshotPrefix(this.getModel()), 'input')
+      tokenLimit(
+        stripRuntimeSnapshotPrefix(this.getModel()),
+        'input',
+        this.getContentGeneratorConfig()?.baseUrl,
+      )
     );
   }
 
@@ -7338,7 +7348,11 @@ export class Config {
     const contextWindow = preference?.contextWindow;
     const contextLimit =
       defaults.contextWindowSize ??
-      tokenLimit(stripRuntimeSnapshotPrefix(config.model), 'input');
+      tokenLimit(
+        stripRuntimeSnapshotPrefix(config.model),
+        'input',
+        config.baseUrl,
+      );
     config.contextWindowSize = defaults.contextWindowSize;
     sources['contextWindowSize'] = defaults.contextWindowSource;
     if (

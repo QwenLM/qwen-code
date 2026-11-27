@@ -2613,9 +2613,10 @@ export class LlmClient {
     // — the schema also bounds it, but clamp here so a hand-edited settings
     // file can't slip past.
     const boundedPercent = Math.min(thresholdPercent, 100);
+    const generatorConfig = this.config.getContentGeneratorConfig();
     const contextWindow =
-      this.config.getContentGeneratorConfig()?.contextWindowSize ??
-      tokenLimit(this.config.getModel(), 'input');
+      generatorConfig?.contextWindowSize ??
+      tokenLimit(this.config.getModel(), 'input', generatorConfig?.baseUrl);
     if (!contextWindow || contextWindow <= 0) {
       return;
     }

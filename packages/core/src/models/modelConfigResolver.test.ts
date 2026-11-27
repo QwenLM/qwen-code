@@ -100,6 +100,50 @@ const expectTimeout = (
 describe('modelConfigResolver', () => {
   describe('resolveModelConfig', () => {
     describe('OpenAI auth type', () => {
+      it.each([
+        [
+          'https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:zai-org',
+          1_000_000,
+          true,
+        ],
+        [
+          'https://router.huggingface.co.example.com/v1',
+          'zai-org/GLM-5.3-Flash:zai-org',
+          undefined,
+          undefined,
+        ],
+        [
+          'blob:https://router.huggingface.co/v1',
+          'zai-org/GLM-5.3-Flash:zai-org',
+          undefined,
+          undefined,
+        ],
+        [
+          'https://infer.flow7.org/v1',
+          'infer/gemini-3.1-pro-preview:low-cost',
+          undefined,
+          undefined,
+        ],
+        [
+          'https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1',
+          'zai-org/GLM-5.3-Flash:peft:262144',
+          undefined,
+          undefined,
+        ],
+      ])(
+        'uses the actual endpoint %s to infer model defaults',
+        (baseUrl, model, context, image) => {
+          const { config } = resolve({
+            env: { OPENAI_BASE_URL: baseUrl, OPENAI_MODEL: model },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(context);
+          expect(config.modalities?.image).toBe(image);
+        },
+      );
+
       it('resolves from CLI with highest priority', () => {
         const result = resolve({
           cli: {

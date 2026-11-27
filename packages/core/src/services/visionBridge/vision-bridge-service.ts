@@ -59,7 +59,8 @@ export interface VisionBridgeModelSelection {
 export function isImageCapable(model: VisionModelCandidate): boolean {
   return (
     model.isVision === true ||
-    (model.modalities ?? defaultModalities(model.id)).image === true
+    (model.modalities ?? defaultModalities(model.id, model.baseUrl)).image ===
+      true
   );
 }
 

@@ -379,6 +379,20 @@ describe('AgentComposer', () => {
       expect(agentFooterProps.contextWindowSize).toBe(128_000);
     });
 
+    it('looks up a router model using the agent endpoint', () => {
+      agentModel = 'zai-org/GLM-5.3-Flash:zai-org';
+      agentRuntimeView = {
+        contentGeneratorConfig: {
+          authType: 'openai',
+          baseUrl: 'https://router.huggingface.co/v1',
+        },
+      };
+
+      render(<AgentComposer agentId="agent-1" />);
+
+      expect(agentFooterProps.contextWindowSize).toBe(1_000_000);
+    });
+
     it("reads the session's window from inside the agent's runtime frame", async () => {
       const agentRoute = {
         model: 'gpt-4o',

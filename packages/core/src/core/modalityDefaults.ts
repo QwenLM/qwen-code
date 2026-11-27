@@ -151,8 +151,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
  * family. A model neither source knows stays text-only (empty object) to avoid
  * sending unsupported media types that would cause unrecoverable API errors.
  */
-export function defaultModalities(model: string): InputModalities {
-  const norm = normalize(model);
+export function defaultModalities(
+  model: string,
+  baseUrl?: string,
+): InputModalities {
+  const norm = normalize(model, baseUrl);
   const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
   delete fromCatalog.pdf;
   for (const [regex, modalities] of MODALITY_PATTERNS) {

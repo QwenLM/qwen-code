@@ -145,17 +145,31 @@ const LIMITS = {
 } as const;
 
 /**
- * A Hugging Face router suffix starts at the first colon after the last slash
- * in the final pipe-delimited segment (`org/model:provider` or `:fastest`).
- * A `:batch` route stays out of model lookup (#11295).
+ * The Hugging Face router uses a single provider or policy suffix. Suffixes on
+ * other endpoints can describe distinct models, and catalog keys have no URL.
  */
-function withoutRouteSuffix(model: string): string {
-  return model.replace(/(\/[^/:|]*):(?!batch(?::|$))[^/|]*$/i, '$1');
+function withoutHuggingFaceRouteSuffix(
+  model: string,
+  baseUrl?: string,
+): string {
+  if (!baseUrl || !model.includes(':')) return model;
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== 'https:' || url.host !== 'router.huggingface.co') {
+      return model;
+    }
+  } catch {
+    return model;
+  }
+  return model.trim().replace(/(\/[^/:|\s]+):(?!batch$)[^/:|\s]+$/i, '$1');
 }
 
 /** Robust normalizer: strips provider prefixes, pipes/colons, date/version suffixes, etc. */
-export function normalize(model: string): string {
-  let s = withoutRouteSuffix((model ?? '').toLowerCase().trim());
+export function normalize(model: string, baseUrl?: string): string {
+  let s = withoutHuggingFaceRouteSuffix(
+    (model ?? '').toLowerCase().trim(),
+    baseUrl,
+  );
 
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
@@ -428,9 +442,8 @@ function findTokenLimit(
     // A terminal dotted version may be stripped as a suffix (deepseek-v3.1 ->
     // deepseek). Retry its original spelling's alias before normalizing so the
     // catalog's dashed entry remains reachable without changing normalization.
-    const routeModel = withoutRouteSuffix(model.trim());
-    const alias = versionSpellingAlias(routeModel);
-    const rawNorm = routeModel.toLowerCase().replace(/^.*\//, '');
+    const alias = versionSpellingAlias(model);
+    const rawNorm = model.toLowerCase().replace(/^.*\//, '');
     if (alias && norm !== rawNorm) {
       catalog = lookupModelCatalog(normalize(alias));
     }
@@ -461,15 +474,19 @@ function findTokenLimit(
  * Whether a curated output limit caps explicit requests. Catalog-only limits
  * supply defaults, but must not clamp a user's endpoint-specific override.
  */
-export function hasExplicitOutputLimit(model: Model): boolean {
-  return curatedOutputLimit(normalize(model)) !== undefined;
+export function hasExplicitOutputLimit(
+  model: Model,
+  baseUrl?: string,
+): boolean {
+  return curatedOutputLimit(normalize(model, baseUrl)) !== undefined;
 }
 
 export function knownTokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
+  baseUrl?: string,
 ): TokenCount | undefined {
-  return findTokenLimit(model, type);
+  return findTokenLimit(withoutHuggingFaceRouteSuffix(model, baseUrl), type);
 }
 
 /**
@@ -485,14 +502,16 @@ export function knownTokenLimit(
  *
  * @param model - The model name to get the token limit for
  * @param type - The type of token limit ('input' for context window, 'output' for generation)
+ * @param baseUrl - The resolved request endpoint, when available
  * @returns The maximum number of tokens allowed for this model and type
  */
 export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
+  baseUrl?: string,
 ): TokenCount {
   return (
-    knownTokenLimit(model, type) ??
+    knownTokenLimit(model, type, baseUrl) ??
     (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
   );
 }
@@ -503,9 +522,13 @@ export function tokenLimit(
  * place that policy lives — the send path and both provider layers call it
  * so a model advertising >64K output is clamped consistently everywhere.
  */
-export function defaultOutputCeiling(model: Model): TokenCount {
-  const outputLimit = tokenLimit(model, 'output');
-  const normalized = normalize(model);
+export function defaultOutputCeiling(
+  model: Model,
+  baseUrl?: string,
+): TokenCount {
+  const lookupModel = withoutHuggingFaceRouteSuffix(model, baseUrl);
+  const outputLimit = tokenLimit(lookupModel, 'output');
+  const normalized = normalize(lookupModel);
   if (
     CLAUDE_OPUS_EXTENDED.test(normalized) ||
     QWEN4_OUTPUT_EXTENDED.test(normalized)

@@ -163,12 +163,13 @@ export class DefaultOpenAICompatibleProvider
     model: string | undefined,
   ): readonly ReasoningEffort[] {
     const configured = this.getReasoningCapabilities(model);
-    if (!configured?.profile && !getGptReasoningCapabilities(model))
-      return OPENAI_COMPATIBLE_EFFORTS;
-    if (configured && !configured.toggleOnly) return configured.efforts;
-    return (
-      getGptReasoningCapabilities(model)?.efforts ?? OPENAI_COMPATIBLE_EFFORTS
+    const builtin = getGptReasoningCapabilities(
+      model,
+      this.contentGeneratorConfig.baseUrl,
     );
+    if (!configured?.profile && !builtin) return OPENAI_COMPATIBLE_EFFORTS;
+    if (configured && !configured.toggleOnly) return configured.efforts;
+    return builtin?.efforts ?? OPENAI_COMPATIBLE_EFFORTS;
   }
 
   protected getReasoningCapabilities(model?: string) {
@@ -316,7 +317,10 @@ export class DefaultOpenAICompatibleProvider
     if (
       this.getReasoningCapabilities(body['model'] as string | undefined)
         ?.profile ||
-      !getGptReasoningCapabilities(body['model'] as string | undefined) ||
+      !getGptReasoningCapabilities(
+        body['model'] as string | undefined,
+        this.contentGeneratorConfig.baseUrl,
+      ) ||
       isOpenRouterHostname(this.contentGeneratorConfig) ||
       this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined ||
       this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined
@@ -393,8 +397,9 @@ export class DefaultOpenAICompatibleProvider
     const userMaxTokens = request.max_tokens;
 
     // Get model-specific output limit and check if model is known
-    const modelLimit = tokenLimit(request.model, 'output');
-    const isKnownModel = hasExplicitOutputLimit(request.model);
+    const { baseUrl } = this.contentGeneratorConfig;
+    const modelLimit = tokenLimit(request.model, 'output', baseUrl);
+    const isKnownModel = hasExplicitOutputLimit(request.model, baseUrl);
 
     // Determine the effective max_tokens
     let effectiveMaxTokens: number;
@@ -422,7 +427,7 @@ export class DefaultOpenAICompatibleProvider
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        effectiveMaxTokens = defaultOutputCeiling(request.model);
+        effectiveMaxTokens = defaultOutputCeiling(request.model, baseUrl);
       }
     }
 

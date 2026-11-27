@@ -16,6 +16,8 @@ import {
 } from './modalityDefaults.js';
 import type { InputModalities } from './contentGenerator.js';
 
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+
 type Check = (model: string) => void;
 
 /** The model's modalities equal `expected` exactly (one assertion). */
@@ -117,10 +119,12 @@ describe('defaultModalities', () => {
       ['o3', IMAGE],
     ]);
 
-    casesFor('returns text-only for', [
-      ['gpt-oss-120b', TEXT_ONLY],
-      ['openai/gpt-oss-120b:cerebras', TEXT_ONLY],
-    ]);
+    it('returns text-only for GPT-OSS and its HF router ID', () => {
+      TEXT_ONLY('gpt-oss-120b');
+      expect(
+        defaultModalities('openai/gpt-oss-120b:cerebras', HF_ROUTER_URL),
+      ).toEqual({});
+    });
   });
 
   describe('Anthropic Claude', () => {
@@ -212,12 +216,13 @@ describe('defaultModalities', () => {
       ['glm-4.6v', IMAGE_NO_PDF],
       ['glm-5v-turbo', IMAGE_NO_PDF],
       ['glm-5.3-flash', IMAGE_NO_PDF],
-      [
-        'zai-org/GLM-5.3-Flash:zai-org (HF router provider suffix)',
-        IMAGE_NO_PDF,
-        'zai-org/GLM-5.3-Flash:zai-org',
-      ],
     ]);
+
+    it('returns image for the GLM-5.3-Flash HF router ID', () => {
+      expect(
+        defaultModalities('zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL).image,
+      ).toBe(true);
+    });
 
     casesFor('returns text-only for', [
       ['glm-5', TEXT_ONLY],

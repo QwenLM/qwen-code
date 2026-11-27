@@ -999,9 +999,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       reconcileMaxTokens(configMaxTokens, requestMaxTokens) ??
       configMaxTokens ??
       requestMaxTokens;
-    const modelId = this.contentGeneratorConfig.model;
-    const modelLimit = tokenLimit(modelId, 'output');
-    const isKnownModel = hasExplicitOutputLimit(modelId);
+    const { model: modelId, baseUrl } = this.contentGeneratorConfig;
+    const modelLimit = tokenLimit(modelId, 'output', baseUrl);
+    const isKnownModel = hasExplicitOutputLimit(modelId, baseUrl);
 
     let maxTokens: number;
     if (userMaxTokens !== undefined && userMaxTokens !== null) {
@@ -1019,7 +1019,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        maxTokens = defaultOutputCeiling(modelId);
+        maxTokens = defaultOutputCeiling(modelId, baseUrl);
       }
     }
 

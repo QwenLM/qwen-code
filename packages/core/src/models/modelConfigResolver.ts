@@ -332,6 +332,7 @@ export function resolveModelConfig(
     authType,
     modelProvider?.id ?? modelResult.value,
     sources,
+    baseUrlResult?.value,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -438,6 +439,7 @@ function resolveGenerationConfig(
   authType: AuthType | undefined,
   modelId: string | undefined,
   sources: ConfigSources,
+  baseUrl?: string,
 ): Partial<ContentGeneratorConfig> {
   const result: Partial<ContentGeneratorConfig> = {};
 
@@ -464,7 +466,7 @@ function resolveGenerationConfig(
   // consumers apply the generic default without a misleading
   // 'auto-detected' source label.
   if (result.contextWindowSize === undefined && modelId) {
-    const knownLimit = knownTokenLimit(modelId, 'input');
+    const knownLimit = knownTokenLimit(modelId, 'input', baseUrl);
     if (knownLimit !== undefined) {
       result.contextWindowSize = knownLimit;
       sources['contextWindowSize'] = computedSource('auto-detected from model');
@@ -484,7 +486,7 @@ function resolveGenerationConfig(
   // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
   // matters.
   if (result.modalities === undefined && modelId) {
-    result.modalities = defaultModalities(modelId);
+    result.modalities = defaultModalities(modelId, baseUrl);
     sources['modalities'] = computedSource('auto-detected from model');
   }
 

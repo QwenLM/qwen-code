@@ -58,7 +58,7 @@ const NO_USAGE: ModModelUsage = {
 export function resolveModModel(
   config: Config,
   name: string,
-): { selector: string; modelId: string; authType?: string } {
+): { selector: string; modelId: string; authType?: string; baseUrl?: string } {
   const modelName = name.trim();
   const wanted = ALIASES.get(modelName) ?? modelName;
   const target =
@@ -73,11 +73,11 @@ export function resolveModModel(
   const resolved = resolveModelId(modelSelector, context);
   if (!resolved)
     throw new Error(`model ${JSON.stringify(name)} is not available`);
+  const sessionBaseUrl = config.getContentGeneratorConfig()?.baseUrl;
   const isSession =
     resolved.modelId === context.currentModel &&
     (!resolved.authType || resolved.authType === context.currentAuthType) &&
-    (endpoint === undefined ||
-      endpoint === config.getContentGeneratorConfig()?.baseUrl);
+    (endpoint === undefined || endpoint === sessionBaseUrl);
   const configured = config
     .getAllConfiguredModels(resolved.authType ? [resolved.authType] : undefined)
     .some(
@@ -95,10 +95,18 @@ export function resolveModModel(
   const selector = resolved.authType
     ? `${resolved.authType}:${resolved.modelId}`
     : resolved.modelId;
+  const baseUrl = isSession
+    ? sessionBaseUrl
+    : (endpoint ??
+      (resolved.authType
+        ? config.getResolvedModelConfig(resolved.authType, resolved.modelId)
+            ?.baseUrl
+        : undefined));
   return {
     selector: endpoint === undefined ? selector : `${selector}\0${endpoint}`,
     modelId: resolved.modelId,
     ...(resolved.authType && { authType: resolved.authType }),
+    ...(baseUrl !== undefined && { baseUrl }),
   };
 }
 
@@ -167,13 +175,12 @@ export async function completeModModel(
     return { isAnswered: false, reason: 'aborted', usage: { ...NO_USAGE } };
   const model = resolveModModel(config, input.model);
   const maxTokens = input.maxTokens ?? MOD_MODEL_DEFAULT_MAX_TOKENS;
-  if (
-    input.maxTokens !== undefined &&
-    hasExplicitOutputLimit(model.modelId) &&
-    maxTokens > tokenLimit(model.modelId, 'output')
-  )
+  const outputLimit = hasExplicitOutputLimit(model.modelId, model.baseUrl)
+    ? tokenLimit(model.modelId, 'output', model.baseUrl)
+    : maxTokens;
+  if (input.maxTokens !== undefined && maxTokens > outputLimit)
     throw new Error(
-      `maxTokens ${maxTokens} is over ${model.modelId}'s output limit of ${tokenLimit(model.modelId, 'output')}`,
+      `maxTokens ${maxTokens} is over ${model.modelId}'s output limit of ${outputLimit}`,
     );
   const abortSignal =
     input.timeoutMs === undefined
@@ -191,12 +198,7 @@ export async function completeModModel(
         abortSignal,
         promptId: 'side-query:mod-model-complete',
         config: {
-          maxOutputTokens: Math.min(
-            maxTokens,
-            hasExplicitOutputLimit(model.modelId)
-              ? tokenLimit(model.modelId, 'output')
-              : maxTokens,
-          ),
+          maxOutputTokens: Math.min(maxTokens, outputLimit),
           // Providers apply their own opt-out. An effort uses the route's
           // configured level.
           thinkingConfig: { includeThoughts: input.effort !== undefined },

@@ -15,6 +15,8 @@ import {
   OUTPUT_TOKEN_CEILING,
 } from './tokenLimits.js';
 
+const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
+
 vi.mock('../models/model-catalog.js', async (importOriginal) => {
   const entries: Record<string, { context?: number; output?: number }> = {
     'catalog-model': { context: 123_456, output: 7_890 },
@@ -44,25 +46,31 @@ describe('normalize', () => {
     'google/gemini-2.5-flash:batch',
     '  google/gemini-2.5-flash:batch  ',
   ])('keeps batch route %s out of token lookup', (model) => {
-    expect(normalize(model)).toBe('batch');
-    expect(knownTokenLimit(model, 'input')).toBeUndefined();
-    expect(knownTokenLimit(model, 'output')).toBeUndefined();
+    expect(normalize(model, HF_ROUTER_URL)).toBe('batch');
+    expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBeUndefined();
+    expect(knownTokenLimit(model, 'output', HF_ROUTER_URL)).toBeUndefined();
   });
 
   it('keeps the model name before a suffix after an org segment', () => {
     // Hugging Face router `org/model:provider` and routing policies.
-    expect(normalize('zai-org/GLM-5.3-Flash:zai-org')).toBe('glm-5.3-flash');
-    expect(normalize('deepseek-ai/DeepSeek-V4.1-Flash:novita')).toBe(
-      'deepseek-v4.1-flash',
-    );
-    expect(normalize('moonshotai/Kimi-K3:fireworks-ai')).toBe('kimi-k3');
-    expect(normalize('openai/gpt-oss-120b:fastest')).toBe('gpt-oss-120b');
-    expect(normalize('openai:zai-org/GLM-5.3-Flash:zai-org')).toBe(
+    expect(normalize('zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL)).toBe(
       'glm-5.3-flash',
     );
-    expect(normalize('thinkingmachines/Inkling-2-Mini:peft:262144')).toBe(
-      'inkling-2-mini',
+    expect(
+      normalize('deepseek-ai/DeepSeek-V4.1-Flash:novita', HF_ROUTER_URL),
+    ).toBe('deepseek-v4.1-flash');
+    expect(normalize('moonshotai/Kimi-K3:fireworks-ai', HF_ROUTER_URL)).toBe(
+      'kimi-k3',
     );
+    expect(normalize('openai/gpt-oss-120b:fastest', HF_ROUTER_URL)).toBe(
+      'gpt-oss-120b',
+    );
+    expect(
+      normalize('openai:zai-org/GLM-5.3-Flash:zai-org', HF_ROUTER_URL),
+    ).toBe('glm-5.3-flash');
+    expect(
+      normalize('thinkingmachines/Inkling-2-Mini:peft:262144', HF_ROUTER_URL),
+    ).toBe('262144');
   });
 
   it('resolves an HF router id to the limits of its model', () => {
@@ -71,14 +79,22 @@ describe('normalize', () => {
       ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 'deepseek-v4.1-flash'],
       ['deepseek-ai/DeepSeek-V3.1:together', 'deepseek-ai/DeepSeek-V3.1'],
     ]) {
-      expect(tokenLimit(id, 'input')).toBe(tokenLimit(base, 'input'));
-      expect(tokenLimit(id, 'output')).toBe(tokenLimit(base, 'output'));
+      expect(tokenLimit(id, 'input', HF_ROUTER_URL)).toBe(
+        tokenLimit(base, 'input'),
+      );
+      expect(tokenLimit(id, 'output', HF_ROUTER_URL)).toBe(
+        tokenLimit(base, 'output'),
+      );
     }
-    expect(tokenLimit('zai-org/GLM-5.3-Flash:zai-org', 'input')).toBe(
-      1_000_000,
-    );
-    expect(tokenLimit('org/Twin-Model-V2.1:together', 'input')).toBe(222_222);
-    expect(tokenLimit('org/Twin-Model-V2.1:together', 'output')).toBe(33_333);
+    expect(
+      tokenLimit('zai-org/GLM-5.3-Flash:zai-org', 'input', HF_ROUTER_URL),
+    ).toBe(1_000_000);
+    expect(
+      tokenLimit('org/Twin-Model-V2.1:together', 'input', HF_ROUTER_URL),
+    ).toBe(222_222);
+    expect(
+      tokenLimit('org/Twin-Model-V2.1:together', 'output', HF_ROUTER_URL),
+    ).toBe(33_333);
   });
 
   it('should lowercase and trim the model string', () => {
@@ -508,8 +524,12 @@ describe('variant-tagged model ids', () => {
   });
 
   it('keeps pipe-separated prefixes out of route suffix matching', () => {
-    expect(tokenLimit('a/b/c|GPT-4o:glm-5.3-flash')).toBe(1_000_000);
-    expect(tokenLimit('org/gpt-4o:novita|gpt-5')).toBe(272_000);
+    expect(
+      tokenLimit('a/b/c|GPT-4o:glm-5.3-flash', 'input', HF_ROUTER_URL),
+    ).toBe(1_000_000);
+    expect(tokenLimit('org/gpt-4o:novita|gpt-5', 'input', HF_ROUTER_URL)).toBe(
+      272_000,
+    );
   });
 });
 

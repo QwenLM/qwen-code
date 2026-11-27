@@ -179,8 +179,10 @@ export async function prepareManagedSideQuery(
   };
   const maxOutputTokens = recap
     ? 300
-    : (model.samplingParams?.max_tokens ?? defaultOutputCeiling(model.model));
-  const window = model.contextWindowSize ?? tokenLimit(model.model);
+    : (model.samplingParams?.max_tokens ??
+      defaultOutputCeiling(model.model, model.baseUrl));
+  const window =
+    model.contextWindowSize ?? tokenLimit(model.model, 'input', model.baseUrl);
   const assemble = (): Content[] => [
     ...main.flat(),
     ...privateHistory.flat(),

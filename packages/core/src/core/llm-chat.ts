@@ -3810,7 +3810,8 @@ export class LlmChat {
       cgConfigForThresholds?.samplingParams?.max_tokens ??
       parsedEnvMaxTokensForClamp;
     const outputCeiling: number =
-      explicitOutputCeiling ?? defaultOutputCeiling(model);
+      explicitOutputCeiling ??
+      defaultOutputCeiling(model, cgConfigForThresholds?.baseUrl);
     // Declared at function level so the MAX_TOKENS escalation path inside
     // the generator closure can re-clamp against the same window and prompt
     // estimate.

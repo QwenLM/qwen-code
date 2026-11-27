@@ -746,6 +746,43 @@ describe('ModelsConfig', () => {
     }
   });
 
+  it.each([
+    {
+      generationConfig: undefined,
+      contextWindowSize: 1_000_000,
+      modalities: { image: true },
+    },
+    {
+      generationConfig: {
+        contextWindowSize: 262_144,
+        modalities: { image: false },
+      },
+      contextWindowSize: 262_144,
+      modalities: { image: false },
+    },
+  ])(
+    'uses the effective Hugging Face endpoint when refreshing a registered model with $generationConfig',
+    ({ generationConfig, contextWindowSize, modalities }) => {
+      const modelId = 'zai-org/GLM-5.3-Flash:zai-org';
+      const baseUrl = 'https://router.huggingface.co/v1';
+      const modelsConfig = openaiConfig(
+        [entry(modelId, 'GLM', undefined, undefined, generationConfig)],
+        { model: modelId, apiKey: 'settings-key', baseUrl },
+        settingsAuthSources(true),
+      );
+
+      expect(refreshOpenAI(modelsConfig, modelId)).toMatchObject({
+        model: modelId,
+        baseUrl,
+        contextWindowSize,
+        modalities,
+      });
+      expect(modelsConfig.getGenerationConfigSources()['baseUrl']?.kind).toBe(
+        'settings',
+      );
+    },
+  );
+
   it('should preserve programmatic apiKey when authType and modelId unchanged (restart scenario)', () => {
     // An apiKey set via updateCredentials (programmatic source) survives a
     // refresh with the same authType+modelId: the short-circuit saves and
