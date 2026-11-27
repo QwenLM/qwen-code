@@ -168,9 +168,41 @@ describe('frozen Managed side-query input', () => {
       ]);
       const maxOutput = request?.config?.maxOutputTokens ?? 0;
       expect(maxOutput).toBeLessThan(58_982);
-      expect(maxOutput + 2 * promptEstimate + 1_024).toBe(65_536);
+      expect(maxOutput + 2 * promptEstimate + 10_000).toBe(65_536);
     },
   );
+
+  it('keeps CJK history and leaves room for the DigitalOcean tokenizer count', async () => {
+    const f = fixture();
+    const text =
+      'The inventory marker is inventory-marker-neptune-88621.\n' +
+      '协调，检查，撤回，超时，等待，分配，重试，终止，恢复，降级，拒绝，忽略，转移，冻结。\n'.repeat(
+        720,
+      );
+    f.turn('good', 'completed', 'Record my new inventory marker.', text);
+    const request = await prepareManagedSideQuery(
+      {
+        kind: 'btw',
+        question:
+          'What inventory marker did I record in the previous exchange?',
+        privateHistory: [],
+        throughSequence: f.events.length,
+      },
+      f.events,
+      f.resources,
+      {
+        model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        baseUrl: 'https://router.huggingface.co/v1',
+      },
+    );
+
+    const contents = request?.contents as Content[];
+    expect(contents[1]?.parts?.[0]?.text).toBe(text);
+    // The published MiniMax tokenizer counts 17,368 input tokens for this replay.
+    expect(request?.config?.maxOutputTokens).toBeLessThanOrEqual(
+      65_536 - 17_368,
+    );
+  });
 
   it('reserves an explicit hosted output budget before fitting history', async () => {
     const f = fixture();

@@ -99,6 +99,7 @@ import {
   DEFAULT_TOKEN_LIMIT,
   OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
+  tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
@@ -6193,6 +6194,9 @@ export class LlmChat {
                       currentUserContent,
                       fallbackModalities ?? {},
                     );
+                  const reclampOutput =
+                    isHuggingFaceRouterUrl(cgConfigForThresholds?.baseUrl) ||
+                    isHuggingFaceRouterUrl(fallbackConfig?.baseUrl);
                   // Stamp the fallback-served counts under the REQUEST route
                   // key: a fallback serves on behalf of the same session
                   // request (the session model never changes), and the
@@ -6223,6 +6227,7 @@ export class LlmChat {
                     promptTokensForClamp,
                     fallbackConfig,
                     options?.onModelRequestDispatched,
+                    reclampOutput ? { explicitOutputCeiling } : undefined,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -6660,7 +6665,44 @@ export class LlmChat {
     promptTokensForClamp = 0,
     contentGeneratorConfig?: ContentGeneratorConfig,
     onModelRequestDispatched?: () => void,
+    outputClamp?: { explicitOutputCeiling: number | undefined },
   ): AsyncGenerator<StreamEvent> {
+    if (outputClamp) {
+      const baseUrl = contentGeneratorConfig?.baseUrl;
+      const wireModel = getRequestModel(contentGeneratorConfig ?? {}, model);
+      const route = getHuggingFaceRoute(wireModel, baseUrl);
+      const window =
+        contentGeneratorConfig?.contextWindowSize ??
+        tokenLimit(wireModel, 'input', baseUrl);
+      const outputCeiling = Math.min(
+        params.config?.maxOutputTokens ?? Infinity,
+        contentGeneratorConfig?.samplingParams?.max_tokens ??
+          outputClamp.explicitOutputCeiling ??
+          defaultOutputCeiling(wireModel, baseUrl),
+        route?.limits?.output ?? Infinity,
+      );
+      // The fallback can prepare different history and a different system prompt.
+      const { systemInstruction } = {
+        ...this.generationConfig,
+        ...params.config,
+      };
+      const systemTokens = Math.ceil(
+        getCustomSystemPrompt(systemInstruction).length / TOKEN_TO_CHAR_RATIO,
+      );
+      promptTokensForClamp =
+        estimateContentTokens(
+          requestContents,
+          resolveSlimmingConfig(this.config.getChatCompression())
+            .imageTokenEstimate,
+        ) + Math.max(ESTIMATE_CLAMP_OVERHEAD_PAD, systemTokens);
+      const maxOutputTokens = clampOutputTokensToWindow(
+        outputCeiling,
+        window,
+        promptTokensForClamp,
+      );
+      this.lastRequestMaxOutputTokens = maxOutputTokens;
+      params = { ...params, config: { ...params.config, maxOutputTokens } };
+    }
     const stream = await this.makeApiCallAndProcessStream(
       model,
       requestContents,

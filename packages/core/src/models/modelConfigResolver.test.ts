@@ -216,6 +216,26 @@ describe('modelConfigResolver', () => {
         },
       );
 
+      it.each([undefined, { image: true, video: true }])(
+        'filters inferred media for a bare Hugging Face wire override with explicit modalities %j',
+        (modalities) => {
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: 'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+            },
+            settings: {
+              generationConfig: {
+                extra_body: { model: 'moonshotai/Kimi-K2.5' },
+                ...(modalities && { modalities }),
+              },
+            },
+          });
+
+          expect(config.modalities).toEqual(modalities ?? { image: true });
+        },
+      );
+
       it('resolves from CLI with highest priority', () => {
         const result = resolve({
           cli: {

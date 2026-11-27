@@ -6,7 +6,8 @@
 
 import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { getRequestModel } from '../core/request-model.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
@@ -372,7 +373,17 @@ export class ModelRegistry {
         isVision: model.capabilities?.vision ?? false,
         contextWindowSize:
           model.generationConfig.contextWindowSize ??
-          tokenLimit(model.id, 'input', model.baseUrl),
+          tokenLimit(
+            authType === AuthType.USE_OPENAI &&
+              isHuggingFaceRouterUrl(model.baseUrl)
+              ? getRequestModel(
+                  { ...model.generationConfig, authType },
+                  model.id,
+                )
+              : model.id,
+            'input',
+            model.baseUrl,
+          ),
         // `modalities` is auto-filled in `resolveModelConfig`, so it is
         // always defined on `ResolvedModelConfig` — no fallback needed here.
         modalities: model.generationConfig.modalities,

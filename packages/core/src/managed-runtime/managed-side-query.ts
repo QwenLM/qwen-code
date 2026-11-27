@@ -21,6 +21,7 @@ import {
   defaultOutputCeiling,
   getHuggingFaceRoute,
   MIN_CLAMPED_OUTPUT_TOKENS,
+  outputClampMargin,
   tokenLimit,
 } from '../core/tokenLimits.js';
 import { projectManagedModelRecords } from './managed-session-message-projection.js';
@@ -186,14 +187,19 @@ export async function prepareManagedSideQuery(
   const outputCeiling = recap
     ? 300
     : (configuredOutput ?? defaultOutputCeiling(model.model, model.baseUrl));
-  const reservedOutput =
+  const adaptiveOutput =
     !recap &&
     configuredOutput == null &&
-    getHuggingFaceRoute(model.model, model.baseUrl)?.limits
-      ? Math.min(outputCeiling, MIN_CLAMPED_OUTPUT_TOKENS)
-      : outputCeiling;
+    getHuggingFaceRoute(model.model, model.baseUrl)?.limits !== undefined;
+  const reservedOutput = adaptiveOutput
+    ? Math.min(outputCeiling, MIN_CLAMPED_OUTPUT_TOKENS)
+    : outputCeiling;
   const window =
     model.contextWindowSize ?? tokenLimit(model.model, 'input', model.baseUrl);
+  // Keep the usual estimation margin proportional for small configured windows.
+  const headroom = adaptiveOutput
+    ? Math.min(outputClampMargin(window), Math.floor(window / 4))
+    : 1_024;
   const assemble = (): Content[] => [
     ...main.flat(),
     ...privateHistory.flat(),
@@ -208,7 +214,7 @@ export async function prepareManagedSideQuery(
         ...privateHistory.slice(privateDrop).flat(),
         question,
       ]) -
-    1024;
+    headroom;
   const fitsWith = (mainDrop: number, privateDrop: number): boolean =>
     outputRoom(mainDrop, privateDrop) >= reservedOutput;
   // fitsWith is monotone in each drop count, so binary-search the cut point

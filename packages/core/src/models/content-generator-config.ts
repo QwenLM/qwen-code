@@ -305,12 +305,11 @@ function buildInheritedAgentContentGeneratorConfig(
   const endpointChanged =
     !sameProvider ||
     (nextConfig.baseUrl !== parentConfig.baseUrl &&
-      (!usesHuggingFaceRouter ||
-        !matchesIsolatedEndpoint(
-          parentConfig,
-          authOverrides.authType as AuthType,
-          nextConfig.baseUrl,
-        )));
+      !matchesOpenAiRequestEndpoint(
+        authOverrides.authType as AuthType,
+        parentConfig.baseUrl,
+        nextConfig.baseUrl,
+      ));
   if (
     !sameProvider ||
     modelChanged ||
@@ -394,6 +393,25 @@ function openAiApiPrefix(
     return `${normalizeOpenAiWireBaseUrl(baseUrl)}/v1`;
   }
   return undefined;
+}
+
+function matchesOpenAiRequestEndpoint(
+  authType: AuthType,
+  parentBaseUrl: string | undefined,
+  targetBaseUrl: string | undefined,
+): boolean {
+  const parent = openAiApiPrefix(authType, parentBaseUrl);
+  const target = openAiApiPrefix(authType, targetBaseUrl);
+  if (!parent || !target) return false;
+
+  // Like the transport, join the request path before parsing the URL.
+  const path =
+    authType === AuthType.USE_OPENAI ? '/chat/completions' : '/responses';
+  try {
+    return new URL(parent + path).href === new URL(target + path).href;
+  } catch {
+    return false;
+  }
 }
 
 function matchesIsolatedEndpoint(

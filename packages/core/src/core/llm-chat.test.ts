@@ -8158,6 +8158,97 @@ describe('LlmChat', async () => {
       );
     });
 
+    const hfBaseUrl = 'https://router.huggingface.co/v1';
+    const digitalOceanModel = 'MiniMaxAI/MiniMax-M2.5:digitalocean';
+    const unverifiedModel = 'deepseek-ai/DeepSeek-V4.1-Flash:fastest';
+    it.each([
+      {
+        name: 'the effective Hugging Face model',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+        },
+        expected: 14_286,
+      },
+      {
+        name: 'a smaller caller limit',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+        },
+        callerLimit: 8_000,
+        expected: 8_000,
+      },
+      {
+        name: 'a smaller configured fallback limit',
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: digitalOceanModel },
+          samplingParams: { max_tokens: 6_000 },
+        },
+        expected: 6_000,
+      },
+      {
+        name: 'a smaller ordinary fallback from a Hugging Face primary',
+        target: {
+          baseUrl: 'https://compatible.example/v1',
+          contextWindowSize: 65_536,
+        },
+        expected: 14_286,
+      },
+      {
+        name: 'the automatic limit of an unverified fallback',
+        target: { baseUrl: hfBaseUrl, extra_body: { model: unverifiedModel } },
+        expected: 32_000,
+      },
+    ])(
+      'sizes the fallback request against $name',
+      async ({ target, callerLimit, expected }) => {
+        const primaryModel = 'zai-org/GLM-5.3-Flash:deepinfra';
+        const fallbackModel = 'fallback-model';
+        const fallback = vi
+          .fn()
+          .mockImplementation(async () => textStream('fallback answer'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              model: fallbackModel,
+              authType: AuthType.USE_OPENAI,
+              ...target,
+            }),
+          ),
+          {
+            model: primaryModel,
+            authType: AuthType.USE_OPENAI,
+            baseUrl: hfBaseUrl,
+            contextWindowSize: 1_048_576,
+          },
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+
+        await drain(
+          await chat.sendMessageStream(
+            primaryModel,
+            {
+              message: ' cat'.repeat(21_250),
+              config: { maxOutputTokens: callerLimit },
+            },
+            'fallback-output-window',
+          ),
+        );
+
+        expect(streamMock().mock.calls[0][0].config?.maxOutputTokens).toBe(
+          callerLimit ?? 64_000,
+        );
+        expect(fallback.mock.calls[0][0]).toMatchObject({
+          model: fallbackModel,
+          config: { maxOutputTokens: expected },
+        });
+        expect(chat.getLastRequestMaxOutputTokens()).toBe(expected);
+      },
+    );
+
     /** The primary fails with `error`; the fallback chain stays untouched. */
     async function expectNoFallback(
       error: Error,

@@ -188,6 +188,29 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.modalities).toEqual(modalities);
     });
 
+    it.each([
+      [AuthType.USE_OPENAI, 'https://gateway.example/v1/'],
+      [AuthType.USE_OPENAI_RESPONSES, 'https://gateway.example/'],
+    ])(
+      'preserves a raw %s window on the same SDK endpoint',
+      (authType, url) => {
+        const parent = {
+          ...parentConfig,
+          authType,
+          baseUrl: 'https://gateway.example/v1',
+          contextWindowSize: 64_000,
+        };
+        const config = buildOver(
+          parent.model,
+          { authType, baseUrl: url },
+          parent,
+        );
+
+        expect(config.baseUrl).toBe(url);
+        expect(config.contextWindowSize).toBe(64_000);
+      },
+    );
+
     it('uses the overridden endpoint for a raw model window', () => {
       const model = 'zai-org/GLM-5.3-Flash:deepinfra';
       const baseUrl = 'https://router.huggingface.co/v1';
@@ -256,7 +279,12 @@ describe('buildAgentContentGeneratorConfig', () => {
         expect(result.modalities).toEqual({});
       });
 
-      it.each([undefined, 'https://router.huggingface.co/v1/'])(
+      it.each([
+        undefined,
+        'https://router.huggingface.co/v1/',
+        'https://router.huggingface.co:443/v1',
+        'https://ROUTER.huggingface.co/v1',
+      ])(
         'retains overrides on the same Hugging Face route with target URL %s',
         (baseUrl) => {
           const overrides = {
@@ -270,10 +298,26 @@ describe('buildAgentContentGeneratorConfig', () => {
             overrides,
           );
 
+          expect(result.baseUrl).toBe(baseUrl ?? overrides.baseUrl);
           expect(result.contextWindowSize).toBe(overrides.contextWindowSize);
           expect(result.modalities).toEqual(overrides.modalities);
         },
       );
+
+      it('reinfers capabilities for a different Hugging Face request path', () => {
+        const result = buildOver(
+          hfParent.model,
+          { authType: 'openai', baseUrl: `${hfParent.baseUrl}/alt` },
+          {
+            ...hfParent,
+            contextWindowSize: 96_000,
+            modalities: { image: false },
+          },
+        );
+
+        expect(result.contextWindowSize).toBe(hfParent.contextWindowSize);
+        expect(result.modalities).toEqual(hfParent.modalities);
+      });
 
       it('uses the wire override when inferring a different raw Hugging Face route', () => {
         const result = buildOver(

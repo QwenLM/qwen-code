@@ -161,11 +161,14 @@ export function defaultModalities(
   delete fromCatalog.pdf;
   const family = MODALITY_PATTERNS.find(([regex]) => regex.test(norm))?.[1];
   const modalities = { ...fromCatalog, ...family };
-  // HF Chat Completions specifies text and image message parts.
-  if (route) {
-    return modalities.image === undefined ? {} : { image: modalities.image };
-  }
-  return modalities;
+  return route ? huggingFaceChatModalities(modalities) : modalities;
+}
+
+// HF Chat Completions specifies text and image message parts.
+export function huggingFaceChatModalities({
+  image,
+}: InputModalities): InputModalities {
+  return image === undefined ? {} : { image };
 }
 
 /**

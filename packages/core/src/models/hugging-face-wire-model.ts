@@ -5,7 +5,10 @@
  */
 
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
-import { defaultModalities } from '../core/modalityDefaults.js';
+import {
+  defaultModalities,
+  huggingFaceChatModalities,
+} from '../core/modalityDefaults.js';
 import { getRequestModel } from '../core/request-model.js';
 import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
 import { AuthType } from '../utils/auth-type.js';
@@ -39,7 +42,9 @@ export function applyHuggingFaceWireModelDefaults(
   }
   if (inferred.modalities) {
     nominal.modalities = defaultModalities(route.model, route.baseUrl);
-    config.modalities = defaultModalities(wireModel, route.baseUrl);
+    config.modalities = huggingFaceChatModalities(
+      defaultModalities(wireModel, route.baseUrl),
+    );
   }
   config.nominalModelCapabilities = nominal;
 }
