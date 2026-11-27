@@ -29,6 +29,8 @@ export const dreamCommand: SlashCommand = {
 
     try {
       const projectRoot = config.getProjectRoot();
+      const owner = config.getProjectMemoryOwner?.();
+      const sessionId = config.getSessionId();
 
       // Structured recall mode forbids the main model from touching
       // managed-memory paths with general file tools, which the prompt-
@@ -37,7 +39,13 @@ export const dreamCommand: SlashCommand = {
       if (config.getMemoryRecallMode?.() === 'structured') {
         const result = await config
           .getMemoryManager()
-          .runManualDream(projectRoot, config, config.getSessionId());
+          .runManualDream(
+            projectRoot,
+            config,
+            sessionId,
+            undefined,
+            context.abortSignal,
+          );
         return {
           type: 'message',
           messageType: 'info',
@@ -45,7 +53,7 @@ export const dreamCommand: SlashCommand = {
         };
       }
 
-      const memoryRoot = getAutoMemoryRoot(projectRoot);
+      const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
       const transcriptDir = path.join(
         new Storage(projectRoot).getProjectDir(),
         'chats',
@@ -58,7 +66,7 @@ export const dreamCommand: SlashCommand = {
       const recordDream = async () =>
         config
           .getMemoryManager()
-          .writeDreamManualRun(projectRoot, config.getSessionId());
+          .writeDreamManualRun(projectRoot, sessionId, undefined, owner);
 
       if (context.executionMode === 'acp') {
         recordDream().catch(() => {});

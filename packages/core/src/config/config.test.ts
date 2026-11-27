@@ -9499,11 +9499,9 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
       new Error('read failed'),
     );
-    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
-      'read failed',
-    );
+    await config.refreshHierarchicalMemory();
     expect(config.getAutoMemoryPrompt()).toBe(policy);
-    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
 
     vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
     await config.refreshHierarchicalMemory();
@@ -10211,6 +10209,58 @@ describe('Server Config (config.ts)', () => {
     skipProcessChdir: true,
     skipArtifactMigration: true,
   };
+
+  it('keeps startup-worktree memory anchored through a nested cd', async () => {
+    const config = makeConfig({ targetDir: NEW_DIR, cwd: NEW_DIR });
+    const owner = {
+      ...config.getProjectMemoryOwner(),
+      cwd: path.resolve('/launch/workspace'),
+    };
+    const originalStorage = config.storage;
+    const nested = path.join(NEW_DIR, 'nested');
+
+    config.bindProjectMemoryToWorktree(NEW_DIR, owner);
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+    expect(config.storage).toBe(originalStorage);
+    expect(
+      deriveWorktreeConfig(
+        config,
+        path.join(NEW_DIR, 'child'),
+      ).getProjectMemoryOwner(),
+    ).toEqual(owner);
+
+    await config.relocateWorkingDirectory(
+      nested,
+      nested,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(nested);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+
+    const outside = path.join(path.dirname(NEW_DIR), 'different-workspace');
+    await config.relocateWorkingDirectory(
+      outside,
+      outside,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getProjectMemoryOwner().cwd).toBe(outside);
+    expect(config.storage).toBe(originalStorage);
+  });
+
+  it('keeps the registered workspace memory owner through daemon relocations', async () => {
+    const config = makeConfig();
+    const memoryBaseDir = path.resolve('/bound/workspace-memory-base');
+    const owner = { ...config.getProjectMemoryOwner(), memoryBaseDir };
+    config.bindProjectMemoryToWorkspace(memoryBaseDir);
+    await config.relocateWorkingDirectory(
+      NEW_DIR,
+      NEW_DIR,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getWorkingDir()).toBe(NEW_DIR);
+    expect(config.getProjectMemoryOwner()).toEqual(owner);
+  });
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
