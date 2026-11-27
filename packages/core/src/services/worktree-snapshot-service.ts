@@ -913,6 +913,14 @@ export async function captureWorktreeSnapshot(
   if (Buffer.byteLength(serializedMeta, 'utf8') > META_READ_MAX_BYTES) {
     throw new Error('Worktree snapshot metadata exceeds 64 KiB');
   }
+  // Pre-flight the exclusions BEFORE the snapshot directory exists. A refusal
+  // here — a FIFO, a case-variant path, a symlink target the fs/tar bridge
+  // cannot carry, or a nested checkout that holds work — must not leave an
+  // empty archive directory behind for a capture that never produced anything.
+  // The archive callback re-reads the same table, so state that changes during
+  // the capture is still caught; this call only moves the first refusal ahead
+  // of the directory creation.
+  await readSnapshotExclusions(worktreePath);
   await fs.mkdir(snapshotDir, { recursive: true });
   // A session UUID may be reused (superseded records, caller-supplied id):
   // never let a later capture overwrite an earlier archive pair of the same
