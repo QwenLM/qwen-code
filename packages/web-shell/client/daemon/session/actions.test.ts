@@ -378,6 +378,118 @@ describe('sendPrompt admission notices', () => {
     },
   );
 
+  it.each([true, false])(
+    'defers optimistic user bubble until beforeDispatch passes (reject=%s)',
+    async (shouldReject) => {
+      const session = createMockSession('session-a');
+      const guardError = new DOMException(
+        'Failed to record the run',
+        'AbortError',
+      );
+      session.submitPrompt.mockImplementationOnce(
+        async (_req, _signal, beforeDispatch) => {
+          await beforeDispatch?.('client-1');
+          return { promptId: 'p-guarded', lastEventId: 1 };
+        },
+      );
+      const onAdmitted = vi.fn();
+      const h = createActionsHarness({ session });
+
+      if (shouldReject) {
+        await expect(
+          h.actions.sendPrompt('Scheduled prompt', {
+            beforeDispatch: async () => {
+              throw guardError;
+            },
+            onAdmitted,
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        const pending = h.actions.sendPrompt('Scheduled prompt', {
+          beforeDispatch: async () => {},
+          onAdmitted,
+        });
+        await vi.waitFor(() =>
+          expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+            promptId: 'p-guarded',
+          }),
+        );
+        expect(h.store.appendLocalUserMessage).toHaveBeenCalledTimes(1);
+        const active = h.activePromptsRef.current.get('session-a');
+        active?.resolve?.({ stopReason: 'end_turn' });
+        await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+      }
+    },
+  );
+
+  it('does not append an optimistic user bubble or emit a duplicate notice when beforeDispatch throws a non-AbortError', async () => {
+    const session = createMockSession('session-a');
+    const guardError = new Error('GET /scheduled-tasks failed: 503');
+    session.submitPrompt.mockImplementation(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-1');
+        return { promptId: 'unexpected', lastEventId: 1 };
+      },
+    );
+    const addNotice = vi.fn();
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session, addNotice });
+
+    await expect(
+      h.actions.sendPrompt('Scheduled prompt', {
+        idempotencyKey: 'idem-1',
+        beforeDispatch: async () => {
+          throw guardError;
+        },
+        onAdmitted,
+      }),
+    ).rejects.toBe(guardError);
+
+    expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(onAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('does not append a deferred optimistic user bubble after switching to another session before admission resolves', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const admission = createDeferred<{
+      promptId: string;
+      lastEventId: number;
+    }>();
+    sessionA.submitPrompt.mockImplementationOnce(
+      async (_req, _signal, beforeDispatch) => {
+        await beforeDispatch?.('client-a');
+        return admission.promise;
+      },
+    );
+    const onAdmitted = vi.fn();
+    const h = createActionsHarness({ session: sessionA });
+
+    const pending = h.actions.sendPrompt('Scheduled prompt for A', {
+      beforeDispatch: async () => {},
+      onAdmitted,
+    });
+    await vi.waitFor(() =>
+      expect(sessionA.submitPrompt).toHaveBeenCalledOnce(),
+    );
+
+    // User switches to session B before session A's POST /prompt returns 202.
+    h.sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    admission.resolve({ promptId: 'p-a', lastEventId: 1 });
+    await vi.waitFor(() =>
+      expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({ promptId: 'p-a' }),
+    );
+    expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    h.activePromptsRef.current
+      .get('session-a')
+      ?.resolve?.({ stopReason: 'end_turn' });
+    await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
   it('keeps notices for MCP App errors before admission starts', async () => {
     const session = createMockSession('session-a');
     const error = new Error('Admission preparation failed');
@@ -434,6 +546,99 @@ describe('sendPrompt admission notices', () => {
       }),
     );
   });
+});
+
+describe('sendDetachedPrompt client registration recovery', () => {
+  it.each([true, false])(
+    'checks deletion during reattach before a second HTTP attempt ($deleted)',
+    async (deleteDuringReattach) => {
+      const resume = createDeferred<Response>();
+      const promptClientIds: Array<string | null> = [];
+      const guardedClientIds: Array<string | undefined> = [];
+      let resumeStarted = false;
+      let stale = false;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/resume')) {
+          resumeStarted = true;
+          return resume.promise;
+        }
+        if (url.endsWith('/prompt')) {
+          promptClientIds.push(
+            new Headers(init?.headers).get('X-Qwen-Client-Id'),
+          );
+          return new Response(
+            JSON.stringify(
+              promptClientIds.length === 1
+                ? { code: 'invalid_client_id', error: 'unknown client' }
+                : { promptId: 'detached-recovered', lastEventId: 0 },
+            ),
+            { status: promptClientIds.length === 1 ? 400 : 202 },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 'session-a',
+          clientId: 'client-a',
+          attached: true,
+          workspaceCwd: '/workspace',
+        },
+      });
+      const detach = vi.spyOn(session, 'detach').mockResolvedValue(undefined);
+      const { actions } = createActionsHarness();
+      const onAdmissionStarted = vi.fn();
+      const onAdmitted = vi.fn();
+      const beforeDetachedDispatch = vi.fn(async (clientId?: string) => {
+        guardedClientIds.push(clientId);
+        await Promise.resolve();
+        if (stale) {
+          throw new DOMException('Task deleted before retry', 'AbortError');
+        }
+      });
+
+      const settled = actions
+        .sendDetachedPrompt(session, 'manual run', {
+          onAdmissionStarted,
+          onAdmitted,
+          beforeDetachedDispatch,
+        })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(resumeStarted).toBe(true));
+      stale = deleteDuringReattach;
+      resume.resolve(
+        new Response(
+          JSON.stringify({
+            sessionId: 'session-a',
+            clientId: 'client-recovered',
+            attached: true,
+            workspaceCwd: '/workspace',
+            state: {},
+          }),
+        ),
+      );
+
+      const result = await settled;
+      if (deleteDuringReattach) {
+        expect(result).toBeInstanceOf(Error);
+        expect(result.name).toBe('AbortError');
+        expect(promptClientIds).toEqual(['client-a']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).not.toHaveBeenCalled();
+      } else {
+        expect(result).toEqual({ promptId: 'detached-recovered' });
+        expect(promptClientIds).toEqual(['client-a', 'client-recovered']);
+        expect(onAdmissionStarted).toHaveBeenCalledOnce();
+        expect(onAdmitted).toHaveBeenCalledExactlyOnceWith({
+          promptId: 'detached-recovered',
+        });
+      }
+      expect(guardedClientIds).toEqual(['client-a', 'client-recovered']);
+      expect(detach).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe('sendPrompt client registration recovery', () => {
@@ -2094,7 +2299,7 @@ describe('createDaemonSessionActions', () => {
       clientId: string;
     }>();
     source.client.branchSession.mockReturnValueOnce(first.promise);
-    const { actions } = createActionsHarness({
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
       session: source,
     });
 
@@ -2114,7 +2319,15 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       displayName: 'First',
       switchStarted: true,
+      switchCompleted: expect.any(Promise),
     });
+    const firstResult = await firstBranch;
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected the forwarded branch load');
+    clearTimeout(pendingLoad.timeout);
+    pendingLoad.resolve();
+    pendingSessionLoadRef.current = undefined;
+    await expect(firstResult.switchCompleted).resolves.toBe(true);
   });
 
   it('does not open a branch that resolves after its source is cleared', async () => {
@@ -2353,14 +2566,20 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
+    const startupConfig = {
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'none' as const,
+    };
     await expect(
       actions.createSession({
         sessionContext: { kind: 'standalone' },
         approvalMode: 'yolo',
+        startupConfig,
       }),
     ).resolves.toBe(standaloneRecord);
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      startupConfig,
     });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);
@@ -2487,6 +2706,102 @@ describe('createDaemonSessionActions', () => {
       expect.objectContaining({
         operation: 'create_session',
         code: 'session_limit_exceeded',
+      }),
+    );
+  });
+
+  it('marks a load-admission create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        },
+        'System overloaded (cpu_load)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'system_overloaded',
+      }),
+    );
+  });
+
+  it('preserves a branch overload notice code and operation', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 42,
+        },
+        'System overloaded (cpu_load)',
+      );
+    });
+    const { actions } = createActionsHarness({ session, addNotice });
+
+    await expect(actions.branchSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'branch_session',
+        code: 'system_overloaded',
+      }),
+    );
+  });
+
+  it('preserves a fork overload notice code and operation', async () => {
+    const addNotice = vi.fn();
+    const session = Object.assign(createMockSession('source-session'), {
+      fork: vi.fn(async () => {
+        throw new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            reason: 'cpu_load',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 42,
+          },
+          'System overloaded (cpu_load)',
+        );
+      }),
+    });
+    const { actions } = createActionsHarness({ session, addNotice });
+
+    await expect(actions.forkSession('write tests')).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'fork_session',
+        code: 'system_overloaded',
       }),
     );
   });
@@ -3981,6 +4296,128 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().models).toBeUndefined();
     expect(getConnection().currentModel).toBeUndefined();
     expect(getConnection().contextWindow).toBeUndefined();
+  });
+
+  it('passes a hydrated worktree restore into the existing pending load', async () => {
+    const restored = createMockSession('session-b', 'restore-client');
+    const restoreDetachedWorktreeSession = vi.fn(async () => restored);
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({ restoreDetachedWorktreeSession });
+
+    const restoredSession = await actions.restoreWorktreeSession('session-b', {
+      workspaceCwd: '/work/b',
+    });
+    expect(restoreDetachedWorktreeSession).toHaveBeenCalledExactlyOnceWith(
+      'session-b',
+      '/work/b',
+    );
+    expect(restoredSession).toBe(restored);
+
+    const load = actions.loadSession('session-b', {
+      workspaceCwd: '/work/b',
+      sessionContext: { kind: 'workspace', cwd: '/work/b' },
+      artifactCountHint: 4,
+      restoredSession,
+    });
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      sessionContext: { kind: 'workspace', cwd: '/work/b' },
+      restoredSession,
+    });
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+    expect(restored.detach).not.toHaveBeenCalled();
+
+    const pending = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pending?.timeout);
+    pending?.resolve();
+    await load;
+  });
+
+  it('dispatches a system_overloaded notice when restoreWorktreeSession fails with 503 overload', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      503,
+      {
+        error: 'System overloaded (cpu_load)',
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.8,
+        eventLoopLagP99Ms: 310,
+      },
+      'System overloaded (cpu_load)',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        operation: 'load_session',
+        code: 'system_overloaded',
+        severity: 'warning',
+        message:
+          'Restore worktree session failed: System overloaded (cpu_load)',
+        recoverable: true,
+      }),
+    );
+    expect(error).toMatchObject({ _alreadyDispatched: true });
+  });
+
+  it('does not dispatch a notice when restoreWorktreeSession fails with a non-overload error', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      500,
+      { error: 'snapshot corrupt' },
+      'snapshot corrupt',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('detaches only an unconsumed restored client when navigation supersedes it', async () => {
+    const first = createMockSession('session-a', 'restore-a');
+    const second = createMockSession('session-b', 'restore-b');
+    const { actions, pendingSessionLoadRef } = createActionsHarness();
+
+    const firstLoad = actions.loadSession('session-a', {
+      restoredSession: first as unknown as DaemonSessionClient,
+    });
+    const secondLoad = actions.loadSession('session-b', {
+      restoredSession: second as unknown as DaemonSessionClient,
+    });
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    expect(first.detach).toHaveBeenCalledOnce();
+    expect(second.detach).not.toHaveBeenCalled();
+    expect(pendingSessionLoadRef.current?.restoredSession).toBe(second);
+
+    const pending = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pending?.timeout);
+    pending?.resolve();
+    await secondLoad;
   });
 
   it('carries the daemon-advertised restore budget into the load request', async () => {
@@ -7131,6 +7568,141 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('preserves overload coding when deferred checkpoint load is refused after publication', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession.mockResolvedValue({
+      sessionId: 'checkpoint-child',
+      displayName: 'Historical branch',
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      addNotice,
+      session,
+    });
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
+    await vi.waitFor(() => {
+      expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 42,
+        },
+        'System overloaded (cpu_load)',
+      ),
+    );
+
+    await expect(branch).resolves.toMatchObject({
+      sessionId: 'checkpoint-child',
+      switchStarted: true,
+    });
+    const completion = (await branch).switchCompleted;
+    expect(completion).toBeInstanceOf(Promise);
+    await expect(completion).resolves.toBe(false);
+    await vi.waitFor(() => {
+      expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'branch_session',
+          code: 'system_overloaded',
+          severity: 'warning',
+          message: 'Branch session failed: System overloaded (cpu_load)',
+        }),
+      );
+    });
+  });
+
+  it('reports an aborted deferred checkpoint switch as incomplete', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession.mockResolvedValue({
+      sessionId: 'checkpoint-child',
+      displayName: 'Historical branch',
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      addNotice,
+      session,
+    });
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
+    await vi.waitFor(() => {
+      expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(new DOMException('Navigation changed', 'AbortError'));
+
+    await expect(branch).resolves.toMatchObject({
+      sessionId: 'checkpoint-child',
+      switchStarted: true,
+    });
+    await expect((await branch).switchCompleted).resolves.toBe(false);
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  describe('fresh-session load overload notices', () => {
+    it.each([
+      {
+        method: 'loadSession',
+        operation: 'load_session',
+        action: 'Load',
+      },
+      {
+        method: 'resumeSession',
+        operation: 'resume_session',
+        action: 'Resume',
+      },
+    ] as const)(
+      'preserves overload coding for $operation',
+      async ({ method, operation, action }) => {
+        const addNotice = vi.fn((notice) => notice);
+        const { actions, pendingSessionLoadRef } = createActionsHarness({
+          addNotice,
+        });
+        const pendingSession = actions[method]('cold-session');
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (!pendingLoad) throw new Error('Expected the pending session load');
+        const error = new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            reason: 'cpu_load',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 42,
+          },
+          'System overloaded (cpu_load)',
+        );
+        clearTimeout(pendingLoad.timeout);
+        pendingSessionLoadRef.current = undefined;
+        pendingLoad.reject(error);
+
+        await expect(pendingSession).rejects.toBe(error);
+        expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            operation,
+            code: 'system_overloaded',
+            severity: 'warning',
+            message: `${action} session failed: System overloaded (cpu_load)`,
+            recoverable: true,
+          }),
+        );
+        expect(error).toMatchObject({ _alreadyDispatched: true });
+      },
+    );
+  });
+
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {
@@ -7164,12 +7736,15 @@ describe('createDaemonSessionActions', () => {
         sessionId: 'session-b',
         displayName: 'Historical branch',
         switchStarted: true,
+        switchCompleted: expect.any(Promise),
       });
+      const completion = (await branch).switchCompleted;
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.resolve();
         pendingSessionLoadRef.current = undefined;
       }
+      await expect(completion).resolves.toBe(true);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -7888,6 +8463,7 @@ function createActionsHarness(
     onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
+    restoreDetachedWorktreeSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: {
       current: DaemonActivePromptState | undefined;
     };
@@ -7983,6 +8559,10 @@ function createActionsHarness(
           createMockSession(
             'detached-standalone-session',
           ) as unknown as DaemonSessionClient,
+      )) as () => Promise<DaemonSessionClient>,
+    restoreDetachedWorktreeSession: (opts.restoreDetachedWorktreeSession ??
+      vi.fn(async (sessionId: string) =>
+        createMockSession(sessionId),
       )) as () => Promise<DaemonSessionClient>,
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),

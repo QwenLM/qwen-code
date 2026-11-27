@@ -173,6 +173,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_agents: { since: 'v1' },
   session_agent_trace: { since: 'v1' },
   scheduled_task_session_reuse: { since: 'v1' },
+  // Item mutations honor expectedSessionId and reject ambiguous ids rather
+  // than acting on an arbitrary matching legacy task.
+  scheduled_task_owner_selection: { since: 'v1' },
   // Scheduled tasks accept a `gate`: a command run at each fire outside the
   // model, so a quiet watch costs no turn. Clients that send `gate` to an
   // older daemon would have it silently dropped on POST.
@@ -631,6 +634,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // restore surface reports the superseded / interrupted / missing-marker
   // classifications as typed 409s.
   session_worktree_reset_v1: { since: 'v1' },
+  // Restore an owned retained-chat worktree snapshot with workspace and
+  // owner validation before the ordinary session load/attestation phase.
+  session_worktree_restore_v1: { since: 'v1' },
   // "Create branch here": `POST /session/:id/worktree-branch` turns a
   // detached managed worktree into a named branch at its current HEAD.
   session_worktree_branch_v1: { since: 'v1' },

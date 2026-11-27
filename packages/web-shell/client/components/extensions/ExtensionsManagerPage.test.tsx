@@ -918,4 +918,30 @@ describe('ExtensionsManagerPage embedded navigation', () => {
     await act(async () => back!.click());
     expect(onBack).toHaveBeenCalledTimes(1);
   });
+
+  it('routes workspace projection and activation mutations through the workspaceCwd prop', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ExtensionsManagerPage
+            onClose={vi.fn()}
+            workspaceCwd="/work/secondary"
+          />
+        </I18nProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(state.client.workspaceByCwd).toHaveBeenCalledWith(
+        '/work/secondary',
+      );
+    });
+    await chooseActivation('workspace', 'Disabled');
+    expect(state.client.workspaceByCwd).toHaveBeenLastCalledWith(
+      '/work/secondary',
+    );
+    expect(state.workspaceHandle.setExtensionActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+  });
 });

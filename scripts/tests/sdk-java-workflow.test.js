@@ -6552,7 +6552,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const configure = mysql.steps.find(
       (s) =>
         s.name ===
-        'Configure the database packet budget for large-object tests',
+        'Configure the database packet budget and the managed OSS test database',
     );
     const verify = mysql.steps.find((s) =>
       s.run?.includes('-Pmysql-integration'),
@@ -6597,6 +6597,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       'echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"',
     );
     expect(configure.env?.MYSQL_CONTAINER).toBeUndefined();
+    // The shell test below cannot execute the step-level env, so the O4
+    // password the Maven line relies on is pinned here.
+    expect(verify.env?.QWEN_O4_MYSQL_PASSWORD).toBe('runtime-broker');
     expect(configure.run).toContain('for fork in 1 2');
     expect(configure.run).toContain(
       'docker exec "${MYSQL_CONTAINER}-${fork}" sh -c',
@@ -6637,7 +6640,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       const configure = mysql.steps.find(
         (s) =>
           s.name ===
-          'Configure the database packet budget for large-object tests',
+          'Configure the database packet budget and the managed OSS test database',
       );
       const verify = mysql.steps.find((s) =>
         s.run?.includes('-Pmysql-integration'),
@@ -6673,7 +6676,8 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
                   echo 'PROBE_SAYS_NO' >&2
                   return 1
                 fi
-                [[ "$3" == sh && "$5" == *'SET GLOBAL max_allowed_packet=134217728'* ]] ;;
+                [[ "$3" == sh && ( "$5" == *'SET GLOBAL max_allowed_packet=134217728'* \
+                  || "$5" == *'CREATE DATABASE IF NOT EXISTS qwen_o4_ci'* ) ]] ;;
               inspect)
                 if [[ "$3" == *State.Running* ]]; then
                   [[ "$MODE" == dead || ( "$MODE" == dead-second && "$4" == *-2 ) ]] && echo false || echo true
@@ -6722,6 +6726,12 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         }
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
+          expect(trace).toContain(
+            `exec ${container}-1 sh -c MYSQL_PWD="\${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE IF NOT EXISTS qwen_o4_ci"`,
+          );
+          expect(trace).not.toContain(
+            `${container}-2 sh -c MYSQL_PWD="\${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE`,
+          );
           expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
             'MYSQL_PORT_1=43219\nMYSQL_PORT_2=43220\n',
           );
@@ -6730,6 +6740,13 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             'MAVEN<-Dmysql.url=jdbc:mysql://127.0.0.1:43219/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>',
           );
           expect(result.stdout).toContain('MAVEN<-Dmysql.integration.forks=2>');
+          expect(result.stdout).toContain(
+            'MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43219/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false>',
+          );
+          expect(result.stdout).toContain('MAVEN<-Dqwen.o4.mysql.user=root>');
+          expect(result.stdout).not.toContain(
+            `MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43220/qwen_o4_ci`,
+          );
           for (const fork of [1, 2]) {
             expect(result.stdout).toContain(
               `MAVEN<-Dmysql.url.${fork}=jdbc:mysql://127.0.0.1:${43218 + fork}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>`,

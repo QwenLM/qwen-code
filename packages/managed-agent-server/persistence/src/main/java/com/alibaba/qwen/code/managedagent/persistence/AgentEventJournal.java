@@ -8,16 +8,19 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionKey;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -76,6 +79,33 @@ final class AgentEventJournal {
                 sessionId,
                 afterSequence,
                 limit);
+    }
+
+    /** Bounds one tail read's parameter list; larger requests are split. */
+    private static final int TAIL_BATCH = 500;
+
+    Map<SessionKey, Long> findEventTails(Collection<SessionKey> sessions) {
+        List<SessionKey> keys = List.copyOf(sessions);
+        Map<SessionKey, Long> tails = new HashMap<>(keys.size() * 2);
+        RowCallbackHandler reader = row -> tails.put(
+                new SessionKey(row.getString(1), row.getString(2)), row.getLong(3));
+        for (int from = 0; from < keys.size(); from += TAIL_BATCH) {
+            List<SessionKey> batch = keys.subList(from, Math.min(keys.size(), from + TAIL_BATCH));
+            List<Object> arguments = new ArrayList<>(batch.size() * 2);
+            for (SessionKey key : batch) {
+                arguments.add(key.tenantId());
+                arguments.add(key.sessionId());
+            }
+            // OR equality groups keep the optimizer on an index range scan;
+            // a row-constructor IN this wide can fall back to a full table scan.
+            jdbc.query("SELECT tenant_id, session_id, last_sequence FROM ma_event_stream"
+                            + " WHERE stream_kind = 'SESSION' AND stream_id = ''"
+                            + " AND ("
+                            + String.join(" OR ", Collections.nCopies(batch.size(),
+                                    "(tenant_id = ? AND session_id = ?)")) + ")",
+                    reader, arguments.toArray());
+        }
+        return tails;
     }
 
     /**

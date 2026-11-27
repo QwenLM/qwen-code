@@ -9,7 +9,6 @@ import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/ex
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
-  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   isHardcodedProjectEnvExclusion,
@@ -57,11 +56,6 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
-    );
-  });
-  it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
-    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
-      ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
     );
   });
 

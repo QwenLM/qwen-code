@@ -212,6 +212,8 @@ export interface BunPtyStats {
   readInFlight: boolean;
   writeActive: boolean;
   resourceFailed: boolean;
+  /** Native exit has been observed and is awaiting terminal-output drain. */
+  pendingNativeExit: boolean;
   nativeExitRecord: { exitCode: number; signal: number } | null;
 }
 
@@ -524,6 +526,7 @@ export class BunPtyProcess extends EventEmitter {
       readInFlight: this.readInFlight,
       writeActive: this.writeActive,
       resourceFailed: this.resourceFailed,
+      pendingNativeExit: this.pendingExit !== null,
       nativeExitRecord: this.nativeExitRecord
         ? { ...this.nativeExitRecord }
         : null,

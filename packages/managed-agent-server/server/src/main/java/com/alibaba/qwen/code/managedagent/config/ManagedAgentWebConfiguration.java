@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerAuthenticationFilter;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpController;
 import org.springframework.boot.context.TypeExcludeFilter;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
@@ -19,7 +21,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 })
 @Import({BrokerSecurity.class, WebConfiguration.class, ManagedSessionJsonConfiguration.class,
         InternalSurfaceConfiguration.class, InternalSurfaceConfiguration.RoutingFilter.class,
-        TerminalWebSocketConfig.class,
+        TerminalWebSocketConfig.class, RuntimeBrokerHttpController.class,
+        RuntimeBrokerAuthenticationFilter.class,
         ManagedAgentWebConfiguration.StandaloneExceptionHandler.class})
 public class ManagedAgentWebConfiguration {
     @RestControllerAdvice

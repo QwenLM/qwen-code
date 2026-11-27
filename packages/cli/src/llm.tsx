@@ -11,6 +11,7 @@ import {
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
+import { getMemoryBaseDir } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   AuthType,
   type ChatRecord,
@@ -507,6 +508,14 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  // The daemon checked this launch environment for collisions before spawning.
+  // Child settings and provider reloads can independently reload workspace .env.
+  const daemonProjectMemoryBase =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    process.env[QWEN_CODE_SERVE_ENV] === '1'
+      ? getMemoryBaseDir()
+      : undefined;
   const conversationsRuntimeProvenance =
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
@@ -1006,6 +1015,17 @@ export async function main() {
   // cwd, and the startup-level chdir would not propagate. Reject the
   // combination with a clear error rather than silently dropping --worktree.
   let startupWorktreeContext: StartupWorktreeContext | null = null;
+  const startupWorktreeMemoryOwner =
+    argv.worktree === undefined
+      ? undefined
+      : {
+          cwd: process.cwd(),
+          memoryBaseDir: Storage.runWithRuntimeBaseDir(
+            settings.merged.advanced?.runtimeOutputDir,
+            process.cwd(),
+            () => getMemoryBaseDir(),
+          ),
+        };
   if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
     writeStderrLine(
       '--worktree cannot be combined with --acp / --experimental-acp. ' +
@@ -1114,6 +1134,9 @@ export async function main() {
       undefined,
       privateAcpParentCapability === undefined
         ? {
+            ...(!isAcpMode && !isBareMode(argv.bare)
+              ? { modelPreferences: settings.merged.model?.preferences ?? {} }
+              : {}),
             workflowAncestorTrustProvider:
               createLocalWorkflowAncestorTrustProvider(
                 getOperatorTrustSettings(settings),
@@ -1127,6 +1150,15 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+    if (daemonProjectMemoryBase !== undefined) {
+      config.bindProjectMemoryToWorkspace(daemonProjectMemoryBase);
+    }
+    if (startupWorktreeContext && startupWorktreeMemoryOwner) {
+      config.bindProjectMemoryToWorktree(
+        process.cwd(),
+        startupWorktreeMemoryOwner,
+      );
+    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,
@@ -1251,8 +1283,13 @@ export async function main() {
     }
 
     // Persist session usage for cross-session reports (must run before
-    // config.shutdown() which clears telemetry state).
-    registerCleanup(() => persistRunUsageOnExit(config));
+    // config.shutdown() which clears telemetry state). In ACP mode each hosted
+    // session persists its own live delta on teardown in QwenAgent; running
+    // the process-wide exit writer here would append a duplicate record under
+    // the bootstrap config's session id.
+    if (!isAcpMode) {
+      registerCleanup(() => persistRunUsageOnExit(config));
+    }
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,

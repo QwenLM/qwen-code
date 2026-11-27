@@ -129,7 +129,7 @@ class ManagedStoreDecompositionTest {
                 findApprovalSelections/2:- findApprovalOwners/3:- findTurnApprovalSelection/3:-
                 changeSessionApproval/9::REQUIRED:DEFAULT:false changeSessionApproval/11::REQUIRED:DEFAULT:false changeSessionApproval/12::REQUIRED:DEFAULT:false
                 changeSessionApproval/15::REQUIRED:DEFAULT:false listTurns/5:- findTurnSummary/3:-
-                findEvents/4:- findLatestEnvironmentEvents/2:- findControlEvents/3:-
+                findEvents/4:- findEventTails/1:- findLatestEnvironmentEvents/2:- findControlEvents/3:-
                 findTranscriptEvents/4:- findMessagePage/5:managedAgentTransactionManager:REQUIRED:REPEATABLE_READ:true findMessagePage/6:managedAgentTransactionManager:REQUIRED:REPEATABLE_READ:true
                 findMessageCoveredSequences/2:- findReplayWindow/2:- findReplayFloorTargets/1:-
                 advanceReplayFloor/3::REQUIRED:DEFAULT:false findMaterializationTargets/1:- materializeNextBatch/3::REQUIRED:DEFAULT:false
@@ -159,7 +159,7 @@ class ManagedStoreDecompositionTest {
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
-                hasLiveWriter/2::REQUIRED:DEFAULT:false
+                hasLiveWriter/2::REQUIRED:DEFAULT:false authenticateEventIngest/7::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }

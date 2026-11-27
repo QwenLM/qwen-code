@@ -5,8 +5,7 @@
  */
 
 import type { DaemonTranscriptStore } from '@qwen-code/sdk/daemon';
-
-const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+export { withActionTimeout } from '../utils/action-timeout.js';
 
 export interface TimerRef {
   current: ReturnType<typeof setTimeout> | undefined;
@@ -29,26 +28,6 @@ export function getReconnectDelayMs(
   const capped = Math.min(exponential, max);
   const jitter = 0.8 + Math.random() * 0.4;
   return Math.min(max, Math.max(1, Math.round(capped * jitter)));
-}
-
-export async function withActionTimeout<T>(
-  promise: Promise<T>,
-  message: string,
-  timeoutMs: number = DEFAULT_ACTION_TIMEOUT_MS,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`${message} after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 export function delay(delayMs: number, signal: AbortSignal): Promise<void> {

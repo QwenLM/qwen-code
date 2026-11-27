@@ -16,7 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
  * Mints the short-lived ticket a browser offers on the terminal WebSocket
  * upgrade. The request travels the normal authenticated WebShell surface, so
  * the full terminal admission runs here, where the deployment's authentication
- * headers are available; the upgrade itself then only consumes the ticket.
+ * headers are available; the upgrade itself then only consumes the ticket
+ * and re-reads the binding it names.
  * Mounted only with the Runtime Broker, like the terminal upgrade itself.
  */
 @RestController
@@ -39,8 +40,8 @@ public class TerminalTicketController {
         RuntimeBindingRecord binding = relay.admit(tenant.tenantId(),
                 tenant.actorId(), request.sessionId());
         String ticket = tickets.issue(new TerminalTicketStore.Admission(
-                tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                request.terminalId(), binding));
+                tenant.tenantId(), request.sessionId(), request.terminalId(),
+                binding.getBindingId(), binding.getGeneration()));
         return new WebShellTerminalTicket(ticket, TerminalTicketStore.TTL.toSeconds());
     }
 }

@@ -24,6 +24,10 @@ export function createGeneratedUiServer(
     appUri === APP_URI
       ? 'With this manually installed provider, ui.state.get/set keeps data only for the current activation.'
       : 'With a state-capable host and daemon, ui.state.get/set restores a small JSON value that the host confirmed saved.';
+  const effectDescription =
+    appUri === APP_URI
+      ? 'With this manually installed provider, Web Shell performs neither ui.copy nor ui.download.'
+      : 'In a click handler, ui.copy(text) and ui.download(filename, mimeType, text) ask the host to copy or download the current result.';
   const server = new McpServer(
     { name: 'generated-ui', version: '1.0.0' },
     { maxToolInputElements: 100_000 },
@@ -31,7 +35,7 @@ export function createGeneratedUiServer(
   server.registerTool(
     'generated_ui_show',
     {
-      description: `Show one complete local interactive view in the conversation for parameter simulation, option comparison or a small list the user keeps editing. Use it when the user wants to adjust values and see results in the chat; write files instead only when the user asks for a file, page or project code. Supply title, readable summary, HTML body, CSS and JavaScript using the documented ui.on/input/text/html/value API. ${stateDescription} JavaScript runs in an isolated bounded interpreter, without browser DOM, network, imports, timers, Intl, files or MCP tools/messages. Before display, the initial calculation is checked once in the same interpreter against the initial input values in the markup; a VIEW_ERROR result names the problem so you can correct the document. Every call creates a separate immutable card; it does not update an earlier card. Field limits: title 120, summary 2000, HTML 12000, CSS 6000, JavaScript 12000 characters; complete result must fit 24000 characters and UTF-8 bytes. Use the generated-ui skill for the API and examples.`,
+      description: `Show one complete local interactive view in the conversation for parameter simulation, option comparison or a small list the user keeps editing. Use it when the user wants to adjust values and see results in the chat; write files instead only when the user asks for a file, page or project code. Supply title, readable summary, HTML body, CSS and JavaScript using the documented ui.on/input/text/html/value API. ${stateDescription} ${effectDescription} JavaScript runs in an isolated bounded interpreter, without browser DOM, network, imports, timers, Intl, files or MCP tools/messages. Before display, the initial calculation is checked once in the same interpreter against the initial input values in the markup; a VIEW_ERROR result names the problem so you can correct the document. Every call creates a separate immutable card; it does not update an earlier card. Field limits: title 120, summary 2000, HTML 12000, CSS 6000, JavaScript 12000 characters; complete result must fit 24000 characters and UTF-8 bytes. Use the generated-ui skill for the API and examples.`,
       inputSchema: z.strictObject(showInputSchema.shape, {
         error: (issue) =>
           issue.code === 'unrecognized_keys'

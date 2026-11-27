@@ -1084,9 +1084,14 @@ async function awaitFirstTurn(
           appendChunk(d.update.content.text);
         }
       } else if (e.type === 'turn_complete') {
-        const d = e.data as { promptId?: string; stopReason?: string };
+        const d = e.data as {
+          promptId?: string;
+          stopReason?: string;
+          promptBlocked?: boolean;
+        };
         if (d?.promptId === promptId) {
-          stopReason = d.stopReason ?? 'end_turn';
+          stopReason =
+            d.promptBlocked === true ? 'blocked' : (d.stopReason ?? 'end_turn');
           break;
         }
       } else if (e.type === 'turn_error') {
@@ -1777,6 +1782,17 @@ export function createSubSessionLauncher(
           dispatchSignal ?? (remote || guardedSent ? stopAc.signal : undefined),
           {
             promptId,
+            // A prompt from another session is input to this one: the
+            // target's UserPromptSubmit hooks see it and its sender.
+            ...(source
+              ? {
+                  userPrompt: true as const,
+                  promptSource: {
+                    sessionId: source.sessionId,
+                    workspaceCwd: source.workspaceCwd,
+                  },
+                }
+              : {}),
             onPromptAdmitted,
             onPromptDispatched,
             dispatchSignal: followUpDispatchAbort?.signal ?? dispatchSignal,

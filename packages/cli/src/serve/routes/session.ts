@@ -162,6 +162,7 @@ import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
   invalidateWorkspaceSessionListCache,
+  isBridgeSessionRetirementFenced,
   isPersistedSessionCursor,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
@@ -201,7 +202,15 @@ import {
   type SessionPromptAdmission,
 } from './session-prompt-admission.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
-import { restoreSessionCore } from '../server/session-restore.js';
+import {
+  restoreSessionCore,
+  type WorktreeRestoreHandoff,
+} from '../server/session-restore.js';
+import {
+  assertNotRetirementFenced,
+  restoreWorktreeFromSessionSnapshot,
+  WorktreeRestoreUnavailableError,
+} from '../server/session-worktree-restore.js';
 import {
   exportSessionTranscript,
   parseSessionExportFormat,
@@ -909,6 +918,52 @@ function parseRequestedSessionSource(
   return source;
 }
 
+interface ParsedSessionRestoreFields {
+  approvalMode: ApprovalMode | undefined;
+  historyPageSize: number | undefined;
+  liveReplayMode: 'full' | 'summary' | undefined;
+  compactedReplayMode: 'full' | 'summary' | undefined;
+  restoreSource: { sourceType?: string; sourceId?: string };
+  clientId: string | undefined;
+}
+
+function parseSessionRestoreFields(
+  req: Request,
+  res: Response,
+  body: Record<string, unknown>,
+  action: 'load' | 'resume',
+): ParsedSessionRestoreFields | null {
+  const approvalMode = parseOptionalApprovalMode(body, res);
+  if (approvalMode === null) return null;
+  const historyPageSize =
+    action === 'load' ? parseHistoryPageSize(body, res) : undefined;
+  if (historyPageSize === null) return null;
+  // Resume restores the full journal and neither uses nor rejects load-only
+  // replay fields (see restore-request-fields.ts).
+  const liveReplayMode =
+    action === 'load'
+      ? parseReplayMode(body, res, 'liveReplayMode')
+      : undefined;
+  if (liveReplayMode === null) return null;
+  const compactedReplayMode =
+    action === 'load'
+      ? parseReplayMode(body, res, 'compactedReplayMode')
+      : undefined;
+  if (compactedReplayMode === null) return null;
+  const restoreSource = parseRequestedSessionSource(body, res);
+  if (restoreSource === null) return null;
+  const clientId = parseClientIdHeader(req, res);
+  if (clientId === null) return null;
+  return {
+    approvalMode,
+    historyPageSize,
+    liveReplayMode,
+    compactedReplayMode,
+    restoreSource,
+    clientId,
+  };
+}
+
 export type ResolveSubagentSessionRuntime = (
   res: Response,
   route: string,
@@ -968,7 +1023,7 @@ export function registerSessionRoutes(
     archiveStates: readonly SessionArchiveState[],
   ): void => {
     invalidateSessionLists(runtime, archiveStates);
-    runtime.bridge.markSessionCatalogChanged();
+    runtime.bridge.markSessionCatalogChanged?.();
   };
   const runWithSessionListInvalidation = async <T>(
     runtime: WorkspaceRuntime,
@@ -1135,6 +1190,37 @@ export function registerSessionRoutes(
   // runtime resolution before this helper runs; the loadable re-check here
   // mirrors the workspace route and tolerates an active conflict the caller
   // already admitted.
+  const withRequestAbortSignal = async <T>(
+    req: Request,
+    res: Response,
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T | undefined> => {
+    const controller = new AbortController();
+    const onRequestAborted = () => {
+      controller.abort(new DOMException('Request aborted', 'AbortError'));
+    };
+    const onResponseClosed = () => {
+      if (!res.writableEnded) {
+        controller.abort(new DOMException('Response closed', 'AbortError'));
+      }
+    };
+    req.once('aborted', onRequestAborted);
+    res.once('close', onResponseClosed);
+    if (req.aborted || res.destroyed) onRequestAborted();
+    try {
+      controller.signal.throwIfAborted();
+      const value = await fn(controller.signal);
+      if (controller.signal.aborted || res.destroyed) return undefined;
+      return value;
+    } catch (err) {
+      if (controller.signal.aborted || res.destroyed) return undefined;
+      throw err;
+    } finally {
+      req.off('aborted', onRequestAborted);
+      res.off('close', onResponseClosed);
+    }
+  };
+
   const readDaemonLocalTranscriptPage = async (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1145,15 +1231,24 @@ export function registerSessionRoutes(
       beforeRecordId?: string;
       atRecordId?: string;
       snapshot?: string;
+      signal?: AbortSignal;
     },
     readerCodec: SessionTranscriptCursorCodec | undefined,
     encodeCursor: (state: SessionTranscriptCursorState) => string,
     assertRuntimeGenerationOpen?: () => void,
     recheckLoadable = true,
   ) => {
-    const { limit, cursor, direction, beforeRecordId, atRecordId, snapshot } =
-      opts;
+    const {
+      limit,
+      cursor,
+      direction,
+      beforeRecordId,
+      atRecordId,
+      snapshot,
+      signal,
+    } = opts;
     return runWithWorkspaceRuntimeStorage(runtime, async () => {
+      signal?.throwIfAborted();
       const service = createWorkspaceRuntimeSessionService(runtime);
       // The default route's resolution already gated loadability: the
       // active-runtime path asserts it (allowActiveConflict:false) and the
@@ -1168,6 +1263,7 @@ export function registerSessionRoutes(
           runtime.sessionRuntimeBaseDir,
           { allowActiveConflict: true },
         );
+        signal?.throwIfAborted();
       }
       const reader = new SessionTranscriptReader(
         runtime.workspaceCwd,
@@ -1190,12 +1286,14 @@ export function registerSessionRoutes(
           throw error;
         }
       };
+      signal?.throwIfAborted();
       const promptStateBeforeRead = getLivePromptState();
       if (
         cursor === undefined &&
         direction === 'backward' &&
         promptStateBeforeRead.live
       ) {
+        signal?.throwIfAborted();
         try {
           if (runtime.bridge.flushSessionTranscript) {
             await runtime.bridge.flushSessionTranscript(sessionId);
@@ -1209,6 +1307,7 @@ export function registerSessionRoutes(
         } catch (error) {
           if (!(error instanceof SessionNotFoundError)) throw error;
         }
+        signal?.throwIfAborted();
       }
       let page;
       try {
@@ -1219,6 +1318,7 @@ export function registerSessionRoutes(
           ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
           ...(atRecordId !== undefined ? { atRecordId } : {}),
           ...(snapshot !== undefined ? { snapshot } : {}),
+          ...(signal !== undefined ? { signal } : {}),
           maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
         });
       } catch (error) {
@@ -4192,7 +4292,12 @@ export function registerSessionRoutes(
   });
 
   const restoreSessionHandler =
-    (action: 'load' | 'resume') => async (req: Request, res: Response) => {
+    (
+      action: 'load' | 'resume',
+      parsedFields?: ParsedSessionRestoreFields,
+      worktreeRestoreHandoff?: WorktreeRestoreHandoff,
+    ) =>
+    async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
@@ -4265,28 +4370,17 @@ export function registerSessionRoutes(
       const { runtime, workspaceCwd } = resolvedRuntime;
       const assertRuntimeGenerationOpen =
         captureRuntimeGenerationAssertion(runtime);
-      const approvalMode = parseOptionalApprovalMode(body, res);
-      if (approvalMode === null) return;
-      const historyPageSize =
-        action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
-      if (historyPageSize === null) return;
-      // Load replays history; resume restores the full journal, so the
-      // load-only replay fields are parsed only for load — resume neither
-      // uses nor rejects them (see restore-request-fields.ts).
-      const liveReplayMode =
-        action === 'load'
-          ? parseReplayMode(body ?? {}, res, 'liveReplayMode')
-          : undefined;
-      if (liveReplayMode === null) return;
-      const compactedReplayMode =
-        action === 'load'
-          ? parseReplayMode(body ?? {}, res, 'compactedReplayMode')
-          : undefined;
-      if (compactedReplayMode === null) return;
-      const restoreSource = parseRequestedSessionSource(body, res);
-      if (restoreSource === null) return;
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
+      const fields =
+        parsedFields ?? parseSessionRestoreFields(req, res, body, action);
+      if (fields === null) return;
+      const {
+        approvalMode,
+        historyPageSize,
+        liveReplayMode,
+        compactedReplayMode,
+        restoreSource,
+        clientId,
+      } = fields;
       if (
         isInternalWorkspaceRuntime(runtime) &&
         deps.standaloneSessionService &&
@@ -4393,6 +4487,7 @@ export function registerSessionRoutes(
           runtime,
           workspaceCwd,
           sessionId,
+          ...(worktreeRestoreHandoff ? { worktreeRestoreHandoff } : {}),
           archiveCoordinator,
           requestedSessionIdAdmission,
           assertRuntimeGenerationOpen,
@@ -4464,6 +4559,11 @@ export function registerSessionRoutes(
       });
       return new WorktreeResetInvalidStateError(sessionId);
     };
+    if (sidecar.worktreeRemoved !== undefined) {
+      throw new WorktreeRestoreUnavailableError(
+        'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+      );
+    }
     const realWorkspace = fs.realpathSync(workspaceCwd);
     if (sidecar.workspaceCwd !== undefined) {
       let realSidecarWorkspace: string;
@@ -4681,6 +4781,50 @@ export function registerSessionRoutes(
                 const newSidecarPath =
                   sessionService.getWorktreeSessionPath(replacementId);
                 const newRead = await readWorktreeSessionStrict(newSidecarPath);
+                const archivedNewSidecarPath =
+                  sessionService.getWorktreeSessionPathForArchiveState(
+                    replacementId,
+                    'archived',
+                  );
+                const archivedNewRead =
+                  archivedNewSidecarPath !== newSidecarPath
+                    ? await readWorktreeSessionStrict(archivedNewSidecarPath)
+                    : ({ state: 'missing' } as const);
+                if (
+                  newRead.state !== 'missing' &&
+                  archivedNewRead.state !== 'missing'
+                ) {
+                  // Active/archived conflict on the replacement session; keep
+                  // any existing resetPending fence armed.
+                  barrierArmed = false;
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
+                const effectiveNewRead =
+                  newRead.state === 'missing' ? archivedNewRead : newRead;
+                if (
+                  effectiveNewRead.state === 'valid' &&
+                  effectiveNewRead.session.worktreeRemoved !== undefined
+                ) {
+                  // Ownership already moved to the replacement session; never
+                  // disarm the superseded session's resetPending fence here.
+                  barrierArmed = false;
+                  throw new WorktreeRestoreUnavailableError(
+                    'The replacement session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                  );
+                }
+                if (
+                  (effectiveNewRead.state === 'valid' &&
+                    (effectiveNewRead.session.supersededBy !== undefined ||
+                      newRead.state === 'missing')) ||
+                  (newRead.state === 'missing' &&
+                    archivedNewRead.state === 'invalid')
+                ) {
+                  // Ownership already moved past the direct replacement (or the
+                  // replacement lives in archived state); never disarm the
+                  // superseded session's resetPending fence.
+                  barrierArmed = false;
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
                 // Sidecar-link agreement only. The marker is the authority on
                 // what committed, so neither branch may consult the
                 // replacement's transcript record: a crash can leave the
@@ -4688,7 +4832,8 @@ export function registerSessionRoutes(
                 // it never converges.
                 const linksAgree =
                   newRead.state === 'valid' &&
-                  newRead.session.supersedes === storageSessionId;
+                  newRead.session.supersedes === storageSessionId &&
+                  newRead.session.supersededBy === undefined;
                 const marker =
                   await readWorktreeSessionMarkerStrict(realTarget);
                 if (marker.state === 'invalid') {
@@ -4855,6 +5000,9 @@ export function registerSessionRoutes(
                     'worktree reset resume found a marker naming another session',
                     { sessionId },
                   );
+                  // Ownership already moved past this superseded session; keep
+                  // any existing resetPending fence armed.
+                  barrierArmed = false;
                   throw new WorktreeResetInvalidStateError(sessionId);
                 }
               }
@@ -5149,6 +5297,154 @@ export function registerSessionRoutes(
   };
   app.post('/session/:id/worktree-reset', mutate(), worktreeResetHandler);
 
+  const worktreeRestoreHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-restore';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error: 'Virtual subagent sessions do not support worktree restore',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    let worktreeRestoreHandoff: WorktreeRestoreHandoff | undefined;
+    try {
+      const resolved = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+      if (resolved === undefined) return;
+      const { runtime } = resolved;
+      if (isInternalWorkspaceRuntime(runtime)) {
+        res.status(400).json({
+          error:
+            'Conversation sessions do not support snapshot worktree restore',
+          code: 'unsupported_action',
+          sessionId,
+        });
+        return;
+      }
+      if (runtime.routeFileSystemFactory.sshWorkspace) {
+        res.status(501).json({
+          error: 'Restore through the remote workspace client',
+          code: 'ssh_workspace_operation_unsupported',
+          sessionId,
+        });
+        return;
+      }
+      const assertRuntimeGenerationOpen =
+        captureRuntimeGenerationAssertion(runtime);
+      const fields = parseSessionRestoreFields(req, res, body, 'load');
+      if (fields === null) return;
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const storedSessionId = await resolveSessionIdForRestore(
+        service,
+        sessionId,
+      );
+      if (storedSessionId === undefined) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      let busy = false;
+      const busyCandidateIds = [
+        ...new Set([
+          sessionId,
+          normalizeSessionIdForLookup(sessionId),
+          storedSessionId,
+        ]),
+      ];
+      let liveOnBridge = false;
+      for (const candidateId of busyCandidateIds) {
+        try {
+          const summary = runtime.bridge.getSessionSummary(candidateId);
+          liveOnBridge = true;
+          busy =
+            summary.hasActivePrompt ||
+            (summary.pendingPromptCount ?? 0) > 0 ||
+            (summary.pendingInteractionCount ?? 0) > 0;
+          break;
+        } catch (error) {
+          // An offline retained chat has no live summary to be busy in.
+          if (
+            !isSessionNotFoundError(error) ||
+            (error as SessionNotFoundError).code === 'session_closing'
+          ) {
+            throw error;
+          }
+        }
+      }
+      if (busy) {
+        res.status(409).json({
+          error:
+            'The session is busy; restore it after the active turn settles',
+          code: 'worktree_restore_active',
+          sessionId,
+        });
+        return;
+      }
+      assertNotRetirementFenced(runtime.bridge, [sessionId, storedSessionId]);
+      if (
+        (await service.getMaintainableSessionLocation(storedSessionId)) ===
+        'conflict'
+      ) {
+        throw new SessionConflictError(storedSessionId);
+      }
+      if (!liveOnBridge) {
+        // Cold worktree restore always allocates a fresh child in the
+        // subsequent load. Refuse before mutating git/disk while overload
+        // admission is closed; already-live sessions remain warm and proceed.
+        const load = getLoadAdmissionSnapshot?.();
+        if (load?.overloaded) {
+          throw new SystemOverloadedError(
+            load.reason ?? 'cpu_load',
+            load.loadRatio,
+            load.eventLoopLagP99Ms,
+          );
+        }
+      }
+      await runOwnerRuntimeActivity(runtime, async () => {
+        await restoreWorktreeFromSessionSnapshot({
+          runtime,
+          sessionId: storedSessionId,
+          archiveCoordinator,
+          assertRuntimeGenerationOpen,
+          handoffWorktreeOwnership: (handoff) => {
+            worktreeRestoreHandoff = handoff;
+          },
+          explicitWorkspaceCwd: Object.hasOwn(body, 'cwd'),
+        });
+      });
+      invalidateSessionListsAndMarkCatalog(runtime, ['active']);
+      await restoreSessionHandler(
+        'load',
+        fields,
+        worktreeRestoreHandoff,
+      )(req, res);
+    } catch (err) {
+      if (res.headersSent) return;
+      if (sendConversationRuntimeError(res, err)) return;
+      if (err instanceof WorktreeRestoreUnavailableError) {
+        res.status(409).json({
+          error: err.message,
+          code: err.code,
+          sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, err, { route, sessionId });
+    } finally {
+      worktreeRestoreHandoff?.release();
+    }
+  };
+  app.post('/session/:id/worktree-restore', mutate(), worktreeRestoreHandler);
+
   // "Create branch here" (Codex parity): turn a detached managed worktree
   // into a named branch at its current HEAD, in place. No session transfer —
   // the checkout, marker owner, and session id all stay; only the branch
@@ -5263,6 +5559,11 @@ export function registerSessionRoutes(
               throw new WorktreeResetInvalidStateError(storageSessionId);
             }
             const sidecar = lockedRead.session;
+            if (sidecar.worktreeRemoved !== undefined) {
+              throw new WorktreeRestoreUnavailableError(
+                'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+              );
+            }
             if (sidecar.worktreeBranch !== '') {
               res.status(409).json({
                 error: 'Worktree already has a branch',
@@ -5452,6 +5753,11 @@ export function registerSessionRoutes(
               const sidecar = lockedRead.session;
               // A superseded sidecar means a reset moved the checkout to a
               // replacement session; the marker must still name this session.
+              if (sidecar.worktreeRemoved !== undefined) {
+                throw new WorktreeRestoreUnavailableError(
+                  'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                );
+              }
               if (sidecar.supersededBy !== undefined) {
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
@@ -6057,6 +6363,11 @@ export function registerSessionRoutes(
             // orphaned the previous checkout.
             const preRead = await readWorktreeSessionStrict(sidecarPath);
             if (preRead.state === 'valid') {
+              if (preRead.session.worktreeRemoved !== undefined) {
+                throw new WorktreeRestoreUnavailableError(
+                  'This session has a retained worktree. Use /session/:id/worktree-restore before modifying it.',
+                );
+              }
               res.status(409).json({
                 error: 'Session already has a managed worktree',
                 code: 'worktree_handoff_unsupported',
@@ -7436,6 +7747,7 @@ export function registerSessionRoutes(
         identity,
         clientId === undefined ? undefined : { clientId },
       );
+      invalidateSessionListsAndMarkCatalog(runtime, ['active', 'archived']);
       sendRetirement(res, receipt);
     } catch (error) {
       const code =
@@ -7482,7 +7794,11 @@ export function registerSessionRoutes(
         const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         try {
           summary.lastUserPromptAt =
-            await service.getLastUserPromptAt(sessionId);
+            runtime.trusted === false
+              ? await service.getLastUserPromptAt(sessionId, 'active', {
+                  allowSidecarWrite: false,
+                })
+              : await service.getLastUserPromptAt(sessionId);
         } catch {
           // An unreadable transcript omits the optional field, not the summary.
           summary.lastUserPromptAt = undefined;
@@ -7611,35 +7927,47 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime = await resolveTranscriptSessionRuntime(
-            res,
-            route,
-            sessionId,
-            cursor !== undefined || snapshot !== undefined,
-          );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          // Read daemon-local so the index cache survives ACP child exits
-          // (session switch, idle TTL, child respawn) instead of rebuilding
-          // in a fresh child on every cold reopen. undefined readerCodec =>
-          // the reader's persisted per-workspace key, the same key the ACP
-          // child signs cursors with, so cursors issued by either side stay
-          // interchangeable. Ownership is enforced by the resolution above.
-          return readDaemonLocalTranscriptPage(
-            runtime,
-            sessionId,
-            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
-            undefined,
-            (state) =>
-              encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
-            assertRuntimeGenerationOpen,
-            false,
-          );
-        }),
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
+            const runtime = await resolveTranscriptSessionRuntime(
+              res,
+              route,
+              sessionId,
+              cursor !== undefined || snapshot !== undefined,
+            );
+            if (!runtime) return undefined;
+            signal.throwIfAborted();
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            // Read daemon-local so the index cache survives ACP child exits
+            // (session switch, idle TTL, child respawn) instead of rebuilding
+            // in a fresh child on every cold reopen. undefined readerCodec =>
+            // the reader's persisted per-workspace key, the same key the ACP
+            // child signs cursors with, so cursors issued by either side stay
+            // interchangeable. Ownership is enforced by the resolution above.
+            return readDaemonLocalTranscriptPage(
+              runtime,
+              sessionId,
+              {
+                limit,
+                cursor,
+                direction,
+                beforeRecordId,
+                atRecordId,
+                snapshot,
+                signal,
+              },
+              undefined,
+              (state) =>
+                encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
+              assertRuntimeGenerationOpen,
+              false,
+            );
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -7733,31 +8061,43 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            preResolvedRuntime ??
-            (await resolveQualifiedSessionRuntime(
-              req,
-              res,
-              route,
-              [sessionId],
-              'active',
-            ));
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          const codec = getTranscriptCursorCodec(runtime);
-          return readDaemonLocalTranscriptPage(
-            runtime,
-            sessionId,
-            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
-            codec,
-            (state) => codec.encode(state),
-            assertRuntimeGenerationOpen,
-          );
-        }),
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
+            const runtime =
+              preResolvedRuntime ??
+              (await resolveQualifiedSessionRuntime(
+                req,
+                res,
+                route,
+                [sessionId],
+                'active',
+              ));
+            if (!runtime) return undefined;
+            signal.throwIfAborted();
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            const codec = getTranscriptCursorCodec(runtime);
+            return readDaemonLocalTranscriptPage(
+              runtime,
+              sessionId,
+              {
+                limit,
+                cursor,
+                direction,
+                beforeRecordId,
+                atRecordId,
+                snapshot,
+                signal,
+              },
+              codec,
+              (state) => codec.encode(state),
+              assertRuntimeGenerationOpen,
+            );
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -7793,92 +8133,102 @@ export function registerSessionRoutes(
       return;
     }
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            qualifiedTarget.kind === 'ordinary'
-              ? qualifiedTarget.runtime
-              : await resolveQualifiedSessionRuntime(
-                  req,
-                  res,
-                  route,
-                  [sessionId],
-                  'active',
-                );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            await assertSessionLoadable(
-              runtime.workspaceCwd,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-              {
-                allowActiveConflict: true,
-              },
-            );
-            try {
-              runtime.bridge.getSessionSummary(sessionId);
-              if (runtime.bridge.flushSessionTranscript) {
-                await runtime.bridge.flushSessionTranscript(sessionId);
-              } else {
-                await runtime.bridge.getSessionTranscriptPage({
-                  sessionId,
-                  direction: 'backward',
-                  limit: 1,
-                });
-              }
-            } catch (error) {
-              if (!(error instanceof SessionNotFoundError)) throw error;
-            }
-            const codec = getTranscriptCursorCodec(runtime);
-            const reader = new SessionTranscriptReader(
-              runtime.workspaceCwd,
-              codec,
-            );
-            const hasActivePrompt = () => {
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
+            const runtime =
+              qualifiedTarget.kind === 'ordinary'
+                ? qualifiedTarget.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    route,
+                    [sessionId],
+                    'active',
+                  );
+            if (!runtime) return undefined;
+            signal.throwIfAborted();
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              signal.throwIfAborted();
+              await assertSessionLoadable(
+                runtime.workspaceCwd,
+                sessionId,
+                runtime.sessionRuntimeBaseDir,
+                {
+                  allowActiveConflict: true,
+                },
+              );
+              signal.throwIfAborted();
               try {
-                return runtime.bridge.getSessionSummary(sessionId)
-                  .hasActivePrompt;
+                runtime.bridge.getSessionSummary(sessionId);
+                signal.throwIfAborted();
+                if (runtime.bridge.flushSessionTranscript) {
+                  await runtime.bridge.flushSessionTranscript(sessionId);
+                } else {
+                  await runtime.bridge.getSessionTranscriptPage({
+                    sessionId,
+                    direction: 'backward',
+                    limit: 1,
+                  });
+                }
               } catch (error) {
-                if (error instanceof SessionNotFoundError) return false;
-                throw error;
+                if (!(error instanceof SessionNotFoundError)) throw error;
               }
-            };
-            let events;
-            try {
-              events = await readSessionToolCalls({
+              signal.throwIfAborted();
+              const codec = getTranscriptCursorCodec(runtime);
+              const reader = new SessionTranscriptReader(
+                runtime.workspaceCwd,
+                codec,
+              );
+              const hasActivePrompt = () => {
+                try {
+                  return runtime.bridge.getSessionSummary(sessionId)
+                    .hasActivePrompt;
+                } catch (error) {
+                  if (error instanceof SessionNotFoundError) return false;
+                  throw error;
+                }
+              };
+              let events;
+              try {
+                events = await readSessionToolCalls({
+                  sessionId,
+                  turnId,
+                  reader,
+                  codec,
+                  hasActivePrompt,
+                  signal,
+                });
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+              assertRuntimeGenerationOpen?.();
+              return {
+                v: 1 as const,
                 sessionId,
                 turnId,
-                reader,
-                codec,
-                hasActivePrompt,
-              });
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-                throw error;
-              const location =
-                await createWorkspaceRuntimeSessionService(
-                  runtime,
-                ).getSessionLocation(sessionId);
-              if (location === 'archived')
-                throw new SessionArchivedError(sessionId);
-              if (location === 'conflict')
-                throw new SessionConflictError(sessionId);
-              throw new SessionNotFoundError(sessionId);
-            }
-            assertRuntimeGenerationOpen?.();
-            return {
-              v: 1 as const,
-              sessionId,
-              turnId,
-              events: events.map((event) =>
-                redactSdkSurfaceEvent(event, runtime.trusted),
-              ),
-            };
-          });
-        }),
+                events: events.map((event) =>
+                  redactSdkSurfaceEvent(event, runtime.trusted),
+                ),
+              };
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       res
@@ -7948,86 +8298,96 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        const result = await runWithoutDebugLogSession(() =>
-          archiveCoordinator.runSharedMany([sessionId], async () => {
-            const runtime = qualified
-              ? target?.kind === 'ordinary'
-                ? target.runtime
-                : await resolveQualifiedSessionRuntime(
-                    req,
+        const result = await withRequestAbortSignal(req, res, (signal) =>
+          runWithoutDebugLogSession(() =>
+            archiveCoordinator.runSharedMany([sessionId], async () => {
+              signal.throwIfAborted();
+              const runtime = qualified
+                ? target?.kind === 'ordinary'
+                  ? target.runtime
+                  : await resolveQualifiedSessionRuntime(
+                      req,
+                      res,
+                      routeName,
+                      [sessionId],
+                      'active',
+                    )
+                : await resolveTranscriptSessionRuntime(
                     res,
                     routeName,
-                    [sessionId],
-                    'active',
-                  )
-              : await resolveTranscriptSessionRuntime(
-                  res,
-                  routeName,
-                  sessionId,
-                  snapshot !== undefined,
-                );
-            if (!runtime) return undefined;
-            const assertOpen = captureRuntimeGenerationAssertion(runtime);
-            assertOpen?.();
-            return runWithWorkspaceRuntimeStorage(runtime, async () => {
-              if (snapshot === undefined) {
-                await assertSessionLoadable(
-                  runtime.workspaceCwd,
-                  sessionId,
-                  runtime.sessionRuntimeBaseDir,
-                  { allowActiveConflict: true },
-                );
-                try {
-                  runtime.bridge.getSessionSummary(sessionId);
-                  if (runtime.bridge.flushSessionTranscript)
-                    await runtime.bridge.flushSessionTranscript(sessionId);
-                  else
-                    await runtime.bridge.getSessionTranscriptPage({
-                      sessionId,
-                      direction: 'backward',
-                      limit: 1,
-                    });
-                } catch (error) {
-                  if (!(error instanceof SessionNotFoundError)) throw error;
-                }
-                assertOpen?.();
-              }
-              try {
-                const page = await new SessionTranscriptReader(
-                  runtime.workspaceCwd,
-                  getTranscriptCursorCodec(runtime),
-                ).readTurnHooksPage(sessionId, promptId, {
-                  ...(snapshot !== undefined ? { snapshot } : {}),
-                  ...(start !== undefined ? { start } : {}),
-                  ...(limit !== undefined ? { limit } : {}),
-                });
-                assertOpen?.();
-                if (!page)
-                  res.status(404).json({
-                    code: 'turn_not_found',
-                    error: 'History turn not found',
                     sessionId,
-                  });
-                return page;
-              } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-                  throw error;
-                if (snapshot !== undefined)
-                  throw new SessionTranscriptSnapshotUnavailableError(
-                    sessionId,
+                    snapshot !== undefined,
                   );
-                const location =
-                  await createWorkspaceRuntimeSessionService(
-                    runtime,
-                  ).getSessionLocation(sessionId);
-                if (location === 'archived')
-                  throw new SessionArchivedError(sessionId);
-                if (location === 'conflict')
-                  throw new SessionConflictError(sessionId);
-                throw new SessionNotFoundError(sessionId);
-              }
-            });
-          }),
+              if (!runtime) return undefined;
+              signal.throwIfAborted();
+              const assertOpen = captureRuntimeGenerationAssertion(runtime);
+              assertOpen?.();
+              return runWithWorkspaceRuntimeStorage(runtime, async () => {
+                signal.throwIfAborted();
+                if (snapshot === undefined) {
+                  await assertSessionLoadable(
+                    runtime.workspaceCwd,
+                    sessionId,
+                    runtime.sessionRuntimeBaseDir,
+                    { allowActiveConflict: true },
+                  );
+                  signal.throwIfAborted();
+                  try {
+                    runtime.bridge.getSessionSummary(sessionId);
+                    signal.throwIfAborted();
+                    if (runtime.bridge.flushSessionTranscript)
+                      await runtime.bridge.flushSessionTranscript(sessionId);
+                    else
+                      await runtime.bridge.getSessionTranscriptPage({
+                        sessionId,
+                        direction: 'backward',
+                        limit: 1,
+                      });
+                  } catch (error) {
+                    if (!(error instanceof SessionNotFoundError)) throw error;
+                  }
+                  signal.throwIfAborted();
+                  assertOpen?.();
+                }
+                try {
+                  const page = await new SessionTranscriptReader(
+                    runtime.workspaceCwd,
+                    getTranscriptCursorCodec(runtime),
+                  ).readTurnHooksPage(sessionId, promptId, {
+                    ...(snapshot !== undefined ? { snapshot } : {}),
+                    ...(start !== undefined ? { start } : {}),
+                    ...(limit !== undefined ? { limit } : {}),
+                    signal,
+                  });
+                  assertOpen?.();
+                  if (!page)
+                    res.status(404).json({
+                      code: 'turn_not_found',
+                      error: 'History turn not found',
+                      sessionId,
+                    });
+                  return page;
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                    throw error;
+                  if (snapshot !== undefined)
+                    throw new SessionTranscriptSnapshotUnavailableError(
+                      sessionId,
+                    );
+                  const location =
+                    await createWorkspaceRuntimeSessionService(
+                      runtime,
+                    ).getSessionLocation(sessionId);
+                  if (location === 'archived')
+                    throw new SessionArchivedError(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  throw new SessionNotFoundError(sessionId);
+                }
+              });
+            }),
+          ),
         );
         if (result === undefined) return;
         res
@@ -8070,75 +8430,83 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime = await resolveTranscriptSessionRuntime(
-            res,
-            route,
-            sessionId,
-            snapshot !== undefined,
-          );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          // Read daemon-local so turn navigation's anchor snapshot survives
-          // ACP child exit, the same reason as the default transcript route.
-          // undefined codec => the persisted per-workspace key, matching the
-          // default transcript route that consumes this snapshot. Resolution
-          // already asserted loadability, so skip the redundant re-check.
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            // Mirror the child handler's live-first-page flush barrier: a
-            // snapshot-less read must drain the recorder so a just-accepted
-            // turn is not omitted from the index and its anchor snapshot. Stay
-            // behind the liveness check so a cold session does not ensure a
-            // child (which would undo the cold-start win); the workspace-
-            // qualified turn-index route carries no such barrier (no-bridge).
-            if (snapshot === undefined) {
-              let live = false;
-              try {
-                runtime.bridge.getSessionSummary(sessionId);
-                live = true;
-              } catch (error) {
-                if (!(error instanceof SessionNotFoundError)) throw error;
-              }
-              if (live) {
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = await resolveTranscriptSessionRuntime(
+              res,
+              route,
+              sessionId,
+              snapshot !== undefined,
+            );
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            // Read daemon-local so turn navigation's anchor snapshot survives
+            // ACP child exit, the same reason as the default transcript route.
+            // undefined codec => the persisted per-workspace key, matching the
+            // default transcript route that consumes this snapshot. Resolution
+            // already asserted loadability, so skip the redundant re-check.
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              // Mirror the child handler's live-first-page flush barrier: a
+              // snapshot-less read must drain the recorder so a just-accepted
+              // turn is not omitted from the index and its anchor snapshot. Stay
+              // behind the liveness check so a cold session does not ensure a
+              // child (which would undo the cold-start win); the workspace-
+              // qualified turn-index route carries no such barrier (no-bridge).
+              if (snapshot === undefined) {
+                signal.throwIfAborted();
+                let live = false;
                 try {
-                  await runtime.bridge.flushSessionTranscript?.(sessionId);
+                  runtime.bridge.getSessionSummary(sessionId);
+                  live = true;
                 } catch (error) {
                   if (!(error instanceof SessionNotFoundError)) throw error;
                 }
+                if (live) {
+                  signal.throwIfAborted();
+                  try {
+                    await runtime.bridge.flushSessionTranscript?.(sessionId);
+                  } catch (error) {
+                    if (!(error instanceof SessionNotFoundError)) throw error;
+                  }
+                }
+                signal.throwIfAborted();
               }
-            }
-            try {
-              const page = await new SessionTranscriptReader(
-                runtime.workspaceCwd,
-              ).readTurnIndexPage(sessionId, {
-                ...(snapshot !== undefined ? { snapshot } : {}),
-                ...(start !== undefined ? { start } : {}),
-                ...(limit !== undefined ? { limit } : {}),
-              });
-              assertRuntimeGenerationOpen?.();
-              return page;
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                ).readTurnIndexPage(sessionId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                  signal,
+                });
+                assertRuntimeGenerationOpen?.();
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                if (snapshot !== undefined) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const location = await service.getSessionLocation(sessionId);
+                if (location === 'archived') {
+                  throw new SessionArchivedError(sessionId);
+                }
+                if (location === 'conflict') {
+                  throw new SessionConflictError(sessionId);
+                }
+                throw new SessionNotFoundError(sessionId);
               }
-              if (snapshot !== undefined) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-              }
-              const service = createWorkspaceRuntimeSessionService(runtime);
-              const location = await service.getSessionLocation(sessionId);
-              if (location === 'archived') {
-                throw new SessionArchivedError(sessionId);
-              }
-              if (location === 'conflict') {
-                throw new SessionConflictError(sessionId);
-              }
-              throw new SessionNotFoundError(sessionId);
-            }
-          });
-        }),
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -8190,60 +8558,67 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            preResolvedRuntime ??
-            (await resolveQualifiedSessionRuntime(
-              req,
-              res,
-              route,
-              [sessionId],
-              'active',
-            ));
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            if (snapshot === undefined) {
-              await assertSessionLoadable(
-                runtime.workspaceCwd,
-                sessionId,
-                runtime.sessionRuntimeBaseDir,
-                { allowActiveConflict: true },
-              );
-            }
-            try {
-              const page = await new SessionTranscriptReader(
-                runtime.workspaceCwd,
-                getTranscriptCursorCodec(runtime),
-              ).readTurnIndexPage(sessionId, {
-                ...(snapshot !== undefined ? { snapshot } : {}),
-                ...(start !== undefined ? { start } : {}),
-                ...(limit !== undefined ? { limit } : {}),
-              });
-              assertRuntimeGenerationOpen?.();
-              return page;
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime =
+              preResolvedRuntime ??
+              (await resolveQualifiedSessionRuntime(
+                req,
+                res,
+                route,
+                [sessionId],
+                'active',
+              ));
+            if (!runtime) return undefined;
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              signal.throwIfAborted();
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
+                signal.throwIfAborted();
               }
-              if (snapshot !== undefined) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnIndexPage(sessionId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                  signal,
+                });
+                assertRuntimeGenerationOpen?.();
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                  throw error;
+                }
+                if (snapshot !== undefined) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                const service = createWorkspaceRuntimeSessionService(runtime);
+                const location = await service.getSessionLocation(sessionId);
+                if (location === 'archived') {
+                  throw new SessionArchivedError(sessionId);
+                }
+                if (location === 'conflict') {
+                  throw new SessionConflictError(sessionId);
+                }
+                throw new SessionNotFoundError(sessionId);
               }
-              const service = createWorkspaceRuntimeSessionService(runtime);
-              const location = await service.getSessionLocation(sessionId);
-              if (location === 'archived') {
-                throw new SessionArchivedError(sessionId);
-              }
-              if (location === 'conflict') {
-                throw new SessionConflictError(sessionId);
-              }
-              throw new SessionNotFoundError(sessionId);
-            }
-          });
-        }),
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
@@ -9348,14 +9723,33 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
+        const sourceValue = body['source'];
+        const source =
+          sourceValue === 'cron' || sourceValue === 'wakeup'
+            ? sourceValue
+            : undefined;
+        if (
+          sourceValue !== undefined &&
+          ((kind === 'cron' &&
+            sourceValue !== 'cron' &&
+            sourceValue !== 'wakeup') ||
+            (kind !== 'cron' && sourceValue !== undefined))
+        ) {
+          res.status(400).json({
+            error: '`source` must be "cron" or "wakeup" for a cron task',
+          });
+          return;
+        }
         if (
           kind !== 'agent' &&
           kind !== 'shell' &&
           kind !== 'monitor' &&
-          kind !== 'workflow'
+          kind !== 'workflow' &&
+          kind !== 'cron'
         ) {
           res.status(400).json({
-            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+            error:
+              '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
           });
           return;
         }
@@ -9373,6 +9767,7 @@ export function registerSessionRoutes(
               taskId,
               kind,
               clientId !== undefined ? { clientId } : undefined,
+              source,
             ),
           );
       },
@@ -11610,6 +12005,7 @@ export function registerSessionRoutes(
                     options,
                     {
                       mergeLive: !readOnlySecondary,
+                      allowSidecarWrite: runtime.trusted,
                       runtimeBaseDir: runtime.sessionRuntimeBaseDir,
                       signal: controller.signal,
                     },
@@ -11772,6 +12168,8 @@ export function registerSessionRoutes(
                 {
                   runtimeBaseDir: runtime.sessionRuntimeBaseDir,
                   signal: controller.signal,
+                  isSessionRetirementFenced: (id) =>
+                    isBridgeSessionRetirementFenced(runtime.bridge, id),
                 },
               ),
             );

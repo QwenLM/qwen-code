@@ -1504,6 +1504,10 @@ export interface DaemonWorktreeInfo {
    * not re-list pre-session work. Absent when unknown.
    */
   baseBranch?: string;
+  /** An owned checkout removed after capturing its retained snapshot. */
+  worktreeRemoved?: { archiveKey: string };
+  /** True only after a matching archive pair passed strict validation. */
+  canRestore?: boolean;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -4168,6 +4172,26 @@ export interface DaemonSessionWorkflowTaskStatus {
   error?: string;
 }
 
+export interface DaemonSessionScheduledTaskStatus {
+  id: string;
+  /** 'cron' for session-scoped cron_create jobs, 'wakeup' for self-paced loop_wakeup. */
+  source: 'cron' | 'wakeup';
+  cronExpr: string;
+  prompt: string;
+  recurring: boolean;
+  createdAt: number;
+  expiresAt: number | null;
+  lastFiredAt: number | null;
+  nextRunAt: number | null;
+  gate?: string;
+  /** False when the owning session's scheduler has been disabled. */
+  enabled?: boolean;
+}
+
+export type DaemonSessionCancelableTaskKind =
+  | DaemonSessionTaskWithWorkflowStatus['kind']
+  | 'cron';
+
 export type DaemonSessionTaskStatus =
   | DaemonSessionAgentTaskStatus
   | DaemonSessionShellTaskStatus
@@ -4184,6 +4208,8 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
   /** Present when requested with `includeSubSessions`. */
   subSessions?: DaemonSessionSubSessionTaskStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 /**
@@ -4270,6 +4296,8 @@ export interface DaemonSessionWorkflowTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskWithWorkflowStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 export interface DaemonLspServerStatus {
@@ -4479,11 +4507,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
+/** Tokens plus distinct active-session counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
-  /** Runs ended on this date, which can differ from their request-token day. */
+  /** Distinct `sessionId`s from ended non-supplement records and ledger rows on this date. */
   sessions: number;
 }
 
@@ -4508,7 +4536,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + ended-run counts across the range window. */
+  /** Per-day tokens + distinct active-session counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;

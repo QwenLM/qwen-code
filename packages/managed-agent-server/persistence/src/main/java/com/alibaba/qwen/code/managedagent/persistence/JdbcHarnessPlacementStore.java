@@ -17,10 +17,12 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Durable ownership; an endpoint disappearing never authorizes another writer. */
 @Repository
@@ -29,6 +31,8 @@ public class JdbcHarnessPlacementStore
         implements HarnessPlacementStore {
     private static final String COLUMNS = "tenant_id, session_id, workspace_id, harness_instance_id, "
             + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state";
+    private static final String JOIN_COLUMNS = "m.tenant_id, m.session_id, m.workspace_id, m.harness_instance_id, "
+            + "m.harness_owner_boot_id, m.harness_placement_epoch, m.harness_placement_state";
     private final JdbcTemplate jdbc;
 
     public JdbcHarnessPlacementStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
@@ -49,6 +53,44 @@ public class JdbcHarnessPlacementStore
                 + " AND h.head_kind = 'MANAGED_SESSION' AND h.state = 'ACTIVE' AND h.writer_lease_until > "
                 + ManagedSchemaTime.SQL_NOW + ")) LIMIT 1",
                 (row, index) -> row.getString(1), instance, boot).isEmpty();
+    }
+
+    public List<Placement> findExpiredSuspensions(Set<String> excludedInstanceIds, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Reaper limit must be between 1 and 100");
+        }
+        Set<String> excluded = Set.copyOf(excludedInstanceIds);
+        List<String> owners = jdbc.query("SELECT DISTINCT harness_instance_id FROM ma_session"
+                + " WHERE harness_instance_id IS NOT NULL AND harness_placement_state IN ('ACTIVE', 'QUIESCING')"
+                + " AND status = 'ACTIVE' AND deleted_at IS NULL AND retired_at IS NULL"
+                + " AND is_resource_gc_completed = FALSE ORDER BY harness_instance_id",
+                (row, index) -> row.getString(1));
+        List<Placement> found = new ArrayList<>();
+        for (String owner : owners) {
+            if (excluded.contains(owner)) {
+                continue;
+            }
+            int remaining = limit - found.size();
+            found.addAll(jdbc.query("SELECT " + JOIN_COLUMNS + " FROM ma_session m JOIN ma_session_head h"
+                    + " ON h.tenant_id = m.tenant_id AND h.session_id = m.session_id"
+                    + " AND h.head_kind = 'MANAGED_SESSION'"
+                    + " WHERE m.harness_instance_id = ? AND m.harness_placement_state IN ('ACTIVE', 'QUIESCING')"
+                    + " AND m.harness_placement_epoch < ? AND m.status = 'ACTIVE'"
+                    + " AND m.deleted_at IS NULL AND m.retired_at IS NULL AND m.is_resource_gc_completed = FALSE"
+                    + " AND (m.session_kind = 'PUBLIC' OR m.workspace_id IS NOT NULL)"
+                    + " AND h.state = 'SEALED' AND h.recovery_status = 'READY'"
+                    + " AND h.writer_lease_until IS NOT NULL AND h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW
+                    + " AND h.activation_phase = 'released' AND h.activation_head_revision = h.journal_revision"
+                    + " AND h.wake_seal_revision = h.journal_revision"
+                    + " ORDER BY m.tenant_id, m.session_id LIMIT ?",
+                    (row, index) -> new Placement(row.getString(1), row.getString(2), row.getString(3),
+                            row.getString(4), row.getString(5), row.getLong(6), row.getString(7)),
+                    owner, ManagedSessionStoreModels.MAX_SAFE_COUNTER, remaining));
+            if (found.size() >= limit) {
+                break;
+            }
+        }
+        return List.copyOf(found);
     }
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
@@ -162,6 +204,12 @@ public class JdbcHarnessPlacementStore
                             || "active".equals(head[2]) && head[3] != null && (Long) head[3] <= now);
             if (!released && !expired) {
                 throw blocked("harness_owner_still_live");
+            }
+            if (released) {
+                // A successor that never acquires a writer must not inherit the released writer's lease.
+                jdbc.update("UPDATE ma_session_head SET writer_lease_until = LEAST(writer_lease_until, ?)"
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        now, tenant, session);
             }
         }
         if (current.epoch() >= ManagedSessionStoreModels.MAX_SAFE_COUNTER) {

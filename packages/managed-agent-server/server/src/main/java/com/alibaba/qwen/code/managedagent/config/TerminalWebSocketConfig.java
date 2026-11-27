@@ -12,12 +12,11 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
-
-import java.time.Clock;
 
 /**
  * The Managed Web Terminal endpoint. Registered only when the Runtime Broker
@@ -32,23 +31,26 @@ import java.time.Clock;
         name = "enabled", havingValue = "true")
 public class TerminalWebSocketConfig implements WebSocketConfigurer {
     private final RuntimeBrokerService broker;
-    private final Clock clock;
+    private final ManagedAgentService sessions;
+    private final ManagedAgentSettings settings;
+    private final JdbcTemplate jdbc;
 
     public TerminalWebSocketConfig(RuntimeBrokerService broker,
-            @Qualifier("managedAgentClock") Clock clock) {
+            ManagedAgentService sessions, ManagedAgentSettings settings,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.broker = broker;
-        this.clock = clock;
+        this.sessions = sessions;
+        this.settings = settings;
+        this.jdbc = jdbc;
     }
 
     @Bean
     public TerminalTicketStore terminalTicketStore() {
-        return new TerminalTicketStore(clock);
+        return new TerminalTicketStore(jdbc);
     }
 
     @Bean
-    public WorkspaceTerminalRelayService workspaceTerminalRelayService(
-            ManagedAgentService sessions, RuntimeBrokerService broker,
-            ManagedAgentSettings settings) {
+    public WorkspaceTerminalRelayService workspaceTerminalRelayService() {
         return new WorkspaceTerminalRelayService(sessions, broker, settings);
     }
 
@@ -71,12 +73,12 @@ public class TerminalWebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        // The intercepted @Bean call returns the singleton the ticket
+        // The intercepted @Bean calls return the singletons the ticket
         // controller also injects; mint and consume must share one store.
         registry.addHandler(new TerminalRelayHandler(broker),
                         PublicSurface
                                 .TERMINAL_UPGRADE_PATH)
-                .addInterceptors(
-                        new TerminalRelayHandshakeInterceptor(terminalTicketStore()));
+                .addInterceptors(new TerminalRelayHandshakeInterceptor(
+                        terminalTicketStore(), workspaceTerminalRelayService()));
     }
 }

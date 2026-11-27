@@ -36,6 +36,7 @@ public final class ManagedSchemaRows {
             "is_publication_retention_registered",
             "is_quarantined",
             "is_recovery_protected",
+            "is_replay_floor_pending",
             "is_resource_gc_completed",
             "is_submission_attempted",
             "is_terminal",

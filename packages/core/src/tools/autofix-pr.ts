@@ -1066,7 +1066,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
     }
     if (this.params.command === 'prepare') {
       if (this.params.in_place) {
-        return `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; the round pushes what the branch holds — your commits included — and replies on the PR.`;
+        return this.params.take_over
+          ? `Takes the in-place watch of PR #${pr} over from any other session that holds it: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR.`
+          : `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; rounds push what the branch holds — your commits included — and reply on the PR.`;
       }
       return this.params.take_over
         ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`
@@ -1515,7 +1517,7 @@ export class AutofixPrTool extends BaseDeclarativeTool<
           in_place: {
             type: 'boolean',
             description:
-              "--in-place (prepare): fix in the user's own checkout of the PR head branch — attended, one round per start, nothing ever discarded.",
+              "--in-place (prepare): fix in the user's own checkout of the PR head branch — attended, never unattended or background, nothing ever discarded.",
           },
           task: {
             type: 'string',

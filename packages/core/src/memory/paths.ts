@@ -5,11 +5,11 @@
  */
 
 import * as fs from 'node:fs';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
   QWEN_DIR,
+  isSubpath,
   realpathNearestExisting,
   resolvePath,
   sanitizeCwd,
@@ -19,7 +19,6 @@ import {
   clearMemoryImportIdentityCache,
 } from './import-paths.js';
 import type { AutoMemoryType } from './types.js';
-import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
@@ -73,103 +72,55 @@ function findGitRoot(startPath: string): string | null {
  * or the global qwen dir);
  * overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
-export function getMemoryBaseDir(): string {
-  if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
-    return resolvePath(undefined, process.env['QWEN_CODE_MEMORY_BASE_DIR']);
-  }
-  return Storage.getRuntimeBaseDir();
+export function getMemoryBaseDir(
+  runtimeBaseDir = Storage.getRuntimeBaseDir(),
+  env = process.env,
+  cwd?: string,
+): string {
+  const override = env['QWEN_CODE_MEMORY_BASE_DIR'];
+  return override ? resolvePath(cwd, override) : runtimeBaseDir;
 }
-
-// Memoize by projectRoot, project scope, and the runtime-specific base dir.
-// The base dir is part of the key because in daemon mode different sessions can
-// share one projectRoot yet write to different output dirs.
-const _autoMemoryRootCache = new Map<string, string>();
 
 // Memoized on projectRoot alone: the team root resolves via findGitRoot, which
 // does sync fs I/O — and isTeamAutoMemPath runs on every file write.
 const _teamAutoMemoryRootCache = new Map<string, string>();
 
-let warnedUnknownMemoryProjectScope = false;
 let warnedImportedMemoryIdentityLost = false;
 
-/**
- * Resolve QWEN_CODE_MEMORY_PROJECT_SCOPE. Only "workspace" (after trimming and
- * lowercasing) opts into per-workspace partitioning; anything else keeps the
- * git-root scope. An unrecognized non-empty value warns once so a typo surfaces
- * instead of silently falling back to the shared scope this flag exists to
- * prevent.
- */
-const projectScopeContext = new AsyncLocalStorage<'workspace' | 'git-root'>();
-
-export function runWithMemoryProjectScope<T>(
-  scope: 'workspace' | 'git-root',
-  run: () => T,
-): T {
-  return projectScopeContext.run(scope, run);
+export interface ProjectMemoryOwner {
+  cwd: string;
+  memoryBaseDir: string;
 }
 
-function resolveWorkspaceProjectScope(): boolean {
-  const scoped = projectScopeContext.getStore();
-  if (scoped) return scoped === 'workspace';
-  const raw = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-  if (raw === undefined) return false;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === 'workspace') return true;
-  if (
-    normalized !== '' &&
-    !(MEMORY_PROJECT_SCOPES as readonly string[]).includes(normalized) &&
-    !warnedUnknownMemoryProjectScope
-  ) {
-    warnedUnknownMemoryProjectScope = true;
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[qwen-code] Ignoring unrecognized QWEN_CODE_MEMORY_PROJECT_SCOPE="${raw}"; ` +
-        'falling back to "git-root". Expected "git-root" or "workspace".',
-    );
-  }
-  return false;
+export function getWorkspaceProjectMemoryRoot(
+  projectRoot: string,
+  memoryBaseDir: string,
+): string {
+  return path.join(
+    memoryBaseDir,
+    'projects',
+    sanitizeCwd(path.resolve(projectRoot)),
+    AUTO_MEMORY_DIRNAME,
+  );
 }
 
-export function getAutoMemoryRoot(projectRoot: string): string {
-  const useLocalMemory = process.env['QWEN_CODE_MEMORY_LOCAL'] === '1';
-  const useWorkspaceRoot = resolveWorkspaceProjectScope();
-  const memoryBaseDir = useLocalMemory ? '' : getMemoryBaseDir();
-  const cacheKey = `${useLocalMemory ? 'local' : memoryBaseDir}\0${
-    useWorkspaceRoot ? 'workspace' : 'git-root'
-  }\0${projectRoot}`;
-  const cached = _autoMemoryRootCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  let result: string;
-  if (useLocalMemory) {
-    result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
-  } else {
-    // In git-root scope, anchor at the nearest git root WITHOUT resolving
-    // linked worktrees back to their canonical repository root: each worktree
-    // gets its own memory, consistent with the per-worktree isolation of
-    // chats/, workflows/, and team memory (getTeamAutoMemoryRoot). See #6449.
-    // In workspace scope, key by the exact resolved workspace dir instead so
-    // nested workspaces in one checkout do not share memory.
-    const projectKey = useWorkspaceRoot
-      ? path.resolve(projectRoot)
-      : (findGitRoot(projectRoot) ?? path.resolve(projectRoot));
-    result = path.join(
-      memoryBaseDir,
-      'projects',
-      sanitizeCwd(projectKey),
-      AUTO_MEMORY_DIRNAME,
-    );
+export function getAutoMemoryRoot(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
+  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
+    return path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   }
-  _autoMemoryRootCache.set(cacheKey, result);
-  return result;
+  return getWorkspaceProjectMemoryRoot(
+    owner?.cwd ?? projectRoot,
+    owner?.memoryBaseDir ?? getMemoryBaseDir(),
+  );
 }
 
 /** Clear the memoization caches (for tests that change environment or git layout). */
 export function clearAutoMemoryRootCache(): void {
-  _autoMemoryRootCache.clear();
   clearMemoryImportIdentityCache();
   _teamAutoMemoryRootCache.clear();
-  warnedUnknownMemoryProjectScope = false;
   warnedImportedMemoryIdentityLost = false;
 }
 
@@ -186,17 +137,21 @@ export function clearAutoMemoryRootCache(): void {
  * repo-tracked `.qwen -> /outside`) can't silently relocate the allowed root
  * out of the trusted anchor.
  */
-export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
+export function getAutoMemoryTrustedAnchor(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
   return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
     ? projectRoot
-    : getMemoryBaseDir();
+    : (owner?.memoryBaseDir ?? getMemoryBaseDir());
 }
 
 export function getProjectAutoMemoryRoots(
   projectRoot: string,
   trustedProject: boolean,
+  owner?: ProjectMemoryOwner,
 ): string[] {
-  const configuredRoot = getAutoMemoryRoot(projectRoot);
+  const configuredRoot = getAutoMemoryRoot(projectRoot, owner);
   const localRoot = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   const roots =
     path.resolve(configuredRoot) === path.resolve(localRoot)
@@ -233,18 +188,19 @@ export function getProjectAutoMemoryRoots(
   return roots;
 }
 
-export function getMemoryRootTrustedAnchor(root: string): string {
-  const baseDir = path.resolve(getMemoryBaseDir());
+export function getMemoryRootTrustedAnchor(
+  root: string,
+  owner?: ProjectMemoryOwner,
+): string {
   const resolvedRoot = path.resolve(root);
-  const relativeToBase = path.relative(baseDir, resolvedRoot);
-  if (
-    relativeToBase === '' ||
-    (!relativeToBase.startsWith(`..${path.sep}`) &&
-      relativeToBase !== '..' &&
-      !path.isAbsolute(relativeToBase))
-  ) {
+  const baseDir = path.resolve(getMemoryBaseDir());
+  if (resolvedRoot === path.join(baseDir, USER_AUTO_MEMORY_DIRNAME)) {
     return baseDir;
   }
+  if (owner && isSubpath(owner.memoryBaseDir, resolvedRoot)) {
+    return owner.memoryBaseDir;
+  }
+  if (isSubpath(baseDir, resolvedRoot)) return baseDir;
   return path.dirname(path.dirname(resolvedRoot));
 }
 
@@ -254,8 +210,11 @@ export function getMemoryRootTrustedAnchor(root: string): string {
  * This is the parent of getAutoMemoryRoot(), so memory/ stays clean:
  * only MEMORY.md and topic files live inside it.
  */
-export function getAutoMemoryProjectStateDir(projectRoot: string): string {
-  return path.dirname(getAutoMemoryRoot(projectRoot));
+export function getAutoMemoryProjectStateDir(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
+  return path.dirname(getAutoMemoryRoot(projectRoot, owner));
 }
 
 /**
@@ -269,17 +228,24 @@ export function getAutoMemoryProjectStateDir(projectRoot: string): string {
 export function isAutoMemPath(
   absolutePath: string,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   const normalizedPath = path.normalize(absolutePath);
-  const memRoot = path.normalize(getAutoMemoryRoot(projectRoot));
+  const memRoot = path.normalize(getAutoMemoryRoot(projectRoot, owner));
   const rel = path.relative(memRoot, normalizedPath);
   // rel === '' means absolutePath IS memRoot itself.
   // !rel.startsWith('..') && !path.isAbsolute(rel) means it's strictly inside.
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-export function getAutoMemoryIndexPath(projectRoot: string): string {
-  return path.join(getAutoMemoryRoot(projectRoot), AUTO_MEMORY_INDEX_FILENAME);
+export function getAutoMemoryIndexPath(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): string {
+  return path.join(
+    getAutoMemoryRoot(projectRoot, owner),
+    AUTO_MEMORY_INDEX_FILENAME,
+  );
 }
 
 export function getAutoMemoryMetadataPath(projectRoot: string): string {
@@ -298,9 +264,10 @@ export function getAutoMemoryExtractCursorPath(projectRoot: string): string {
 
 export function getAutoMemoryConsolidationLockPath(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): string {
   return path.join(
-    getAutoMemoryProjectStateDir(projectRoot),
+    getAutoMemoryProjectStateDir(projectRoot, owner),
     AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME,
   );
 }
@@ -417,11 +384,12 @@ export function isManagedMemoryPath(
   filePath: string,
   projectRoot: string,
   baseDir: string = projectRoot,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   const absolutePath = path.resolve(baseDir, filePath);
   const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
   const roots = [
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryRoot(projectRoot, owner),
     getUserAutoMemoryRoot(),
     getTeamAutoMemoryRoot(projectRoot),
   ];
@@ -444,8 +412,10 @@ export function isManagedMemoryPath(
 export function isAnyAutoMemPath(
   absolutePath: string,
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): boolean {
   return (
-    isAutoMemPath(absolutePath, projectRoot) || isUserAutoMemPath(absolutePath)
+    isAutoMemPath(absolutePath, projectRoot, owner) ||
+    isUserAutoMemPath(absolutePath)
   );
 }

@@ -3815,6 +3815,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('hides the composer stop action while a submit is in flight so it matches canCancel authority', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: true, canCancel: true },
+      }),
+    );
+    let finishSubmit!: (value: { sessionId: string; turnId: string }) => void;
+    mocks.client.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ sessionId: string; turnId: string }>((resolve) => {
+          finishSubmit = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, null);
+    const findStop = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+    expect(findStop()).toBeDefined();
+
+    await input('Steer while running');
+    await click('Send');
+    expect(findStop()).toBeUndefined();
+
+    await act(async () => {
+      finishSubmit({ sessionId: 's1', turnId: 'p1' });
+      await flush();
+    });
+    expect(findStop()).toBeDefined();
+  });
+
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
       summary('s1', {
@@ -4330,10 +4362,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenCalledWith(action, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledWith(
+      action,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
@@ -4381,10 +4417,14 @@ describe('ManagedSessionsPage', () => {
       allow().click();
       await flush();
     });
-    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(
+      first,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]')?.textContent,
     ).toContain('Child session request · child-b');
@@ -4393,13 +4433,89 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('disables an expired permission card with an expired status notice on mount and on live expiry', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let currentPerm = {
+      ...pendingAction,
+      actionId: 'perm-expired-1',
+      sessionId: 's1',
+      expiresAt: Date.now() - 1,
+    };
+    const listPending = vi.fn(async () => [currentPerm]);
+    const respond = vi.fn(async () => undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const allowButton = () =>
+      [
+        ...card().querySelectorAll<HTMLButtonElement>(
+          '[data-testid="approval-overlay"] button',
+        ),
+      ].find((button) => button.textContent?.includes('Yes, allow once'))!;
+    expect(allowButton().disabled).toBe(true);
+    expect(
+      [...card().querySelectorAll('[role="status"]')].some((node) =>
+        node.textContent?.includes('Expired'),
+      ),
+    ).toBe(true);
+    await act(async () => {
+      allowButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open permission card to disabled + Expired status.
+    vi.useFakeTimers();
+    try {
+      currentPerm = {
+        ...pendingAction,
+        actionId: 'perm-live-expiring',
+        sessionId: 's2',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s2');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(allowButton().disabled).toBe(false);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(allowButton().disabled).toBe(true);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
@@ -4420,6 +4536,12 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await act(async () => flush());
     const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(
+      container.querySelector('[data-testid="chat-surface"]'),
+    ).not.toBeNull();
+    expect(mocks.client.getSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
+    expect(listPending).toHaveBeenCalledTimes(1);
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();
     expect(card.querySelector('[data-web-shell-ask-panel]')).not.toBeNull();
     expect(card.querySelector('form')).toBeNull();
@@ -4478,7 +4600,15 @@ describe('ManagedSessionsPage', () => {
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
     await act(async () => flush());
-    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][0]).toEqual(respond.mock.calls[1][0]);
+    expect(respond.mock.calls[0][1]).toEqual(respond.mock.calls[1][1]);
+    expect({
+      clientId: respond.mock.calls[0][2]?.clientId,
+      idempotencyKey: respond.mock.calls[0][2]?.idempotencyKey,
+    }).toEqual({
+      clientId: respond.mock.calls[1][2]?.clientId,
+      idempotencyKey: respond.mock.calls[1][2]?.idempotencyKey,
+    });
     expect(respond.mock.calls[0][1]).toEqual({
       kind: 'question',
       answers: [
@@ -8594,5 +8724,103 @@ describe('ManagedSessionsPage', () => {
       'item-1',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('gates ComposerUsageStats and onOpenContextUsage on diagnostics capability, opens the matching tab, and aborts in-flight reads on session switch', async () => {
+    // 1) Without capabilities.diagnostics: neither usage bar nor context opener mounts.
+    const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
+    const getStatistics = vi.fn().mockResolvedValue(diagnosticStats);
+    provider = {
+      ...provider,
+      diagnostics: {
+        getContextUsage,
+        getStatistics,
+        getResources: vi.fn().mockResolvedValue(diagnosticResources),
+        listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s0', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: false },
+      }),
+    );
+    await render('s0');
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+    expect(getStatistics).not.toHaveBeenCalled();
+
+    // 2) With capabilities.diagnostics=true: ComposerUsageStats renders real
+    // usage and opens Statistics tab; onOpenContextUsage opens Context tab.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: true },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    const usageBar = container.querySelector('[data-web-shell-composer-usage]');
+    expect(usageBar).not.toBeNull();
+    expect(usageBar?.textContent).toContain('110 tok');
+    expect(usageBar?.textContent).toContain('20% cache hit');
+    expect(usageBar?.textContent).toContain('11 tok/s');
+    expect(usageBar?.textContent).not.toContain('turn');
+    expect(mocks.editorProps?.onOpenContextUsage).toBeTypeOf('function');
+
+    await act(async () => {
+      usageBar!.querySelector('button')!.click();
+      await flush();
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const statsTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Statistics');
+    expect(statsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).not.toHaveBeenCalled();
+
+    // Close dialog via Escape, then open via onOpenContextUsage -> Context tab.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await flush();
+    });
+    await act(async () => {
+      mocks.editorProps?.onOpenContextUsage?.();
+      await flush();
+    });
+    const contextTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Context');
+    expect(contextTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).toHaveBeenCalledTimes(1);
+
+    // 3) Switching sessions aborts an in-flight getStatistics request and hides
+    // the usage bar when the target session does not advertise diagnostics.
+    let capturedSignal: AbortSignal | undefined;
+    getStatistics.mockImplementationOnce((_id, options) => {
+      capturedSignal = options.signal;
+      return new Promise(() => {});
+    });
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          diagnostics: id === 's2',
+        },
+      }),
+    );
+    await render('s2');
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
+    await render('s3');
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
   });
 });

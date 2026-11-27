@@ -777,6 +777,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'scheduled_task_owner_selection',
   'scheduled_task_gate',
   'autofix_pr_watches',
   'session_monitor_tool_correlation',
@@ -888,6 +889,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
@@ -1017,6 +1019,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_restore_v1' &&
       f !== 'session_worktree_branch_v1' &&
       f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
@@ -1106,6 +1109,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   'workspace_qualified_acp',
@@ -1276,8 +1280,9 @@ interface FakeBridgeOpts {
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2],
     context?: BridgeClientRequestContext,
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4],
   ) => Promise<{ cancelled: boolean }>;
   controlSessionWorkflowTaskImpl?: (
     sessionId: string,
@@ -1617,8 +1622,9 @@ interface FakeBridge extends AcpSessionBridge {
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2];
     context?: BridgeClientRequestContext;
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4];
   }>;
   controlSessionWorkflowTaskCalls: Array<{
     sessionId: string;
@@ -2930,14 +2936,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTurnIndexCalls.push(req);
       return sessionTurnIndexImpl(req);
     },
-    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context, source) {
       cancelSessionTaskCalls.push({
         sessionId,
         taskId,
         taskKind,
         ...(context ? { context } : {}),
+        ...(source ? { source } : {}),
       });
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
+      return cancelSessionTaskImpl(
+        sessionId,
+        taskId,
+        taskKind,
+        context,
+        source,
+      );
     },
     async controlSessionWorkflowTask(
       sessionId,
@@ -12234,9 +12247,97 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(
-        '`kind` must be "agent", "shell", "monitor", or "workflow"',
+        '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
       );
       expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('cancels a cron task through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/cron-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'cron-1',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it.each([
+      { kind: 'agent', source: 'wakeup' },
+      { kind: 'cron', source: 'unsupported' },
+    ])('rejects invalid kind/source combinations: %j', async (body) => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/task-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send(body);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        '`source` must be "cron" or "wakeup" for a cron task',
+      );
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('forwards the selected cron wakeup source through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/shared-source/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron', source: 'wakeup' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'shared-source',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+          source: 'wakeup',
+        },
+      ]);
     });
 
     it('cancels a workflow task through the bridge', async () => {
@@ -24925,7 +25026,8 @@ describe('createServeApp', () => {
           }),
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
-        expect(readSidecar).toHaveBeenCalledTimes(1);
+        // Metadata stays cached; each later view revalidates the sidecar.
+        expect(readSidecar).toHaveBeenCalledTimes(2);
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;
@@ -24978,7 +25080,9 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
-        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        // A historical missing checkout needs an ownership reread before
+        // considering its snapshot, but must not be enriched for this owner.
+        expect(mockWt.readSidecar).toHaveBeenCalledTimes(2);
         expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;
@@ -28350,8 +28454,27 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ ...summary, lastUserPromptAt: timestamp });
-      expect(read).toHaveBeenCalledWith('s-time');
+      expect(read).toHaveBeenCalledWith('s-time', 'active', {
+        allowSidecarWrite: false,
+      });
       expect(read.mock.instances[0]?.getProjectRoot()).toBe(WS_BOUND);
+
+      read.mockClear();
+      read.mockResolvedValueOnce(timestamp);
+      const trustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+      const trustedRes = await request(trustedApp)
+        .get('/session/s-time/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(trustedRes.status).toBe(200);
+      expect(trustedRes.body).toEqual({
+        ...summary,
+        lastUserPromptAt: timestamp,
+      });
+      expect(read).toHaveBeenCalledWith('s-time');
       read.mockRestore();
     });
 
