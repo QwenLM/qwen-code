@@ -25,10 +25,6 @@ import java.util.Optional;
 import java.util.Set;
 
 final class AgentTurnExecution {
-    // The Harness renews the lease of a Turn it holds while it pushes, so
-    // the cancel lane takes such a Turn back without waiting for a lapse.
-    private static final String HARNESS_HELD_CANCEL = "(status = 'CANCELLING' AND dispatch_owner LIKE '"
-            + AgentStateStore.HARNESS_DISPATCH_OWNER_PREFIX + "%')";
     private final AgentEventJournal eventJournal;
     private final AgentMessageProjection messageProjection;
     private final AgentSessionCommands sessionCommands;
@@ -61,7 +57,7 @@ final class AgentTurnExecution {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ? OR " + HARNESS_HELD_CANCEL + ") AND (retry_after IS NULL OR retry_after <= ? OR " + HARNESS_HELD_CANCEL + ") AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ? OR " + AgentTurnHandOff.HARNESS_HELD_CANCEL + ") AND (retry_after IS NULL OR retry_after <= ? OR " + AgentTurnHandOff.HARNESS_HELD_CANCEL + ") AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -91,9 +87,8 @@ final class AgentTurnExecution {
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
-                        + " OR dispatch_lease_until < ? OR " + HARNESS_HELD_CANCEL
-                        + ") AND (retry_after IS NULL OR retry_after <= ? OR "
-                        + HARNESS_HELD_CANCEL + ") AND (status = 'CANCELLING' OR NOT EXISTS"
+                        + " OR dispatch_lease_until < ? OR " + AgentTurnHandOff.HARNESS_HELD_CANCEL + ") AND (retry_after IS"
+                        + " NULL OR retry_after <= ? OR " + AgentTurnHandOff.HARNESS_HELD_CANCEL + ") AND (status = 'CANCELLING' OR NOT EXISTS"
                         + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
                         + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
                 owner, now + leaseDuration.toMillis(), AgentStateStore.HARNESS_ACTION_PARKED,
@@ -341,20 +336,6 @@ final class AgentTurnExecution {
                     Map.of("turnId", turnId), false, null, now);
         }
         sessionCommands.settleTurnCommands(tenantId, sessionId, turnId, now);
-    }
-
-    boolean recordAdmissionHandOff(String tenantId, String sessionId,
-            String turnId, String owner, String eventEpoch, long lastEventId,
-            String harnessOwner, Duration leaseDuration) {
-        recordAdmission(tenantId, sessionId, turnId, owner, eventEpoch, lastEventId);
-        long now = clock.millis();
-        // A cancelling Turn stays with the dispatcher, which delivers the cancel.
-        return jdbc.update("UPDATE ma_turn SET dispatch_owner = ?, dispatch_lease_until = ?,"
-                        + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ?"
-                        + " AND session_id = ? AND turn_id = ? AND dispatch_owner = ?"
-                        + " AND status = 'RUNNING'",
-                harnessOwner, now + leaseDuration.toMillis(), now, tenantId, sessionId,
-                turnId, owner) == 1;
     }
 
     void recordRecoveryAdmission(String tenantId, String sessionId,
