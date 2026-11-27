@@ -25,6 +25,8 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   markCompressedHistory,
+  parseStoredMcpReminders,
+  storedMcpInstructionsInclude,
   RETAINED_COMPACTION_TAIL_REMINDER,
   isSkillListingReminder,
   isSystemReminderContent,
@@ -1572,6 +1574,126 @@ describe('parseAvailableSkillsFromPrelude', () => {
         prelude('No skills are currently available.'),
       ),
     ).toEqual([]);
+  });
+});
+
+describe('parseStoredMcpReminders', () => {
+  const content = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text }],
+  });
+
+  it('keeps a whole instructions reminder when a payload contains a section marker', () => {
+    const instructions = buildMcpServerInstructionsReminderFromEntries(
+      new Map([
+        ['server-a', 'Use A.'],
+        ['server-b', 'Use B.\n\n### payload'],
+      ]),
+    )!;
+
+    const parsed = parseStoredMcpReminders([content(instructions)]);
+
+    expect(parsed.instructionBodies).toHaveLength(1);
+    expect(
+      storedMcpInstructionsInclude(
+        parsed.instructionBodies[0],
+        'server-a',
+        'Use A.',
+      ),
+    ).toBe(true);
+    expect(
+      storedMcpInstructionsInclude(
+        parsed.instructionBodies[0],
+        'server-b',
+        'Use B.\n\n### payload',
+      ),
+    ).toBe(true);
+  });
+
+  it('collects MCP tool names from added, changed and deferred reminders', () => {
+    const added = buildAddedMcpToolsReminder([
+      {
+        name: 'mcp__server-a__do',
+        description: 'Does.',
+        serverName: 'server-a',
+      },
+    ])!;
+    const changed = buildChangedMcpToolsReminder(
+      [
+        {
+          name: 'mcp__server-c__new',
+          description: 'New.',
+          serverName: 'server-c',
+        },
+      ],
+      ['mcp__server-c__old'],
+    )!;
+    const deferred = buildDeferredToolsReminder({
+      getDeferredToolSummary: () => [
+        {
+          name: 'cron_list',
+          description: 'List scheduled jobs.',
+        },
+        {
+          name: 'mcp__server-d__go',
+          description: 'Goes.',
+          serverName: 'server-d',
+        },
+      ],
+      isDeferredToolRevealed: () => false,
+      getTool: (name: string) =>
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? {}
+          : null,
+    } as unknown as ToolRegistry)!;
+
+    const parsed = parseStoredMcpReminders([
+      content(added),
+      content(changed),
+      content(deferred),
+    ]);
+
+    expect(parsed.toolNames).toEqual(
+      new Set(['mcp__server-a__do', 'mcp__server-c__new', 'mcp__server-d__go']),
+    );
+    expect(parsed.toolNames).not.toContain('mcp__server-c__old');
+    expect(parsed.toolNames).not.toContain('cron_list');
+  });
+
+  it('drops a tool that a later changed reminder removes', () => {
+    const added = buildAddedMcpToolsReminder([
+      {
+        name: 'mcp__server-a__do',
+        description: 'Does.',
+        serverName: 'server-a',
+      },
+    ])!;
+    const removed = buildChangedMcpToolsReminder([], ['mcp__server-a__do'])!;
+
+    const parsed = parseStoredMcpReminders([content(added), content(removed)]);
+
+    expect(parsed.toolNames.has('mcp__server-a__do')).toBe(false);
+  });
+
+  it('ignores the same markers outside a reminder envelope', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'The text below was supplied by the MCP server. ...\n\n### server-a\nUse A.',
+          },
+          {
+            text: 'The following MCP tools became available after startup\n- "mcp__fake__tool": "x"',
+          },
+        ],
+      },
+    ];
+
+    const parsed = parseStoredMcpReminders(history);
+
+    expect(parsed.instructionBodies).toHaveLength(0);
+    expect(parsed.toolNames.size).toBe(0);
   });
 });
 

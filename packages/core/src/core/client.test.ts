@@ -140,6 +140,7 @@ import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { TurnBudget } from './turn-budget.js';
 import {
+  buildAddedMcpToolsReminder,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
@@ -157,6 +158,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { MCPDiscoveryState } from '../tools/mcp-client.js';
 import { Kind } from '../tools/tools.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
@@ -2631,6 +2633,119 @@ describe('Gemini Client (client.ts)', () => {
       ).toEqual(new Set(['skill:existing']));
     });
 
+    it('holds MCP reminder dedup from a stored prelude until discovery', async () => {
+      const stored: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nstored prelude\n</system-reminder>' },
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['server-a', 'Use A.']]),
+            )!,
+          },
+          {
+            text: buildAddedMcpToolsReminder([
+              {
+                name: 'mcp__server-a__do',
+                description: 'Does.',
+                serverName: 'server-a',
+              },
+            ])!,
+          },
+        ],
+      };
+      const resumed = [stored, userText('resumed')];
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([resumed, []]);
+
+      await client.startChat(resumed, SessionStartSource.Resume);
+
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        storedAnnouncedMcpToolNames: Set<string>;
+      };
+      expect(internals.storedMcpInstructionBodies).toHaveLength(1);
+      expect(internals.storedAnnouncedMcpToolNames).toEqual(
+        new Set(['mcp__server-a__do']),
+      );
+    });
+
+    it('does not re-announce replayed MCP reminders but still announces changed instructions', () => {
+      const instructions = buildMcpServerInstructionsReminderFromEntries(
+        new Map([['server-a', 'Use A.']]),
+      )!;
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        storedAnnouncedMcpToolNames: Set<string>;
+        pendingMcpServerInstructions: Map<string, string>;
+        pendingAddedMcpTools: Map<string, unknown>;
+        queueMcpServerInstructionsReminder(
+          instructions: ReadonlyMap<string, string>,
+        ): void;
+        queueAddedMcpToolsReminder(
+          tools: ReadonlyArray<{
+            name: string;
+            description: string;
+            serverName: string;
+          }>,
+        ): void;
+      };
+      internals.storedMcpInstructionBodies = [instructions];
+      internals.storedAnnouncedMcpToolNames = new Set(['mcp__server-a__do']);
+
+      internals.queueMcpServerInstructionsReminder(
+        new Map([['server-a', 'Use A.']]),
+      );
+      internals.queueAddedMcpToolsReminder([
+        {
+          name: 'mcp__server-a__do',
+          description: 'Does.',
+          serverName: 'server-a',
+        },
+      ]);
+      expect(internals.pendingMcpServerInstructions.size).toBe(0);
+      expect(internals.pendingAddedMcpTools.size).toBe(0);
+      expect(internals.storedMcpInstructionBodies).toEqual([]);
+
+      internals.queueMcpServerInstructionsReminder(
+        new Map([['server-a', 'Use A v2']]),
+      );
+      expect(internals.pendingMcpServerInstructions.size).toBe(1);
+    });
+
+    it('consumes only the replayed server sections already promoted', () => {
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        pendingMcpServerInstructions: Map<string, string>;
+        queueMcpServerInstructionsReminder(
+          instructions: ReadonlyMap<string, string>,
+        ): void;
+      };
+      internals.storedMcpInstructionBodies = [
+        buildMcpServerInstructionsReminderFromEntries(
+          new Map([
+            ['server-a', 'Use A.'],
+            ['server-b', 'Use B.'],
+          ]),
+        )!,
+      ];
+
+      internals.queueMcpServerInstructionsReminder(
+        new Map([['server-a', 'Use A.']]),
+      );
+      expect(internals.pendingMcpServerInstructions.size).toBe(0);
+      expect(internals.storedMcpInstructionBodies).toHaveLength(1);
+      expect(internals.storedMcpInstructionBodies[0]).not.toContain(
+        '### server-a',
+      );
+      expect(internals.storedMcpInstructionBodies[0]).toContain('### server-b');
+
+      internals.queueMcpServerInstructionsReminder(
+        new Map([['server-b', 'Use B.']]),
+      );
+      expect(internals.pendingMcpServerInstructions.size).toBe(0);
+      expect(internals.storedMcpInstructionBodies).toEqual([]);
+    });
+
     it('enables effective permission snapshots on fresh and rebuilt main chats', async () => {
       const enableSpy = vi.spyOn(LlmChat.prototype, 'enablePermissionContext');
       await client.startChat();
@@ -3308,6 +3423,199 @@ describe('Gemini Client (client.ts)', () => {
         expect.objectContaining({ announcedDate: undefined }),
       );
     });
+
+    it('re-seeds MCP dedup from the rebuilt prelude', async () => {
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['server-a', 'Use A.']]),
+            )!,
+          },
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['server-b', 'Use B.\n\n### payload']]),
+            )!,
+          },
+          {
+            text: buildAddedMcpToolsReminder([
+              {
+                name: 'mcp__server-a__do',
+                description: 'Does.',
+                serverName: 'server-a',
+              },
+            ])!,
+          },
+        ],
+      };
+      vi.mocked(
+        mockConfig.getToolRegistry().getMcpServerInstructions,
+      ).mockReturnValue(
+        new Map([
+          ['server-a', 'Use A.'],
+          ['server-b', 'Use B.\n\n### payload'],
+        ]),
+      );
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        storedAnnouncedMcpToolNames: Set<string>;
+        announcedMcpServerInstructions: Map<string, string>;
+        announcedMcpToolNames: Set<string>;
+        pendingRemovedMcpToolNames: Set<string>;
+      };
+      internals.storedMcpInstructionBodies = ['stale'];
+      internals.storedAnnouncedMcpToolNames = new Set(['mcp__stale']);
+      internals.announcedMcpToolNames = new Set([
+        'mcp__server-a__revealed',
+        'mcp__server-a__gone',
+      ]);
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(((
+        name: string,
+      ) => (name === 'mcp__server-a__revealed' ? {} : undefined)) as never);
+
+      await refreshOver(
+        [
+          userText('<system-reminder>\nold prelude\n</system-reminder>'),
+          userText('hello'),
+        ],
+        [prelude],
+      );
+
+      expect(internals.announcedMcpServerInstructions.get('server-a')).toBe(
+        'Use A.',
+      );
+      expect(internals.announcedMcpServerInstructions.get('server-b')).toBe(
+        'Use B.\n\n### payload',
+      );
+      expect(internals.announcedMcpToolNames).toContain('mcp__server-a__do');
+      expect(internals.announcedMcpToolNames).toContain(
+        'mcp__server-a__revealed',
+      );
+      expect(internals.announcedMcpToolNames).not.toContain(
+        'mcp__server-a__gone',
+      );
+      expect(internals.pendingRemovedMcpToolNames).toContain(
+        'mcp__server-a__gone',
+      );
+      expect(internals.storedMcpInstructionBodies).toEqual([]);
+      expect(internals.storedAnnouncedMcpToolNames.size).toBe(0);
+    });
+
+    it('clears replay state when the rebuilt prelude is absent', () => {
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        storedAnnouncedMcpToolNames: Set<string>;
+        announcedMcpToolNames: Set<string>;
+        pendingRemovedMcpToolNames: Set<string>;
+        resetMcpReminderDedupFromPrelude(prelude: Content | undefined): void;
+      };
+      internals.storedMcpInstructionBodies = ['stale'];
+      internals.storedAnnouncedMcpToolNames = new Set(['mcp__stale']);
+      internals.announcedMcpToolNames = new Set(['mcp__gone']);
+      internals.pendingRemovedMcpToolNames = new Set(['mcp__pending']);
+      const registry = mockConfig.getToolRegistry() as unknown as {
+        getMcpClientManager: () => {
+          getDiscoveryState: () => MCPDiscoveryState;
+        };
+      };
+      registry.getMcpClientManager = vi.fn(() => ({
+        getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+      }));
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockReturnValue(
+        undefined,
+      );
+
+      internals.resetMcpReminderDedupFromPrelude(undefined);
+
+      expect(internals.storedMcpInstructionBodies).toEqual([]);
+      expect(internals.storedAnnouncedMcpToolNames.size).toBe(0);
+      expect(internals.announcedMcpToolNames.size).toBe(0);
+      expect(internals.pendingRemovedMcpToolNames).toContain('mcp__pending');
+      expect(internals.pendingRemovedMcpToolNames).toContain('mcp__gone');
+    });
+
+    it('derives removals when discovery completed and the rebuilt prelude has no MCP', async () => {
+      const prelude = userText('<system-reminder>\nno mcp\n</system-reminder>');
+      const internals = client as unknown as {
+        announcedMcpToolNames: Set<string>;
+        pendingRemovedMcpToolNames: Set<string>;
+      };
+      internals.announcedMcpToolNames = new Set(['mcp__server-a__gone']);
+      const registry = mockConfig.getToolRegistry() as unknown as {
+        getMcpClientManager: () => {
+          getDiscoveryState: () => MCPDiscoveryState;
+        };
+      };
+      registry.getMcpClientManager = vi.fn(() => ({
+        getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+      }));
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockReturnValue(
+        undefined,
+      );
+
+      await refreshOver(
+        [
+          userText('<system-reminder>\nold prelude\n</system-reminder>'),
+          userText('hello'),
+        ],
+        [prelude],
+      );
+
+      expect(internals.pendingRemovedMcpToolNames).toContain(
+        'mcp__server-a__gone',
+      );
+    });
+
+    it('keeps a revealed MCP tool tracked so a later disconnect is announced', async () => {
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['server-a', 'Use A.']]),
+            )!,
+          },
+        ],
+      };
+      vi.mocked(
+        mockConfig.getToolRegistry().getMcpServerInstructions,
+      ).mockReturnValue(new Map([['server-a', 'Use A.']]));
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockImplementation(((
+        name: string,
+      ) => (name === 'mcp__server-a__revealed' ? {} : undefined)) as never);
+      const internals = client as unknown as {
+        announcedMcpToolNames: Set<string>;
+        pendingRemovedMcpToolNames: Set<string>;
+        queueAddedMcpToolsReminder(
+          tools: ReadonlyArray<{
+            name: string;
+            description: string;
+            serverName: string;
+          }>,
+        ): void;
+      };
+      internals.announcedMcpToolNames = new Set(['mcp__server-a__revealed']);
+
+      await refreshOver(
+        [
+          userText('<system-reminder>\nold prelude\n</system-reminder>'),
+          userText('hello'),
+        ],
+        [prelude],
+      );
+      expect(internals.announcedMcpToolNames).toContain(
+        'mcp__server-a__revealed',
+      );
+
+      vi.mocked(mockConfig.getToolRegistry().getTool).mockReturnValue(
+        undefined,
+      );
+      internals.queueAddedMcpToolsReminder([]);
+      expect(internals.pendingRemovedMcpToolNames).toContain(
+        'mcp__server-a__revealed',
+      );
+    });
   });
 
   describe('restoreStartupContextAfterCompaction', () => {
@@ -3352,6 +3660,57 @@ describe('Gemini Client (client.ts)', () => {
         undefined,
         expect.objectContaining({ announcedDate: null }),
       );
+    });
+
+    it('re-seeds MCP dedup from the rebuilt prelude', async () => {
+      const prelude: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: buildMcpServerInstructionsReminderFromEntries(
+              new Map([['server-a', 'Use A.']]),
+            )!,
+          },
+          {
+            text: buildAddedMcpToolsReminder([
+              {
+                name: 'mcp__server-a__do',
+                description: 'Does.',
+                serverName: 'server-a',
+              },
+            ])!,
+          },
+        ],
+      };
+      vi.mocked(
+        mockConfig.getToolRegistry().getMcpServerInstructions,
+      ).mockReturnValue(new Map([['server-a', 'Use A.']]));
+      const currentHistory: Content[] = [userText('summary')];
+      const mockChat: Partial<LlmChat> = {
+        getHistory: vi.fn(() => structuredClone(currentHistory)),
+        getHistoryShallow: vi.fn(() => currentHistory.map((c) => ({ ...c }))),
+        getCompletedToolCallIds: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as LlmChat;
+      const internals = client as unknown as {
+        storedMcpInstructionBodies: string[];
+        storedAnnouncedMcpToolNames: Set<string>;
+        announcedMcpServerInstructions: Map<string, string>;
+        announcedMcpToolNames: Set<string>;
+      };
+      internals.storedMcpInstructionBodies = ['stale'];
+      internals.storedAnnouncedMcpToolNames = new Set(['mcp__stale']);
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.restoreStartupContextAfterCompaction();
+
+      expect(internals.announcedMcpServerInstructions.get('server-a')).toBe(
+        'Use A.',
+      );
+      expect(internals.announcedMcpToolNames).toContain('mcp__server-a__do');
+      expect(internals.storedMcpInstructionBodies).toEqual([]);
+      expect(internals.storedAnnouncedMcpToolNames.size).toBe(0);
     });
   });
 

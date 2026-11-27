@@ -199,6 +199,9 @@ import {
   getStartupContextLength,
   isSystemReminderContent,
   parseAvailableSkillsFromPrelude,
+  parseStoredMcpReminders,
+  storedMcpInstructionSection,
+  storedMcpInstructionsInclude,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -207,6 +210,7 @@ import {
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
+import { MCPDiscoveryState } from '../tools/mcp-client.js';
 import { replayUiTelemetryFromConversation } from '../services/sessionService.js';
 import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { markApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
@@ -839,6 +843,11 @@ export class LlmClient {
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
   private announcedMcpServerInstructions = new Map<string, string>();
+  // Reminders a stored startup prelude already replayed. Progressive discovery
+  // fills the live registry only after `startChat`, so these are promoted to
+  // the announced sets in the first `setTools()` that sees the server/tool.
+  private storedMcpInstructionBodies: string[] = [];
+  private storedAnnouncedMcpToolNames = new Set<string>();
   private pendingMcpServerInstructions = new Map<string, string>();
   private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
@@ -878,6 +887,101 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(
       parseAvailableSkillsFromPrelude(prelude),
     );
+  }
+
+  /**
+   * Holds the MCP reminders a replayed prelude already delivered until the
+   * live registry reports the same server/tool. Seeding the announced sets
+   * directly here would be erased by the first `setTools()` before discovery
+   * (it prunes announced entries the live registry does not know yet).
+   */
+  private seedMcpReminderDedupFromStoredHistory(
+    history: readonly Content[],
+  ): void {
+    const stored = parseStoredMcpReminders(history);
+    this.storedMcpInstructionBodies = [...stored.instructionBodies];
+    this.storedAnnouncedMcpToolNames = new Set(stored.toolNames);
+  }
+
+  /**
+   * Re-anchors MCP dedup on a prelude the client just rebuilt in place (auto-
+   * compaction / explicit refresh). The rebuilt prelude is the new truth: if it
+   * lacks an MCP server, discovery must be free to announce it later, so stale
+   * resume stashes and announced entries are dropped.
+   */
+  private resetMcpReminderDedupFromPrelude(prelude: Content | undefined): void {
+    const toolRegistry = this.config.getToolRegistry();
+    const discoveryCompleted =
+      toolRegistry.getMcpClientManager?.()?.getDiscoveryState?.() ===
+      MCPDiscoveryState.COMPLETED;
+    // Snapshot: the `!prelude` branch below clears the live set in place.
+    const previousAnnounced = new Set(this.announcedMcpToolNames);
+    const previousPendingRemovals = this.pendingRemovedMcpToolNames;
+
+    this.storedMcpInstructionBodies = [];
+    this.storedAnnouncedMcpToolNames.clear();
+    this.pendingAddedMcpTools.clear();
+    this.pendingRemovedMcpToolNames = new Set();
+    this.pendingMcpServerInstructions.clear();
+
+    // Keep a removal queued before the reset; the rebuilt prelude describes
+    // what is available, not that an already-pending removal was undone.
+    for (const name of previousPendingRemovals) {
+      if (!toolRegistry.getTool(name)) {
+        this.pendingRemovedMcpToolNames.add(name);
+      }
+    }
+
+    if (!prelude) {
+      this.announcedMcpServerInstructions.clear();
+      this.announcedMcpToolNames.clear();
+      this.announcedDeferredToolNames.clear();
+      if (discoveryCompleted) {
+        for (const name of previousAnnounced) {
+          if (!toolRegistry.getTool(name)) {
+            this.pendingRemovedMcpToolNames.add(name);
+          }
+        }
+      }
+      return;
+    }
+
+    const stored = parseStoredMcpReminders([prelude]);
+    const liveInstructions = toolRegistry.getMcpServerInstructions();
+    this.announcedMcpServerInstructions = new Map(
+      [...liveInstructions].filter(([serverName, text]) =>
+        stored.instructionBodies.some((body) =>
+          storedMcpInstructionsInclude(body, serverName, text),
+        ),
+      ),
+    );
+
+    // The rebuilt deferred listing omits revealed/preloaded tools, but the
+    // model already saw them. Keep tracking them while they remain registered
+    // so a later disconnect can still be announced.
+    const announcedTools = new Set(stored.toolNames);
+    for (const name of previousAnnounced) {
+      if (toolRegistry.getTool(name)) {
+        announcedTools.add(name);
+      }
+    }
+    this.announcedMcpToolNames = announcedTools;
+    this.announcedDeferredToolNames = new Set(stored.toolNames);
+
+    // The rebuilt prelude is authoritative about the MCP surface when it
+    // carries MCP content, or when discovery has settled (a prelude without
+    // MCP then means the servers are really gone, not still connecting).
+    if (
+      discoveryCompleted ||
+      stored.instructionBodies.length > 0 ||
+      stored.toolNames.size > 0
+    ) {
+      for (const name of previousAnnounced) {
+        if (!toolRegistry.getTool(name)) {
+          this.pendingRemovedMcpToolNames.add(name);
+        }
+      }
+    }
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
@@ -2528,6 +2632,7 @@ export class LlmClient {
       },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+    this.resetMcpReminderDedupFromPrelude(startupContext);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
       this.config
@@ -2574,6 +2679,7 @@ export class LlmClient {
       { gitStatus: this.getCachedGitStatus(), announcedDate: null },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+    this.resetMcpReminderDedupFromPrelude(startupContext);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
       this.config
@@ -2830,15 +2936,34 @@ export class LlmClient {
     instructions: ReadonlyMap<string, string>,
   ): void {
     this.pendingMcpServerInstructions.clear();
+    // A replayed prelude already showed these exact server sections. Consume
+    // only the matched section: another server in the same reminder may still
+    // be exploring, and its section must stay available for its promotion.
+    for (const [serverName, text] of instructions) {
+      const section = storedMcpInstructionSection(serverName, text);
+      let matched = false;
+      this.storedMcpInstructionBodies = this.storedMcpInstructionBodies
+        .map((body) => {
+          if (!body.includes(section)) return body;
+          matched = true;
+          return body.replace(section, '');
+        })
+        .filter((body) => /\n### /.test(body));
+      if (matched) {
+        this.announcedMcpServerInstructions.set(serverName, text);
+      }
+    }
     for (const serverName of this.announcedMcpServerInstructions.keys()) {
       if (!instructions.has(serverName)) {
         this.announcedMcpServerInstructions.delete(serverName);
       }
     }
     for (const [serverName, text] of instructions) {
+      const normalized = text.trim();
       if (
-        text.trim().length > 0 &&
-        this.announcedMcpServerInstructions.get(serverName) !== text
+        normalized.length > 0 &&
+        this.announcedMcpServerInstructions.get(serverName)?.trim() !==
+          normalized
       ) {
         this.pendingMcpServerInstructions.set(serverName, text);
       }
@@ -2901,6 +3026,16 @@ export class LlmClient {
     for (const name of this.announcedDeferredToolNames) {
       if (!currentDeferredNames.has(name)) {
         this.announcedDeferredToolNames.delete(name);
+      }
+    }
+    // Promote replayed tool names once discovery registers them, before the
+    // removal pass below can mistake "not registered yet" for "removed".
+    for (const name of this.storedAnnouncedMcpToolNames) {
+      if (currentMcpToolNames.has(name) || toolRegistry.getTool(name)) {
+        this.announcedMcpToolNames.add(name);
+        this.announcedDeferredToolNames.add(name);
+        this.pendingAddedMcpTools.delete(name);
+        this.storedAnnouncedMcpToolNames.delete(name);
       }
     }
     for (const name of this.announcedMcpToolNames) {
@@ -3270,6 +3405,8 @@ export class LlmClient {
           (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
+      this.storedMcpInstructionBodies = [];
+      this.storedAnnouncedMcpToolNames.clear();
       const storedPrelude = Boolean(
         extraHistory?.[0] && isSystemReminderContent(extraHistory[0]),
       );
@@ -3280,6 +3417,9 @@ export class LlmClient {
             gitStatus: this.getCachedGitStatus(),
           }),
       );
+      if (storedPrelude) {
+        this.seedMcpReminderDedupFromStoredHistory(history);
+      }
       if (!storedPrelude && history[0] && isSystemReminderContent(history[0])) {
         try {
           this.config
