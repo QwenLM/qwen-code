@@ -2122,6 +2122,35 @@ describe('ChatSurface', () => {
         ?.className,
     ).not.toContain('composerHidden');
     expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+
+    // onComposerCancel overrides controller.cancel() when supplied and stays
+    // suppressed when composerCancelEnabled=false.
+    const onComposerCancel = vi.fn();
+    const cancelSpy = vi.fn(async () => ({
+      admission: 'accepted' as const,
+      outcome: 'unsettled' as const,
+      target: { sessionId: 's1' },
+    }));
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    (captured.editor?.onCancel as (() => void) | undefined)?.();
+    expect(onComposerCancel).toHaveBeenCalledTimes(1);
+    expect(cancelSpy).not.toHaveBeenCalled();
+
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        composerCancelEnabled={false}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    expect(captured.editor?.onCancel).toBeUndefined();
   });
 
   it('does not report a late approval rejection onto a newly selected session after switching away', async () => {

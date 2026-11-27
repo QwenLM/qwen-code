@@ -66,7 +66,6 @@ export interface DaemonChatControllerFromStateOptions {
   readonly pendingQuestions: readonly PendingQuestion[];
   readonly pendingSignature: string;
   readonly transcriptState?: SessionChatController['transcriptState'];
-  readonly statusFacts?: ChatStatusFacts;
   readonly submitPermission?: (
     requestId: string,
     optionId: string,
@@ -118,7 +117,6 @@ function useDaemonChatControllerCore({
   pendingQuestions,
   pendingSignature,
   transcriptState,
-  statusFacts,
   submitPermission: submitPermissionOverride,
 }: DaemonChatControllerFromStateOptions): {
   readonly controller: SessionChatController;
@@ -158,7 +156,7 @@ function useDaemonChatControllerCore({
     historyPaginationError: transcriptHistory.paginationError,
     pendingApprovals,
     pendingQuestions,
-    statusFacts: statusFacts ?? DEFAULT_STATUS_FACTS,
+    statusFacts: DEFAULT_STATUS_FACTS,
     capabilities: capabilitiesFromFeatures(
       connection.capabilities?.features ?? [],
     ),

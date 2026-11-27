@@ -30,9 +30,9 @@ main daemon column in `App.tsx`.
   and `ChatEditor` from `ChatPane.tsx`.
 - Reuse `ChatPane`'s already-mounted daemon context hooks, frame-throttled
   transcript snapshot (`useAnimationFrameTranscriptSnapshot`), message
-  projection (`useMessagesFromBlocks`), history pagination, live status facts
-  (`queueLength`, `goalActive`), and `ExitPlanMode` mode-transition lock without
-  opening duplicate subscriptions or re-projecting messages.
+  projection (`useMessagesFromBlocks`), history pagination, and `ExitPlanMode`
+  mode-transition lock without opening duplicate subscriptions or re-projecting
+  messages.
 - Keep pane chrome (`<header>`, `PaneHeaderActions`, `SessionDetailsTooltip`,
   `connectionError`), `GoalEditDialog`, `ReportedArtifactRegistration`,
   composer status stack (`StreamingStatus`, `ComposerStatusStack`,
@@ -54,50 +54,71 @@ main daemon column in `App.tsx`.
 ## Scope
 
 - **`packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx`:**
-  - Export `useOptionalDaemonPromptSettled(listener)`, identical to
-    `useDaemonPromptSettled` except that it returns silently when mounted
-    outside `DaemonSessionProvider` (supporting shared-state callers whose unit
-    tests mock `@qwen-code/web-shell/daemon-react-sdk` directly).
-- **`packages/web-shell/client/daemon/useDaemonChatController.ts`:**
+  - Export `useOptionalDaemonPromptSettled(listener)`, sharing the same
+    subscription helper as `useDaemonPromptSettled` without the throw guard
+    when mounted outside `DaemonSessionProvider` (supporting shared-state
+    callers whose unit tests mock `@qwen-code/web-shell/daemon-react-sdk`
+    directly).
+- **`packages/web-shell/client/daemon/useDaemonChatController.ts` and
+  `permission-signals.ts`:**
   - Extract the shared binding core (`useDaemonChatControllerFromState`) and
     delegate standalone `useDaemonChatController()` to it with zero contract
     change.
   - `useDaemonChatControllerFromState` accepts caller-owned `connection`,
     `actions`, `transcriptHistory`, `messages`, `pendingApprovals`,
-    `pendingQuestions`, `pendingSignature`, and optional `transcriptState`,
-    `statusFacts`, and `submitPermission` override.
+    `pendingQuestions`, `pendingSignature`, and optional `transcriptState` and
+    `submitPermission` override.
   - Both standalone `useDaemonChatController()` and
     `useDaemonChatControllerFromState()` derive permission currency and decision
-    settlement through the same `derivePermissionSignals` effect, resolve
-    `ExitPlanMode` / `AskUserQuestion` metadata directly from the render-ready
-    `PendingApproval.request` / `PendingQuestion.request`, and forward prompt
-    settlements into `createDaemonChatController`.
+    settlement through the same `derivePermissionSignals` effect (keyed on
+    `[pendingSignature, sessionId]` so session switches sharing a signature
+    still re-seed `prevPendingRef`), resolve `ExitPlanMode` / `AskUserQuestion`
+    metadata directly from the render-ready `PendingApproval.request` /
+    `PendingQuestion.request`, and forward prompt settlements into
+    `createDaemonChatController`.
+  - Remove the now-unused `questionSubmitOptionId` helper from
+    `permission-signals.ts` (and its dead tests).
 - **`packages/web-shell/client/chat-core/ChatSurface.tsx`:**
   - Pass `activeApproval?.request ?? null` (tool approvals only, excluding
     `AskUserQuestion`) to `TranscriptViewport.pendingApproval`, while keeping
     `approvalOverlayActive={cardActive}` covering both approvals and questions.
-  - Add three minimal, backend-neutral host seams actively consumed by
+  - Guard `ToolApproval.onConfirm` error reporting on mounted + owning session.
+  - Add five minimal, backend-neutral host seams actively consumed by
     `ChatPane.tsx` (omitting them preserves all existing defaults):
     - `transcriptRef?: Ref<MessageListHandle>` forwarded to
-      `TranscriptViewport` (and `'ref'` added to `SurfaceOwnedTranscriptKeys`).
+      `TranscriptViewport` (adding `'ref'` to `SurfaceOwnedTranscriptKeys`).
+    - `transcriptProps.isResponding` host override (removing `'isResponding'`
+      from `SurfaceOwnedTranscriptKeys`, falling back to controller-derived
+      `isRunning` when omitted): needed when a pane reopens onto an
+      already-admitted turn or submits through `onComposerSubmit`, where the
+      controller has no non-terminal submit so `deriveChatPhase` returns
+      `'idle'` while `TranscriptViewport` deletion gating and streaming
+      affordances still require the live responding state.
     - `footerClassName?: string` optionally wrapping the bottom stack (decision
       cards, `panels`, admission banner, composer block) in a single styled
       container.
     - `composerEditorVisible?: boolean` (default `true`) hiding `ChatEditor`
       and `composerFooter` while keeping `composerStatus` mounted inside the
       approval-hidden wrapper (used by `ChatPane` when `readOnly` is `true`).
-- **`packages/web-shell/client/components/ChatPane.tsx` and
-  `ChatPane.module.css`:**
+    - `onComposerCancel?: () => void` optional cancel override (paralleling
+      `onComposerSubmit`, still gated by `composerCancelEnabled`), allowing a
+      host whose submit pipeline stays outside the controller to cancel via
+      `actions.cancel()` without recording an unsettleable `failed` cancel
+      operation in `controller.operations`.
+- **`packages/web-shell/client/components/ChatPane.tsx`,
+  `ChatPane.module.css`, and `App.css.test.ts`:**
   - Replace the inline `<TranscriptViewport>`, `<ToolApproval>`,
     `<AskUserQuestion>`, and `<ChatEditor>` blocks with `<ChatSurface>` driven
-    by `useDaemonChatControllerFromState`.
+    by `useDaemonChatControllerFromState`, passing `onComposerCancel` and
+    preserving specific permission-failure / mode-lock causes through the
+    surface error sink without double-reporting.
   - Delete direct value imports of `TranscriptViewport`, `ToolApproval`,
-    `AskUserQuestion`, and `ChatEditor`, delete `handleAskUserConfirm` and
-    `handleCancel`, and remove the now-redundant `.composerHidden` CSS rule from
+    `AskUserQuestion`, and `ChatEditor`, delete `handleAskUserConfirm`, and
+    remove the now-redundant `.composerHidden` CSS rule from
     `ChatPane.module.css`.
   - Scope `.pane .surface` and `.pane .body` in `ChatPane.module.css` so flex
     height and scrolling remain pixel-identical regardless of stylesheet import
-    order.
+    order, and pin both rules in `App.css.test.ts`.
 
 ## Key Design Decisions
 
@@ -113,12 +134,16 @@ main daemon column in `App.tsx`.
      `useDaemonChatController()`'s public contract and strict provider guard
      unchanged.
 2. **Tool-approval-only `pendingApproval` on `TranscriptViewport`.**
-   - `MessageList` uses `pendingApproval` only to keep a compact tool-call group
-     expanded while a tool approval is open; `AskUserQuestion` is not a tool
-     approval, and overlay layout already uses `approvalOverlayActive={cardActive}`.
-     Narrowing `TranscriptViewport.pendingApproval` to
-     `activeApproval?.request ?? null` matches `App.tsx`, `ChatPane.tsx`, and
-     `ManagedSessionsPage.tsx`.
+   - `MessageList` uses `pendingApproval` to keep a compact tool-call group
+     expanded while a tool approval is open, and `DaemonTranscriptViewport`
+     folds `props.pendingApproval !== null` (deliberately not
+     `approvalOverlayActive`, as pinned by `TranscriptViewport.test.tsx`) into
+     `useMessageDeletion`'s blocked guard. `AskUserQuestion` is not a tool
+     approval, and `ManagedSessionsPage` mounts with
+     `sessionViewportEnabled={false}` (where `useMessageDeletion` does not
+     run). Narrowing `ChatSurface`'s `pendingApproval` to
+     `activeApproval?.request ?? null` matches `App.tsx` and `ChatPane` while
+     keeping `approvalOverlayActive={cardActive}` covering both cards.
 3. **Host `ExitPlanMode` handoff lock via `submitPermission` override.**
    - `ChatPane` owns `modeTransitionRef` and `modeControlsBusy` to serialize
      approval-mode switches against `ExitPlanMode` confirmations. Passing a
@@ -133,10 +158,15 @@ main daemon column in `App.tsx`.
      Keeping `composerVisible` for whole-block hiding (used by
      `ManagedSessionsPage`) and adding `composerEditorVisible` (default `true`)
      preserves both hosts cleanly with zero backend branching.
-5. **Keep `ChatPane.handleSubmit` behind `ChatSurface.onComposerSubmit`.**
+5. **Keep `ChatPane.handleSubmit` and `handleCancel` behind
+   `ChatSurface.onComposerSubmit` / `onComposerCancel`.**
    - Pane-local slash commands, `/plan` mode preparation, `/goal` commands,
      mid-turn prompt queueing, and capacity-recovery dialogs remain behind
      `onComposerSubmit` until a dedicated submit-pipeline convergence pass.
+   - Because host-submitted turns do not populate the daemon controller's
+     live-turn queue, `ChatPane` passes `onComposerCancel` so Stop dispatches
+     `actions.cancel()` directly instead of recording an unsettleable `failed`
+     cancel operation on `controller.operations`.
 
 ## Constraints
 
@@ -152,13 +182,20 @@ main daemon column in `App.tsx`.
 ## Validation & Acceptance Criteria
 
 - **Unit & integration tests:**
-  - `ChatPane.test.tsx`, `SplitView.test.tsx`, `SideTaskPanel.test.tsx`,
-    `ChatSurface.test.tsx`, `useDaemonChatController.test.tsx`,
-    `daemon/chat-controller.test.ts`, and `build-artifact.test.ts` all pass.
-  - New regression tests cover `useDaemonChatControllerFromState`, `ChatSurface`
-    new seams (`transcriptRef`, `footerClassName`, `composerEditorVisible`,
-    question-only `pendingApproval === null`), and `ChatPane` `<ChatSurface>`
-    rendering + `AskUserQuestion` submit/dismiss routing.
+  - `App.css.test.ts`, `ChatPane.test.tsx`, `SplitView.test.tsx`,
+    `SideTaskPanel.test.tsx`, `ChatSurface.test.tsx`,
+    `TranscriptViewport.test.tsx`, `DaemonSessionProvider.test.tsx`,
+    `useDaemonChatController.test.tsx`, `daemon/chat-controller.test.ts`,
+    `daemon/permission-signals.test.ts`, and `build-artifact.test.ts` all pass.
+  - New regression tests cover `useOptionalDaemonPromptSettled` (no-provider,
+    provider delivery, listener update), `useDaemonChatControllerFromState`
+    (including same-signature session switch re-seeding), `ChatSurface` new
+    seams (`transcriptRef`, `transcriptProps.isResponding`, `footerClassName`,
+    `composerEditorVisible`, `onComposerCancel`, question-only
+    `pendingApproval === null`, and session-scoped approval error reporting in
+    `ChatSurface.test.tsx`), `App.css.test.ts` `.pane .body` / `.pane .surface`
+    pins, and `ChatPane` `<ChatSurface>` rendering + `AskUserQuestion`
+    submit/dismiss + preserved approval failure diagnostics.
 - **Mutation witnesses:** Reachable new guards and seams verified red under an
   isolated mutation harness.
 - **Static gates:** `tsconfig.lib.json`, `tsconfig.json`,

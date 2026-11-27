@@ -877,7 +877,6 @@ describe('useDaemonChatControllerFromState', () => {
         pendingQuestions,
         pendingSignature,
         transcriptState: 'ready',
-        statusFacts: { queueLength: 2, goalActive: true },
         submitPermission: customSubmitPermission,
       });
       return null;
@@ -886,10 +885,6 @@ describe('useDaemonChatControllerFromState', () => {
     mountReact(<SharedProbe />);
     expect(controller!.sessionId).toBe('s-shared');
     expect(controller!.transcriptState).toBe('ready');
-    expect(controller!.statusFacts).toEqual({
-      queueLength: 2,
-      goalActive: true,
-    });
 
     // Omitting actions.submitPrompt rejects submit() fail-closed.
     const submitRes = await controller!.submit({ text: 'hi' });

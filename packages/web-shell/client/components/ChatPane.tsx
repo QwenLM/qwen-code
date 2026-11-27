@@ -135,7 +135,6 @@ import {
 } from '../session-catalog/session-catalog-hooks';
 import type {
   Admission,
-  ChatStatusFacts,
   PendingApproval,
   PendingQuestion,
 } from '../chat-core/contract';
@@ -1543,11 +1542,43 @@ export function ChatPane({
       .find((block) => matchesPaneUserBlock(block, failedPrompt.block));
   }, [blocks, connection.sessionId, failedPrompt]);
 
+  // Carries the specific host diagnostic across ChatSurface's generic
+  // approval-rejection error sink so transport errors and mode-lock refusals
+  // preserve their cause without double-reporting.
+  const pendingPermissionFailureRef = useRef<{
+    error: unknown;
+    fallback: string;
+  } | null>(null);
+  useEffect(() => {
+    pendingPermissionFailureRef.current = null;
+  }, [connection.sessionId]);
+
+  const handleSurfaceError = useCallback(
+    (error: unknown, fallback: string) => {
+      const pending = pendingPermissionFailureRef.current;
+      if (pending && fallback === t('chat.approvalNotAccepted')) {
+        pendingPermissionFailureRef.current = null;
+        reportError(pending.error, pending.fallback);
+        return;
+      }
+      reportError(error, fallback);
+    },
+    [reportError, t],
+  );
+
   const submitPanePermission = useCallback(
     async (id: string, selectedOption: string): Promise<Admission> => {
+      pendingPermissionFailureRef.current = null;
       const request = pendingToolApprovalRef.current;
-      const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
+      const isToolApproval = request?.id === id;
+      const isPlan = isToolApproval && isExitPlanApprovalRequest(request);
       if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
+        pendingPermissionFailureRef.current = {
+          error: new Error(
+            'Approval mode or plan confirmation is still pending',
+          ),
+          fallback: 'Failed to submit permission choice',
+        };
         return 'rejected';
       }
       const owner = sessionOwnerGuard.capture();
@@ -1587,18 +1618,37 @@ export function ChatPane({
           releaseModeTransition(transition);
         }
         return applied ? 'accepted' : 'rejected';
-      } catch {
+      } catch (error) {
         if (transition) releaseModeTransition(transition);
+        if (owner.isCurrent()) {
+          if (isToolApproval) {
+            pendingPermissionFailureRef.current = {
+              error,
+              fallback: 'Failed to submit permission choice',
+            };
+          } else {
+            reportError(error, 'Failed to submit permission choice');
+          }
+        }
         return 'unknown';
       }
     },
     [
       actions,
+      reportError,
       sessionOwnerGuard,
       releaseModeTransition,
       connection.planExecutionMode,
     ],
   );
+
+  const handleCancel = useCallback(() => {
+    actions
+      .cancel()
+      .catch((error: unknown) =>
+        reportError(error, 'Failed to cancel request'),
+      );
+  }, [actions, reportError]);
 
   const pendingApprovals = useMemo<readonly PendingApproval[]>(
     () =>
@@ -1625,13 +1675,6 @@ export function ChatPane({
     : pendingAskUserApproval
       ? `q:${pendingAskUserApproval.id}`
       : '';
-  const statusFacts = useMemo<ChatStatusFacts>(
-    () => ({
-      queueLength: queuedPrompts.length,
-      goalActive: Boolean(liveGoalSnapshot?.goal),
-    }),
-    [queuedPrompts.length, liveGoalSnapshot?.goal],
-  );
   const surfaceController = useDaemonChatControllerFromState({
     connection,
     actions,
@@ -1641,7 +1684,6 @@ export function ChatPane({
     pendingQuestions,
     pendingSignature,
     transcriptState: connection.loadingTranscript ? 'loading' : 'ready',
-    statusFacts,
     submitPermission: submitPanePermission,
   });
 
@@ -2177,7 +2219,7 @@ export function ChatPane({
                   commands={commands}
                   visibleToolbarActions={paneToolbarActions}
                   atWorkspaceCwd={paneWorkspaceCwd}
-                  onError={reportError}
+                  onError={handleSurfaceError}
                   showBrowserNotifications
                   approvalDisabled={isExitPlanApproval && modeControlsBusy}
                   planExecutionMode={connection.planExecutionMode}
@@ -2347,6 +2389,7 @@ export function ChatPane({
                   }
                   composerEditorVisible={!readOnly}
                   composerRef={editorRef}
+                  onComposerCancel={handleCancel}
                   onComposerSubmit={handleSubmit}
                   composerProps={{
                     sessionId: connection.sessionId,

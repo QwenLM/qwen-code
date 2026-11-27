@@ -144,6 +144,7 @@ export interface ChatSurfaceProps {
   readonly composerRef?: Ref<EditorHandle>;
   readonly composerContainerRef?: Ref<HTMLDivElement>;
   readonly composerCancelEnabled?: boolean;
+  readonly onComposerCancel?: () => void;
   readonly onComposerSubmit?: ChatEditorComponentProps['onSubmit'];
   readonly composerProps?: ChatSurfaceComposerProps;
   // Opt-in flags for host-context integrations (historical turn-navigation /
@@ -212,6 +213,7 @@ export function ChatSurface({
   composerRef,
   composerContainerRef,
   composerCancelEnabled = true,
+  onComposerCancel,
   onComposerSubmit,
   composerProps,
   sessionViewportEnabled = false,
@@ -606,7 +608,11 @@ export function ChatSurface({
                   admissionLocked ||
                   controller.phase === 'submitting'
                 }
-                onCancel={composerCancelEnabled ? handleCancel : undefined}
+                onCancel={
+                  composerCancelEnabled
+                    ? (onComposerCancel ?? handleCancel)
+                    : undefined
+                }
                 onSubmit={onComposerSubmit ?? handleSurfaceSubmit}
               />
               {composerFooter}

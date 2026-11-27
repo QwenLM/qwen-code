@@ -27,8 +27,8 @@ Slice 4）。日期：2026-11-27。
   与 `ChatEditor` 的直接值导入及内联渲染。
 - 直接复用 `ChatPane` 已挂载的 Daemon 上下文 hook、帧节流转录快照
   （`useAnimationFrameTranscriptSnapshot`）、消息投影
-  （`useMessagesFromBlocks`）、历史分页、实时状态事实（`queueLength`、
-  `goalActive`）与 `ExitPlanMode` 模式切换锁，不新增重复订阅或重复消息投影。
+  （`useMessagesFromBlocks`）、历史分页与 `ExitPlanMode` 模式切换锁，不新增重
+  复订阅或重复消息投影。
 - 完整保留窗格 chrome（`<header>`、`PaneHeaderActions`、
   `SessionDetailsTooltip`、`connectionError`）、`GoalEditDialog`、
   `ReportedArtifactRegistration`、编辑器状态区（`StreamingStatus`、
@@ -49,43 +49,60 @@ Slice 4）。日期：2026-11-27。
 ## 范围
 
 - **`packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx`：**
-  - 导出 `useOptionalDaemonPromptSettled(listener)`，行为与
-    `useDaemonPromptSettled` 一致，但在未包裹 `DaemonSessionProvider` 时静默空操作
-    （兼容直接 mock `@qwen-code/web-shell/daemon-react-sdk` 的单测宿主）。
-- **`packages/web-shell/client/daemon/useDaemonChatController.ts`：**
+  - 导出 `useOptionalDaemonPromptSettled(listener)`，与
+    `useDaemonPromptSettled` 共用同一内部订阅 helper，仅省略未包裹
+    `DaemonSessionProvider` 时的 throw 守卫（兼容直接 mock
+    `@qwen-code/web-shell/daemon-react-sdk` 的单测宿主）。
+- **`packages/web-shell/client/daemon/useDaemonChatController.ts` 与
+  `permission-signals.ts`：**
   - 抽取共享绑定核心 `useDaemonChatControllerFromState`，并让独立
     `useDaemonChatController()` 直接委托给该核心，既有公开契约与行为零变化。
   - `useDaemonChatControllerFromState` 接收调用方已持有的 `connection`、
     `actions`、`transcriptHistory`、`messages`、`pendingApprovals`、
-    `pendingQuestions`、`pendingSignature`，以及可选的 `transcriptState`、
-    `statusFacts` 与 `submitPermission` 覆盖回调。
+    `pendingQuestions`、`pendingSignature`，以及可选的 `transcriptState` 与
+    `submitPermission` 覆盖回调。
   - 独立与共享两种绑定统一经由同一 `derivePermissionSignals` 派生权限时效与决策
-    结算，直接从就绪的 `PendingApproval.request` / `PendingQuestion.request` 读取
-    `ExitPlanMode` 与 `AskUserQuestion` 元数据，并将回合结算事件转发给
-    `createDaemonChatController`。
+    结算（依赖 `[pendingSignature, sessionId]`，确保跨会话共享同一签名时仍会重
+    种 `prevPendingRef`），直接从就绪的 `PendingApproval.request` /
+    `PendingQuestion.request` 读取 `ExitPlanMode` 与 `AskUserQuestion` 元数据，
+    并将回合结算事件转发给 `createDaemonChatController`。
+  - 删除 `permission-signals.ts` 中已无生产调用方的 `questionSubmitOptionId`（及
+    其对应死单测）。
 - **`packages/web-shell/client/chat-core/ChatSurface.tsx`：**
   - 透传给 `TranscriptViewport.pendingApproval` 的值收窄为
-    `activeApproval?.request ?? null`（仅工具审批，不含 `AskUserQuestion`），同时
-    保留 `approvalOverlayActive={cardActive}` 覆盖审批与提问两类卡片。
-  - 新增 3 处极小且后端中立、由 `ChatPane.tsx` 实际消费的可选宿主缝隙（省略时保
-    持既有默认行为不变）：
-    - `transcriptRef?: Ref<MessageListHandle>`：转发给 `TranscriptViewport`（同步
-      将 `'ref'` 加入 `SurfaceOwnedTranscriptKeys`）。
+    `activeApproval?.request ?? null`（仅工具审批，不含 `AskUserQuestion`），同
+    时保留 `approvalOverlayActive={cardActive}` 覆盖审批与提问两类卡片。
+  - 为 `ToolApproval.onConfirm` 的错误上报补充挂载态与归属会话守卫。
+  - 新增 5 处极小且后端中立、由 `ChatPane.tsx` 实际消费的可选宿主缝隙（省略时
+    保持既有默认行为不变）：
+    - `transcriptRef?: Ref<MessageListHandle>`：转发给 `TranscriptViewport`（同
+      步将 `'ref'` 加入 `SurfaceOwnedTranscriptKeys`）。
+    - `transcriptProps.isResponding` 宿主覆盖（将 `'isResponding'` 移出
+      `SurfaceOwnedTranscriptKeys`，省略时回退至控制器派生的 `isRunning`）：当
+      窗格重新打开到已接入的运行中回合或经 `onComposerSubmit` 提交时，控制器无
+      非终态提交操作导致 `deriveChatPhase` 返回 `'idle'`，必须靠该覆盖维持
+      `TranscriptViewport` 删除门控与流式提示所需的实时响应态。
     - `footerClassName?: string`：提供时将底部区（决策卡、`panels`、未知准入横
       幅、编辑器区）包裹在单一带类名的容器中。
     - `composerEditorVisible?: boolean`（默认 `true`）：仅隐藏 `ChatEditor` 与
       `composerFooter`，同时将 `composerStatus` 留在随审批隐藏的容器内（供
       `ChatPane` 在 `readOnly` 为 `true` 时使用）。
-- **`packages/web-shell/client/components/ChatPane.tsx` 与
-  `ChatPane.module.css`：**
+    - `onComposerCancel?: () => void` 可选取消覆盖（与 `onComposerSubmit` 对称，
+      仍受 `composerCancelEnabled` 门控），使自有提交管线的宿主直接调用
+      `actions.cancel()`，避免在 `controller.operations` 中记入永不结算的
+      `failed` 取消操作。
+- **`packages/web-shell/client/components/ChatPane.tsx`、
+  `ChatPane.module.css` 与 `App.css.test.ts`：**
   - 用由 `useDaemonChatControllerFromState` 驱动的 `<ChatSurface>` 替换内联的
     `<TranscriptViewport>`、`<ToolApproval>`、`<AskUserQuestion>` 与
-    `<ChatEditor>`。
+    `<ChatEditor>`，传入 `onComposerCancel` 并在错误汇中保留原始审批失败与模式
+    锁诊断原因（单次上报不重复）。
   - 删除对 `TranscriptViewport`、`ToolApproval`、`AskUserQuestion`、`ChatEditor`
-    的直接值导入，删除 `handleAskUserConfirm` 与 `handleCancel`，并移除
-    `ChatPane.module.css` 中不再使用的 `.composerHidden`。
-  - 在 `ChatPane.module.css` 中限定 `.pane .surface` 与 `.pane .body`，确保不论样
-    式导入顺序如何，弹性高度与滚动容器均与改前逐像素一致。
+    的直接值导入，删除 `handleAskUserConfirm`，并移除 `ChatPane.module.css` 中
+    不再使用的 `.composerHidden`。
+  - 在 `ChatPane.module.css` 中限定 `.pane .surface` 与 `.pane .body`，确保不论
+    样式导入顺序如何，弹性高度与滚动容器均与改前逐像素一致，并在
+    `App.css.test.ts` 中固定这两条规则。
 
 ## 关键设计决策
 
@@ -96,10 +113,14 @@ Slice 4）。日期：2026-11-27。
      `useDaemonChatControllerFromState()` 的薄包装，既避免二次消息投影与代码复
      制，又完整保留独立 `useDaemonChatController()` 的公开契约与严格上下文守卫。
 2. **`TranscriptViewport.pendingApproval` 仅透传工具审批。**
-   - `MessageList` 仅用 `pendingApproval` 在工具审批期间保持对应紧凑工具组展开；
-     `AskUserQuestion` 并非工具审批，浮层定位已由 `approvalOverlayActive={cardActive}`
-     负责。将其收窄为 `activeApproval?.request ?? null` 与 `App.tsx`、
-     `ChatPane.tsx` 及 `ManagedSessionsPage.tsx` 保持一致。
+   - `MessageList` 用 `pendingApproval` 在工具审批期间保持对应紧凑工具组展开，
+     `DaemonTranscriptViewport` 也将 `props.pendingApproval !== null` 并入
+     `useMessageDeletion` 阻塞守卫（刻意不含 `approvalOverlayActive`，由
+     `TranscriptViewport.test.tsx` 契约固定）。`AskUserQuestion` 并非工具审
+     批，且 `ManagedSessionsPage` 默认 `sessionViewportEnabled={false}`（根本
+     不执行 `useMessageDeletion`）。将 `ChatSurface` 的 `pendingApproval` 收窄
+     为 `activeApproval?.request ?? null` 与 `App.tsx` 及 `ChatPane` 保持一致，
+     同时保留 `approvalOverlayActive={cardActive}` 覆盖两类卡片。
 3. **通过 `submitPermission` 覆盖回调衔接宿主 `ExitPlanMode` 交接锁。**
    - `ChatPane` 维护 `modeTransitionRef` 与 `modeControlsBusy` 来串行化审批模式切
      换与 `ExitPlanMode` 确认。向 `useDaemonChatControllerFromState` 传入
@@ -111,9 +132,13 @@ Slice 4）。日期：2026-11-27。
      `ComposerStatusStack` 与 `SessionRecoveryBanner`。保留 `composerVisible` 控
      制整块显隐（`ManagedSessionsPage` 使用），新增默认 `true` 的
      `composerEditorVisible`，在不引入后端分支的前提下干净覆盖两类宿主。
-5. **`ChatPane.handleSubmit` 暂留于 `ChatSurface.onComposerSubmit` 之后。**
+5. **`ChatPane.handleSubmit` 与 `handleCancel` 暂留于
+   `ChatSurface.onComposerSubmit` / `onComposerCancel` 之后。**
    - 窗格本地斜杠命令、`/plan` 模式准备、`/goal` 命令、回合中排队与容量恢复对话
      框继续经由 `onComposerSubmit` 承接，待后续专门的提交流程收敛切片再统一。
+   - 因宿主自行提交的回合不进入 Daemon 控制器的活跃队列，`ChatPane` 同步传入
+     `onComposerCancel`，使停止操作直接调用 `actions.cancel()`，不在
+     `controller.operations` 中留下永不结算的 `failed` 取消记录。
 
 ## 约束
 
@@ -128,13 +153,18 @@ Slice 4）。日期：2026-11-27。
 ## 验证与验收标准
 
 - **单测与集成测试：**
-  - `ChatPane.test.tsx`、`SplitView.test.tsx`、`SideTaskPanel.test.tsx`、
-    `ChatSurface.test.tsx`、`useDaemonChatController.test.tsx`、
-    `daemon/chat-controller.test.ts` 与 `build-artifact.test.ts` 全部通过。
-  - 新增回归用例覆盖 `useDaemonChatControllerFromState`、`ChatSurface` 新增缝隙
-    （`transcriptRef`、`footerClassName`、`composerEditorVisible`、仅提问时
-    `pendingApproval === null`）以及 `ChatPane` 通过 `<ChatSurface>` 渲染与
-    `AskUserQuestion` 提交/忽略路由。
+  - `App.css.test.ts`、`ChatPane.test.tsx`、`SplitView.test.tsx`、
+    `SideTaskPanel.test.tsx`、`ChatSurface.test.tsx`、
+    `TranscriptViewport.test.tsx`、`DaemonSessionProvider.test.tsx`、
+    `useDaemonChatController.test.tsx`、`daemon/chat-controller.test.ts`、
+    `daemon/permission-signals.test.ts` 与 `build-artifact.test.ts` 全部通过。
+  - 新增回归用例覆盖 `useOptionalDaemonPromptSettled`（无供应方、供应方投递、
+    监听器切换）、`useDaemonChatControllerFromState`（含跨会话同签名重种）、
+    `ChatSurface` 新增缝隙（`ChatSurface.test.tsx` 固定 `transcriptRef`、
+    `transcriptProps.isResponding`、`footerClassName`、`composerEditorVisible`、
+    `onComposerCancel`、仅提问时 `pendingApproval === null` 及按会话隔离的审批
+    错误上报）、`App.css.test.ts` 的 `.pane .body` / `.pane .surface` 契约以及 `ChatPane`
+    经 `<ChatSurface>` 渲染、`AskUserQuestion` 提交/忽略与审批失败原因保留。
 - **变异见证：** 全部可达新增守卫与缝隙在独立变异装置下验证转红。
 - **静态门禁：** `tsconfig.lib.json`、`tsconfig.json`、
   `eslint --max-warnings=0`、`prettier --check` 与全仓

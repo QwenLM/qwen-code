@@ -4831,4 +4831,88 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     });
     expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
   });
+
+  it('preserves original permission failure and mode-lock causes in onError without double reporting', async () => {
+    const onError = vi.fn();
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-diag',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const modeDeferred = deferred<void>();
+    setApprovalMode.mockReturnValueOnce(modeDeferred.promise);
+    render({ onError });
+
+    // Same-tick mode lock surfaces the specific 'still pending' error once.
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('yolo');
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-diag', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]?.[0] as Error)?.message).toContain(
+      'still pending',
+    );
+    expect(onError.mock.calls[0]?.[1]).toBe(
+      'Failed to submit permission choice',
+    );
+
+    await act(async () => {
+      modeDeferred.resolve(undefined);
+      await Promise.resolve();
+    });
+    onError.mockClear();
+
+    // Transport failure surfaces the original daemon error once.
+    const transportErr = new Error('daemon says: plan mode changed');
+    respondToPermission.mockRejectedValueOnce(transportErr);
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-diag', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      transportErr,
+      'Failed to submit permission choice',
+    );
+
+    // A failed AskUserQuestion dismiss reports once directly and does not leave
+    // stale state that hijacks a subsequent AskUserQuestion onError call.
+    onError.mockClear();
+    pendingPermission = {
+      id: 'ask-diag',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick', options: [{ label: 'One' }] }],
+      },
+    };
+    rerender({ onError });
+    const dismissErr = new Error('dismiss failed');
+    submitPermission.mockRejectedValueOnce(dismissErr);
+    await act(async () => {
+      const ok = await latestAskUserQuestionProps.onConfirm(
+        'ask-diag',
+        'reject-once',
+      );
+      expect(ok).toBe(false);
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      dismissErr,
+      'Failed to submit permission choice',
+    );
+    onError.mockClear();
+    const otherErr = new Error('question validation failed');
+    latestAskUserQuestionProps.onError(otherErr, 'Question fallback');
+    expect(onError).toHaveBeenCalledWith(otherErr, 'Question fallback');
+  });
 });
