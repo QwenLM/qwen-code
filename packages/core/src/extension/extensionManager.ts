@@ -26,7 +26,6 @@ import * as os from 'node:os';
 
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { AGENT_CONTEXT_FILENAME } from '../utils/memory-constants.js';
 import { getExtensionContextFileNames } from './context-files.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
@@ -2074,25 +2073,11 @@ export class ExtensionManager {
               head.extension.commands = commands;
               head.extension.contextFiles = getExtensionContextFileNames(
                 head.extension,
-              ).flatMap((name) => {
-                const file = path.join(effectiveExtensionPath, name);
-                if (!fs.existsSync(file)) return [];
-                if (
-                  name !== AGENT_CONTEXT_FILENAME ||
-                  config.contextFileName?.length
-                ) {
-                  return [file];
-                }
-                try {
-                  const resolved = resolveContainedExistingPath(
-                    effectiveExtensionPath,
-                    file,
-                  );
-                  return fs.statSync(resolved).isFile() ? [file] : [];
-                } catch {
-                  return [];
-                }
-              });
+              )
+                .map((contextFileName) =>
+                  path.join(effectiveExtensionPath, contextFileName),
+                )
+                .filter((contextFilePath) => fs.existsSync(contextFilePath));
             },
           ),
           loadSkillsFromDir(

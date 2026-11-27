@@ -2885,6 +2885,29 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('should use default context files when contextFileName is an empty string', async () => {
+      writeTree(path.join(userExtensionsDir, 'ext-empty-string-context'), {
+        [EXTENSIONS_CONFIG_FILENAME]: {
+          name: 'ext-empty-string-context',
+          version: '1.0.0',
+          contextFileName: '',
+        },
+        'QWEN.md': 'context content',
+        'AGENTS.md': 'agents context',
+      });
+
+      const { extensions } = await ready();
+
+      expect(extensions).toHaveLength(1);
+      const ext = extensions.find(
+        (e) => e.config.name === 'ext-empty-string-context',
+      );
+      expect(ext?.contextFiles).toEqual([
+        path.join(userExtensionsDir, 'ext-empty-string-context', 'QWEN.md'),
+        path.join(userExtensionsDir, 'ext-empty-string-context', 'AGENTS.md'),
+      ]);
+    });
+
     it('should retain the existing default for converted plugins', async () => {
       const dir = addExt({
         name: 'converted',
@@ -2903,25 +2926,24 @@ describe('extension tests', () => {
     });
 
     it.skipIf(process.platform === 'win32')(
-      'should only discover implicit AGENTS.md symlinks within the extension',
+      'should treat implicit AGENTS.md links the same as QWEN.md',
       async () => {
-        const contained = addExt({ name: 'contained' });
-        const escaping = addExt({ name: 'escaping' });
-        writeTree(contained, { 'rules.md': 'context' });
-        fs.symlinkSync('rules.md', path.join(contained, 'AGENTS.md'));
-        fs.symlinkSync(
-          path.join(contained, 'rules.md'),
-          path.join(escaping, 'AGENTS.md'),
-        );
+        const dir = addExt({ name: 'linked' });
+        const outside = path.join(userExtensionsDir, 'outside.md');
+        fs.writeFileSync(outside, 'context');
+        fs.symlinkSync(outside, path.join(dir, 'QWEN.md'));
+        fs.symlinkSync(outside, path.join(dir, 'AGENTS.md'));
+        const dangling = addExt({ name: 'dangling', addContextFile: true });
+        fs.symlinkSync('missing.md', path.join(dangling, 'AGENTS.md'));
 
         const { extensions } = await ready();
 
         expect(
-          extensions.find((e) => e.name === 'contained')?.contextFiles,
-        ).toEqual([path.join(contained, 'AGENTS.md')]);
+          extensions.find((e) => e.name === 'linked')?.contextFiles,
+        ).toEqual([path.join(dir, 'QWEN.md'), path.join(dir, 'AGENTS.md')]);
         expect(
-          extensions.find((e) => e.name === 'escaping')?.contextFiles,
-        ).toEqual([]);
+          extensions.find((e) => e.name === 'dangling')?.contextFiles,
+        ).toEqual([path.join(dangling, 'QWEN.md')]);
       },
     );
 
