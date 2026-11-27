@@ -103,9 +103,11 @@ File names at any depth, because context files load hierarchically:
 `AGENTS.md`, `QWEN.md`, `QWEN.local.md`, `CLAUDE.md`, `package.json`,
 `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `eslint.config.js`,
 `esbuild.config.js`, `vitest.config.ts`, `.npmrc`, `.pnpmfile.mjs`,
-`.mcp.json`. Settings variants follow the repository's own self-modification
+`.mcp.json`, `copilot-instructions.md`, `eslint.legacy-filenames.mjs`,
+`eslint.legacy-core-barrel-imports.mjs`. Settings variants follow the repository's own self-modification
 glob at any depth: `.qwen/settings.json` and `.qwen/settings.<variant>.json`.
-Exact path: `.qwen/output-language.md`.
+Exact paths: `.qwen/output-language.md`, `.qwen/review-rules.md`, and
+`.qwen/review-context.json`.
 
 Paths are derived from the diff, the only path source the workflow supplies.
 Side headers (`---` and `+++`) are recognized only outside hunks, so example
@@ -267,8 +269,15 @@ distinguish an instruction from a filename or symbol mentioned in a code span; a
 instruction-tuned heuristic would be speculative and easy to obfuscate. When an
 inline code span is the only hostile content, no reason code is emitted either: a
 reviewer is not summoned by `ambient_credential:env_dump`. This residual is a
-documented gap, not claimed fixed and not a compensating control; no behavior was
-changed at this head.
+documented gap, not claimed fixed and not a compensating control.
+
+A related, narrower backtick residual is also disclosed: when a closing backtick
+follows a word character, the dump command after it is not anchored. Thus ``Run
+`true` env;``, ``Run `notes.txt` printenv CI_BOT_PAT``, and an unquoted
+``echo`env|cat|...`` can be admitted even though the earlier anchor head held some
+of these shapes. The release exists to keep prose such as `` `modalities.image`
+set; `` out of the gate; the rule does not claim to distinguish that prose from a
+command after a code span.
 
 Two further limits are explicit rather than silently widened. Leading indentation
 is recognized only through 192 columns for the no-list form, 128 columns before
@@ -346,7 +355,7 @@ listed above. These are coverage gaps, not safety claims. Dumps written for anot
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 200 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 215 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

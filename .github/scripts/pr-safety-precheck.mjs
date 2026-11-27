@@ -64,6 +64,9 @@ const PROTECTED_FILE_NAMES = new Set([
   '.npmrc',
   '.pnpmfile.mjs',
   '.mcp.json',
+  'copilot-instructions.md',
+  'eslint.legacy-filenames.mjs',
+  'eslint.legacy-core-barrel-imports.mjs',
 ]);
 // Mirror autoMode's settings variant glob, not just the default filename.
 const PROTECTED_SETTINGS_PATH = /(?:^|\/)\.qwen\/settings(?:\.[^/]+)?\.json$/;
@@ -72,6 +75,8 @@ const PROTECTED_FILE_PATHS = new Set([
   // project's output-language file and appends it through
   // getExtensionContextFilePaths(), so it reaches the system prompt too.
   '.qwen/output-language.md',
+  '.qwen/review-rules.md',
+  '.qwen/review-context.json',
 ]);
 
 // Credentials the runner holds ambiently, reachable without naming a single
@@ -95,15 +100,15 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // signals documented in the design, not acceptance claims of this rule.
   [
     'ambient_credential:env_dump',
-    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))(?!\)\s*=>)|(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$))(?!\)\s*=>))/m,
+    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))(?!\)\s*=>)|(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$))(?!\)\s*=>))/m,
   ],
-  // `.credentials` needs a boundary that admits every spelling of a file read
+  // `.credentials` needs a boundary that admits common spellings of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
   // separator — while refusing property access. The allowed set is enumerated
   // rather than negated: a negated class also admits `?` and `)`, which gated
   // ordinary TypeScript such as `a?.credentials` and `(await
   // client).credentials`. A dot is excluded so `{ ...credentials }` stays
-  // ungated.
+  // ungated. This is not a complete inventory of runner credential files.
   [
     'ambient_credential:credential_file',
     /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
@@ -113,7 +118,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
 // Restores the historical process-substitution regression without restoring a
 // bare-parenthesis anchor that would hold ordinary function calls.
 const CAT_ENV_SUBSTITUTION =
-  /\bcat[ \t]{1,64}[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
+  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
 
 const METADATA_HOSTNAMES = new Set([
   '100.100.100.200',
@@ -141,7 +146,8 @@ function hasCloudMetadataHost(text) {
     /https?:\/\/(?:\[[a-f\d:.]+\](?::\d+)?|[^\s"'`<>\])}]+)[^\s"'`<>\])}]*/gi,
   )) {
     try {
-      if (METADATA_HOSTNAMES.has(normalizedHost(match[0]))) return true;
+      const token = match[0].split(/[|;&,!]+/)[0];
+      if (METADATA_HOSTNAMES.has(normalizedHost(token))) return true;
     } catch {
       // A malformed URL is not a usable metadata host match.
     }
@@ -182,7 +188,7 @@ const PROMPT_INJECTION_PATTERNS = [
     'prompt_injection:ignore_previous',
     /ignore (?:all )?(?:previous|above) instructions/i,
   ],
-  ['prompt_injection:system_prompt', /(?<!session )(?<![-\w])system prompt\b/i],
+  ['prompt_injection:system_prompt', /(?<!main session )\bsystem prompt\b/i],
   ['prompt_injection:developer_message', /\bdeveloper message\b/i],
   [
     'prompt_injection:print_secrets',
