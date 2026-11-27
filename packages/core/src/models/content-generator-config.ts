@@ -44,6 +44,7 @@ import {
   type ReasoningEffort,
 } from '../core/reasoning-effort.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { applyHuggingFaceWireModelDefaults } from './hugging-face-wire-model.js';
 
 const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
@@ -285,13 +286,6 @@ function buildInheritedAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
-  if (
-    !sameProvider ||
-    nextConfig.model !== parentConfig.model ||
-    (authOverrides.baseUrl !== undefined &&
-      authOverrides.baseUrl !== parentConfig.baseUrl)
-  )
-    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -304,24 +298,44 @@ function buildInheritedAgentContentGeneratorConfig(
     ? parentConfig.apiKeyEnvKey
     : undefined;
 
+  const modelChanged = nextConfig.model !== parentConfig.model;
+  const usesHuggingFaceRouter =
+    isHuggingFaceRouterUrl(nextConfig.baseUrl) ||
+    isHuggingFaceRouterUrl(parentConfig.baseUrl);
   const endpointChanged =
-    !sameProvider || nextConfig.baseUrl !== parentConfig.baseUrl;
+    !sameProvider ||
+    (nextConfig.baseUrl !== parentConfig.baseUrl &&
+      (!usesHuggingFaceRouter ||
+        !matchesIsolatedEndpoint(
+          parentConfig,
+          authOverrides.authType as AuthType,
+          nextConfig.baseUrl,
+        )));
+  if (
+    !sameProvider ||
+    modelChanged ||
+    (authOverrides.baseUrl !== undefined && endpointChanged)
+  ) {
+    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
+  }
   const huggingFaceRouteChanged =
-    (endpointChanged || nextConfig.model !== parentConfig.model) &&
-    (isHuggingFaceRouterUrl(nextConfig.baseUrl) ||
-      isHuggingFaceRouterUrl(parentConfig.baseUrl));
+    usesHuggingFaceRouter && (endpointChanged || modelChanged);
   if (endpointChanged || huggingFaceRouteChanged) {
     nextConfig.contextWindowSize = tokenLimit(
       nextConfig.model,
       'input',
       nextConfig.baseUrl,
     );
-  }
-  if (huggingFaceRouteChanged) {
-    nextConfig.modalities = defaultModalities(
-      nextConfig.model,
-      nextConfig.baseUrl,
-    );
+    if (huggingFaceRouteChanged) {
+      nextConfig.modalities = defaultModalities(
+        nextConfig.model,
+        nextConfig.baseUrl,
+      );
+    }
+    applyHuggingFaceWireModelDefaults(nextConfig, nextConfig, {
+      contextWindowSize: true,
+      modalities: huggingFaceRouteChanged,
+    });
   }
 
   return nextConfig;
@@ -518,20 +532,32 @@ function applyResolvedModelConfig(
   }
 
   // Materialize the target's fallback so Config cannot reuse the session window.
-  if (
+  const inferContextWindow =
     resolvedModel.generationConfig.contextWindowSize === undefined &&
     (isolateGenerationConfig ||
       !sameProvider ||
       targetConfig.model !== parentConfig.model ||
       targetConfig.baseUrl !== parentConfig.baseUrl ||
-      differentRowForSameModel)
-  ) {
+      differentRowForSameModel ||
+      targetConfig.nominalModelCapabilities?.contextWindowSize !== undefined);
+  if (inferContextWindow) {
     targetConfig.contextWindowSize = tokenLimit(
       targetConfig.model,
       'input',
       targetConfig.baseUrl,
     );
   }
+  const inferModalities = resolvedModel.modalitiesInferred === true;
+  if (inferModalities && targetConfig.baseUrl !== resolvedModel.baseUrl) {
+    targetConfig.modalities = defaultModalities(
+      targetConfig.model,
+      targetConfig.baseUrl,
+    );
+  }
+  applyHuggingFaceWireModelDefaults(targetConfig, targetConfig, {
+    contextWindowSize: inferContextWindow,
+    modalities: inferModalities,
+  });
 }
 
 /**

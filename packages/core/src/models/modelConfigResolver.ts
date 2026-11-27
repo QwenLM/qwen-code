@@ -50,6 +50,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ModelConfig as ModelProviderConfig } from './types.js';
+import { applyHuggingFaceWireModelDefaults } from './hugging-face-wire-model.js';
 export {
   validateModelConfig,
   type ModelConfigValidationResult,
@@ -465,11 +466,12 @@ function resolveGenerationConfig(
   // unknown models keep `undefined` so downstream `?? DEFAULT_TOKEN_LIMIT`
   // consumers apply the generic default without a misleading
   // 'auto-detected' source label.
-  if (result.contextWindowSize === undefined && modelId) {
+  const inferContextWindow = result.contextWindowSize === undefined;
+  const inferModalities = result.modalities === undefined;
+  if (inferContextWindow && modelId) {
     const knownLimit = knownTokenLimit(modelId, 'input', baseUrl);
     if (knownLimit !== undefined) {
       result.contextWindowSize = knownLimit;
-      sources['contextWindowSize'] = computedSource('auto-detected from model');
     }
   }
 
@@ -485,9 +487,20 @@ function resolveGenerationConfig(
   // on `modalities === undefined` to mean "unresolved" — use the sources map
   // (kind === 'computed' vs 'modelProviders'/'settings') if that distinction
   // matters.
-  if (result.modalities === undefined && modelId) {
+  if (inferModalities && modelId) {
     result.modalities = defaultModalities(modelId, baseUrl);
     sources['modalities'] = computedSource('auto-detected from model');
+  }
+
+  if (modelId) {
+    applyHuggingFaceWireModelDefaults(
+      result,
+      { model: modelId, authType, baseUrl },
+      { contextWindowSize: inferContextWindow, modalities: inferModalities },
+    );
+  }
+  if (inferContextWindow && result.contextWindowSize !== undefined) {
+    sources['contextWindowSize'] = computedSource('auto-detected from model');
   }
 
   return result;

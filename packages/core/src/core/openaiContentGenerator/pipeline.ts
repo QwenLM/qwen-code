@@ -1958,14 +1958,26 @@ export class ContentGenerationPipeline {
     if (hfOutputLimit !== undefined) {
       const limit = Math.min(hfOutputLimit, requestLimit ?? hfOutputLimit);
       const maxTokens = providerRequest.max_tokens;
+      const normalBudget =
+        typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : undefined;
+      const budget = Math.min(limit, normalBudget ?? limit);
+      // An unset alternate can suppress max_tokens when building samplingParams.
+      let removedAlternate = false;
+      for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+        const value = typed[key];
+        if (value !== undefined && !(typeof value === 'number' && value > 0)) {
+          delete typed[key];
+          removedAlternate = true;
+        }
+      }
       if (hasProviderOutputBudgetKey(typed)) {
         delete providerRequest.max_tokens;
-        clampProviderOutputBudgetKeys(
-          typed,
-          Math.min(limit, maxTokens ?? limit),
-        );
-      } else if (typeof maxTokens === 'number' && maxTokens > limit) {
-        providerRequest.max_tokens = limit;
+        clampProviderOutputBudgetKeys(typed, budget);
+      } else if (
+        normalBudget !== undefined ||
+        (removedAlternate && requestLimit !== undefined)
+      ) {
+        providerRequest.max_tokens = budget;
       }
     }
     return providerRequest;
@@ -2368,6 +2380,10 @@ export class ContentGenerationPipeline {
       this.contentGeneratorConfig,
       request.model || this.contentGeneratorConfig.model,
     );
+    const nominalModalities =
+      effectiveModel === this.contentGeneratorConfig.model
+        ? this.contentGeneratorConfig.nominalModelCapabilities?.modalities
+        : undefined;
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming
@@ -2382,7 +2398,8 @@ export class ContentGenerationPipeline {
 
     return {
       model: effectiveModel,
-      modalities: this.contentGeneratorConfig.modalities ?? {},
+      modalities:
+        nominalModalities ?? this.contentGeneratorConfig.modalities ?? {},
       imageDetail: this.contentGeneratorConfig.imageDetail,
       startTime: Date.now(),
       splitToolMedia:

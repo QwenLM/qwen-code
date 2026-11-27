@@ -2595,6 +2595,7 @@ interface ModelPreferenceDefaults {
   key: string;
   reasoning: ContentGeneratorConfig['reasoning'];
   contextWindowSize: number | undefined;
+  nominalContextWindowSize?: number;
   reasoningSource: ContentGeneratorConfigSources['reasoning'];
   contextWindowSource: ContentGeneratorConfigSources['contextWindowSize'];
 }
@@ -7334,6 +7335,8 @@ export class Config {
       key: `${config.authType}/${modelId}${suffix}`,
       reasoning: config.reasoning,
       contextWindowSize: config.contextWindowSize,
+      nominalContextWindowSize:
+        config.nominalModelCapabilities?.contextWindowSize,
       reasoningSource: sources['reasoning'],
       contextWindowSource: sources['contextWindowSize'],
     };
@@ -7355,16 +7358,24 @@ export class Config {
       );
     config.contextWindowSize = defaults.contextWindowSize;
     sources['contextWindowSize'] = defaults.contextWindowSource;
-    if (
+    const hasContextWindowPreference =
       contextWindow !== undefined &&
       Number.isSafeInteger(contextWindow) &&
       contextWindow > 0 &&
-      contextWindow <= contextLimit
-    ) {
+      contextWindow <= contextLimit;
+    if (hasContextWindowPreference) {
       config.contextWindowSize = contextWindow;
       sources['contextWindowSize'] = {
         kind: 'settings',
         settingsPath: 'model.preferences',
+      };
+    }
+    if (config.nominalModelCapabilities) {
+      config.nominalModelCapabilities = {
+        ...config.nominalModelCapabilities,
+        contextWindowSize: hasContextWindowPreference
+          ? undefined
+          : defaults.nominalContextWindowSize,
       };
     }
 

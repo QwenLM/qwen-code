@@ -5,7 +5,7 @@
  */
 
 import type { InputModalities } from './contentGenerator.js';
-import { normalize } from './tokenLimits.js';
+import { getHuggingFaceRoute, normalize } from './tokenLimits.js';
 import { lookupModelCatalog } from '../models/model-catalog.js';
 import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
@@ -155,15 +155,17 @@ export function defaultModalities(
   model: string,
   baseUrl?: string,
 ): InputModalities {
-  const norm = normalize(model, baseUrl);
+  const route = getHuggingFaceRoute(model, baseUrl);
+  const norm = normalize(route?.model ?? model);
   const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
   delete fromCatalog.pdf;
-  for (const [regex, modalities] of MODALITY_PATTERNS) {
-    if (regex.test(norm)) {
-      return { ...fromCatalog, ...modalities };
-    }
+  const family = MODALITY_PATTERNS.find(([regex]) => regex.test(norm))?.[1];
+  const modalities = { ...fromCatalog, ...family };
+  // HF Chat Completions specifies text and image message parts.
+  if (route) {
+    return modalities.image === undefined ? {} : { image: modalities.image };
   }
-  return fromCatalog;
+  return modalities;
 }
 
 /**

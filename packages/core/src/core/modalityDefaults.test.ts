@@ -255,6 +255,20 @@ describe('defaultModalities', () => {
       expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
     });
 
+    it.each([
+      'moonshotai/Kimi-K3:amazon-bedrock',
+      'moonshotai/Kimi-K2.5:fastest',
+    ])('infers image without video on the Hugging Face route %s', (model) => {
+      expect(defaultModalities(model, HF_ROUTER_URL)).toEqual({ image: true });
+    });
+
+    it('keeps the Kimi family defaults for a bare model ID', () => {
+      expect(defaultModalities('moonshotai/Kimi-K3', HF_ROUTER_URL)).toEqual({
+        image: true,
+        video: true,
+      });
+    });
+
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
     });

@@ -172,6 +172,50 @@ describe('modelConfigResolver', () => {
         },
       );
 
+      it.each([
+        [
+          'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
+          'deepseek-ai/DeepSeek-V4.1-Flash:featherless',
+          {},
+          262_144,
+          undefined,
+        ],
+        [
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          'Qwen/Qwen3-Coder-30B-A3B-Instruct',
+          {},
+          262_144,
+          undefined,
+        ],
+        [
+          'zai-org/GLM-5.3-Flash:deepinfra',
+          'Qwen/Qwen3-Coder-30B-A3B-Instruct',
+          { contextWindowSize: 128_000, modalities: { image: true } },
+          128_000,
+          true,
+        ],
+      ])(
+        'uses the Hugging Face wire model %s -> %s for inferred capabilities',
+        (model, wireModel, explicit, window, image) => {
+          const { config } = resolve({
+            env: {
+              OPENAI_BASE_URL: 'https://router.huggingface.co/v1',
+              OPENAI_MODEL: model,
+            },
+            settings: {
+              generationConfig: {
+                extra_body: { model: wireModel },
+                ...explicit,
+              },
+            },
+          });
+
+          expect(config.model).toBe(model);
+          expect(config.contextWindowSize).toBe(window);
+          expect(config.modalities?.image).toBe(image);
+        },
+      );
+
       it('resolves from CLI with highest priority', () => {
         const result = resolve({
           cli: {

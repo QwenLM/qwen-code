@@ -256,20 +256,34 @@ describe('buildAgentContentGeneratorConfig', () => {
         expect(result.modalities).toEqual({});
       });
 
-      it('retains overrides on the same Hugging Face route', () => {
-        const overrides = {
-          ...hfParent,
-          contextWindowSize: 96_000,
-          modalities: { image: false, audio: true },
-        };
+      it.each([undefined, 'https://router.huggingface.co/v1/'])(
+        'retains overrides on the same Hugging Face route with target URL %s',
+        (baseUrl) => {
+          const overrides = {
+            ...hfParent,
+            contextWindowSize: 96_000,
+            modalities: { image: false, audio: true },
+          };
+          const result = buildOver(
+            hfParent.model,
+            { authType: 'openai', baseUrl },
+            overrides,
+          );
+
+          expect(result.contextWindowSize).toBe(overrides.contextWindowSize);
+          expect(result.modalities).toEqual(overrides.modalities);
+        },
+      );
+
+      it('uses the wire override when inferring a different raw Hugging Face route', () => {
         const result = buildOver(
-          hfParent.model,
+          'deepseek-ai/DeepSeek-V4.1-Flash:deepinfra',
           { authType: 'openai' },
-          overrides,
+          { ...hfParent, extra_body: { model: textModel } },
         );
 
-        expect(result.contextWindowSize).toBe(overrides.contextWindowSize);
-        expect(result.modalities).toEqual(overrides.modalities);
+        expect(result.contextWindowSize).toBe(262_144);
+        expect(result.modalities).toEqual({});
       });
 
       it('does not reuse Hugging Face modalities at an overridden endpoint', () => {

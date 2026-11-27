@@ -14,6 +14,7 @@ import type {
 } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import { prepareManagedSideQuery } from './managed-side-query.js';
+import { estimateContentTokens } from '../services/tokenEstimation.js';
 
 function fixture() {
   const events: ManagedSessionEvent[] = [];
@@ -132,6 +133,68 @@ describe('frozen Managed side-query input', () => {
     expect(serialized).toContain('keep answer');
     expect(serialized).not.toMatch(/failed|cancel|unfinished|poison/);
     expect(request?.config?.tools).toBeUndefined();
+  });
+
+  it.each(['main', 'private'] as const)(
+    'fits %s history before sizing the default output for a tight HF route',
+    async (source) => {
+      const f = fixture();
+      const question = 'What did we decide?';
+      const text = 'Use the inventory marker. ' + 'x'.repeat(12_656);
+      if (source === 'main') f.turn('good', 'completed', question, text);
+      const request = await prepareManagedSideQuery(
+        {
+          kind: 'btw',
+          question: 'What is the marker?',
+          privateHistory: source === 'private' ? [{ question, text }] : [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+        },
+      );
+      const contents = request?.contents as Content[];
+      expect(contents).toHaveLength(3);
+      expect(contents[1]?.parts?.[0]?.text).toBe(text);
+      const promptEstimate = estimateContentTokens([
+        {
+          role: 'user',
+          parts: [{ text: String(request?.config?.systemInstruction) }],
+        },
+        ...contents,
+      ]);
+      const maxOutput = request?.config?.maxOutputTokens ?? 0;
+      expect(maxOutput).toBeLessThan(58_982);
+      expect(maxOutput + 2 * promptEstimate + 1_024).toBe(65_536);
+    },
+  );
+
+  it('reserves an explicit hosted output budget before fitting history', async () => {
+    const f = fixture();
+    f.turn('good', 'completed', 'Previous question', 'x'.repeat(12_656));
+    const request = await prepareManagedSideQuery(
+      {
+        kind: 'btw',
+        question: 'Current question',
+        privateHistory: [],
+        throughSequence: f.events.length,
+      },
+      f.events,
+      f.resources,
+      {
+        model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+        baseUrl: 'https://router.huggingface.co/v1',
+        samplingParams: { max_tokens: 58_982 },
+      },
+    );
+
+    expect(request?.contents).toEqual([
+      { role: 'user', parts: [{ text: 'Current question' }] },
+    ]);
+    expect(request?.config?.maxOutputTokens).toBe(58_982);
   });
 
   it('recaps only visible original dialogue and uses the pre-hook display text', async () => {

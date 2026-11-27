@@ -15624,6 +15624,21 @@ describe('LlmChat', async () => {
       },
     );
 
+    it('budgets the output for the Hugging Face model selected by a request override', async () => {
+      const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      mockGeneratorConfig({
+        authType: AuthType.USE_OPENAI,
+        model,
+        baseUrl: 'https://router.huggingface.co/v1',
+        extra_body: { model: 'deepseek-ai/DeepSeek-V4.1-Flash:fastest' },
+      });
+      serveStreams(textStream('done'));
+
+      await drain(await sendOn(model, 'write an essay', 'hf-wire-model'));
+
+      expect(requestAt(0).config?.maxOutputTokens).toBe(32_000);
+    });
+
     it('retries protocol-tag leaks during direct output recovery', async () => {
       vi.useFakeTimers();
       serveStreams(

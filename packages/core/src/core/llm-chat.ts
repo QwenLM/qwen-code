@@ -89,12 +89,13 @@ import type {
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
-import { getSystemPromptModel } from './request-model.js';
+import { getRequestModel, getSystemPromptModel } from './request-model.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
   getHuggingFaceRoute,
+  isHuggingFaceRouterUrl,
   DEFAULT_TOKEN_LIMIT,
   OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
@@ -3810,10 +3811,18 @@ export class LlmChat {
       params.config?.maxOutputTokens ??
       cgConfigForThresholds?.samplingParams?.max_tokens ??
       parsedEnvMaxTokensForClamp;
-    const hfRoute = getHuggingFaceRoute(model, cgConfigForThresholds?.baseUrl);
+    const budgetModel =
+      cgConfigForThresholds &&
+      isHuggingFaceRouterUrl(cgConfigForThresholds.baseUrl)
+        ? getRequestModel(cgConfigForThresholds, model)
+        : model;
+    const hfRoute = getHuggingFaceRoute(
+      budgetModel,
+      cgConfigForThresholds?.baseUrl,
+    );
     const outputCeiling = Math.min(
       explicitOutputCeiling ??
-        defaultOutputCeiling(model, cgConfigForThresholds?.baseUrl),
+        defaultOutputCeiling(budgetModel, cgConfigForThresholds?.baseUrl),
       hfRoute?.limits?.output ?? Infinity,
     );
     // Declared at function level so the MAX_TOKENS escalation path inside
