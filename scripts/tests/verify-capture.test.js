@@ -5,7 +5,14 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -104,6 +111,133 @@ describe('verify-capture helper', () => {
         input: `${ESC}[32mPASS${ESC}[0m 64/64\n`,
       });
       expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+    }));
+
+  it('refuses cwd modules by default when executed from an isolated directory and resolves them only with --allow-cwd-modules', () =>
+    withDir((dir) => {
+      const isolatedDir = path.join(dir, 'trusted-scripts');
+      mkdirSync(isolatedDir, { recursive: true });
+      const isolatedScript = path.join(isolatedDir, 'verify-capture.mjs');
+      copyFileSync(HELPER, isolatedScript);
+
+      const plantedCwd = path.join(dir, 'pr-work');
+      for (const pkg of ['@xterm/headless', 'sharp']) {
+        const pkgDir = path.join(plantedCwd, 'node_modules', pkg);
+        mkdirSync(pkgDir, { recursive: true });
+        writeFileSync(
+          path.join(pkgDir, 'index.js'),
+          `process.stderr.write('FAKE-${pkg.toUpperCase()}-LOADED\\n');\nmodule.exports = {};\n`,
+        );
+      }
+
+      const denied = spawnSync(
+        process.execPath,
+        [isolatedScript, '--out', path.join(dir, 'denied.png'), '--cols', '40'],
+        {
+          cwd: plantedCwd,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(denied.status).toBe(1);
+      expect(denied.stderr).not.toContain('FAKE-@XTERM/HEADLESS-LOADED');
+      expect(denied.stderr).not.toContain('FAKE-SHARP-LOADED');
+      expect(denied.stderr).toContain("Cannot find module '@xterm/headless'");
+
+      // Reach loadDependency('sharp') by providing a resolvable @xterm/headless
+      // stub beside the script: default refusal must block cwd's sharp too.
+      const xtermOnlyDir = path.join(dir, 'trusted-with-xterm');
+      const xtermOnlyScript = path.join(xtermOnlyDir, 'verify-capture.mjs');
+      const xtermStubDir = path.join(
+        xtermOnlyDir,
+        'node_modules',
+        '@xterm',
+        'headless',
+      );
+      mkdirSync(xtermStubDir, { recursive: true });
+      copyFileSync(HELPER, xtermOnlyScript);
+      writeFileSync(
+        path.join(xtermStubDir, 'index.js'),
+        'module.exports = { Terminal: class {} };\n',
+      );
+      const deniedSharp = spawnSync(
+        process.execPath,
+        [
+          xtermOnlyScript,
+          '--out',
+          path.join(dir, 'denied-sharp.png'),
+          '--cols',
+          '40',
+        ],
+        {
+          cwd: plantedCwd,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(deniedSharp.status).toBe(1);
+      expect(deniedSharp.stderr).not.toContain('FAKE-SHARP-LOADED');
+      expect(deniedSharp.stderr).toContain("Cannot find module 'sharp'");
+
+      // A transitive MODULE_NOT_FOUND inside a resolved module beside the
+      // script must not trigger a cwd fallback even with --allow-cwd-modules.
+      writeFileSync(
+        path.join(xtermStubDir, 'index.js'),
+        "require('nonexistent-transitive-dep');\n",
+      );
+      const brokenTransitive = spawnSync(
+        process.execPath,
+        [
+          xtermOnlyScript,
+          '--allow-cwd-modules',
+          '--out',
+          path.join(dir, 'broken.png'),
+          '--cols',
+          '40',
+        ],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(brokenTransitive.status).toBe(1);
+      expect(brokenTransitive.stderr).toContain(
+        "Cannot find module 'nonexistent-transitive-dep'",
+      );
+
+      const deniedRepoCwd = spawnSync(
+        process.execPath,
+        [
+          isolatedScript,
+          '--out',
+          path.join(dir, 'denied2.png'),
+          '--cols',
+          '40',
+        ],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(deniedRepoCwd.status).toBe(1);
+      expect(deniedRepoCwd.stderr).toContain(
+        "Cannot find module '@xterm/headless'",
+      );
+
+      const out = path.join(dir, 'isolated.png');
+      const allowed = spawnSync(
+        process.execPath,
+        [isolatedScript, '--allow-cwd-modules', '--out', out, '--cols', '40'],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          input: `${ESC}[32mPASS${ESC}[0m isolated\n`,
+        },
+      );
+      expect(allowed.status).toBe(0);
       expect(isPng(out)).toBe(true);
     }));
 

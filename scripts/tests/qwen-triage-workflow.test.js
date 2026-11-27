@@ -6851,7 +6851,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'retrying prepare against it and completing at the original round recovers `H` with no release',
     );
-    // R3-2: the restarted round's number becomes this round's number.
+    // R3-2 / R3-7: the restarted round's number becomes this round's number,
+    // and the manual section pins the atomic --restart form with <H>.
+    expect(manualSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <H> --from-round <r> --round <r+1> --repo <owner>/<repo>',
+    );
     expect(manualSlice).toContain(
       "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
     );
@@ -7305,6 +7309,47 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(prompt).toContain(
       'an omitted `--repo` does not disarm it once the state records a repo',
     );
+    // R3-7: pin the persisted watch prompt's atomic --restart form (<headSha>),
+    // stop teardown commands, and migration safeguards.
+    expect(prompt).toContain(
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --restart --head <headSha> --from-round <r> --round <r+1> --repo <owner>/<repo>',
+    );
+    const stopStart = verifySkill.indexOf('On `action: "stop"`');
+    const stopEnd = verifySkill.indexOf("The probe's cursor lives under");
+    expect(stopStart).toBeGreaterThan(-1);
+    expect(stopEnd).toBeGreaterThan(stopStart);
+    const stopSlice = verifySkill
+      .slice(stopStart, stopEnd)
+      .replace(/\s+/g, ' ');
+    expect(stopSlice).toContain('cron_delete');
+    expect(stopSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor',
+    );
+    expect(stopSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release',
+    );
+    expect(stopSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>',
+    );
+
+    const migrateStart = verifySkill.indexOf('To migrate this PR');
+    const migrateEnd = verifySkill.indexOf('The prompt consumes the gate');
+    expect(migrateStart).toBeGreaterThan(-1);
+    expect(migrateEnd).toBeGreaterThan(migrateStart);
+    const migrateSlice = verifySkill
+      .slice(migrateStart, migrateEnd)
+      .replace(/\s+/g, ' ');
+    expect(migrateSlice).toContain('cron_list');
+    expect(migrateSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release --reset-cursor',
+    );
+    expect(migrateSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release',
+    );
+    expect(migrateSlice).toContain(
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <dead head> [--round <r>] --repo <owner>/<repo>',
+    );
+    expect(migrateSlice).toContain('neither verified nor in flight');
     // The manual registration step names the repo-mismatch refusal too,
     // in its own section — not only by reference to the watch prompt.
     const manualStart = verifySkill.indexOf(
