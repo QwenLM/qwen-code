@@ -1019,25 +1019,6 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
           }),
         ]),
       );
-      await expect(
-        client.setSessionConfigOption(
-          second.sessionId,
-          'reasoning_effort',
-          'low',
-          {
-            clientId: second.clientId,
-            persistToSession: true,
-          },
-        ),
-      ).resolves.toMatchObject({
-        persisted: true,
-        configOptions: expect.arrayContaining([
-          expect.objectContaining({
-            id: 'reasoning_effort',
-            currentValue: 'low',
-          }),
-        ]),
-      });
       const readback = await workspace.modelPreferences();
       expect(
         readback.models.find(({ key: modelKey }) => modelKey === key)?.values

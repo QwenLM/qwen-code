@@ -6620,8 +6620,8 @@ describe('createServeApp', () => {
         },
         originatorClientId: 'client-1',
       };
-      expect(primaryPublish).toHaveBeenCalledWith(expectedEvent);
-      expect(secondaryPublish).toHaveBeenCalledWith({
+      expect(primaryPublish).toHaveBeenCalledExactlyOnceWith(expectedEvent);
+      expect(secondaryPublish).toHaveBeenCalledExactlyOnceWith({
         type: 'settings_changed',
         data: expectedEvent.data,
       });

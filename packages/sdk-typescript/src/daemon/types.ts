@@ -4902,13 +4902,6 @@ export interface DaemonModelPreferencesPatch {
   }>;
 }
 
-export interface DaemonReasoningUpdateOptions {
-  /** Write the legacy shared reasoning setting. */
-  persist?: boolean;
-  /** Save the override in the session transcript. */
-  persistToSession?: boolean;
-}
-
 export interface DaemonModelConfigurationUpdateResult {
   updated: true;
   requiresRestart: boolean;

@@ -352,7 +352,6 @@ import {
   copyModelPreferences,
   getModelPreferenceKey,
 } from '@qwen-code/qwen-code-core/models/model-preferences.js';
-import { STARTUP_REASONING_SELECTION_META_KEY } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -387,7 +386,6 @@ import {
   hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
-  PERSIST_SESSION_REASONING_META_KEY,
   parseReasoningSelection,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
@@ -7400,10 +7398,6 @@ class QwenAgent implements Agent {
 
           const persist =
             params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
-          const persistToSession =
-            params._meta?.[PERSIST_SESSION_REASONING_META_KEY] === true ||
-            (params._meta?.[STARTUP_REASONING_SELECTION_META_KEY] === true &&
-              config.getModelPreferenceSnapshot?.() !== undefined);
           const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
             selected !== REASONING_EFFORT_DEFAULT;
@@ -7434,15 +7428,7 @@ class QwenAgent implements Agent {
             if (modelReasoning && !modelReasoning.toggleOnly) {
               clearReasoningRequestOverrides(generation, config);
             }
-            applyReasoningSelection(
-              config,
-              selected,
-              selected === REASONING_EFFORT_DEFAULT &&
-                persistToSession &&
-                generation.reasoning === false
-                ? defaultReasoning || {}
-                : defaultReasoning,
-            );
+            applyReasoningSelection(config, selected, defaultReasoning);
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
               config.setReasoningEffort?.(
                 selected === REASONING_EFFORT_DEFAULT
@@ -7479,21 +7465,12 @@ class QwenAgent implements Agent {
             if (persist) {
               session.persistReasoningSelection(selected);
             }
-            const savedToSession =
-              persistToSession &&
-              (await recordDaemonSessionModelFromConfig(config, {
-                reasoningSelection: selected,
-                required: true,
-              }));
-            if (savedToSession)
-              session.setSessionReasoningSelection(selected, true);
-            else
-              session.setSessionReasoningSelection(
-                persist ? undefined : selected,
-              );
+            session.setSessionReasoningSelection(
+              persist ? undefined : selected,
+            );
             return {
               configOptions,
-              ...(persist || savedToSession
+              ...(persist
                 ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
                 : {}),
             };
@@ -17508,10 +17485,7 @@ class QwenAgent implements Agent {
             ...(useModelPreferences
               ? {
                   restoreModelPreferences: true,
-                  ...(modelPreferences &&
-                  Object.keys(modelPreferences).length > 0
-                    ? { modelPreferences }
-                    : {}),
+                  modelPreferences,
                 }
               : {}),
             ...(workflowAncestorTrustProvider
@@ -18599,14 +18573,6 @@ class QwenAgent implements Agent {
         }
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
-      }
-      if (
-        parseReasoningSelection(
-          config.getSessionRestoreRuntime?.()?.recording?.sessionModel
-            ?.reasoningSelection,
-        ) !== undefined
-      ) {
-        session.reapplySessionReasoningSelection();
       }
       options.beforeSessionPublish?.();
       options.primeSession?.(session);

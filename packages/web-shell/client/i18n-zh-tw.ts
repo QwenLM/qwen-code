@@ -5827,6 +5827,12 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.modelPreferences.save': '儲存設定',
   'settings.modelPreferences.saveFailed': '無法儲存模型偏好',
   'settings.modelPreferences.retry': '重試',
+  'settings.modelPreferences.catalogChanged':
+    '模型清單已變更，請重新載入模型並檢查你的修改。',
+  'settings.modelPreferences.reload': '重新載入模型',
+  'settings.modelPreferences.unavailableModel': (v) =>
+    `${v?.model ?? ''} 已無法使用。請放棄對該模型的修改後繼續。`,
+  'settings.modelPreferences.discardEdits': '放棄修改',
   'settings.models.windowHint':
     '留空根據模型 ID 自動推斷。已有會話需重啟後使用新視窗大小。',
   'settings.models.windowSaved': '已儲存，重啟已有會話後生效。',

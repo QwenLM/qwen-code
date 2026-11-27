@@ -3030,7 +3030,7 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await expect(
         models.getByRole('button', {
-          name: 'Edit context window Managed Test Model',
+          name: 'Provider window limit Managed Test Model',
           exact: true,
         }),
       ).toBeVisible();

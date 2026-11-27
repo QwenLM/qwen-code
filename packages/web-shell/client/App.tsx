@@ -13359,7 +13359,6 @@ export function App({
                 'session_startup_config',
               ),
             reasoningEffort,
-            persistReasoningToSession: modelPreferencesSupported,
             modeId,
             planMode,
             workspaceCwd: targetWorkspaceCwd,
@@ -13525,7 +13524,6 @@ export function App({
     [
       getComposerWorkspaceCwd,
       lockedWorkspaceCwd,
-      modelPreferencesSupported,
       sessionActions,
       sessionCatalogController,
       setPendingSessionContext,
@@ -23154,26 +23152,15 @@ export function App({
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
         return Promise.resolve();
       }
-      const inWorkspace =
-        connectionRef.current.sessionContext?.kind !== 'standalone';
       return sessionActions
-        .setReasoningEffort(
-          value,
-          inWorkspace && modelPreferencesSupported
-            ? { persistToSession: true }
-            : { persist: inWorkspace },
-        )
+        .setReasoningEffort(value, {
+          persist: connectionRef.current.sessionContext?.kind !== 'standalone',
+        })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         );
     },
-    [
-      modelPreferencesSupported,
-      reportError,
-      sessionActions,
-      sessionWriteBlocked,
-      t,
-    ],
+    [reportError, sessionActions, sessionWriteBlocked, t],
   );
 
   const handleWelcomeReasoningEffort = useCallback(

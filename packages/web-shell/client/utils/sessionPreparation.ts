@@ -6,7 +6,6 @@ import {
 import type {
   DaemonSessionClient,
   ReasoningSelection,
-  DaemonReasoningUpdateOptions,
   SessionStartupConfig,
 } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
@@ -47,7 +46,7 @@ type PromptSessionActions = {
   setModel: (modelId: string) => Promise<unknown>;
   setReasoningEffort: (
     value: ReasoningSelection,
-    opts?: DaemonReasoningUpdateOptions,
+    opts?: { persist?: boolean },
   ) => Promise<void>;
 };
 
@@ -68,7 +67,6 @@ export async function createAndAttachSessionForPrompt({
   modelId,
   startupConfig,
   supportsSessionStartupConfig,
-  persistReasoningToSession,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -89,7 +87,6 @@ export async function createAndAttachSessionForPrompt({
   modelId?: string;
   startupConfig?: SessionStartupConfig;
   supportsSessionStartupConfig?: boolean;
-  persistReasoningToSession?: boolean;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -258,9 +255,7 @@ export async function createAndAttachSessionForPrompt({
         await detachedSession.setConfigOption(
           'reasoning_effort',
           reasoningEffort,
-          persistReasoningToSession && sessionContext?.kind !== 'standalone'
-            ? { persistToSession: true }
-            : { persist: sessionContext?.kind !== 'standalone' },
+          { persist: sessionContext?.kind !== 'standalone' },
         );
       }
       return {
@@ -348,12 +343,9 @@ export async function createAndAttachSessionForPrompt({
     }
     if (reasoningEffort && !standaloneStartupConfig) {
       preparationStep = 'set reasoning effort';
-      await sessionActions.setReasoningEffort(
-        reasoningEffort,
-        persistReasoningToSession && sessionContext?.kind !== 'standalone'
-          ? { persistToSession: true }
-          : { persist: sessionContext?.kind !== 'standalone' },
-      );
+      await sessionActions.setReasoningEffort(reasoningEffort, {
+        persist: sessionContext?.kind !== 'standalone',
+      });
     }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);

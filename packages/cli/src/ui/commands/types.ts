@@ -12,7 +12,6 @@ import type {
   GoalStateResponse,
   GoalStateCause,
   Logger,
-  ReasoningEffort,
   SessionListItem,
   ToolArtifact,
 } from '@qwen-code/qwen-code-core';
@@ -133,7 +132,6 @@ export interface CommandContext {
     sessionShellAllowlist: Set<string>;
     /** Reset session metrics and prompt counters for a fresh session. */
     startNewSession?: (sessionId: string) => void;
-    setReasoningEffort?: (effort: ReasoningEffort) => Promise<void>;
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;

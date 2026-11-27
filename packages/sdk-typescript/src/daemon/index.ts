@@ -556,7 +556,6 @@ export type {
   DaemonModelPreferenceSource,
   DaemonModelPreferences,
   DaemonModelPreferencesPatch,
-  DaemonReasoningUpdateOptions,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonModelProviderRuntimeSyncResult,

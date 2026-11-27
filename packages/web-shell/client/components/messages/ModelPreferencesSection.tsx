@@ -5,15 +5,16 @@
  */
 
 import { useCallback, useId, useMemo, useState } from 'react';
-import type {
-  DaemonModelPreference,
-  DaemonModelPreferenceEffort,
-  DaemonModelPreferenceField,
-  DaemonModelPreferenceRow,
-  DaemonModelPreferenceScope,
-  DaemonModelPreferences,
-  DaemonModelPreferencesPatch,
-  DaemonClient,
+import {
+  DaemonHttpError,
+  type DaemonModelPreference,
+  type DaemonModelPreferenceEffort,
+  type DaemonModelPreferenceField,
+  type DaemonModelPreferenceRow,
+  type DaemonModelPreferenceScope,
+  type DaemonModelPreferences,
+  type DaemonModelPreferencesPatch,
+  type DaemonClient,
 } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDaemonWorkspaceEventSignals } from '../../daemon/session/DaemonSessionProvider';
@@ -38,7 +39,7 @@ type DraftRow = {
   enabled?: boolean | null;
   effort?: DaemonModelPreferenceEffort | null;
 };
-type ScopeDraft = Record<string, DraftRow>;
+type ScopeDraft = Record<string, DraftRow & { modelName: string }>;
 
 const FIELDS = {
   enabled: 'reasoning.thinking',
@@ -101,7 +102,7 @@ function ScopedModelPreferencesSection({
     autoLoad: true,
   });
   const signals = useDaemonWorkspaceEventSignals();
-  useWorkspaceEventReload(signals?.settingsVersion, reload, true);
+  useWorkspaceEventReload(signals?.settingsVersion, reload, true, true);
 
   return (
     <ModelPreferencesSection
@@ -145,9 +146,12 @@ export function ModelPreferencesSection({
       >
     >
   >({});
+  const [staleData, setStaleData] = useState<DaemonModelPreferences>();
+  const needsReload = staleData !== undefined && staleData === data;
   const draft = drafts[scope] ?? {};
+  const entries = Object.entries(draft);
   const status = feedback[scope];
-  const dirty = Object.keys(draft).length > 0;
+  const dirty = entries.length > 0;
   const writable = scope === 'user' || data?.workspaceWritable === true;
   const models = (data?.models ?? []).filter(
     (model) =>
@@ -157,11 +161,12 @@ export function ModelPreferencesSection({
       }),
   );
   const byKey = new Map(models.map((model) => [model.key, model]));
+  const unavailable = entries.filter(([key]) => !byKey.has(key));
   const nameCounts = new Map<string, number>();
   for (const { name } of models) {
     nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
   }
-  const valid = Object.entries(draft).every(([key, row]) => {
+  const valid = entries.every(([key, row]) => {
     const model = byKey.get(key);
     return (
       model &&
@@ -169,18 +174,35 @@ export function ModelPreferencesSection({
         isValidContextWindow(row.contextWindow, model.contextLimit))
     );
   });
+  const canSave =
+    dirty && valid && writable && !status?.saving && !loading && !needsReload;
   const setStatus = (next: typeof status) =>
     setFeedback((previous) => ({ ...previous, [scope]: next }));
   const clearDraft = () =>
     setDrafts((previous) => ({ ...previous, [scope]: undefined }));
-  const edit = (key: string, value: DraftRow) => {
+  const edit = (
+    { key, name, provider, authType }: DaemonModelPreferenceRow,
+    value: DraftRow,
+  ) => {
     setDrafts((previous) => ({
       ...previous,
       [scope]: {
         ...previous[scope],
-        [key]: { ...previous[scope]?.[key], ...value },
+        [key]: {
+          ...previous[scope]?.[key],
+          ...value,
+          modelName: `${name} (${provider ?? authType})`,
+        },
       },
     }));
+    setStatus(undefined);
+  };
+  const discardUnavailable = (key: string) => {
+    setDrafts((previous) => {
+      const remaining = { ...previous[scope] };
+      delete remaining[key];
+      return { ...previous, [scope]: remaining };
+    });
     setStatus(undefined);
   };
   const save = async () => {
@@ -188,29 +210,32 @@ export function ModelPreferencesSection({
     try {
       await onSave({
         scope,
-        changes: Object.entries(draft).map(
-          ([key, { contextWindow, enabled, effort }]) => ({
-            key,
-            ...(contextWindow !== undefined
-              ? {
-                  contextWindow:
-                    contextWindow === null ? null : Number(contextWindow),
-                }
-              : {}),
-            ...(enabled !== undefined || effort !== undefined
-              ? {
-                  reasoning: {
-                    ...(enabled !== undefined ? { enabled } : {}),
-                    ...(effort !== undefined ? { effort } : {}),
-                  },
-                }
-              : {}),
-          }),
-        ),
+        changes: entries.map(([key, { contextWindow, enabled, effort }]) => ({
+          key,
+          ...(contextWindow !== undefined
+            ? {
+                contextWindow:
+                  contextWindow === null ? null : Number(contextWindow),
+              }
+            : {}),
+          ...(enabled !== undefined || effort !== undefined
+            ? {
+                reasoning: {
+                  ...(enabled !== undefined ? { enabled } : {}),
+                  ...(effort !== undefined ? { effort } : {}),
+                },
+              }
+            : {}),
+        })),
       });
       clearDraft();
       setStatus({ saved: true });
     } catch (cause) {
+      if (cause instanceof DaemonHttpError && cause.status === 409) {
+        setStaleData(data);
+        setStatus(undefined);
+        return;
+      }
       setStatus({
         error:
           cause instanceof Error
@@ -225,13 +250,15 @@ export function ModelPreferencesSection({
       className={styles.panel}
       onSubmit={(event) => {
         event.preventDefault();
-        if (dirty && valid && writable && !status?.saving) void save();
+        if (canSave) void save();
       }}
     >
       <h3 className={styles.title}>{t('settings.modelPreferences.title')}</h3>
-      {error && (
-        <div className={styles.error} role="alert">
-          {error.message}
+      {(error || needsReload) && (
+        <div className={styles.error}>
+          <span role="alert">
+            {error?.message ?? t('settings.modelPreferences.catalogChanged')}
+          </span>
           <Button
             type="button"
             size="sm"
@@ -239,7 +266,11 @@ export function ModelPreferencesSection({
             onClick={onReload}
             disabled={loading}
           >
-            {t('settings.modelPreferences.retry')}
+            {t(
+              needsReload
+                ? 'settings.modelPreferences.reload'
+                : 'settings.modelPreferences.retry',
+            )}
           </Button>
         </div>
       )}
@@ -267,12 +298,31 @@ export function ModelPreferencesSection({
                 scope={scope}
                 draft={draft[model.key] ?? {}}
                 readOnly={!writable || status?.saving === true}
-                onEdit={(value) => edit(model.key, value)}
+                onEdit={(value) => edit(model, value)}
               />
             ))}
           </tbody>
         </table>
       )}
+      {unavailable.map(([key, { modelName }]) => (
+        <div key={key} className={styles.error}>
+          <span role="alert">
+            {t('settings.modelPreferences.unavailableModel', {
+              model: modelName,
+            })}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-label={`${t('settings.modelPreferences.discardEdits')} · ${modelName}`}
+            disabled={status?.saving}
+            onClick={() => discardUnavailable(key)}
+          >
+            {t('settings.modelPreferences.discardEdits')}
+          </Button>
+        </div>
+      ))}
       {status?.error && (
         <p className={styles.error} role="alert">
           {status.error}
@@ -295,11 +345,7 @@ export function ModelPreferencesSection({
             >
               {t('settings.models.cancel')}
             </Button>
-            <Button
-              type="submit"
-              size="sm"
-              disabled={!dirty || !valid || !writable || status?.saving}
-            >
+            <Button type="submit" size="sm" disabled={!canSave}>
               {t('settings.modelPreferences.save')}
             </Button>
           </div>

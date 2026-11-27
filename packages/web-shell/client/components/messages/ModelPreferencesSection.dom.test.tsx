@@ -2,9 +2,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type {
-  DaemonModelPreferenceRow,
-  DaemonModelPreferenceScope,
+import {
+  DaemonHttpError,
+  type DaemonModelPreferenceRow,
+  type DaemonModelPreferenceScope,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { ModelPreferencesSection } from './ModelPreferencesSection';
@@ -62,7 +63,11 @@ const chat: DaemonModelPreferenceRow = {
   },
 };
 
-function render(models = [chat], save = vi.fn().mockResolvedValue(undefined)) {
+function render(
+  models = [chat],
+  save = vi.fn().mockResolvedValue(undefined),
+  reload = vi.fn(),
+) {
   const container = document.createElement('div');
   document.body.append(container);
   const root: Root = createRoot(container);
@@ -70,18 +75,25 @@ function render(models = [chat], save = vi.fn().mockResolvedValue(undefined)) {
     act(() => root.unmount());
     container.remove();
   });
-  const scope = (value: DaemonModelPreferenceScope) =>
+  let data = { workspaceWritable: true, models };
+  const scope = (
+    value: DaemonModelPreferenceScope,
+    nextModels?: DaemonModelPreferenceRow[],
+  ) => {
+    if (nextModels) data = { ...data, models: nextModels };
     act(() =>
       root.render(
         <I18nProvider language="en">
           <ModelPreferencesSection
             scope={value}
-            data={{ workspaceWritable: true, models }}
+            data={data}
+            onReload={reload}
             onSave={save}
           />
         </I18nProvider>,
       ),
     );
+  };
   scope('workspace');
   const find = <T extends HTMLElement>(label: string) => {
     const result = container.querySelector<T>(`[aria-label="${label}"]`);
@@ -96,7 +108,7 @@ function render(models = [chat], save = vi.fn().mockResolvedValue(undefined)) {
     return result;
   };
   const windowInput = () => find<HTMLInputElement>('Chat · Context window');
-  return { container, scope, find, button, save, windowInput };
+  return { container, scope, find, button, save, reload, windowInput };
 }
 
 function input(target: HTMLInputElement, value: string) {
@@ -165,6 +177,67 @@ describe('ModelPreferencesSection', () => {
     expect(view.save).toHaveBeenLastCalledWith({
       scope: 'workspace',
       changes: [{ key: chat.key, contextWindow: null }],
+    });
+  });
+
+  it('reloads the catalog after a save conflict and keeps the draft for retry', async () => {
+    const view = render(
+      [chat],
+      vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            409,
+            { code: 'invalid_model_preferences' },
+            'Model catalog changed. Reload settings and retry.',
+          ),
+        )
+        .mockResolvedValue(undefined),
+    );
+    input(view.windowInput(), '160000');
+    await act(async () => view.button('Save settings').click());
+
+    expect(
+      view.container.querySelector('[role="alert"]')?.textContent ?? '',
+    ).toMatch(/model catalog changed\./i);
+    expect(view.button('Reload models').disabled).toBe(false);
+    expect(view.button('Save settings').disabled).toBe(true);
+    act(() => view.button('Reload models').click());
+    expect(view.reload).toHaveBeenCalledOnce();
+
+    view.scope('workspace', [chat]);
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    expect(view.windowInput().value).toBe('160000');
+    await act(async () => view.button('Save settings').click());
+    expect(view.save).toHaveBeenCalledTimes(2);
+    expect(view.save).toHaveBeenLastCalledWith({
+      scope: 'workspace',
+      changes: [{ key: chat.key, contextWindow: 160_000 }],
+    });
+  });
+
+  it('lets users discard an unavailable model edit and save the remaining draft', async () => {
+    const removed = { ...chat, key: 'openai/removed', name: 'Removed model' };
+    const view = render([chat, removed]);
+    input(view.windowInput(), '160000');
+    input(
+      view.find<HTMLInputElement>('Removed model · Context window'),
+      '90000',
+    );
+
+    view.scope('workspace', [chat]);
+    expect(
+      view.container.querySelector('[role="alert"]')?.textContent ?? '',
+    ).toContain('Removed model (primary.test) is no longer available.');
+    expect(view.button('Save settings').disabled).toBe(true);
+    act(() => view.button('Discard edits').click());
+
+    expect(view.windowInput().value).toBe('160000');
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => view.button('Save settings').click());
+    expect(view.save).toHaveBeenCalledExactlyOnceWith({
+      scope: 'workspace',
+      changes: [{ key: chat.key, contextWindow: 160_000 }],
     });
   });
 

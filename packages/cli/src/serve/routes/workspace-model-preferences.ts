@@ -5,17 +5,22 @@
  */
 
 import type { Application, RequestHandler } from 'express';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { normalizeReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import {
   readModelPreference,
   type ModelPreference,
 } from '@qwen-code/qwen-code-core/models/model-preferences.js';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import {
   readSettingsSnapshot,
   SettingScope,
   type LoadedSettings,
 } from '../../config/settings.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  sanitizeDaemonLogLine,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import type {
   WorkspaceRegistry,
@@ -297,6 +302,7 @@ export function registerWorkspaceModelPreferencesRoutes(
       workspace: string,
       writes: WorkspaceSettingsWrites,
       assertOpen?: () => void,
+      snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
     ) => Promise<void>;
     broadcast: (
       runtime: WorkspaceRuntime,
@@ -333,16 +339,11 @@ export function registerWorkspaceModelPreferencesRoutes(
 
         const requireOpen = () => runtime.generationGuard?.assertOpen();
         const { workspaceCwd } = runtime;
-        const env = deps.getEnv(runtime);
-        const load = () =>
-          readSettingsSnapshot(workspaceCwd, {
-            environment: env,
-            workspaceTrusted: true,
-          });
-        const catalog = (settings: LoadedSettings) =>
-          listWorkspacePreferenceModels(workspaceCwd, settings, env);
         try {
           requireOpen();
+          const env = deps.getEnv(runtime);
+          const catalog = (settings: LoadedSettings) =>
+            listWorkspacePreferenceModels(workspaceCwd, settings, env);
           if (method === 'PATCH') {
             const clientId = parseAndValidateWorkspaceClientId(
               req,
@@ -372,7 +373,7 @@ export function registerWorkspaceModelPreferencesRoutes(
                 const target =
                   scope === 'user' ? SettingScope.User : SettingScope.Workspace;
                 const models = new Map(
-                  catalog(load()).map((model) => [model.key, model]),
+                  catalog(settings).map((model) => [model.key, model]),
                 );
                 const next: Record<string, ModelPreference | undefined> = {
                   ...settings.forScope(target).originalSettings.model
@@ -403,12 +404,16 @@ export function registerWorkspaceModelPreferencesRoutes(
                 ];
               },
               requireOpen,
+              env,
             );
             requireOpen();
             deps.broadcast(runtime, scope, clientId);
           }
 
-          const settings = load();
+          const settings = readSettingsSnapshot(workspaceCwd, {
+            environment: env,
+            workspaceTrusted: true,
+          });
           res.json({
             workspaceWritable: settings.workspaceSettingsActive,
             models: catalog(settings).map((model) =>
@@ -424,8 +429,20 @@ export function registerWorkspaceModelPreferencesRoutes(
             });
             return;
           }
-          writeStderrLine(`qwen serve: ${method} ${route} failed`);
-          res.status(500).json({ error: 'Unable to update model preferences' });
+          const detail = sanitizeDaemonLogLine(
+            redactLogCredentials(
+              stripAnsiAndControl(
+                error instanceof Error ? error.message : String(error),
+              ),
+            ),
+          ).slice(0, 500);
+          writeStderrLine(`qwen serve: ${method} ${route} failed: ${detail}`);
+          res.status(500).json({
+            error:
+              method === 'GET'
+                ? 'Unable to load model preferences'
+                : 'Unable to update model preferences',
+          });
         }
       };
     app.get(route, handle('GET'));

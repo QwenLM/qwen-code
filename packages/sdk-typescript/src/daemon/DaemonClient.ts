@@ -322,7 +322,6 @@ import type {
   DaemonModelConfiguration,
   DaemonModelPreferences,
   DaemonModelPreferencesPatch,
-  DaemonReasoningUpdateOptions,
   DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
@@ -7434,9 +7433,7 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
-    clientOrOptions?:
-      | string
-      | (DaemonReasoningUpdateOptions & { clientId?: string }),
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult>;
   setSessionConfigOption(
     sessionId: string,
@@ -7448,9 +7445,7 @@ export class DaemonClient {
     sessionId: string,
     configId: 'reasoning_effort' | 'workflow_mode',
     value: ReasoningSelection | 'on' | 'off',
-    clientOrOptions?:
-      | string
-      | (DaemonReasoningUpdateOptions & { clientId?: string }),
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
@@ -7458,9 +7453,7 @@ export class DaemonClient {
         : clientOrOptions;
     if (
       configId === 'workflow_mode' &&
-      ((value !== 'on' && value !== 'off') ||
-        options?.persist !== undefined ||
-        options?.persistToSession !== undefined)
+      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
     ) {
       throw new Error(
         'Workflow mode requires on/off and does not accept persist',
@@ -7477,12 +7470,8 @@ export class DaemonClient {
           ...(options?.persist !== undefined
             ? { persist: options.persist }
             : {}),
-          ...(options?.persistToSession !== undefined
-            ? { persistToSession: options.persistToSession }
-            : {}),
         },
         clientId: options?.clientId,
-        ...(options?.persistToSession !== undefined ? { mode: 'rest' } : {}),
       },
     );
     // ACP returns configOptions only; a successful Workflow mode write has

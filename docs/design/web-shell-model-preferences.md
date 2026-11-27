@@ -29,11 +29,12 @@ writes `model.preferences` in that scope. The daemon owns the route key from
 auth type, model ID, and effective endpoint. The new `reasoning.enabled`
 field is optional alongside `reasoning.effort` and `contextWindow`.
 
-New local daemon tasks capture the effective preferences at creation. The
-session's record carries the snapshot through route switches and restoration.
-Older recordings can keep their existing fallback. The existing Web Shell
-reasoning control stores an override with the session, where it takes precedence
-over the captured defaults. A session-level context editor is a follow-up.
+New recorded local daemon tasks capture the effective preferences at creation,
+including when the preference map is empty. The task keeps that snapshot through
+model switches and restoration. New task creation surfaces an error if the
+daemon cannot save the snapshot. Older recordings without a snapshot use the
+existing fallback. Chat reasoning controls, `/effort`, and a session-level
+context editor are follow-ups.
 
 Native Web Shell exposes the table on daemons that advertise support. An
 embedding host can set `modelManagement.allowPreferences` after its initialization
@@ -42,11 +43,12 @@ use the same daemon API.
 
 ## Verification
 
-Create A with a 200K window, save 128K, and create B. Check both effective
-windows across prompts, model switches, and a daemon restart. Change thinking
-inside A, and check B and a later C against the saved defaults. Cover field
-inheritance, distinct endpoints for the same ID, force-on and toggle-only model
-capabilities, and a rejected batch that leaves settings intact.
+With an empty preference map, create A at 200K with low effort. Save 128K and
+high effort while A is responding, then create B. Check both tasks through
+prompts, model switches, and a daemon restart. Cover field inheritance while
+other preferences are present, effective endpoints including a proxy, force-on
+and toggle-only model capabilities, and a rejected batch that leaves settings
+intact.
 
 In a browser, check token entry and the displayed limit on desktop and on a
 narrow touch viewport. Verify that out-of-range values stay in the field and

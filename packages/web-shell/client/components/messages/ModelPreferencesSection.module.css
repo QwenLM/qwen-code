@@ -172,6 +172,13 @@
   overflow-wrap: anywhere;
 }
 
+.panel > div.error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+}
+
 .footer {
   display: flex;
   flex-wrap: wrap;

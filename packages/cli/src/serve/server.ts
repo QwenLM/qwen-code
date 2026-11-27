@@ -758,6 +758,7 @@ export interface ServeAppDeps {
     workspace: string,
     writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
+    snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
@@ -3500,6 +3501,7 @@ export function createServeApp(
     for (const runtime of workspaceRegistry.listAll()) {
       if (
         runtime.bridge === origin ||
+        (!originRuntime && runtime.primary) ||
         (originRuntime && isInternalWorkspaceRuntime(runtime))
       )
         continue;

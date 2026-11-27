@@ -8889,6 +8889,32 @@ describe('Server Config (config.ts)', () => {
     expect(config.getReasoningEffort()).toBe('high');
     expect(config.getContentGeneratorConfig().contextWindowSize).toBe(128_000);
 
+    const restoreBase = { reasoning: undefined };
+    const task = makeConfig({
+      ...params,
+      modelPreferences: preferences,
+      modelPreferenceRestoreBase: restoreBase,
+    });
+    const recorded = task.getModelPreferenceSnapshot()!;
+    const restoredTask = makeConfig({
+      ...params,
+      modelPreferenceRestoreBase: restoreBase,
+      modelPreferenceDefaultEffort: 'none',
+    });
+    expect(restoredTask.getModelPreferenceSnapshot()).toBeUndefined();
+    restoredTask.restoreModelPreferenceSnapshot(recorded);
+    await restoredTask.refreshAuth(authType);
+    expect(restoredTask.getReasoningEffort()).toBe('high');
+    expect(restoredTask.getContentGeneratorConfig().contextWindowSize).toBe(
+      128_000,
+    );
+    expect(restoredTask.getModelPreferenceKey()).toBeUndefined();
+    await restoredTask.switchModel(authType, model, { baseUrl: second });
+    expect(restoredTask.getReasoningEffort()).toBe('medium');
+    expect(restoredTask.getContentGeneratorConfig().contextWindowSize).toBe(
+      256_000,
+    );
+
     const restarted = makeConfig({ ...params, modelPreferences: preferences });
     await restarted.refreshAuth(authType);
     expect(restarted.getReasoningEffort()).toBe('high');

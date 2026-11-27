@@ -19,6 +19,7 @@ import type {
   AuthType,
   ContentGeneratorConfig,
 } from '@qwen-code/qwen-code-core';
+import { resolveModelConfig } from '@qwen-code/qwen-code-core/models/modelConfigResolver.js';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -121,11 +122,7 @@ export function listWorkspacePreferenceModels(
         generation.model,
         generation.baseUrl,
       );
-      const existing = models.get(key);
-      if (existing) {
-        existing.isCurrent ||= isCurrent;
-        return;
-      }
+      if (models.has(key) && !isCurrent) return;
       const capabilities = resolveReasoningForModel(undefined, generation);
       const preview = (
         fallback?: string,
@@ -212,7 +209,14 @@ export function listWorkspacePreferenceModels(
       });
     },
   );
-  if (!status.initialized) throw new Error('Unable to resolve model catalog');
+  if (!status.initialized) {
+    const detail = status.errors?.[0]?.error;
+    throw new Error(
+      detail
+        ? `Unable to resolve model catalog: ${detail}`
+        : 'Unable to resolve model catalog',
+    );
+  }
   const rows = [...models.values()];
   const counts = new Map<string, number>();
   const label = (model: WorkspacePreferenceModel) =>
@@ -283,6 +287,7 @@ function buildWorkspaceProvidersStatus(
       providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
+      initialRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     });
     const currentAuth = resolvedCliConfig.authType;
     let currentModelId = (
@@ -309,14 +314,15 @@ function buildWorkspaceProvidersStatus(
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
-    const currentRegistryBaseUrl = usedFallback
-      ? modelsConfig.getCurrentRegistryBaseUrl()
-      : modelCameFromSettings && currentAuth
-        ? settings.model?.baseUrl !== undefined
-          ? settings.model.baseUrl || null
-          : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
-              ?.registryBaseUrl ?? null)
-        : undefined;
+    const currentRegistryBaseUrl =
+      collectPreferenceModel || usedFallback
+        ? modelsConfig.getCurrentRegistryBaseUrl()
+        : modelCameFromSettings && currentAuth
+          ? settings.model?.baseUrl !== undefined
+            ? settings.model.baseUrl || null
+            : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
+                ?.registryBaseUrl ?? null)
+          : undefined;
     const models = modelsConfig.getAllConfiguredModels();
     const modelOptions = buildAcpModelOptions(models);
     const reasoningSnapshot = captureReasoningSnapshot(models);
@@ -372,13 +378,23 @@ function buildWorkspaceProvidersStatus(
       };
       const opaqueRoute = modelId.startsWith(ACP_ROUTE_ID_PREFIX);
       if (collectPreferenceModel) {
-        if (!model.visionOnly)
+        if (!model.visionOnly) {
+          const baseUrl =
+            model.registryBaseUrl ??
+            resolveModelConfig({
+              authType: model.authType,
+              cli: { baseUrl: argv.openaiBaseUrl },
+              settings: { baseUrl: settings.security?.auth?.baseUrl },
+              env,
+            }).config.baseUrl ??
+            generation.baseUrl;
           collectPreferenceModel(
-            generation,
+            { ...generation, baseUrl },
             model.label,
             isCurrent,
             opaqueRoute,
           );
+        }
         continue;
       }
       const preference = getModelPreferenceKey(
@@ -428,30 +444,24 @@ function buildWorkspaceProvidersStatus(
       if (isCurrent) provider.current = true;
     }
 
-    if (collectPreferenceModel && currentAuth && currentModelId) {
-      const generation = modelsConfig.getGenerationConfig();
-      const endpoint = currentBaseUrl ?? generation.baseUrl;
-      const currentOption = modelOptions.find(
-        ({ modelId }) => modelId === currentAcpModelId,
+    if (
+      collectPreferenceModel &&
+      currentAuth &&
+      currentModelId &&
+      currentRegistryBaseUrl === undefined
+    ) {
+      collectPreferenceModel(
+        {
+          ...modelsConfig.getGenerationConfig(),
+          authType: currentAuth,
+          model: currentModelId,
+          reasoningSnapshot,
+          reasoningRouteBaseUrl: null,
+        },
+        currentModelId,
+        true,
+        false,
       );
-      const matchesRegisteredRoute =
-        currentOption &&
-        (!endpoint || endpoint === currentOption.model.baseUrl);
-      if (!matchesRegisteredRoute && !currentOption?.model.visionOnly) {
-        collectPreferenceModel(
-          {
-            ...generation,
-            authType: currentAuth,
-            model: currentModelId,
-            baseUrl: endpoint,
-            reasoningSnapshot,
-            reasoningRouteBaseUrl: currentRegistryBaseUrl ?? null,
-          },
-          currentOption?.model.label ?? currentModelId,
-          true,
-          false,
-        );
-      }
     }
 
     const current = buildCurrent(

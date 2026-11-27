@@ -7283,7 +7283,11 @@ export class Config {
   }
 
   getModelPreferenceKey(): string | undefined {
-    return this.modelPreferenceDefaults?.key;
+    // Preference commands can write live settings for the CLI. A daemon task
+    // keeps its creation-time settings and follows the legacy command path.
+    return this.modelPreferenceRestoreBase
+      ? undefined
+      : this.modelPreferenceDefaults?.key;
   }
 
   getModelPreferenceSnapshot(): ModelPreferenceSnapshot | undefined {

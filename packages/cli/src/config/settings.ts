@@ -928,7 +928,12 @@ export class LoadedSettings {
       const scope = scopeList[i]!;
       try {
         assertCanCommit?.();
-        saveSettings(this.forScope(scope), undefined, undefined, {
+        const replacePath = writes.some(
+          (write) => write.scope === scope && write.key === 'model.preferences',
+        )
+          ? ['model', 'preferences']
+          : undefined;
+        saveSettings(this.forScope(scope), undefined, replacePath, {
           throwOnWriteFailure: true,
         });
       } catch (err) {

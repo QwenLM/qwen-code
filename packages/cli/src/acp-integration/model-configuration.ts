@@ -124,8 +124,6 @@ export const PERSIST_REASONING_SELECTION_META_KEY =
   'qwenCode/persistReasoningSelection';
 export const REASONING_SELECTION_PERSISTED_META_KEY =
   'qwenCode/reasoningSelectionPersisted';
-export const PERSIST_SESSION_REASONING_META_KEY =
-  'qwenCode/persistSessionReasoning';
 
 export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   low: 'Low',
