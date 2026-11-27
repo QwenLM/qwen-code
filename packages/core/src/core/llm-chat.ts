@@ -90,7 +90,6 @@ import type {
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { getRequestModel, getSystemPromptModel } from './request-model.js';
-import { convertLlmToolsToOpenAI } from './openaiContentGenerator/converter.js';
 import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -167,6 +166,7 @@ import {
   CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
   estimateDenseTextTokens,
+  estimateDenseTextTokensWithScriptAllowance,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
@@ -1063,11 +1063,9 @@ function estimateHuggingFaceFallbackTextTokens(text: string): number {
 
 function estimateHuggingFaceUnpaddedTextTokens(text: string): number {
   // Raw messages and the new part of a warm prompt lack the cold-prompt pad.
-  const khmer = text.match(/\p{Script=Khmer}/gu)?.length ?? 0;
-  const mongolian = text.match(/\p{Script=Mongolian}/gu)?.length ?? 0;
-  return (
-    estimateHuggingFaceFallbackTextTokens(text) +
-    Math.ceil(khmer * 0.9 + mongolian * 1.5)
+  return estimateDenseTextTokensWithScriptAllowance(
+    text,
+    estimateHuggingFaceFallbackTextTokens,
   );
 }
 
@@ -6935,6 +6933,9 @@ export class LlmChat {
           for (const tool of tools) {
             declarations.push('tool' in tool ? await tool.tool() : tool);
           }
+          const { convertLlmToolsToOpenAI } = await import(
+            './openaiContentGenerator/converter.js'
+          );
           wireTools = await convertLlmToolsToOpenAI(
             declarations,
             promptSource.schemaCompliance,

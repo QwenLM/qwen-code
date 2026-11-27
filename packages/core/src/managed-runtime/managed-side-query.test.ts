@@ -225,6 +225,40 @@ describe('frozen Managed side-query input', () => {
     );
   });
 
+  it.each(['main', 'private'] as const)(
+    'fits traditional Mongolian %s history within the DigitalOcean window',
+    async (source) => {
+      const f = fixture();
+      const question =
+        'Preserve this snapshot for the subsequent incident summary.';
+      const text =
+        'The export-1-reference is inventory-marker-neptune-88621. The retained snapshot follows.\n\n' +
+        'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n'.repeat(255);
+      if (source === 'main') f.turn('good', 'completed', question, text);
+      const request = await prepareManagedSideQuery(
+        {
+          kind: 'btw',
+          question:
+            'What inventory marker did I record in the previous exchange?',
+          privateHistory: source === 'private' ? [{ question, text }] : [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+        },
+      );
+
+      expect((request?.contents as Content[])[1]?.parts?.[0]?.text).toBe(text);
+      const output = request?.config?.maxOutputTokens ?? 0;
+      expect(output).toBeGreaterThan(4_000);
+      // The published MiniMax tokenizer counts 30,189 input tokens for this replay.
+      expect(output + 30_189).toBeLessThanOrEqual(65_536);
+    },
+  );
+
   it.each([
     { kind: 'btw', shifts: 1, maxTokens: undefined, retained: 1 },
     { kind: 'btw', shifts: 2, maxTokens: 32_000, retained: 1 },

@@ -17,7 +17,7 @@ import {
 } from '../services/sessionRecap.js';
 import {
   estimateContentTokens,
-  estimateDenseTextTokens,
+  estimateDenseTextTokensWithScriptAllowance,
 } from '../services/tokenEstimation.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import {
@@ -220,7 +220,7 @@ export async function prepareManagedSideQuery(
         estimate = estimateContentTokens(
           [content],
           undefined,
-          estimateDenseTextTokens,
+          estimateDenseTextTokensWithScriptAllowance,
         );
         estimatedTokens.set(content, estimate);
       }

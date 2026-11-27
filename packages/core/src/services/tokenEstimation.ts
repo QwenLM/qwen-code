@@ -60,6 +60,15 @@ export function estimateDenseTextTokens(
   return Math.ceil(estimate);
 }
 
+export function estimateDenseTextTokensWithScriptAllowance(
+  text: string,
+  estimateBase = estimateDenseTextTokens,
+): number {
+  const khmer = text.match(/\p{Script=Khmer}/gu)?.length ?? 0;
+  const mongolian = text.match(/\p{Script=Mongolian}/gu)?.length ?? 0;
+  return estimateBase(text) + Math.ceil(khmer * 0.9 + mongolian * 1.5);
+}
+
 /**
  * Estimate the token count of a list of Content objects via char/4.
  *
