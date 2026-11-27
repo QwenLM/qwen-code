@@ -3439,23 +3439,23 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.event).toBe('COMMENT');
     expect(sent.body.length).toBeGreaterThan(0);
   });
+
+  it('downgrades a verified blocking review to COMMENT in the publisher', () => {
+    vi.stubEnv('GITHUB_ACTIONS', 'true');
+    const review = file('comment-only-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        { path: 'a.ts', line: 12, body: '**[Critical]** Drops the error.' },
+      ],
+    });
+    withVerifyEnv(() => runSubmit(authorized({ review, commentOnly: true })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(posted().event).toBe('COMMENT');
+  });
 });
 
 describe('trusted CI COMMENT-only publication', () => {
-  it('publishes one COMMENT instead of an APPROVE and skips old threads', () => {
-    vi.stubEnv('GITHUB_ACTIONS', 'true');
-    vi.stubEnv(
-      'QWEN_CI_REVIEW_PUBLISHER',
-      'qwen-code-pr-review/publish-comment',
-    );
-    runSubmit(args({ userAuthorized: true, commentOnly: true }));
-    expect(ghMock).toHaveBeenCalledOnce();
-    expect(JSON.parse(ghMock.mock.calls[0]![0] as string).event).toBe(
-      'COMMENT',
-    );
-    expect(ghViewMock).not.toHaveBeenCalled();
-  });
-
   it('COMMENT-only alone never authorizes an unapproved review', () => {
     runSubmit(args({ commentOnly: true }));
     expect(process.exitCode).toBe(3);
@@ -3464,10 +3464,6 @@ describe('trusted CI COMMENT-only publication', () => {
 
   it('discloses fixed rulings left unapplied under COMMENT-only publication', () => {
     vi.stubEnv('GITHUB_ACTIONS', 'true');
-    vi.stubEnv(
-      'QWEN_CI_REVIEW_PUBLISHER',
-      'qwen-code-pr-review/publish-comment',
-    );
     runSubmit(
       args({
         userAuthorized: true,

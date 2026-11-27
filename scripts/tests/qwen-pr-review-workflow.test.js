@@ -117,6 +117,18 @@ const realPkillPath = realUtilityPath('pkill');
 const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
+  it('admits only a positively identified trusted head to the write-capable review job', () => {
+    const review = parse(workflow).jobs['review-pr'];
+    expect(review.if).toMatch(
+      /needs\.review-trust\.result == 'success' &&\s+needs\.review-trust\.outputs\.untrusted == 'false' &&\s+needs\.review-trust\.outputs\.head_sha != '' &&/,
+    );
+    expect(review.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'write',
+      issues: 'write',
+    });
+  });
+
   it('isolates the long-running review job on the schedule-sized review pool', () => {
     // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);

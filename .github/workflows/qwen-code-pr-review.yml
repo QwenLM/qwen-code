@@ -523,6 +523,8 @@ jobs:
     if: |-
       !cancelled() &&
       needs.review-trust.result == 'success' &&
+      needs.review-trust.outputs.untrusted == 'false' &&
+      needs.review-trust.outputs.head_sha != '' &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
       (github.event_name == 'pull_request_target' &&
@@ -570,8 +572,8 @@ jobs:
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && needs.review-trust.outputs.untrusted != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
-      pull-requests: "${{ needs.review-trust.outputs.untrusted != 'true' && 'write' || 'read' }}"
-      issues: "${{ needs.review-trust.outputs.untrusted != 'true' && 'write' || 'read' }}"
+      pull-requests: 'write'
+      issues: 'write'
     outputs:
       pr_number: '${{ steps.context.outputs.pr_number }}'
       expected_head_sha: '${{ steps.review.outputs.expected_head_sha }}'
