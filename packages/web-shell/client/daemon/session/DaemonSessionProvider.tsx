@@ -2598,6 +2598,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 errorStatus: undefined,
                 missingSession: false,
                 sessionArchived: undefined,
+                userClosedSession: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -4888,6 +4889,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               errorStatus: undefined,
               missingSession: false,
               sessionArchived: undefined,
+              userClosedSession: true,
             }));
             return;
           }
@@ -5244,6 +5246,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               missingSession:
                 missingLoadedSession || current.missingSession === true,
               sessionArchived: isSessionArchivedHttpError(error) || undefined,
+              userClosedSession: undefined,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -5317,6 +5320,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ),
             missingSession: false,
             sessionArchived: undefined,
+            userClosedSession: undefined,
             loadingTranscript: undefined,
           }));
         }
