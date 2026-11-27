@@ -68,6 +68,8 @@ export default {
   Retry: '重试',
   'Connecting…': '正在连接…',
   'Loading models from provider…': '正在加载服务商模型…',
+  'Could not list models. Enter model IDs manually.':
+    '无法获取模型列表，请手动填写模型 ID。',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
   'Generated UI': 'Generated UI 生成式界面',

@@ -1210,7 +1210,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             .thenCompose(context -> {
                                 ToolExecutionRecord current = executionState.requireExecution(context, executionId);
                                 // Adoption may have checked while the tool was still running.
-                                if (current.getState() == ToolExecutionRecord.State.EXECUTING
+                                if ((current.getState() == ToolExecutionRecord.State.EXECUTING
+                                        || current.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED)
                                         && current.getDispatchOwner() != null
                                         && !brokerOwnerId.equals(current.getDispatchOwner())) {
                                     return executionReconciler.reconcileInContext(context, current, true, true)
