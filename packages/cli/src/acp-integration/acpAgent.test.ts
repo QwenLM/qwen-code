@@ -868,6 +868,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     getUserExtensionsDir: vi.fn(() => '/tmp/qwen-extensions'),
     getUserWorkflowsDir: vi.fn(() => '/home/test/.qwen/workflows'),
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+    runWithResolvedRuntimeBaseDir: vi.fn(
+      (_runtimeBaseDir: string, operation: () => unknown) => operation(),
+    ),
     runWithRuntimeBaseDir: vi.fn(
       (
         _runtimeBaseDir: string,
@@ -6212,6 +6215,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/project'),
       getSessionId: vi.fn().mockReturnValue(sessionId),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue(runtimeBaseDir),
+      getProjectAutoMemoryRoot: vi
+        .fn()
+        .mockReturnValue('/project/.qwen/memory'),
       getFileSystemService: vi.fn().mockReturnValue(fallbackFileSystem),
       setFileSystemService: vi.fn(),
       storage: {
@@ -6267,9 +6273,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         fsCapabilities,
         fallbackFileSystem,
         {
-          localReadRoots: expectedLocalReadRoots,
+          localReadRoots: expect.any(Function),
         },
       );
+      const localReadRoots = vi
+        .mocked(AcpFileSystemService)
+        .mock.calls.at(-1)?.[4]?.localReadRoots;
+      if (typeof localReadRoots !== 'function') {
+        throw new Error('Expected a session-scoped read root resolver.');
+      }
+      expect(localReadRoots()).toEqual(expectedLocalReadRoots);
+      expect(Storage.runWithResolvedRuntimeBaseDir).toHaveBeenCalledWith(
+        runtimeBaseDir,
+        expect.any(Function),
+      );
+      innerConfig.getProjectAutoMemoryRoot.mockReturnValue('/next/memory');
+      expect(localReadRoots()).toContain('/next/memory');
+      expect(localReadRoots()).not.toContain('/project/.qwen/memory');
       expect(innerConfig.setFileSystemService).toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
@@ -22638,6 +22658,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // still resolves the admission worktree root — that stable root, not the
     // live cwd, is what the handlers must load settings for.
     const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
+    const autoMemoryDir = '/runtime/projects/launch/memory';
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
       'worktree-session',
       {
@@ -22647,6 +22668,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getTargetDir: vi
             .fn()
             .mockReturnValue(`${worktreeRoot}/packages/core`),
+          getProjectRoot: () => `${worktreeRoot}/packages/core`,
+          getProjectAutoMemoryRoot: () => autoMemoryDir,
           storage: { getProjectRoot: () => worktreeRoot },
         }),
       },
@@ -22723,10 +22746,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // than the daemon's boot directory.
     const memoryPaths = (await agent.extMethod('qwen/settings/getMemoryPaths', {
       sessionId: 'worktree-session',
-    })) as { paths: { projectMemoryFile: string } };
+    })) as { paths: { projectMemoryFile: string; autoMemoryDir: string } };
     expect(memoryPaths.paths.projectMemoryFile).toBe(
       path.join(worktreeRoot, 'QWEN.md'),
     );
+    expect(memoryPaths.paths.autoMemoryDir).toBe(autoMemoryDir);
 
     // An explicit cwd still wins over the session target dir.
     await agent.extMethod('qwen/settings/getCore', { cwd: '/explicit' });

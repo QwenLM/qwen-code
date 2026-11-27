@@ -481,6 +481,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import {
   getSlashCommandFirstToken,
+  isPrivateBuiltinSlashCommand,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
@@ -7367,6 +7368,9 @@ export class Session implements SessionContext {
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
+            const deferSlashRecording =
+              isSlashInput &&
+              isPrivateBuiltinSlashCommand(inputText, slashCommandName);
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -7443,13 +7447,9 @@ export class Session implements SessionContext {
                 this.config
                   .getLlmClient()!
                   .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (!isSlashInput || slashCommandName !== 'advisor') {
-              // record user message for session management. Only `/advisor`
-              // defers its record to after command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
+            } else if (!deferSlashRecording) {
+              // /clear rotates the recorder, so record it before its action.
+              // Private command candidates wait until command resolution.
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
@@ -7524,6 +7524,19 @@ export class Session implements SessionContext {
                     this.mods?.invalidateTools();
                     this.rebindGoalRuntimeForNewSession();
                   },
+                  ...(!isRetry &&
+                  !channelTurn &&
+                  modelPrompt === undefined &&
+                  goalTurn?.origin !== 'runtime'
+                    ? {
+                        confirmAction: (title, content) =>
+                          this.#requestSlashCommandConfirmation(
+                            title,
+                            content,
+                            pendingSend.signal,
+                          ),
+                      }
+                    : {}),
                 },
                 this.slashCommandPolicy,
               );
@@ -7531,7 +7544,7 @@ export class Session implements SessionContext {
               await this.mods?.syncSession();
 
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 pendingSend.signal.aborted &&
                 slashCommandResult.type === 'message'
               ) {
@@ -7546,18 +7559,18 @@ export class Session implements SessionContext {
                 return { stopReason: 'cancelled' };
               }
 
-              // Classify by the RESOLVED command, not the raw token: a
-              // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
+              // A custom command shadowing a private built-in keeps its
+              // transcript records.
               const resolvedCommandInfo = slashCommandResult.resolvedCommand;
               const shouldRecordSlashCommand = !(
                 resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                resolvedCommandInfo.name === 'advisor'
+                isPrivateBuiltinSlashCommand(
+                  inputText,
+                  resolvedCommandInfo.name,
+                )
               );
               if (
-                slashCommandName === 'advisor' &&
+                deferSlashRecording &&
                 shouldRecordSlashCommand &&
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
@@ -15450,6 +15463,49 @@ export class Session implements SessionContext {
       params,
       signal,
     );
+  }
+
+  async #requestSlashCommandConfirmation(
+    title: string,
+    content: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const response = await this.#requestPermissionQueued(
+      {
+        sessionId: this.sessionId,
+        toolCall: {
+          toolCallId: `slash-command:${randomUUID()}`,
+          title,
+          kind: 'other',
+          status: 'pending',
+          content: [
+            { type: 'content', content: { type: 'text', text: content } },
+          ],
+        },
+        options: [
+          {
+            optionId: ToolConfirmationOutcome.ProceedOnce,
+            name: 'Apply changes',
+            kind: 'allow_once',
+          },
+          {
+            optionId: ToolConfirmationOutcome.Cancel,
+            name: 'Cancel',
+            kind: 'reject_once',
+          },
+        ],
+      },
+      signal,
+    );
+    if (
+      signal.aborted ||
+      response.outcome.outcome !== 'selected' ||
+      response.outcome.optionId !== ToolConfirmationOutcome.ProceedOnce
+    ) {
+      return false;
+    }
+    await this.assertCanStartTurn();
+    return !signal.aborted;
   }
 
   /**

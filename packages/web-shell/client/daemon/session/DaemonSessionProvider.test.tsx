@@ -11,6 +11,7 @@ import {
   act,
   useContext,
   useLayoutEffect,
+  useState,
   type ContextType,
   type ReactNode,
 } from 'react';
@@ -68,6 +69,7 @@ import {
   useDaemonSessionNotices,
   useDaemonPendingPermissions,
   useDaemonPromptSettled,
+  useOptionalDaemonPromptSettled,
   useDaemonPromptStatus,
   useDaemonStreamingState,
   useDaemonTranscriptBlocks,
@@ -13025,6 +13027,140 @@ describe('DaemonSessionProvider', () => {
     // gated on local admission and this prompt was never admitted, so the
     // settlement the live path withheld is never re-published (#12230).
     expect(settlements).toEqual([]);
+  });
+
+  it('useOptionalDaemonPromptSettled is a no-op outside a provider, delivers inside one, and tracks updated listeners', async () => {
+    // 1) Outside DaemonSessionProvider: must not throw.
+    const orphanContainer = document.createElement('div');
+    document.body.append(orphanContainer);
+    const orphanRoot = createRoot(orphanContainer);
+    function OrphanHarness() {
+      useOptionalDaemonPromptSettled(() => {});
+      return null;
+    }
+    try {
+      await act(async () => {
+        orphanRoot.render(<OrphanHarness />);
+      });
+    } finally {
+      await act(async () => {
+        orphanRoot.unmount();
+      });
+      orphanContainer.remove();
+    }
+
+    // 2) Inside DaemonSessionProvider: receives fired settlement, and after
+    // re-rendering with a new listener, the latest listener receives the next.
+    const firstBatch: DaemonPromptSettledEvent[] = [];
+    const secondBatch: DaemonPromptSettledEvent[] = [];
+    let currentListener = (event: DaemonPromptSettledEvent) => {
+      firstBatch.push(event);
+    };
+    let rerenderHarness!: () => void;
+    let actions: DaemonUiSessionActions | undefined;
+    const firstGate = createDeferred<void>();
+    const secondGate = createDeferred<void>();
+    let submitCount = 0;
+    const session = createMockSession({
+      sessionId: 'session-optional-settled',
+      submitPrompt: vi.fn(async () => {
+        submitCount += 1;
+        return {
+          promptId: `prompt-${submitCount}`,
+          lastEventId: submitCount * 10 - 1,
+        };
+      }),
+      events: async function* twoSettlements(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        const waitGate = (gate: Promise<void>) =>
+          Promise.race([
+            gate,
+            new Promise<void>((resolve) =>
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+        await waitGate(firstGate.promise);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 10,
+          v: 1,
+          type: 'turn_complete' as const,
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        };
+        await waitGate(secondGate.promise);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 20,
+          v: 1,
+          type: 'turn_complete' as const,
+          data: { promptId: 'prompt-2', stopReason: 'end_turn' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    function ProviderHarness() {
+      const [, bump] = useState(0);
+      rerenderHarness = () => bump((n) => n + 1);
+      actions = useDaemonActions();
+      useOptionalDaemonPromptSettled(currentListener);
+      return null;
+    }
+
+    await renderWithProvider(<ProviderHarness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    let firstPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      firstPrompt = requireActions(actions).sendPrompt('first');
+      await flushPromises();
+    });
+    await act(async () => {
+      firstGate.resolve();
+      await expect(firstPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await flushPromises();
+    });
+    expect(firstBatch).toEqual([
+      {
+        sessionId: 'session-optional-settled',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+
+    // Swap listener and trigger a second settlement.
+    currentListener = (event: DaemonPromptSettledEvent) => {
+      secondBatch.push(event);
+    };
+    await act(async () => {
+      rerenderHarness();
+    });
+    let secondPrompt: Promise<unknown> | undefined;
+    await act(async () => {
+      secondPrompt = requireActions(actions).sendPrompt('second');
+      await flushPromises();
+    });
+    await act(async () => {
+      secondGate.resolve();
+      await expect(secondPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await flushPromises();
+    });
+    expect(firstBatch).toHaveLength(1);
+    expect(secondBatch).toEqual([
+      {
+        sessionId: 'session-optional-settled',
+        promptId: 'prompt-2',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
   });
 
   it('does not let replay state events overwrite fresh connection status', async () => {

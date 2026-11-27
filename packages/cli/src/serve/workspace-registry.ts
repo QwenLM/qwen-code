@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
+import { getMemoryBaseDir } from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  realpathNearestExisting,
+  sanitizeCwd,
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import {
   SessionNotFoundError,
   type AcpSessionBridge,
@@ -67,6 +73,40 @@ export class WorkspaceGenerationClosedError extends Error {
     super(message);
     this.name = 'WorkspaceGenerationClosedError';
   }
+}
+
+export class WorkspaceMemoryPathCollisionError extends Error {
+  constructor() {
+    super(
+      'Workspace path encodes to the same project memory directory as another registered workspace. Configure a separate runtimeOutputDir or use a different workspace path.',
+    );
+    this.name = 'WorkspaceMemoryPathCollisionError';
+  }
+}
+
+function workspaceMemoryBase(runtime: WorkspaceRuntime): string {
+  return getMemoryBaseDir(
+    runtime.sessionRuntimeBaseDir,
+    runtime.env.effectiveEnv ??
+      (runtime.env.mode === 'parent-process' ? undefined : {}),
+    runtime.workspaceCwd,
+  );
+}
+
+function sameRuntimeDirectory(left: string, right: string): boolean {
+  const leftPath = realpathNearestExisting(left);
+  const rightPath = realpathNearestExisting(right);
+  return (
+    path.relative(leftPath, rightPath) === '' ||
+    (process.platform === 'darwin' &&
+      leftPath.toLowerCase() === rightPath.toLowerCase())
+  );
+}
+
+function workspaceMemoryKey(workspaceCwd: string): string {
+  const encoded = sanitizeCwd(workspaceCwd);
+  // A case-insensitive macOS volume can alias keys before either exists.
+  return process.platform === 'darwin' ? encoded.toLowerCase() : encoded;
 }
 
 export interface WorkspaceGenerationGuard {
@@ -289,6 +329,27 @@ export function createWorkspaceRegistry(
     appliedRevision: 'boot',
   });
   const entries: WorkspaceEntry[] = [];
+  const assertMemoryPathAvailable = (runtime: WorkspaceRuntime): void => {
+    const encoded = workspaceMemoryKey(runtime.workspaceCwd);
+    for (const entry of entries) {
+      const existing = entry.current?.runtime;
+      if (
+        existing &&
+        existing.workspaceCwd !== runtime.workspaceCwd &&
+        workspaceMemoryKey(existing.workspaceCwd) === encoded &&
+        (sameRuntimeDirectory(
+          existing.sessionRuntimeBaseDir,
+          runtime.sessionRuntimeBaseDir,
+        ) ||
+          sameRuntimeDirectory(
+            workspaceMemoryBase(existing),
+            workspaceMemoryBase(runtime),
+          ))
+      ) {
+        throw new WorkspaceMemoryPathCollisionError();
+      }
+    }
+  };
   for (const runtime of inputRuntimes) {
     if (byCwd.has(runtime.workspaceCwd)) {
       throw new Error(
@@ -297,6 +358,7 @@ export function createWorkspaceRegistry(
         )}.`,
       );
     }
+    assertMemoryPathAvailable(runtime);
     const entry = createEntry(runtime, 1);
     byCwd.set(runtime.workspaceCwd, entry);
 
@@ -437,6 +499,7 @@ export function createWorkspaceRegistry(
       ) {
         throw new Error('Replacement runtime identity does not match entry.');
       }
+      assertMemoryPathAvailable(runtime);
       if (entry.displayName === undefined) {
         delete runtime.displayName;
       } else {
@@ -522,6 +585,7 @@ export function createWorkspaceRegistry(
           `Duplicate workspace runtime id ${JSON.stringify(runtime.workspaceId)}.`,
         );
       }
+      assertMemoryPathAvailable(runtime);
       const entry = createEntry(runtime, 1);
       byCwd.set(runtime.workspaceCwd, entry);
       byId.set(runtime.workspaceId, entry);
