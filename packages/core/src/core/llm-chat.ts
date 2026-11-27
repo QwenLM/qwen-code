@@ -90,6 +90,7 @@ import type {
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { getRequestModel, getSystemPromptModel } from './request-model.js';
+import { convertLlmToolsToOpenAI } from './openaiContentGenerator/converter.js';
 import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
@@ -1056,7 +1057,12 @@ function huggingFaceChatPromptSource(
 }
 
 function estimateHuggingFaceFallbackTextTokens(text: string): number {
-  return estimateDenseTextTokens(text, estimateTextTokens);
+  // Kana commonly merges across letters.
+  const kana =
+    text.match(/[\p{Script=Hiragana}\p{Script=Katakana}ー]/gu)?.length ?? 0;
+  return Math.ceil(
+    estimateDenseTextTokens(text, estimateTextTokens) - kana * 0.6,
+  );
 }
 
 function estimateRawChatMessagesTokens(
@@ -1076,7 +1082,15 @@ function estimateRawChatMessagesTokens(
     }
     return value;
   });
-  return estimateHuggingFaceFallbackTextTokens(text) + imageTokens;
+  // Raw overrides bypass the standard prompt's padding. Leave room for
+  // extra subword pieces in scripts that are denser than the base estimate.
+  const khmerAndMongolian =
+    text.match(/[\p{Script=Khmer}\p{Script=Mongolian}]/gu)?.length ?? 0;
+  return (
+    estimateHuggingFaceFallbackTextTokens(text) +
+    Math.ceil(khmerAndMongolian * 0.9) +
+    imageTokens
+  );
 }
 
 /**
@@ -4667,13 +4681,28 @@ export class LlmChat {
               ),
             )
           ) {
-            // Fixed raw messages replace the history, pending input, and system prompt.
+            // Fixed raw messages replace the conversation. Otherwise the usage
+            // covers the prior turns; the new input still needs a density estimate.
+            let usageTokens = usageAnchor.promptTokens;
+            if (!primaryPromptSource.messages) {
+              const pendingContents = [userContent];
+              const legacyPendingTokens = Math.ceil(
+                estimateContentTokens(pendingContents, imageTokenEstimate) *
+                  CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
+              );
+              const densePendingTokens = estimateContentTokens(
+                pendingContents,
+                imageTokenEstimate,
+                estimateHuggingFaceFallbackTextTokens,
+              );
+              usageTokens =
+                promptTokensForClamp +
+                Math.max(0, densePendingTokens - legacyPendingTokens);
+            }
             usageBackedPrompt = {
               source: primaryPromptSource,
               contents: requestContents,
-              tokens: primaryPromptSource.messages
-                ? usageAnchor.promptTokens
-                : promptTokensForClamp,
+              tokens: usageTokens,
             };
           }
         }
@@ -6864,7 +6893,7 @@ export class LlmChat {
         route?.limits?.output ?? Infinity,
       );
       // The fallback can prepare different history and a different system prompt.
-      const { systemInstruction } = {
+      const { systemInstruction, tools } = {
         ...this.generationConfig,
         ...params.config,
       };
@@ -6873,12 +6902,28 @@ export class LlmChat {
         this.config.getChatCompression(),
       );
       const { promptSource, usagePromptTokens } = outputClamp;
-      const toolTokens =
-        promptSource && usagePromptTokens === undefined
-          ? estimateHuggingFaceFallbackTextTokens(
-              JSON.stringify(promptSource.tools) ?? '',
-            )
-          : 0;
+      let toolTokens = 0;
+      if (promptSource && usagePromptTokens === undefined) {
+        let wireTools = promptSource.tools;
+        if (promptSource.schemaCompliance && tools) {
+          // Resolve callable tools once so sizing and dispatch see the same declarations.
+          const declarations: Tool[] = [];
+          for (const tool of tools) {
+            declarations.push('tool' in tool ? await tool.tool() : tool);
+          }
+          wireTools = await convertLlmToolsToOpenAI(
+            declarations,
+            promptSource.schemaCompliance,
+          );
+          params = {
+            ...params,
+            config: { ...params.config, tools: declarations },
+          };
+        }
+        toolTokens = estimateHuggingFaceFallbackTextTokens(
+          JSON.stringify(wireTools) ?? '',
+        );
+      }
       if (promptSource?.messages) {
         promptTokensForClamp =
           usagePromptTokens ??

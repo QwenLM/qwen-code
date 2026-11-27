@@ -8290,6 +8290,17 @@ describe('LlmChat', async () => {
       { name: 'the same window', primaryWindow: 65_536, keepUsage: true },
       { name: 'a larger window', primaryWindow: 61_000, keepUsage: true },
       {
+        name: 'new dense follow-up',
+        primaryWindow: 65_536,
+        appendedDense: true,
+      },
+      {
+        name: 'restored Japanese history',
+        primaryWindow: 65_536,
+        resumed: true,
+        japaneseHistory: true,
+      },
+      {
         name: 'shadowed sampling tools',
         primaryWindow: 65_536,
         keepUsage: true,
@@ -8329,13 +8340,24 @@ describe('LlmChat', async () => {
         shadowedTools,
         staticPrompt,
         resumed,
+        appendedDense,
+        japaneseHistory,
       }) => {
         const fallbackModel = 'another-minimax-account';
         const fixedMessages = staticPrompt
           ? [{ role: 'user', content: 'Use this fixed prompt' }]
           : undefined;
         const fallbackMessages = messages ?? fixedMessages;
-        const promptTokenCount = resumed ? 41_000 : 35_000;
+        const promptTokenCount = resumed
+          ? 41_000
+          : appendedDense
+            ? 15_000
+            : 35_000;
+        const firstMessage = japaneseHistory
+          ? 'const label = "ひらがなの見出しに使うことばです";\n'.repeat(2_800)
+          : resumed
+            ? '嗰陣'.repeat(16_000)
+            : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600);
         const fallback = vi
           .fn()
           .mockImplementation(async () => textStream('fallback answer'));
@@ -8387,9 +8409,7 @@ describe('LlmChat', async () => {
           await chat.sendMessageStream(
             digitalOceanModel,
             {
-              message: resumed
-                ? '嗰陣'.repeat(16_000)
-                : '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
+              message: firstMessage,
               config: { maxOutputTokens: 1_000 },
             },
             'warm-fallback-first',
@@ -8409,7 +8429,8 @@ describe('LlmChat', async () => {
               message: image
                 ? [{ text: 'What happened next?' }, inline('image/png', 'abc')]
                 : 'What happened next?' +
-                  (staticPrompt ? ' cat'.repeat(2_000) : ''),
+                  (staticPrompt ? ' cat'.repeat(2_000) : '') +
+                  (appendedDense ? '嗰陣'.repeat(11_000) : ''),
             },
             'warm-fallback-second',
           ),
@@ -8421,10 +8442,11 @@ describe('LlmChat', async () => {
           expect(fallbackRequest.config.maxOutputTokens).toBe(
             65_536 - 35_000 - 10_000,
           );
-        } else if (resumed) {
+        } else if (resumed || appendedDense) {
           expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          const measuredInput = appendedDense ? 43_000 : promptTokenCount;
           expect(
-            fallbackRequest.config.maxOutputTokens + promptTokenCount,
+            fallbackRequest.config.maxOutputTokens + measuredInput,
           ).toBeLessThanOrEqual(65_536);
           expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(4_000);
         } else if (keepUsage) {
@@ -8444,6 +8466,78 @@ describe('LlmChat', async () => {
             primaryRequest.config!.maxOutputTokens!,
           );
         }
+      },
+    );
+
+    it.each([
+      {
+        name: 'fixed Khmer messages',
+        rawText:
+          'សួស្តី ពិភពលោក! តើអ្នកសុខសប្បាយទេ? យើងកំពុងពិនិត្យឯកសារនេះ។\n'.repeat(
+            260,
+          ),
+        measuredInput: 29_678,
+      },
+      {
+        name: 'fixed Mongolian messages',
+        rawText: 'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n'.repeat(240),
+        measuredInput: 28_358,
+      },
+      { name: 'a discarded tool default' },
+    ])(
+      'prices the cold fallback wire input with $name',
+      async ({ rawText, measuredInput }) => {
+        const fallbackModel = 'another-minimax-account';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        const toolWithDefault = {
+          functionDeclarations: [
+            {
+              name: 'load_template',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: {
+                  template: {
+                    type: 'string',
+                    default: '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(1_900),
+                  },
+                },
+              },
+            },
+          ],
+        };
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              schemaCompliance: 'openapi_30',
+              extra_body: {
+                model: digitalOceanModel,
+                ...(rawText && {
+                  messages: [{ role: 'user', content: rawText }],
+                }),
+              },
+            }),
+          ),
+          narrowPrimary,
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: 'Summarize the report.',
+              config: { tools: rawText ? [] : [toolWithDefault] },
+            },
+            'cold-effective-prompt',
+          ),
+        );
+        const outputTokens = fallback.mock.calls[0][0].config.maxOutputTokens;
+        if (measuredInput !== undefined) {
+          expect(measuredInput + outputTokens).toBeLessThanOrEqual(65_536);
+        }
+        expect(outputTokens).toBeGreaterThanOrEqual(25_000);
       },
     );
 
