@@ -69,6 +69,7 @@ import { extensionAgentsOf } from './configuration-routes.js';
 import { childAgentsOf, stopPublicChildSource } from './interaction-routes.js';
 import { noteSessionActivity } from './lifecycle-routes.js';
 import {
+  blockOnTurnRecovery,
   blockRecovery,
   type HostedRuntimeOwnership,
   liftRecoveryBlock,
@@ -880,14 +881,19 @@ export function registerHostedTakeoverRoutes({
         }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
-          session.recoveryCancelPromptId =
-            cause instanceof HostedChildLedgerRecoveryRequiredError
-              ? promptId
-              : undefined;
-          if (cause instanceof HostedChildLedgerRecoveryRequiredError)
-            // A blocked continue's admission must not replay as a cancel.
+          if (cause instanceof HostedChildLedgerRecoveryRequiredError) {
+            session.recoveryCancelPromptId = promptId;
+            session.blocked = true;
+          } else {
+            session.recoveryCancelPromptId = undefined;
+            blockOnTurnRecovery(session, promptId, cause);
+          }
+          // A new recovery must drive the parked Turn, even at the same checkpoint.
+          if (
+            session.recoveryCancelPromptId === promptId ||
+            session.runtimeRecoveryPromptId === promptId
+          )
             session.admissions.delete(promptId);
-          session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
           );
@@ -961,6 +967,7 @@ export function registerHostedTakeoverRoutes({
         session.active = undefined;
         noteSessionActivity(session);
         void toolTurn?.close().catch((cause: unknown) => {
+          session.runtimeRecoveryPromptId = undefined;
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Shell publisher cleanup failed: ${String(cause)}`,

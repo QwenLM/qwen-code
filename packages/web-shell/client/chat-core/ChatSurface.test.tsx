@@ -6,27 +6,42 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, startTransition, Suspense, useState } from 'react';
+import {
+  act,
+  forwardRef,
+  startTransition,
+  Suspense,
+  useImperativeHandle,
+  useState,
+} from 'react';
 import type {
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types.js';
+import type { MessageListHandle } from '../components/MessageList.js';
 import type { QuestionAnswer, SessionChatController } from './contract.js';
 import { regionsToCapabilities } from './capabilities.js';
 
 const captured = vi.hoisted(() => ({
   transcript: undefined as Record<string, unknown> | undefined,
+  transcriptScrollToBottom: vi.fn(),
   approval: undefined as Record<string, unknown> | undefined,
   question: undefined as Record<string, unknown> | undefined,
   editor: undefined as Record<string, unknown> | undefined,
 }));
 
 vi.mock('../components/TranscriptViewport.js', () => ({
-  TranscriptViewport: (props: Record<string, unknown>) => {
+  TranscriptViewport: forwardRef(function MockTranscriptViewport(
+    props: Record<string, unknown>,
+    ref,
+  ) {
     captured.transcript = props;
+    useImperativeHandle(ref, () => ({
+      scrollToBottom: captured.transcriptScrollToBottom,
+    }));
     return <div data-testid="transcript-viewport" />;
-  },
+  }),
 }));
 vi.mock('../components/messages/ToolApproval.js', () => ({
   ToolApproval: (props: Record<string, unknown>) => {
@@ -1952,5 +1967,261 @@ describe('ChatSurface', () => {
     expect(captured.editor?.workspaceFeaturesEnabled).toBe(true);
     expect(captured.editor?.visibleToolbarActions).toEqual(['model', 'voice']);
     expect(captured.question?.disabled).toBe(false);
+  });
+
+  it('forwards Managed host seams for transcript, decision wrapper, AskUserQuestion draft/submitDisabled, and composer overrides', () => {
+    const question = permissionRequest('q-managed');
+    const onDraftChange = vi.fn();
+    const onComposerSubmit = vi.fn(() => false as const);
+    const controller = fakeController({
+      sessionId: 'managed-s1',
+      phase: 'failed',
+      pendingQuestions: [{ id: 'q-managed', request: question }],
+    });
+    const container = mountReact(
+      <ChatSurface
+        controller={controller}
+        transcriptClassName="custom-transcript"
+        transcriptProps={{ hideSessionTimeline: true }}
+        decisionTestId="managed-approval"
+        decisionClassName="custom-decision"
+        decisionHeader={<div data-testid="dec-hdr">Header</div>}
+        decisionFooter={<div data-testid="dec-ftr">Footer</div>}
+        askUserInitialDraft={{ q1: { optionIds: [], text: 'draft' } }}
+        askUserOnDraftChange={onDraftChange}
+        askUserSubmitDisabled
+        hideComposerWhenCardActive={false}
+        composerClassName="custom-composer"
+        composerCancelEnabled
+        onComposerSubmit={onComposerSubmit}
+        composerProps={{
+          sessionId: undefined,
+          isRunning: true,
+          dialogOpen: false,
+          placeholderText: 'Custom placeholder',
+        }}
+        composerFooter={<div data-testid="cmp-ftr">Queue</div>}
+      />,
+    );
+    expect(container.querySelector('.custom-transcript')).not.toBeNull();
+    expect(captured.transcript?.hideSessionTimeline).toBe(true);
+    expect(container.querySelector('.custom-decision')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-testid="dec-hdr"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="dec-ftr"]')).not.toBeNull();
+    expect(captured.question?.initialDraft).toEqual({
+      q1: { optionIds: [], text: 'draft' },
+    });
+    expect(captured.question?.onDraftChange).toBe(onDraftChange);
+    expect(captured.question?.submitDisabled).toBe(true);
+    // hideComposerWhenCardActive=false keeps composer visible alongside card
+    // without appending the hidden utility class to the custom wrapper class.
+    const composerWrapper = container.querySelector('.custom-composer');
+    expect(composerWrapper).not.toBeNull();
+    expect(composerWrapper?.className).toBe('custom-composer');
+    expect(captured.editor?.dialogOpen).toBe(false);
+    expect(captured.editor?.sessionId).toBeUndefined();
+    expect(captured.editor?.isRunning).toBe(true);
+    expect(captured.editor?.onCancel).toBeTypeOf('function');
+    expect(captured.editor?.placeholderText).toBe('Custom placeholder');
+    expect(container.querySelector('[data-testid="cmp-ftr"]')).not.toBeNull();
+    const onSubmit = captured.editor?.onSubmit as SubmitHandler;
+    expect(onSubmit('hi', undefined, undefined)).toBe(false);
+    expect(onComposerSubmit).toHaveBeenCalledTimes(1);
+
+    // composerCancelEnabled=false suppresses isRunning and onCancel;
+    // composerVisible=false unmounts the composer region.
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={controller}
+        composerCancelEnabled={false}
+        composerProps={{ isRunning: true }}
+      />,
+    );
+    expect(captured.editor?.isRunning).toBe(false);
+    expect(captured.editor?.onCancel).toBeUndefined();
+
+    rerenderReact(
+      container,
+      <ChatSurface controller={controller} composerVisible={false} />,
+    );
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+  });
+
+  it('supports transcriptRef, footerClassName, composerEditorVisible, transcript isResponding override, and excludes questions from TranscriptViewport.pendingApproval', () => {
+    captured.transcriptScrollToBottom.mockClear();
+    const transcriptRef = { current: null as MessageListHandle | null };
+    const questionRequest = permissionRequest('q-only');
+    const controller = fakeController({
+      phase: 'idle',
+      pendingApprovals: [],
+      pendingQuestions: [{ id: 'q-only', request: questionRequest }],
+    });
+
+    const container = mountReact(
+      <ChatSurface
+        controller={controller}
+        transcriptRef={transcriptRef}
+        footerClassName="custom-footer"
+        transcriptProps={{ isResponding: true }}
+        composerEditorVisible={false}
+        composerStatus={<div data-testid="ro-status">status</div>}
+        composerFooter={<div data-testid="ro-footer">footer</div>}
+      />,
+    );
+
+    // transcriptRef forwards to TranscriptViewport handle.
+    transcriptRef.current?.scrollToBottom();
+    expect(captured.transcriptScrollToBottom).toHaveBeenCalledTimes(1);
+
+    // transcriptProps.isResponding overrides controller.phase-derived isRunning.
+    expect(captured.transcript?.isResponding).toBe(true);
+
+    // AskUserQuestion is not a tool approval: pendingApproval stays null while
+    // approvalOverlayActive remains true.
+    expect(captured.transcript?.pendingApproval).toBeNull();
+    expect(captured.transcript?.approvalOverlayActive).toBe(true);
+
+    // footerClassName wraps the bottom stack (decision card + composer block).
+    const footerEl = container.querySelector('.custom-footer');
+    expect(footerEl).not.toBeNull();
+    expect(
+      footerEl?.querySelector('[data-testid="question-overlay"]'),
+    ).not.toBeNull();
+    expect(footerEl?.querySelector('[data-testid="ro-status"]')).not.toBeNull();
+
+    // composerEditorVisible=false keeps composerStatus mounted inside the
+    // approval-hidden wrapper while hiding ChatEditor and composerFooter.
+    expect(
+      container.querySelector('[data-testid="ro-status"]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+    expect(container.querySelector('[data-testid="ro-footer"]')).toBeNull();
+
+    // Clearing the question unhides composerStatus while keeping the editor absent.
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({
+          phase: 'idle',
+          pendingApprovals: [],
+          pendingQuestions: [],
+        })}
+        footerClassName="custom-footer"
+        composerEditorVisible={false}
+        composerStatus={<div data-testid="ro-status">status</div>}
+        composerFooter={<div data-testid="ro-footer">footer</div>}
+      />,
+    );
+    expect(
+      container.querySelector('[data-testid="ro-status"]')?.parentElement
+        ?.className,
+    ).not.toContain('composerHidden');
+    expect(container.querySelector('[data-testid="chat-editor"]')).toBeNull();
+
+    // onComposerCancel overrides controller.cancel() when supplied and stays
+    // suppressed when composerCancelEnabled=false.
+    const onComposerCancel = vi.fn();
+    const cancelSpy = vi.fn(async () => ({
+      admission: 'accepted' as const,
+      outcome: 'unsettled' as const,
+      target: { sessionId: 's1' },
+    }));
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    (captured.editor?.onCancel as (() => void) | undefined)?.();
+    expect(onComposerCancel).toHaveBeenCalledTimes(1);
+    expect(cancelSpy).not.toHaveBeenCalled();
+
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={fakeController({ phase: 'running', cancel: cancelSpy })}
+        composerCancelEnabled={false}
+        onComposerCancel={onComposerCancel}
+      />,
+    );
+    expect(captured.editor?.onCancel).toBeUndefined();
+  });
+
+  it('does not report a late approval rejection after switching sessions or unmounting', async () => {
+    let resolveApproval!: (result: {
+      admission: 'unknown';
+      target: { sessionId: string; requestId: string };
+    }) => void;
+    const onError = vi.fn();
+    const s1 = fakeController({
+      sessionId: 's1',
+      pendingApprovals: [
+        { id: 'a1', status: 'pending', request: permissionRequest('a1') },
+      ],
+      respondApproval: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveApproval = resolve;
+          }),
+      ),
+    });
+    const s2 = fakeController({ sessionId: 's2' });
+
+    const container = mountReact(
+      <ChatSurface controller={s1} onError={onError} />,
+    );
+    const confirm = captured.approval?.onConfirm as (
+      id: string,
+      optionId: string,
+    ) => Promise<void>;
+    const pending = confirm('a1', 'submit');
+
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+
+    resolveApproval({
+      admission: 'unknown',
+      target: { sessionId: 's1', requestId: 'a1' },
+    });
+    await expect(pending).rejects.toThrow('localized:chat.approvalNotAccepted');
+    expect(onError).not.toHaveBeenCalled();
+
+    // Unmount arm: same session, but surface unmounts before rejection arrives.
+    let resolveUnmounted!: (result: {
+      admission: 'unknown';
+      target: { sessionId: string; requestId: string };
+    }) => void;
+    const s3 = fakeController({
+      sessionId: 's3',
+      pendingApprovals: [
+        { id: 'a3', status: 'pending', request: permissionRequest('a3') },
+      ],
+      respondApproval: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveUnmounted = resolve;
+          }),
+      ),
+    });
+    mountReact(<ChatSurface controller={s3} onError={onError} />);
+    const confirmUnmounted = captured.approval?.onConfirm as (
+      id: string,
+      optionId: string,
+    ) => Promise<void>;
+    const pendingUnmounted = confirmUnmounted('a3', 'submit');
+    cleanupReact();
+    resolveUnmounted({
+      admission: 'unknown',
+      target: { sessionId: 's3', requestId: 'a3' },
+    });
+    await expect(pendingUnmounted).rejects.toThrow(
+      'localized:chat.approvalNotAccepted',
+    );
+    expect(onError).not.toHaveBeenCalled();
   });
 });

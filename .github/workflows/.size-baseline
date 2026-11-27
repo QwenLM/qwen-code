@@ -33,6 +33,7 @@
 14543 managed-agent-gate.yml
 4318 managed-agent-loop.yml
 61381 main-ci-failure-issue.yml
+9992 main-ci-failure-resolve.yml
 1343 mobile-shell.yml
 3259 pnpm-store.yml
 2489 pnpm-worktree-smoke.yml
@@ -48,7 +49,7 @@
 5760 qwen-pr-safety-precheck.yml
 3243 qwen-review-runner-schedule.yml
 27648 qwen-triage-finalize.yml
-416593 qwen-triage.yml
+421428 qwen-triage.yml
 18383 release-chrome-extension.yml
 28497 release-managed-agent-reference.yml
 13464 release-managed-runtime.yml

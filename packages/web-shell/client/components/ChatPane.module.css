@@ -185,8 +185,15 @@
   background: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
+/* The surface fills the remaining pane height below the header and error bar. */
+.pane .surface {
+  flex: 1 1 0%;
+  min-height: 0;
+  height: auto;
+}
+
 /* The transcript takes the remaining height and scrolls independently per pane. */
-.body {
+.pane .body {
   flex: 1 1 0%;
   min-height: 0;
   overflow-y: auto;
@@ -202,8 +209,4 @@
 
 .approval {
   margin-bottom: 8px;
-}
-
-.composerHidden {
-  display: none;
 }
