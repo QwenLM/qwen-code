@@ -3110,7 +3110,6 @@ describe('local container recipe pins', () => {
         'zsh',
         'ksh',
         'dash',
-        'ash',
       ]);
       const rawShellCommands = new Set([
         'ls',
@@ -3221,8 +3220,6 @@ describe('local container recipe pins', () => {
         'ionice',
         'caffeinate',
         'rlwrap',
-        'busybox',
-        'toybox',
       ]);
       const astDangerCmds = new Set([
         'gh',
@@ -3236,7 +3233,6 @@ describe('local container recipe pins', () => {
         'wget',
         'bash',
         'sh',
-        'ash',
         'zsh',
         'ksh',
         'dash',
@@ -4363,7 +4359,7 @@ describe('local container recipe pins', () => {
         if (depth > 4) return true;
         if (
           !fenceBody &&
-          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|busybox|toybox|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|ash|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
+          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|busybox|toybox|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
             source,
           )
         ) {
@@ -4793,12 +4789,21 @@ describe('local container recipe pins', () => {
                   rawLine &&
                   !evalLike &&
                   /^(?:is|are|was|were)$/i.test(args[0] ?? '');
-                // A copula only makes the line prose when no later word names a
-                // wrapper, danger command, flag or path: `busybox is sh -c '…'`
-                // is an invocation wearing a copula, not a sentence.
+                // Prose is a sentence of plain words, or a copula followed by
+                // nothing runnable: `busybox is sh -c '…'` is an invocation
+                // wearing a copula, while `busybox provides many utilities.`
+                // is documentation and must stay admitted.
+                const words = args.map((arg) => astUnquoteArg(arg));
+                const proseSentence =
+                  words.length > 1 &&
+                  words.every((w) =>
+                    /^[A-Za-z][A-Za-z'-]*[.,;:!?]?$/.test(w),
+                  ) &&
+                  /[.!?]$/.test(words.at(-1));
                 const proseOnly =
-                  proseCopula &&
-                  !args.slice(1).some((arg) => astRealWrapperArg(arg));
+                  proseSentence ||
+                  (proseCopula &&
+                    !args.slice(1).some((arg) => astRealWrapperArg(arg)));
                 if (
                   hasRedir ||
                   (evalLike && args.length > 0) ||
@@ -5059,7 +5064,6 @@ describe('local container recipe pins', () => {
           }
         }
         const executionWrappers = new Set([
-          'busybox',
           'command',
           'env',
           'eval',
@@ -5071,7 +5075,6 @@ describe('local container recipe pins', () => {
           'python',
           'python3',
           'time',
-          'toybox',
         ]);
         const literalName = (value) =>
           value?.replaceAll('\\', '').replace(/["']/g, '').split('/').at(-1);
@@ -5112,7 +5115,7 @@ describe('local container recipe pins', () => {
           /^qwen\s+-/,
           /^["']?(?:\/[A-Za-z0-9_.-]+)*\/qwen["']?\s+-/,
           /^["']?(?:[A-Za-z0-9_.-]+\/)*qwen["']?\s+-/,
-          /^(?:bash|sh|ash|zsh|ksh|dash)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash|ash|zsh|ksh)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
+          /^(?:bash|sh|zsh|ksh|dash)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash|zsh|ksh)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
           /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
           /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|echo|touch|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
@@ -8669,10 +8672,6 @@ describe('local container recipe pins', () => {
       ['inline toybox sh -c (S11-1)', "`toybox sh -c 'gh pr merge <n>'`"],
       ['inline direct ash -c (S11-1)', "`ash -c 'gh pr merge <n>'`"],
       [
-        'inline ash copula-wrapped sh -c (S11-1)',
-        "`ash is sh -c 'gh pr merge <n>'`",
-      ],
-      [
         'bare busybox copula-wrapped sh -c (S11-1)',
         "busybox is sh -c 'gh pr merge <n>'",
       ],
@@ -8718,6 +8717,27 @@ describe('local container recipe pins', () => {
       ['bare toybox prose copula', 'toybox is a multi-call binary.'],
       ['bare ash prose copula', 'ash is the Almquist shell.'],
       ['bare busybox past-tense prose', 'busybox was removed from the image.'],
+      [
+        'bare busybox non-copula prose',
+        'busybox provides many small utilities.',
+      ],
+      [
+        'bare capitalized non-copula prose',
+        'Busybox ships applets for embedded systems.',
+      ],
+      ['bare toybox non-copula prose', 'toybox includes several applets.'],
+      ['bare busybox has prose', 'busybox has many applets.'],
+      ['bare busybox can prose', 'busybox can replace coreutils.'],
+      [
+        'bare multi-call conjunction prose',
+        'busybox and toybox are multi-call binaries.',
+      ],
+      ['bare ash non-copula prose', 'ash supports job control.'],
+      ['bare ash remains prose', 'ash remains the default shell.'],
+      [
+        'fenced text non-copula prose',
+        '```text\nbusybox provides many utilities.\n```',
+      ],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
