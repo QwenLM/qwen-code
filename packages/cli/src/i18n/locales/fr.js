@@ -562,7 +562,6 @@ export default {
   'Max Session Turns': 'Nombre maximum de tours de session',
   'Skip Next Speaker Check':
     'Ignorer la vérification du prochain interlocuteur',
-  'Skip Loop Detection': 'Ignorer la détection de boucle',
   'Skip Startup Context': 'Ignorer le contexte de démarrage',
   'Enable OpenAI Logging': 'Activer la journalisation OpenAI',
   'OpenAI Logging Directory': 'Répertoire de journalisation OpenAI',

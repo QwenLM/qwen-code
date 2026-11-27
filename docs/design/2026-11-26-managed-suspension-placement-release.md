@@ -97,7 +97,7 @@ The sealed arm does not require an unexpired writer lease: the sealed incarnatio
 
 Both arms insert the same release resource, domain record and resource reference, then change the placement to `RELEASED` in the same transaction. All SQL remains tenant-scoped and parameterized. A stale owner cannot release a newer epoch or generation, and an old exact retry can only return its original receipt.
 
-`JdbcHarnessPlacementStore.takeover` and `HarnessPoolConnector.select` need no change. A released placement already triggers reselection, and the existing receipt plus sealed-head proof permits the CAS before lease expiry.
+A released placement triggers pool reselection. When `JdbcHarnessPlacementStore.takeover` uses the release receipt and sealed head to advance the placement epoch, it ends the sealed writer's lease in the same transaction. The update preserves the head's modification time and wake stamps. If the selected member never acquires a writer, another member can take over using the expired lease and released activation. An acquisition at the new epoch establishes a fresh lease and fences further takeover.
 
 ## 7. Failure and race semantics
 
@@ -121,6 +121,7 @@ Both arms insert the same release resource, domain record and resource reference
 - `packages/managed-agent-server/server/.../ManagedSessionStoreController.java`: advertise the capability with wake dispatch.
 - `packages/managed-agent-server/persistence/.../JournalStoreRows.java`: expose `wake_seal_revision` on the locked head row.
 - `packages/managed-agent-server/persistence/.../JournalWriterLifecycle.java`: clean-sealed release arm.
+- `packages/managed-agent-server/persistence/.../JdbcHarnessPlacementStore.java` ends the sealed writer's lease when a takeover consumes a release receipt.
 
 ### TypeScript Store client and Harness
 
@@ -140,6 +141,7 @@ Both arms insert the same release resource, domain record and resource reference
 - Cover capability-off behavior, bare-seal refusal, stale wake revision, wrong generation/token/proof, lagging activation and cross-tenant credentials; none may write a receipt or change placement/head state.
 - Prove exact replay, conflicting-operation refusal, rollback atomicity and stale-writer fencing on H2 and the selected MySQL 8.4 cases; retain the existing takeover-CAS coverage.
 - Prove release preserves wake, background and parked-Turn certificates; the successor's acquisition clears them only under current semantics.
+- Assign a released placement to a member that never acquires a writer. Verify that a second member can take over immediately and that its new lease prevents a third takeover.
 - Inject a lost release acknowledgement and a failure after seal; verify same-body retry without another quiesce, activation release or seal.
 - Run real Harness processes A and B against MySQL 8.4 for a cleanly idle-suspended Session, with A healthy and its old lease live. Verify Action parking through the new-epoch cold-recovery unit test and the real-process replacement scenario for every outcome. A healthy two-member Action-parked soak is a follow-up, not evidence claimed by this slice.
 - Run focused TypeScript and Java checks, the required root build/typecheck/bundle, and leave complete Java/MySQL/Hosted profiles to CI.
@@ -149,6 +151,7 @@ Both arms insert the same release resource, domain record and resource reference
 - Unsupported or bare-seal suspensions behave exactly as before.
 - A supported clean suspension writes one durable release receipt and leaves `RELEASED + SEALED` state without changing the wake/park certificate.
 - B can acquire the next placement epoch while A is healthy and A's old writer lease is still live.
+- An assignment that never acquires a writer after release can be replaced without waiting for the original lease deadline.
 - A cannot commit, renew, seal or release B's resources after the transition.
 - Cancellation, Allow, Deny, mode change and expiry retain their existing behavior; Allow executes exactly once and Deny zero times.
 - No release attempt repeats quiesce, activation release or seal after those steps have completed.
@@ -156,6 +159,6 @@ Both arms insert the same release resource, domain record and resource reference
 
 ## 11. Cost and follow-up
 
-Each supported suspension adds one quiesce update and the release receipt writes. The sealed release arm deliberately avoids a second head update. Rollout measurement must compare these writes and the extra cold-open churn with the Harness/renewal resources saved and the value of immediate reassignment.
+Each supported suspension adds one quiesce update and the release receipt writes. The sealed release arm leaves the head untouched. A takeover that consumes the receipt updates the old lease under the existing head lock. Rollout measurement must compare these writes and the extra cold-open churn with the Harness/renewal resources saved and the value of immediate reassignment.
 
 The [departed-placement reaper](2026-11-26-managed-departed-placement-reaper.md) handles legacy suspended rows and crashes between seal and release without inferring a release receipt from a bare sealed head. A separate real-process soak should also keep both pool members healthy through an Action-parked Allow/Deny handover; the clean-release slice does not claim that integrated evidence.

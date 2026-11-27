@@ -118,6 +118,14 @@ export class CommandService {
       });
     }
 
+    // A primary name stays reserved even when its command is unavailable in
+    // the current mode. An extension alias must not take over that spelling.
+    for (const cmd of commandMap.values()) {
+      if (cmd.source === 'plugin-command' && cmd.altNames) {
+        cmd.altNames = cmd.altNames.filter((alias) => !commandMap.has(alias));
+      }
+    }
+
     if (disabledNames && disabledNames.size > 0) {
       const normalizedDisabled = new Set<string>();
       for (const entry of disabledNames) {

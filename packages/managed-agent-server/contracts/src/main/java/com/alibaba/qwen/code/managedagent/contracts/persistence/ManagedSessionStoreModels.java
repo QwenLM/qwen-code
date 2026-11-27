@@ -166,7 +166,7 @@ public final class ManagedSessionStoreModels {
      * is a coordinator Turn row; {@code wake} is a wake-started Turn, which
      * only the wake-recovery scan can resume.
      */
-    public record ParkedTurn(@NotBlank @Size(max = 64) String promptId,
+    public record ParkedTurn(@NotBlank @Size(max = 128) String promptId,
             @Min(0) @Max(MAX_SAFE_COUNTER) long wakeAt,
             @Min(0) @Max(MAX_SAFE_COUNTER) Long approvalRevision,
             @Pattern(regexp = "wake") String owner) {
