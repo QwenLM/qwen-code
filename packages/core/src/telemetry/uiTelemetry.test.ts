@@ -2258,4 +2258,87 @@ describe('UiTelemetryService live usage accounting', () => {
       new Set(['exec-fresh']),
     );
   });
+
+  it('tracks per-session live metrics and run start time separately from replayed and restored history', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-25T10:00:00.000Z'));
+
+      // Replayed and restored historical metrics must not enter live buckets.
+      service.addReplayedEvent(
+        apiResponse('m', 50, [1000, 200, 1200, 0, 0], {
+          execution_id: 'replayed-1',
+        }),
+        'sess-a',
+      );
+      service.restoreSessionModelMetrics('sess-b', {
+        m: {
+          api: { totalRequests: 5, totalErrors: 0, totalLatencyMs: 500 },
+          tokens: {
+            prompt: 5000,
+            candidates: 500,
+            total: 5500,
+            cached: 0,
+            thoughts: 0,
+          },
+          bySource: {},
+        },
+      });
+      expect(service.getLiveMetricsForSession('sess-a')).toBeUndefined();
+      expect(service.getRunStartTimeForSession('sess-a')).toBeUndefined();
+      expect(service.getLiveMetricsForSession('sess-b')).toBeUndefined();
+
+      // Live API response and skill invocation populate only the owning session.
+      vi.setSystemTime(new Date('2026-11-25T10:05:00.000Z'));
+      service.addEvent(
+        apiResponse('m', 10, [40, 20, 60, 0, 0], { execution_id: 'live-a-1' }),
+        'sess-a',
+      );
+      service.recordSkillInvocation('review', true, 'sess-a');
+
+      vi.setSystemTime(new Date('2026-11-25T10:06:00.000Z'));
+      service.addEvent(
+        apiResponse('m', 20, [70, 30, 100, 0, 0], { execution_id: 'live-b-1' }),
+        'sess-b',
+      );
+
+      const liveA = service.getLiveMetricsForSession('sess-a');
+      expect(liveA?.models['m']?.api.totalRequests).toBe(1);
+      expect(liveA?.models['m']?.tokens.total).toBe(60);
+      expect(liveA?.skills?.totalCalls).toBe(1);
+      expect(getRequestExecutionIds(liveA!)).toEqual(new Set(['live-a-1']));
+      expect(service.getRunStartTimeForSession('sess-a')?.toISOString()).toBe(
+        '2026-11-25T10:05:00.000Z',
+      );
+
+      const liveB = service.getLiveMetricsForSession('sess-b');
+      expect(liveB?.models['m']?.api.totalRequests).toBe(1);
+      expect(liveB?.models['m']?.tokens.total).toBe(100);
+      expect(service.getRunStartTimeForSession('sess-b')?.toISOString()).toBe(
+        '2026-11-25T10:06:00.000Z',
+      );
+
+      // Snapshot and restore round-trips per-session live metrics and clock.
+      const snapshot = service.snapshotForReplay('sess-c', 'sess-a');
+      service.resetSession('sess-a');
+      expect(service.getLiveMetricsForSession('sess-a')).toBeUndefined();
+      service.restoreFromReplaySnapshot(snapshot);
+      expect(
+        service.getLiveMetricsForSession('sess-a')?.models['m']?.tokens.total,
+      ).toBe(60);
+      expect(service.getRunStartTimeForSession('sess-a')?.toISOString()).toBe(
+        '2026-11-25T10:05:00.000Z',
+      );
+
+      // Removing sess-a clears only sess-a, leaving sess-b untouched.
+      service.removeSession('sess-a');
+      expect(service.getLiveMetricsForSession('sess-a')).toBeUndefined();
+      expect(service.getRunStartTimeForSession('sess-a')).toBeUndefined();
+      expect(
+        service.getLiveMetricsForSession('sess-b')?.models['m']?.tokens.total,
+      ).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

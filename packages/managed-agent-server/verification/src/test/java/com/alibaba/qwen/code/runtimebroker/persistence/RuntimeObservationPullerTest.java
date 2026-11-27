@@ -18,7 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
@@ -91,7 +91,7 @@ class RuntimeObservationPullerTest {
     private final List<Map<String, Object>> workerOutbox = new CopyOnWriteArrayList<>();
     private final List<Long> observedAckThroughs = new CopyOnWriteArrayList<>();
     private final List<RuntimeBrokerService> openServices = new ArrayList<>();
-    private final List<RuntimeBrokerHttpServer> openServers = new ArrayList<>();
+    private final List<RuntimeBrokerHttpControllerTestFixture> openServers = new ArrayList<>();
 
     @BeforeEach
     void setUp() throws Exception {
@@ -124,8 +124,8 @@ class RuntimeObservationPullerTest {
     }
 
     @AfterEach
-    void tearDown() {
-        for (RuntimeBrokerHttpServer server : openServers) {
+    void tearDown() throws Exception {
+        for (RuntimeBrokerHttpControllerTestFixture server : openServers) {
             server.close();
         }
         for (RuntimeBrokerService service : openServices) {
@@ -139,7 +139,7 @@ class RuntimeObservationPullerTest {
     @Test
     void detachesStagesViaSinglePullerAndAdoptsAcrossBrokerRestart() throws Exception {
         RuntimeBrokerService brokerA = newBroker("broker-a");
-        RuntimeBrokerHttpServer serverA = newHttpServer(brokerA);
+        RuntimeBrokerHttpControllerTestFixture serverA = newHttpServer(brokerA);
         RuntimeBrokerService brokerB = newBroker("broker-b");
 
         // Acquire Runtime Session on brokerA and seed unsettled background run call-1.
@@ -197,7 +197,7 @@ class RuntimeObservationPullerTest {
 
         // Start a brand-new Broker instance (brokerC) with empty in-memory maps — NO acquire call!
         RuntimeBrokerService brokerC = newBroker("broker-c");
-        RuntimeBrokerHttpServer serverC = newHttpServer(brokerC);
+        RuntimeBrokerHttpControllerTestFixture serverC = newHttpServer(brokerC);
 
         acquireWriter();
         // 1. Publisher re-attach adopts durable binding + Runtime Session and returns observedRuns!
@@ -254,7 +254,7 @@ class RuntimeObservationPullerTest {
     @Test
     void stopBackgroundProcessAdoptsTheDurableSessionWithoutAPriorReattach() throws Exception {
         RuntimeBrokerService brokerA = newBroker("broker-a");
-        RuntimeBrokerHttpServer serverA = newHttpServer(brokerA);
+        RuntimeBrokerHttpControllerTestFixture serverA = newHttpServer(brokerA);
         HttpResponse<String> acquired = postBroker(serverA, "/tool-sessions:acquire", Map.of(
                 "protocolVersion", 1,
                 "requestId", "acq-1",
@@ -285,7 +285,7 @@ class RuntimeObservationPullerTest {
     @Test
     void stopBackgroundProcessRejectsAMismatchedTenantOnAFreshBrokerWithoutSideEffects() throws Exception {
         RuntimeBrokerService brokerA = newBroker("broker-a");
-        RuntimeBrokerHttpServer serverA = newHttpServer(brokerA);
+        RuntimeBrokerHttpControllerTestFixture serverA = newHttpServer(brokerA);
         HttpResponse<String> acquired = postBroker(serverA, "/tool-sessions:acquire", Map.of(
                 "protocolVersion", 1,
                 "requestId", "acq-1",
@@ -317,7 +317,7 @@ class RuntimeObservationPullerTest {
     @Test
     void aReplicaThatCannotUseTheLeaseLeavesThePullToOneThatCan() throws Exception {
         RuntimeBrokerService owner = newBroker("broker-owner");
-        RuntimeBrokerHttpServer server = newHttpServer(owner);
+        RuntimeBrokerHttpControllerTestFixture server = newHttpServer(owner);
         RuntimeBrokerService blind = newBroker("broker-blind", false);
         // Scan by hand only, the blind replica first.
         for (RuntimeBrokerService broker : List.of(owner, blind)) {
@@ -396,19 +396,20 @@ class RuntimeObservationPullerTest {
         return service;
     }
 
-    private RuntimeBrokerHttpServer newHttpServer(RuntimeBrokerService service) throws IOException {
-        RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
-                new InetSocketAddress("127.0.0.1", 0), BROKER_SECRET, service);
+    private RuntimeBrokerHttpControllerTestFixture newHttpServer(RuntimeBrokerService service) throws Exception {
+        RuntimeBrokerHttpControllerTestFixture server = new RuntimeBrokerHttpControllerTestFixture(
+                BROKER_SECRET, service);
         server.start();
         openServers.add(server);
         return server;
     }
 
     private HttpResponse<String> postBroker(
-            RuntimeBrokerHttpServer server,
+            RuntimeBrokerHttpControllerTestFixture server,
             String path,
             Map<String, Object> body) throws Exception {
-        URI uri = server.getBaseUri().resolve("internal/runtime-broker/v1" + path);
+        URI uri = server.getBaseUri().resolve(
+                RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + path);
         HttpRequest req = HttpRequest.newBuilder(uri)
                 .header("Authorization", "Bearer " + BROKER_SECRET)
                 .header("Content-Type", "application/json")

@@ -1134,5 +1134,144 @@ describe.skipIf(process.platform === 'win32')(
       expect(writes()).toEqual([]);
       expect(checkoutState()).toBe(checkoutBefore);
     });
+
+    it('runs a scheduled in-place watch end to end: schedule, gate without re-nagging, take-over resume, and cleanup keeping checkout', async () => {
+      // Dedicated clean checkout on the PR head branch tracking origin/feat.
+      const inPlaceDir = join(dir, 'in-place');
+      run(dir, 'clone', '-q', '-b', 'feat', bare, inPlaceDir);
+      process.chdir(inPlaceDir);
+
+      const head = prHead();
+      ci(head, 11, { test: 'FAILURE' }, 'expected 3, got 4\n');
+      const [prep] = await cli(
+        'prepare',
+        '7',
+        '--repo',
+        'o/r',
+        '--host',
+        'ghe.example.com',
+        '--in-place',
+      );
+      expect(prep).toMatchObject({
+        inPlace: true,
+        resumed: false,
+        worktreePath: inPlaceDir,
+      });
+
+      const [sched] = await cli('schedule', '7', '--every', '5');
+      const taskId = sched['task'] as string;
+      const gateCmd = sched['gate'] as string;
+      expect(sched).toMatchObject({
+        cron: '*/5 * * * *',
+        recurring: true,
+        prompt: `Run /autofix-pr tick o/r#7 --task ${taskId} --in-place`,
+      });
+
+      // First round handles the initial failing check, commits in the user's
+      // checkout, pushes and replies.
+      expect(await cli('sync', '7', '--task', taskId)).toMatchObject([
+        { synced: true },
+      ]);
+      const [snap1] = await cli('snapshot', '7', '--task', taskId);
+      expect(snap1).toMatchObject({ action: 'fix' });
+      const fixedSha = agentCommits(
+        inPlaceDir,
+        'export const sum = (a, b) => a + b;\n',
+        'Fix sum in place',
+      );
+      expect(await cli('sync', '7', '--task', taskId)).toMatchObject([
+        { synced: true },
+      ]);
+      expect(await cli('push', '7', '--task', taskId)).toMatchObject([
+        { pushed: true, sha: fixedSha },
+      ]);
+      const planPath = join(
+        inPlaceDir,
+        '.qwen',
+        'tmp',
+        'autofix-pr-7-plan.json',
+      );
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          summary: { body: `Fixed in ${fixedSha.slice(0, 7)}.`, handled: [] },
+        }),
+      );
+      expect(await cli('reply', '7', planPath, '--task', taskId)).toMatchObject(
+        [{ posted: [{ kind: 'summary' }] }],
+      );
+      // Gate stays quiet once CI passes on the pushed head.
+      ci(fixedSha, 12, { test: 'SUCCESS' });
+      expect(await gate(gateCmd)).toEqual([]);
+
+      // New trusted comment arrives: gate wakes once (advancing cursor) and
+      // does not re-nag on the next tick when the user chooses "Not now",
+      // while prepared snapshot still surfaces the unhandled comment.
+      updateWorld((world) => {
+        world.comments.push({
+          id: 'IC_INPLACE_1',
+          databaseId: 701,
+          author: 'alice',
+          authorAssociation: 'MEMBER',
+          body: 'Please also export sub.',
+        });
+      });
+      expect(await gate(gateCmd)).toMatchObject([
+        {
+          action: 'fix',
+          events: [{ type: 'issue_comment', id: 'IC_INPLACE_1' }],
+        },
+      ]);
+      expect(await gate(gateCmd)).toEqual([]);
+      const snap2File = (await cli('snapshot', '7', '--task', taskId))[0]![
+        'snapshot'
+      ] as string;
+      const snap2 = JSON.parse(readFileSync(snap2File, 'utf8')) as {
+        action: string;
+        events: Array<{ type: string; id?: string }>;
+      };
+      expect(snap2.action).toBe('fix');
+      expect(snap2.events).toContainEqual(
+        expect.objectContaining({ type: 'issue_comment', id: 'IC_INPLACE_1' }),
+      );
+
+      // Another session resumes via --in-place --take-over + schedule --again;
+      // the old session's gate stops with watched_elsewhere.
+      process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+      const [resumed] = await cli(
+        'prepare',
+        '7',
+        '--repo',
+        'o/r',
+        '--host',
+        'ghe.example.com',
+        '--in-place',
+        '--take-over',
+      );
+      expect(resumed).toMatchObject({
+        inPlace: true,
+        resumed: true,
+        tookOver: true,
+      });
+      const [resched] = await cli('schedule', '7', '--again');
+      expect(resched['task']).not.toBe(taskId);
+      expect(resched['prompt']).toBe(
+        `Run /autofix-pr tick o/r#7 --task ${resched['task']} --in-place`,
+      );
+      expect(await gate(gateCmd)).toMatchObject([
+        {
+          action: 'stop',
+          events: [{ type: 'watched_elsewhere' }],
+        },
+      ]);
+
+      // Cleanup keeps the user's checkout, branch and pushed commit.
+      expect(await cli('cleanup', '7')).toMatchObject([
+        { removed: true, inPlace: true },
+      ]);
+      expect(run(inPlaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat');
+      expect(run(inPlaceDir, 'rev-parse', 'HEAD')).toBe(fixedSha);
+      expectPushes([[head, fixedSha]]);
+    });
   },
 );

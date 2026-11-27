@@ -550,3 +550,52 @@ it('rejects an oversized replay segment before materializing its events', async 
   ).rejects.toThrow('replay scan exceeds its byte budget');
   expect(replay).not.toHaveBeenCalled();
 });
+
+it('propagates AbortSignal to readTurnIndexPage and each readPage step and stops pagination on abort (R2-2)', async () => {
+  await write([
+    record('turn-1'),
+    call('c1', 'call-1', 'read_file'),
+    call('c2', 'call-2', 'read_file'),
+    call('c3', 'call-3', 'read_file'),
+  ]);
+  const controller = new AbortController();
+  const capturedSignals: Array<AbortSignal | undefined> = [];
+  const origReadTurnIndexPage = reader.readTurnIndexPage.bind(reader);
+  const origReadPage = reader.readPage.bind(reader);
+  const turnIndexSpy = vi
+    .spyOn(reader, 'readTurnIndexPage')
+    .mockImplementation(async (sid, opts) => {
+      capturedSignals.push(opts?.signal);
+      return origReadTurnIndexPage(sid, opts);
+    });
+  let pageCalls = 0;
+  const readPageSpy = vi
+    .spyOn(reader, 'readPage')
+    .mockImplementation(async (sid, opts) => {
+      capturedSignals.push(opts?.signal);
+      pageCalls += 1;
+      const result = await origReadPage(sid, { ...opts, limit: 1 });
+      if (pageCalls === 1) {
+        controller.abort(new DOMException('client disconnected', 'AbortError'));
+      }
+      return result;
+    });
+  try {
+    await expect(
+      readSessionToolCalls({
+        sessionId,
+        turnId: 'turn-1',
+        reader,
+        codec: { encode: () => 'cursor-1' },
+        hasActivePrompt: () => false,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(turnIndexSpy).toHaveBeenCalledTimes(1);
+    expect(readPageSpy).toHaveBeenCalledTimes(1);
+    expect(capturedSignals).toEqual([controller.signal, controller.signal]);
+  } finally {
+    turnIndexSpy.mockRestore();
+    readPageSpy.mockRestore();
+  }
+});

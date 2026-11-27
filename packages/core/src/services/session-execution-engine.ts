@@ -78,6 +78,13 @@ export function assertSessionExecutionEngine(
   }
 }
 
+export interface SessionExecutionEngineAccumulatorSnapshot {
+  readonly engine: SessionExecutionEngine | undefined;
+  readonly reason: string | undefined;
+  readonly hasRecords: boolean;
+  readonly complete: boolean;
+}
+
 /** Tracks physical records before branch selection or UUID aggregation. */
 export class SessionExecutionEngineAccumulator {
   private engine: SessionExecutionEngine | undefined;
@@ -86,6 +93,27 @@ export class SessionExecutionEngineAccumulator {
   private complete = true;
 
   constructor(private readonly sessionId: string) {}
+
+  static fromSnapshot(
+    sessionId: string,
+    snapshot: SessionExecutionEngineAccumulatorSnapshot,
+  ): SessionExecutionEngineAccumulator {
+    const accumulator = new SessionExecutionEngineAccumulator(sessionId);
+    accumulator.engine = snapshot.engine;
+    accumulator.reason = snapshot.reason;
+    accumulator.hasRecords = snapshot.hasRecords;
+    accumulator.complete = snapshot.complete;
+    return accumulator;
+  }
+
+  snapshot(): SessionExecutionEngineAccumulatorSnapshot {
+    return {
+      engine: this.engine,
+      reason: this.reason,
+      hasRecords: this.hasRecords,
+      complete: this.complete,
+    };
+  }
 
   parseLine(line: string, filePath: string): ValidatedTranscriptLineRecord[] {
     if (!line.trim()) return [];

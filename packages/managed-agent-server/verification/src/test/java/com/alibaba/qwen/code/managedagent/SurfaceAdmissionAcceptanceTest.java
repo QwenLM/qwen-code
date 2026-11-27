@@ -1618,7 +1618,7 @@ public class SurfaceAdmissionAcceptanceTest {
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
             case STORE_MEMORY_QUERY, STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
-                    STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
+                    STORE_RECOVERY_BLOCK, STORE_EVENT_INGEST, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
                     STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, PUB_FINISHED,
@@ -2089,6 +2089,11 @@ public class SurfaceAdmissionAcceptanceTest {
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
                     + "\"recoveryStatus\":\"BLOCKED_WORKSPACE\","
                     + "\"recoveryDetailCode\":\"probe\"}";
+            case STORE_EVENT_INGEST -> "{\"workspaceId\":\"ws\","
+                    + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
+                    + "\"eventEpoch\":\"epoch\",\"turnId\":\"turn\","
+                    + "\"promptId\":\"prompt\",\"afterSequence\":0,"
+                    + "\"throughSequence\":0,\"events\":[]}";
             case STORE_TRANSACTION_COMMIT -> "{\"workspaceId\":\"ws\","
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
                     + "\"expectedJournalRevision\":0,"
@@ -2371,7 +2376,7 @@ public class SurfaceAdmissionAcceptanceTest {
                     new WorkspaceTerminalRelayService(sessions,
                             mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
                             settings),
-                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+                    mock(TerminalTicketStore.class));
         }
     }
 

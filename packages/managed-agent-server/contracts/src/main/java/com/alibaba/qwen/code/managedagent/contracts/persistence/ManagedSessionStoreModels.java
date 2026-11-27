@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class ManagedSessionStoreModels {
@@ -63,6 +64,17 @@ public final class ManagedSessionStoreModels {
             "managed_session_head_corrupt";
     public static final String ERROR_RECOVERY_CONFLICT =
             "managed_session_recovery_conflict";
+    public static final String ERROR_INGEST_CURSOR_MISMATCH =
+            "managed_event_ingest_cursor_mismatch";
+    public static final String ERROR_INGEST_NOT_READY =
+            "managed_event_ingest_not_ready";
+    public static final String ERROR_INGEST_NOT_OWNER =
+            "managed_event_ingest_not_owner";
+    public static final String ERROR_INGEST_END_REFUSED =
+            "managed_event_ingest_end_refused";
+    public static final int MAX_INGEST_EVENTS = 64;
+    public static final String INGEST_END_PARKED = "parked";
+    public static final String INGEST_END_RECOVERY_BLOCKED = "recovery_blocked";
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
@@ -166,7 +178,7 @@ public final class ManagedSessionStoreModels {
      * is a coordinator Turn row; {@code wake} is a wake-started Turn, which
      * only the wake-recovery scan can resume.
      */
-    public record ParkedTurn(@NotBlank @Size(max = 64) String promptId,
+    public record ParkedTurn(@NotBlank @Size(max = 128) String promptId,
             @Min(0) @Max(MAX_SAFE_COUNTER) long wakeAt,
             @Min(0) @Max(MAX_SAFE_COUNTER) Long approvalRevision,
             @Pattern(regexp = "wake") String owner) {
@@ -240,40 +252,43 @@ public final class ManagedSessionStoreModels {
             String lastCommitDigest, long activationEpoch,
             boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease,
             boolean wakeDispatch, boolean runtimeObservation, boolean actionParking,
-            boolean backgroundActionParking, boolean wakeActionParking) {
+            boolean backgroundActionParking, boolean wakeActionParking,
+            boolean suspensionPlacementRelease) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch,
                 boolean runtimeObservation) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
-                    runtimeObservation, false, false, false);
+                    runtimeObservation, false, false, false, false);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease, boolean wakeDispatch) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, replayed, activationLeaseRenewal, activationLease, wakeDispatch,
-                    false, false, false, false);
+                    false, false, false, false, false);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
                 boolean activationLeaseRenewal, ActivationLease activationLease) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
                     activationEpoch, replayed, activationLeaseRenewal, activationLease, false, false, false,
-                    false, false);
+                    false, false, false);
         }
         /** Advertises that this control plane consumes seal-time wake stamps. */
         public WriterGrant withWakeDispatch() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    true, runtimeObservation, actionParking, backgroundActionParking, wakeActionParking);
+                    true, runtimeObservation, actionParking, backgroundActionParking, wakeActionParking,
+                    suspensionPlacementRelease);
         }
         /** Advertises that a background Session may suspend behind the pull. */
         public WriterGrant withRuntimeObservation() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    wakeDispatch, true, actionParking, backgroundActionParking, wakeActionParking);
+                    wakeDispatch, true, actionParking, backgroundActionParking, wakeActionParking,
+                    suspensionPlacementRelease);
         }
         /**
          * Advertises Action parking, including a park sealed beside a
@@ -283,7 +298,14 @@ public final class ManagedSessionStoreModels {
         public WriterGrant withActionParking() {
             return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
                     lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
-                    wakeDispatch, runtimeObservation, true, true, true);
+                    wakeDispatch, runtimeObservation, true, true, true, suspensionPlacementRelease);
+        }
+        /** Advertises that a wake-stamped sealed writer can release its placement. */
+        public WriterGrant withSuspensionPlacementRelease() {
+            return new WriterGrant(writerGeneration, leaseUntil, journalRevision, committedSequence,
+                    lastCommitDigest, activationEpoch, replayed, activationLeaseRenewal, activationLease,
+                    wakeDispatch, runtimeObservation, actionParking, backgroundActionParking, wakeActionParking,
+                    true);
         }
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
@@ -311,6 +333,28 @@ public final class ManagedSessionStoreModels {
     public record RecoveryStateReceipt(long writerGeneration,
             String recoveryStatus, String recoveryDetailCode,
             boolean replayed) {
+    }
+
+    /**
+     * Committed event envelopes of one Harness-owned Turn, in journal order,
+     * covering {@code (afterSequence, throughSequence]}. The writer ID is the
+     * Harness boot that owns the Turn.
+     */
+    public record IngestEventsRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 128) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 64) String eventEpoch,
+            @NotBlank @Size(max = 64) String turnId,
+            @NotBlank @Size(max = 64) String promptId,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long afterSequence,
+            @Min(0) @Max(MAX_SAFE_COUNTER) long throughSequence,
+            @NotNull @Size(max = MAX_INGEST_EVENTS) List<Map<String, Object>> events,
+            @Pattern(regexp = INGEST_END_PARKED + "|" + INGEST_END_RECOVERY_BLOCKED) String end) {
+    }
+
+    /** {@code terminal} means the request recorded the Turn's terminal event. */
+    public record IngestReceipt(long cursor, long leaseRenewAfterMillis, boolean terminal) {
     }
 
     public record CommitResource(

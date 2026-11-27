@@ -37,6 +37,15 @@ describe.skipIf(process.platform === 'win32')(
         expect(
           (await stat(path.join(directory, 'state.json'))).mode & 0o777,
         ).toBe(0o600);
+        expect(first.state).not.toHaveProperty('brokerPort');
+        expect(
+          new Set([first.state.javaPort, first.state.harnessPort]).size,
+        ).toBe(2);
+        expect(
+          JSON.parse(
+            await readFile(path.join(directory, 'state.json'), 'utf8'),
+          ),
+        ).toEqual(first.state);
         expect(
           new Set([
             first.state.publicToken,
@@ -59,6 +68,30 @@ describe.skipIf(process.platform === 'win32')(
       } finally {
         await second.release();
       }
+    });
+
+    it('accepts schema 1 state with a legacy broker port without using or rewriting it', async () => {
+      const directory = path.join(temporary, 'data');
+      const first = await openManagedLocalState(directory);
+      await first.release();
+      const statePath = path.join(directory, 'state.json');
+      const current = JSON.parse(await readFile(statePath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      const legacy = { ...current, brokerPort: current['javaPort'] };
+      await writeFile(statePath, `${JSON.stringify(legacy, null, 2)}\n`, {
+        mode: 0o600,
+      });
+
+      const reopened = await openManagedLocalState(directory);
+      try {
+        expect(reopened.state).toEqual(current);
+        expect(reopened.state).not.toHaveProperty('brokerPort');
+      } finally {
+        await reopened.release();
+      }
+      expect(JSON.parse(await readFile(statePath, 'utf8'))).toEqual(legacy);
     });
 
     it('does not replace corrupted or missing state alongside persisted data', async () => {

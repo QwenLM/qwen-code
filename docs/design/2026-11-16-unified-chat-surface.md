@@ -405,10 +405,18 @@ separately. Each slice is an independently shippable PR with its own tests.
    `ChatSurface`; delete the replaced transcript/composer/approval/status
    orchestration from `ManagedSessionsPage.tsx`. Managed-only panels become
    slots.
-4. **ChatPane converges.** Split view and side task render `ChatSurface`
-   through the daemon adapter; pane chrome (title, maximize/close, header
-   actions) stays as slots; `ChatPane`'s duplicated submit, cancel,
-   approval, and status orchestration is deleted.
+4. **ChatPane converges.**
+   - **Slice 4a (rendering + approval/question routing):** Split view, side
+     task, and the artifacts panel's read-only session tab (`SessionPanel`)
+     render `ChatSurface` through the daemon adapter; pane chrome (title,
+     maximize/close, header actions) stays as slots; `ChatPane`'s inline
+     transcript, tool-approval, question, and composer rendering plus its
+     question handler are deleted.
+   - **Slice 4b (submit/cancel/status follow-up):** Converge `ChatPane`'s
+     remaining host-owned submit (`onComposerSubmit`), cancel
+     (`onComposerCancel`), and `composerStatus` orchestration onto the shared
+     controller/surface pipeline and retire the temporary host-owned cancel and
+     `transcriptProps.isResponding` overrides.
 5. **Capability-gated parity.** Unify status stack, usage stats, and context
    usage/compression display on both sides wherever backend facts exist.
    Conversation search and goal display remain gated pending the open

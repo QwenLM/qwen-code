@@ -74,16 +74,24 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // must not replace this measured shared-tree baseline with an older estimate.
 // The expansion-preserving normalization adds 42 bytes to that merged build.
 // The schema-version narrowing capture adds a further 8 bytes.
-// Model selection panel i18n keys add 2,327 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
-// Merged main through 68388f5d41 plus the focus-stable touch-control changes
-// measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
-// across independent local transcript/export builds.
-// Model selection panel i18n keys add 5,729 bytes, measuring 2,161,302 renderer
-// JS bytes and 1,906,920 CSS bytes. Keep the house margins:
-// warning = measurement + 713, hard ceiling = measurement + 1,713.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_162_015;
+// Main CI then measured 2,156,327 on a0dced748e (run 45741862667), 2,156,357
+// after #18437, 2,156,880 after #18009 and 2,157,683 after #18140 (build job
+// 139890640548 on run 45814470900), which crossed the old 2,157,286 ceiling.
+// #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
+// catalogs; the export entry inlines the whole table (see above), so none of
+// that PR's component code reaches the document entry and the forbidden-input
+// guard still passes. Independent same-toolchain A/B builds measured the
+// scheduled-task branch transcript renderer at 2,160,446 bytes locally;
+// merging the overload-indicator slice (#18054) adds the EN/ZH-CN overload
+// catalog entries (+483 bytes), bringing the merged tree to 2,160,929 bytes
+// (component CSS 1,911,270 bytes). Adding all 42 auth.modelSelection.* keys
+// across EN and ZH-CN brings the merged tree to 2,163,261 JS bytes (component
+// CSS 1,911,385 bytes). Retain the house warning and hard-ceiling margins of
+// 713 and 1,713 bytes (2,163,974 / 2,164,974).
+const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_163_261;
+const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -210,12 +218,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_162_015;
 // component graph is not wired into any column and useDaemonChatController
 // has no importer, so no component code reaches the document entry; the
 // forbidden-input guard passes and the third-party input mix is unchanged.
+// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
+//
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured shared tree also re-tracks this ceiling to 2,163,015,
-// which is 1,713 bytes above its 2,161,302-byte measurement, and stays coupled
+// The latest measured merged tree re-tracks this ceiling to 2,164,974,
+// which is 1,713 bytes above its 2,163,261-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 

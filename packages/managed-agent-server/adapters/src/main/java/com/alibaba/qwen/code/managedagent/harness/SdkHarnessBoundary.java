@@ -331,6 +331,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        return call(() -> delegate.inspectUnattachedRecovery(session, promptId));
+    }
+
+    @Override
     public Attachment cachedRecoveryAttachment(String tenantId, String sessionId) {
         return call(() -> delegate.cachedRecoveryAttachment(tenantId, sessionId));
     }

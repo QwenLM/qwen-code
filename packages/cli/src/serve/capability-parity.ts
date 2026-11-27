@@ -263,6 +263,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence:
       'surface:AUTOMATION_RUN,surface:STORE_AUTOMATION_CREATE,surface:STORE_AUTOMATION_LIST,surface:STORE_AUTOMATION_RETIRE',
   },
+  scheduled_task_owner_selection: NO_MANAGED_EQUIVALENT(
+    'Managed automations do not accept daemon session-owner selectors',
+  ),
   // Fixed-interval /loop: cron_create passes a gate through to the
   // definition, probed before each firing by the same gateCommandError the
   // daemon's scheduled-task gate uses, so a quiet watch spends no turn.
@@ -432,6 +435,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   workspace_git_check_ignore: NO_MANAGED_EQUIVALENT(
     'no Managed Git ignore query route',
+  ),
+  workspace_input_history: NO_MANAGED_EQUIVALENT(
+    'no Managed input history route',
   ),
   workspace_mcp_restart: {
     standing: 'managed',
@@ -612,6 +618,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   ),
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT(
     'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
+  ),
+  session_worktree_restore_v1: NO_MANAGED_EQUIVALENT(
+    'Managed has no retained-chat snapshot selector, Git reconstruction, and owner-attested restore session flow',
   ),
   session_worktree_branch_v1: NO_MANAGED_EQUIVALENT(
     'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',

@@ -525,11 +525,14 @@ export async function readManagedSessionRecordsAndTitle(options: {
   readonly maxBytes?: number;
   /** Stops projection before the next body would exceed this retained size. */
   readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<{
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
+  options.signal?.throwIfAborted();
   const scan = await readManagedSessionLog(options);
+  options.signal?.throwIfAborted();
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -540,13 +543,16 @@ export async function readManagedSessionRecordsAndTitle(options: {
     ...(options.maxBodyBytes !== undefined
       ? { maxBodyBytes: options.maxBodyBytes }
       : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
+  options.signal?.throwIfAborted();
   let titleInfo: { title?: string; source?: 'auto' | 'manual' } = {};
   try {
     titleInfo = await projectManagedSessionTitleInfo({ scan, resources });
   } catch {
     // Reported as no title.
   }
+  options.signal?.throwIfAborted();
   return { records, titleInfo };
 }
 
@@ -569,8 +575,10 @@ export async function projectManagedSessionRecords(options: {
   readonly resources: ManagedSessionResourceStore;
   /** Stops before reading the body that would cross this retained size. */
   readonly maxBodyBytes?: number;
+  readonly signal?: AbortSignal;
 }): Promise<ChatRecord[]> {
-  const { scan, resources, maxBodyBytes } = options;
+  const { scan, resources, maxBodyBytes, signal } = options;
+  signal?.throwIfAborted();
   if (scan.header === undefined) {
     throw new ManagedSessionRecordError(
       'session log has no Managed header, so it cannot be projected.',
@@ -580,6 +588,7 @@ export async function projectManagedSessionRecords(options: {
   const checkpoints = new Map<string, number>();
   let projectedBytes = 0;
   for (const event of scan.events) {
+    signal?.throwIfAborted();
     const branch = await readManagedBranchCheckpoint(
       event,
       resources,

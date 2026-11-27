@@ -88,8 +88,21 @@ import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import {
   SessionExecutionEngineAccumulator,
   type SessionExecutionEngine,
+  type SessionExecutionEngineAccumulatorSnapshot,
   type SessionExecutionEngineState,
 } from './session-execution-engine.js';
+import {
+  addPromptUuidToBloom,
+  buildPromptUuidBloom,
+  decodePromptUuidBloom,
+  encodePromptUuidBloom,
+  promptUuidBloomMayContain,
+  readSessionPromptTimeSidecarAsync,
+  sessionPromptTimeSidecarPath,
+  writeSessionPromptTimeSidecar,
+  type SessionPromptTimeSidecar,
+  type SessionPromptTimeUuidBloom,
+} from './session-prompt-time-sidecar.js';
 import {
   selectActiveSideArtifactRecordUuids,
   SessionArtifactSnapshotAccumulator,
@@ -103,10 +116,12 @@ import {
   projectUserTranscriptForDisplay,
   stripGeneratedAttachmentTokens,
   type TranscriptRecordInput,
+  type TranscriptRecordType,
   validateTranscriptRecord,
   walkTranscriptUuidChain,
 } from '../utils/transcript-records.js';
 import {
+  parseBranchCheckpointPayload,
   resolveBranchPoints,
   type BranchPointRecord,
 } from './branch-points.js';
@@ -255,6 +270,7 @@ export interface SessionTranscriptReadTurnIndexOptions {
   snapshot?: string;
   start?: number;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export interface SessionTranscriptTurnIndexPage {
@@ -280,6 +296,7 @@ export interface SessionTranscriptReadPageOptions {
   direction?: 'backward';
   limit?: number;
   maxBytes?: number;
+  signal?: AbortSignal;
 }
 
 export interface SessionTranscriptRecordPage {
@@ -530,10 +547,13 @@ export interface SessionLiveRestoreProjection
 
 interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
+  signal?: AbortSignal;
 }
 
 interface LastUserPromptReadOptions {
   preferCache?: boolean;
+  signal?: AbortSignal;
+  allowSidecarWrite?: boolean;
   validateFirstRecord?: (
     record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
   ) => boolean | Promise<boolean>;
@@ -639,6 +659,7 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  task?: SharedAbortableTask<TranscriptIndex>;
   hookTurns?: Map<
     string,
     Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
@@ -749,11 +770,201 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+
+interface IncrementalIndexState {
+  branchPointRecords: Map<string, BranchPointRecord>;
+  executionEngine: SessionExecutionEngineAccumulatorSnapshot;
+  firstRecordTimestamp?: string;
+  rawStartTime?: string;
+  loopEstimatedBytes: number;
+  prefixSha256: string;
+  endsWithNewline: boolean;
+}
+
+// Retained alongside cached indexes only while accounted within the entry's
+// budget class; uncached indexes release their pending state automatically.
+const incrementalIndexStates = new WeakMap<
+  TranscriptIndex,
+  IncrementalIndexState
+>();
+const pendingIncrementalIndexStates = new WeakMap<
+  TranscriptIndex,
+  IncrementalIndexState
+>();
+
+const PREFIX_HASH_CHUNK_BYTES = 256 * 1024;
+const MAX_TAIL_HASH_BUFFER_BYTES = 1024 * 1024;
+const DEFAULT_MAX_CONCURRENT_TRANSCRIPT_BUILDS = 2;
+
+export type TranscriptIndexBuildModeEvent = {
+  filePath: string;
+  mode: 'full' | 'incremental';
+  startOffset: number;
+  snapshotSize: number;
+};
+
+export type TranscriptReadStreamBytesEvent = {
+  filePath: string;
+  startOffset: number;
+  bytesRead: number;
+};
+
+export type PromptTimeScanModeEvent = {
+  filePath: string;
+  mode:
+    | 'sidecar_exact'
+    | 'sidecar_tail'
+    | 'index_cache'
+    | 'lightweight_scan'
+    | 'managed_scan';
+  startOffset: number;
+  snapshotSize: number;
+};
+
+interface SharedAbortableTask<T> {
+  readonly promise: Promise<T>;
+  readonly aborted: () => boolean;
+  attach(signal?: AbortSignal): Promise<T>;
+}
+
+function createSharedAbortableTask<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  onAllAborted?: () => void,
+): SharedAbortableTask<T> {
+  const controller = new AbortController();
+  let waiters = 0;
+  let settled = false;
+  const promise = run(controller.signal).finally(() => {
+    settled = true;
+  });
+  // Detaching every waiter via AbortSignal can leave the underlying run to
+  // reject with AbortError after no caller is listening.
+  promise.catch(() => undefined);
+
+  const abortIfAbandoned = (reason?: unknown) => {
+    if (waiters > 0 || settled || controller.signal.aborted) return;
+    controller.abort(
+      reason ?? new DOMException('No active transcript waiters', 'AbortError'),
+    );
+    onAllAborted?.();
+  };
+
+  const attach = (signal?: AbortSignal): Promise<T> => {
+    if (signal?.aborted) {
+      abortIfAbandoned(signal.reason);
+      return Promise.reject(signal.reason);
+    }
+    waiters += 1;
+    return new Promise<T>((resolve, reject) => {
+      let done = false;
+      const finish = (cb: () => void) => {
+        if (done) return;
+        done = true;
+        signal?.removeEventListener('abort', onAbort);
+        waiters -= 1;
+        if (waiters === 0) {
+          abortIfAbandoned(signal?.reason);
+        }
+        cb();
+      };
+      const onAbort = () => {
+        finish(() => reject(signal?.reason));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    });
+  };
+
+  return {
+    promise,
+    aborted: () => controller.signal.aborted,
+    attach,
+  };
+}
+
+class TranscriptBuildSemaphore {
+  private active = 0;
+  private readonly waiters: Array<{
+    resolve: (release: () => void) => void;
+    reject: (error: unknown) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+  }> = [];
+
+  private limit(): number {
+    return (
+      maxConcurrentTranscriptBuildsForTest ??
+      DEFAULT_MAX_CONCURRENT_TRANSCRIPT_BUILDS
+    );
+  }
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    signal?.throwIfAborted();
+    if (this.active < this.limit()) {
+      this.active += 1;
+      return Promise.resolve(this.makeRelease());
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: (typeof this.waiters)[number] = {
+        resolve,
+        reject,
+        signal,
+      };
+      if (signal) {
+        const onAbort = () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(signal.reason);
+        };
+        waiter.onAbort = onAbort;
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+    });
+  }
+
+  stats(): { active: number; queued: number } {
+    return { active: this.active, queued: this.waiters.length };
+  }
+
+  private makeRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active = Math.max(0, this.active - 1);
+      this.drain();
+    };
+  }
+
+  private drain(): void {
+    while (this.active < this.limit() && this.waiters.length > 0) {
+      const next = this.waiters.shift()!;
+      if (next.signal && next.onAbort) {
+        next.signal.removeEventListener('abort', next.onAbort);
+      }
+      if (next.signal?.aborted) {
+        next.reject(next.signal.reason);
+        continue;
+      }
+      this.active += 1;
+      next.resolve(this.makeRelease());
+    }
+  }
+}
+
+const transcriptBuildSemaphore = new TranscriptBuildSemaphore();
+
 interface LastUserPromptCacheEntry {
   fileIdentity: SessionTranscriptFileIdentity;
   size: number;
   lastUpdated: string;
   snapshot: Promise<LastUserPromptSnapshot>;
+  task?: SharedAbortableTask<LastUserPromptSnapshot>;
+  pendingSidecar?: Omit<SessionPromptTimeSidecar, 'version'>;
 }
 
 const lastUserPromptScopes = new Map<
@@ -809,12 +1020,24 @@ let selectedLineReadHookForTest:
 let indexBuildCompleteHookForTest:
   | ((filePath: string) => void | Promise<void>)
   | undefined;
+let maxConcurrentTranscriptBuildsForTest: number | undefined;
+let indexBuildModeHookForTest:
+  | ((event: TranscriptIndexBuildModeEvent) => void)
+  | undefined;
+let promptTimeScanModeHookForTest:
+  | ((event: PromptTimeScanModeEvent) => void)
+  | undefined;
+let readStreamBytesHookForTest:
+  | ((event: TranscriptReadStreamBytesEvent) => void)
+  | undefined;
+let maxPromptTailRecordsForTest: number | undefined;
 
 class CooperativeReadScheduler {
   private processedBytes = 0;
   private startedAt = performance.now();
 
-  async afterUnit(sourceBytes: number): Promise<void> {
+  async afterUnit(sourceBytes: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     this.processedBytes += sourceBytes;
     const byteBudget =
       cooperativeReadByteBudgetForTest ?? COOPERATIVE_READ_BYTE_BUDGET;
@@ -829,6 +1052,7 @@ class CooperativeReadScheduler {
 
     cooperativeYieldHookForTest?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
+    signal?.throwIfAborted();
     this.processedBytes = 0;
     this.startedAt = performance.now();
   }
@@ -881,14 +1105,18 @@ function projectBranchPointParts(record: ChatRecord): Part[] {
 
 function projectBranchPointRecord(record: ChatRecord): BranchPointRecord {
   const parts = projectBranchPointParts(record);
+  const checkpointPayload =
+    record.subtype === 'branch_checkpoint'
+      ? parseBranchCheckpointPayload(record.systemPayload)
+      : undefined;
   return {
     uuid: record.uuid,
     parentUuid: record.parentUuid,
     type: record.type,
     ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
     ...(parts.length > 0 ? { message: { parts } } : {}),
-    ...(record.subtype === 'branch_checkpoint'
-      ? { systemPayload: record.systemPayload }
+    ...(checkpointPayload !== undefined
+      ? { systemPayload: checkpointPayload }
       : {}),
   };
 }
@@ -1921,8 +2149,10 @@ function getMaxAllReplayBytes(): number {
   return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
 }
 
-function estimateStringBytes(value: string | null | undefined): number {
-  return value ? value.length * INDEX_STRING_BYTES : 0;
+function estimateStringBytes(value: unknown): number {
+  return typeof value === 'string' && value.length > 0
+    ? value.length * INDEX_STRING_BYTES
+    : 0;
 }
 
 function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
@@ -2302,6 +2532,265 @@ function evictSupersededSnapshots(
   return evicted;
 }
 
+function estimateBranchPointRecordBytes(record: BranchPointRecord): number {
+  let total =
+    INDEX_HINT_BASE_BYTES +
+    INDEX_MAP_ENTRY_BYTES +
+    estimateStringBytes(record.uuid) +
+    estimateStringBytes(record.parentUuid) +
+    estimateStringBytes(record.type) +
+    estimateStringBytes(record.subtype);
+  if (isObjectRecord(record.systemPayload)) {
+    total +=
+      INDEX_HINT_BASE_BYTES +
+      estimateStringBytes(
+        typeof record.systemPayload['startExclusiveRecordUuid'] === 'string'
+          ? record.systemPayload['startExclusiveRecordUuid']
+          : undefined,
+      ) +
+      estimateStringBytes(
+        typeof record.systemPayload['assistantRecordUuid'] === 'string'
+          ? record.systemPayload['assistantRecordUuid']
+          : undefined,
+      );
+  }
+  const parts = record.message?.parts;
+  if (parts) {
+    total +=
+      INDEX_CONTAINER_BASE_BYTES + parts.length * INDEX_CONTAINER_SLOT_BYTES;
+    for (const part of parts) {
+      total += INDEX_HINT_BASE_BYTES;
+      if (part.functionCall) {
+        total +=
+          estimateStringBytes(part.functionCall.id) +
+          estimateStringBytes(part.functionCall.name);
+      }
+      if (part.functionResponse) {
+        total +=
+          estimateStringBytes(part.functionResponse.id) +
+          estimateStringBytes(part.functionResponse.name);
+      }
+    }
+  }
+  return total;
+}
+
+function estimateIncrementalIndexStateBytes(
+  state: IncrementalIndexState,
+): number {
+  let total =
+    INDEX_CONTAINER_BASE_BYTES +
+    estimateStringBytes(state.prefixSha256) +
+    estimateStringBytes(state.firstRecordTimestamp) +
+    estimateStringBytes(state.rawStartTime) +
+    estimateStringBytes(state.executionEngine.reason);
+  for (const record of state.branchPointRecords.values()) {
+    total += estimateBranchPointRecordBytes(record);
+  }
+  return total;
+}
+
+function resolveAdmissionSizeAndIncrementalState(index: TranscriptIndex): {
+  byteSize: number;
+  oversized: boolean;
+  classBudget: number;
+  incrementalState: IncrementalIndexState | undefined;
+} {
+  const baseBytes = estimateIndexCacheBytes(index);
+  const sharedBudget = getIndexCacheMaxBytes();
+  const oversizedBudget = getIndexCacheOversizedMaxBytes();
+  const pendingState = pendingIncrementalIndexStates.get(index);
+  if (pendingState) {
+    const withIncremental =
+      baseBytes + estimateIncrementalIndexStateBytes(pendingState);
+    const baseOversized = baseBytes > sharedBudget;
+    const withOversized = withIncremental > sharedBudget;
+    const combinedBudget = withOversized ? oversizedBudget : sharedBudget;
+    // Keep incremental continuation state inside the atomic admission size
+    // unless adding it alone would cross the shared->oversized boundary or
+    // exceed the entry's own class cap.
+    if (baseOversized === withOversized && withIncremental <= combinedBudget) {
+      return {
+        byteSize: withIncremental,
+        oversized: withOversized,
+        classBudget: combinedBudget,
+        incrementalState: pendingState,
+      };
+    }
+  }
+  const oversized = baseBytes > sharedBudget;
+  return {
+    byteSize: baseBytes,
+    oversized,
+    classBudget: oversized ? oversizedBudget : sharedBudget,
+    incrementalState: undefined,
+  };
+}
+
+function findExtendableBaseIndex(
+  filePath: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  snapshotSize: number,
+  now: number,
+): { index: TranscriptIndex; state: IncrementalIndexState } | undefined {
+  if (fileIdentity.ino === 0) return undefined;
+  let best:
+    | { index: TranscriptIndex; state: IncrementalIndexState }
+    | undefined;
+  for (const entry of indexCache.values()) {
+    if (!entry.value || entry.expiresAt <= now) continue;
+    const candidate = entry.value;
+    if (
+      candidate.filePath !== filePath ||
+      candidate.projectedRecords !== undefined ||
+      candidate.snapshotSize <= 0 ||
+      candidate.snapshotSize >= snapshotSize ||
+      !sameFileIdentity(candidate.fileIdentity, fileIdentity)
+    ) {
+      continue;
+    }
+    const state = incrementalIndexStates.get(candidate);
+    if (!state || !state.endsWithNewline || state.prefixSha256.length === 0) {
+      continue;
+    }
+    if (!best || candidate.snapshotSize > best.index.snapshotSize) {
+      best = { index: candidate, state };
+    }
+  }
+  return best;
+}
+
+async function verifyByteIsNewline(
+  filePath: string,
+  offset: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  signal?.throwIfAborted();
+  if (offset < 0) return false;
+  let handle: fsp.FileHandle;
+  try {
+    handle = await fsp.open(filePath, 'r');
+  } catch (error) {
+    if (isFileMissingError(error)) return false;
+    throw error;
+  }
+  try {
+    signal?.throwIfAborted();
+    const buffer = Buffer.allocUnsafe(1);
+    const { bytesRead } = await handle.read(buffer, 0, 1, offset);
+    return bytesRead === 1 && buffer[0] === 0x0a;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifyPrefixSha256(
+  filePath: string,
+  prefixSize: number,
+  expectedSha256: string,
+  signal?: AbortSignal,
+): Promise<crypto.Hash | undefined> {
+  signal?.throwIfAborted();
+  if (prefixSize <= 0 || expectedSha256.length !== 64) {
+    return undefined;
+  }
+  const hash = crypto.createHash('sha256');
+  const scheduler = new CooperativeReadScheduler();
+  let bytesHashed = 0;
+  let lastByte = -1;
+  const stream = fs.createReadStream(filePath, {
+    start: 0,
+    end: prefixSize - 1,
+    highWaterMark: PREFIX_HASH_CHUNK_BYTES,
+  });
+  const onAbort = () => {
+    stream.destroy(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    );
+  };
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  }
+  try {
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buffer.length > 0) {
+        hash.update(buffer);
+        bytesHashed += buffer.length;
+        lastByte = buffer[buffer.length - 1]!;
+      }
+      await scheduler.afterUnit(buffer.length, signal);
+    }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    stream.destroy();
+  }
+  if (bytesHashed !== prefixSize || lastByte !== 0x0a) {
+    return undefined;
+  }
+  if (hash.copy().digest('hex') !== expectedSha256) {
+    return undefined;
+  }
+  return hash;
+}
+
+async function updateHashFromRange(
+  filePath: string,
+  startOffset: number,
+  endExclusive: number,
+  hash: crypto.Hash,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  signal?.throwIfAborted();
+  if (endExclusive <= startOffset) return true;
+  const expectedLength = endExclusive - startOffset;
+  const scheduler = new CooperativeReadScheduler();
+  let bytesHashed = 0;
+  const stream = fs.createReadStream(filePath, {
+    start: startOffset,
+    end: endExclusive - 1,
+    highWaterMark: PREFIX_HASH_CHUNK_BYTES,
+  });
+  const onAbort = () => {
+    stream.destroy(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    );
+  };
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  }
+  try {
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buffer.length > 0) {
+        hash.update(buffer);
+        bytesHashed += buffer.length;
+      }
+      await scheduler.afterUnit(buffer.length, signal);
+    }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (isFileMissingError(error)) return false;
+    throw error;
+  } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
+    stream.destroy();
+  }
+  return bytesHashed === expectedLength;
+}
+
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
@@ -2310,27 +2799,49 @@ async function forEachLineInSnapshot(
     line: Buffer,
     offset: number,
     length: number,
-  ) => void | Promise<void>,
+  ) => boolean | void | Promise<boolean | void>,
+  options: {
+    startOffset?: number;
+    signal?: AbortSignal;
+    onRawChunk?: (chunk: Buffer) => void;
+  } = {},
 ): Promise<void> {
-  if (snapshotSize === 0) return;
+  const startOffset = options.startOffset ?? 0;
+  const signal = options.signal;
+  signal?.throwIfAborted();
+  if (snapshotSize <= startOffset) return;
   const maxLineBytes = getSessionTranscriptMaxLineBytes();
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
-  let pendingOffset = 0;
-  let streamOffset = 0;
+  let pendingOffset = startOffset;
+  let streamOffset = startOffset;
+  let stoppedEarly = false;
   const stream = fs.createReadStream(filePath, {
-    start: 0,
+    start: startOffset,
     end: snapshotSize - 1,
     highWaterMark: READ_CHUNK_SIZE,
   });
+  const onAbort = () => {
+    stream.destroy(
+      signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException('Aborted', 'AbortError'),
+    );
+  };
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  }
 
   const makePendingLine = (): Buffer =>
     pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
 
   try {
     for await (const chunk of stream) {
+      signal?.throwIfAborted();
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      options.onRawChunk?.(buffer);
       let lineStart = 0;
       while (lineStart < buffer.length) {
         const lineEnd = buffer.indexOf(0x0a, lineStart);
@@ -2354,12 +2865,18 @@ async function forEachLineInSnapshot(
           rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
             ? rawLine.subarray(0, rawLine.length - 1)
             : rawLine;
-        await onLine(line, lineOffset, line.length);
-        await scheduler.afterUnit(line.length);
+        const keepGoing = await onLine(line, lineOffset, line.length);
+        if (keepGoing === false) {
+          stoppedEarly = true;
+          stream.destroy();
+          break;
+        }
+        await scheduler.afterUnit(line.length, signal);
         pending = [];
         pendingLength = 0;
         lineStart = lineEnd + 1;
       }
+      if (stoppedEarly) break;
 
       if (lineStart < buffer.length) {
         if (pendingLength === 0) {
@@ -2380,16 +2897,32 @@ async function forEachLineInSnapshot(
       streamOffset += buffer.length;
     }
 
-    if (pendingLength > 0) {
+    signal?.throwIfAborted();
+    if (!stoppedEarly && pendingLength > 0) {
       const rawLine = makePendingLine();
       const line =
         rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, pendingOffset, line.length);
-      await scheduler.afterUnit(line.length);
+      const keepGoing = await onLine(line, pendingOffset, line.length);
+      if (keepGoing !== false) {
+        await scheduler.afterUnit(line.length, signal);
+      }
     }
+  } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
+    throw error;
   } finally {
+    if (signal) {
+      signal.removeEventListener('abort', onAbort);
+    }
+    readStreamBytesHookForTest?.({
+      filePath,
+      startOffset,
+      bytesRead: stream.bytesRead,
+    });
     stream.destroy();
   }
 }
@@ -2623,10 +3156,12 @@ async function buildIndex(params: {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   lastUpdated: string;
+  signal?: AbortSignal;
+  base?: { index: TranscriptIndex; state: IncrementalIndexState };
 }): Promise<TranscriptIndex> {
-  const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
+  const { filePath, fileIdentity, snapshotSize, lastUpdated, signal } = params;
+  signal?.throwIfAborted();
   const sessionId = path.basename(filePath, '.jsonl');
-  const executionEngine = new SessionExecutionEngineAccumulator(sessionId);
   if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
     debugLogger.warn(
       `index rejected: snapshot too large session=${sessionId} ` +
@@ -2638,358 +3173,470 @@ async function buildIndex(params: {
       SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
     );
   }
-  debugLogger.debug(
-    `index build start session=${sessionId} snapshotSize=${snapshotSize}`,
-  );
-  const byUuid = new Map<string, UuidIndexEntry>();
-  // Retain only the fields required by the shared branch resolver while the
-  // frozen snapshot is parsed, so page reads never reopen the full active chain.
-  const branchPointRecords = new Map<string, BranchPointRecord>();
-  let sequence = 0;
-  const physicalRecords: PhysicalRecordHint[] = [];
-  let sourceReadComplete = true;
-  let leafUuid: string | undefined;
-  let firstRecordUuid: string | undefined;
-  let firstRecordTimestamp: string | undefined;
-  let startTime: string | undefined;
-  const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
-  const buildHeapUsedStart = process.memoryUsage().heapUsed;
-  const heapSizeLimit = getHeapStatistics().heap_size_limit;
-  const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
-  const remainingHeapBudget =
-    availableHeapBudgetForTest ??
-    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
-  // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
-  // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24, where a
-  // 192 MiB old space can report roughly 2x that in heap_size_limit). Deducting
-  // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving ~512+ MiB
-  // heaps 5/8 headroom above GC noise; smaller heaps on such platforms remain
-  // subject to V8's pre-existing OOM limitation, matching base.
-  const estimatedOldSpaceAvailableBytes = Math.max(
-    0,
-    availableHeapBytes - 96 * 1024 * 1024,
-  );
-  const maxHeapGrowthBytes =
-    availableHeapBudgetForTest ??
-    Math.max(
-      64 * 1024,
-      Math.min(
-        Math.floor((availableHeapBytes * 5) / 8),
-        Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
-      ),
-    );
-  const maxIndexBuildBytes = Math.min(
-    maxIndexEstimateBytes,
-    remainingHeapBudget,
-  );
-  // Only mark a heap-limited estimate rejection retryable when live heap
-  // occupancy is elevated (or a test injects a constrained headroom). An idle
-  // process with a small fixed --max-old-space-size will reject the same file
-  // on every retry.
-  const transientHeapPressure =
-    availableHeapBudgetForTest !== undefined
-      ? remainingHeapBudget < maxIndexEstimateBytes
-      : remainingHeapBudget < maxIndexEstimateBytes &&
-        buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
-  let estimatedIndexBytes =
-    INDEX_ENTRY_BASE_BYTES +
-    INDEX_CONTAINER_BASE_BYTES * 7 +
-    estimateStringBytes(filePath);
 
+  let builtIndex: TranscriptIndex;
+  let usedBase:
+    | { index: TranscriptIndex; state: IncrementalIndexState }
+    | undefined;
+  let scanStartOffset = 0;
+
+  const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
   try {
-    await forEachLineInSnapshot(
-      filePath,
-      snapshotSize,
-      sessionId,
-      (line, offset, length) => {
-        const text = line.toString('utf8').trim();
-        if (text.length === 0) return;
-        let fragmentIndex = 0;
-        for (const { record } of executionEngine.parseLine(text, filePath)) {
-          if (!record) {
-            sourceReadComplete = false;
-            continue;
-          }
-          if (firstRecordUuid === undefined) {
-            firstRecordUuid = record.uuid;
-            firstRecordTimestamp = record.timestamp;
-          }
-          if (isTranscriptConversationRecord(record)) {
-            appendBranchPointRecord(
-              branchPointRecords,
-              record as unknown as ChatRecord,
-            );
-            if (record.timestamp) startTime ??= record.timestamp;
-            leafUuid = record.uuid;
-          }
-          const existing = byUuid.get(record.uuid);
-          const physicalHint: PhysicalRecordHint = {
-            uuid: record.uuid,
-            parentUuid: record.parentUuid,
-            type: record.type,
-            ...(record.subtype !== undefined
-              ? { subtype: record.subtype }
-              : {}),
-          };
-          physicalRecords.push(physicalHint);
-          estimatedIndexBytes +=
-            INDEX_CONTAINER_SLOT_BYTES +
-            estimatePhysicalRecordHintBytes(physicalHint);
-          const segment = {
-            offset,
-            length,
-            sequence: sequence++,
-            fragmentIndex,
-          };
-          fragmentIndex++;
-          if (existing) {
-            const fragmentRecord = {
-              ...(record as unknown as ChatRecord),
-              type: existing.type,
-              subtype: existing.subtype,
-              systemPayload: existing.navigationTextSuppressed
-                ? { displayText: '', hookContext: '' }
-                : undefined,
-            } as ChatRecord;
-            existing.segments.push(segment);
-            estimatedIndexBytes +=
-              INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
-            existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
-            existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
-            existing.assistantPreviewCandidate ||=
-              isAssistantPreviewCandidate(fragmentRecord);
-            existing.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
-              ...(record as unknown as ChatRecord),
-              type: existing.type,
-              subtype: existing.subtype,
-            } as ChatRecord);
-            if (existing.type === 'assistant' && record.usageMetadata) {
-              existing.resumeTokenCountsCandidate =
-                isResumeTokenCountsCandidate({
-                  ...(record as unknown as ChatRecord),
-                  type: existing.type,
-                  subtype: existing.subtype,
-                } as unknown as ChatRecord);
+    signal?.throwIfAborted();
+    let prefixHash: crypto.Hash | undefined;
+    if (
+      params.base &&
+      params.base.index.snapshotSize > 0 &&
+      params.base.index.snapshotSize < snapshotSize
+    ) {
+      prefixHash = await verifyPrefixSha256(
+        filePath,
+        params.base.index.snapshotSize,
+        params.base.state.prefixSha256,
+        signal,
+      );
+      if (prefixHash) {
+        usedBase = params.base;
+        scanStartOffset = usedBase.index.snapshotSize;
+      }
+    }
+    const snapshotHash = prefixHash ?? crypto.createHash('sha256');
+    let lastByte = usedBase ? 0x0a : -1;
+
+    const executionEngine = usedBase
+      ? SessionExecutionEngineAccumulator.fromSnapshot(
+          sessionId,
+          usedBase.state.executionEngine,
+        )
+      : new SessionExecutionEngineAccumulator(sessionId);
+
+    debugLogger.debug(
+      `index build start session=${sessionId} snapshotSize=${snapshotSize}` +
+        (usedBase ? ` incrementalFrom=${scanStartOffset}` : ''),
+    );
+
+    const byUuid = usedBase
+      ? new Map(usedBase.index.byUuid)
+      : new Map<string, UuidIndexEntry>();
+    // Retain only the fields required by the shared branch resolver while the
+    // frozen snapshot is parsed, so page reads never reopen the full active chain.
+    const branchPointRecords = usedBase
+      ? new Map(usedBase.state.branchPointRecords)
+      : new Map<string, BranchPointRecord>();
+    let sequence = usedBase ? usedBase.index.physicalRecords.length : 0;
+    let deltaRecords = 0;
+    const physicalRecords: PhysicalRecordHint[] = usedBase
+      ? usedBase.index.physicalRecords.slice()
+      : [];
+    let sourceReadComplete = usedBase
+      ? usedBase.index.sourceReadComplete
+      : true;
+    let leafUuid: string | undefined = usedBase?.index.leafUuid;
+    let firstRecordUuid: string | undefined = usedBase?.index.firstRecordUuid;
+    let firstRecordTimestamp: string | undefined =
+      usedBase?.state.firstRecordTimestamp;
+    let startTime: string | undefined = usedBase?.state.rawStartTime;
+
+    const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+    const buildHeapUsedStart = process.memoryUsage().heapUsed;
+    const heapSizeLimit = getHeapStatistics().heap_size_limit;
+    const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
+    const remainingHeapBudget =
+      availableHeapBudgetForTest ??
+      Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+    // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
+    // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24, where a
+    // 192 MiB old space can report roughly 2x that in heap_size_limit). Deducting
+    // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving ~512+ MiB
+    // heaps 5/8 headroom above GC noise; smaller heaps on such platforms remain
+    // subject to V8's pre-existing OOM limitation, matching base.
+    const estimatedOldSpaceAvailableBytes = Math.max(
+      0,
+      availableHeapBytes - 96 * 1024 * 1024,
+    );
+    const maxHeapGrowthBytes =
+      availableHeapBudgetForTest ??
+      Math.max(
+        64 * 1024,
+        Math.min(
+          Math.floor((availableHeapBytes * 5) / 8),
+          Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+        ),
+      );
+    const maxIndexBuildBytes = Math.min(
+      maxIndexEstimateBytes,
+      remainingHeapBudget,
+    );
+    // Only mark a heap-limited estimate rejection retryable when live heap
+    // occupancy is elevated (or a test injects a constrained headroom). An idle
+    // process with a small fixed --max-old-space-size will reject the same file
+    // on every retry.
+    const transientHeapPressure =
+      availableHeapBudgetForTest !== undefined
+        ? remainingHeapBudget < maxIndexEstimateBytes
+        : remainingHeapBudget < maxIndexEstimateBytes &&
+          buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
+    let estimatedIndexBytes = usedBase
+      ? usedBase.state.loopEstimatedBytes
+      : INDEX_ENTRY_BASE_BYTES +
+        INDEX_CONTAINER_BASE_BYTES * 7 +
+        estimateStringBytes(filePath);
+
+    try {
+      await forEachLineInSnapshot(
+        filePath,
+        snapshotSize,
+        sessionId,
+        (line, offset, length) => {
+          const text = line.toString('utf8').trim();
+          if (text.length === 0) return;
+          let fragmentIndex = 0;
+          for (const { record } of executionEngine.parseLine(text, filePath)) {
+            if (!record) {
+              sourceReadComplete = false;
+              continue;
             }
-            existing.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
-              record as unknown as ChatRecord,
-              sessionId,
-            ).countsAsUserPrompt;
-          } else {
-            const chatRecord = record as unknown as ChatRecord;
-            const entry = newIndexEntry(chatRecord, sessionId, [segment]);
-            byUuid.set(record.uuid, entry);
-            estimatedIndexBytes += estimateUuidIndexEntryBytes(
-              record.uuid,
-              entry,
-            );
-          }
-          if (estimatedIndexBytes > maxIndexBuildBytes) {
-            const retryable =
-              transientHeapPressure &&
-              estimatedIndexBytes <= maxIndexEstimateBytes;
-            throw new SessionTranscriptTooLargeError(
-              sessionId,
-              snapshotSize,
-              maxIndexBuildBytes,
-              {
-                dimension: 'index',
-                measuredBytes: estimatedIndexBytes,
-                ...(retryable ? { retryable: true } : {}),
-              },
-            );
-          }
-          // The cache estimate intentionally stays unchanged. For the hard
-          // build ceiling, periodically sample real heap growth as well —
-          // short-record retention can cost materially more than the estimate
-          // on some runtimes, and estimation alone must not free a 1 GiB heap.
-          // Always sample the first record so a depleted process cannot admit
-          // a build even if there are fewer than 1024 records.
-          if ((sequence & 1023) === 1) {
-            const heapGrowth =
-              process.memoryUsage().heapUsed - buildHeapUsedStart;
-            if (heapGrowth > maxHeapGrowthBytes) {
+            if (firstRecordUuid === undefined) {
+              firstRecordUuid = record.uuid;
+              firstRecordTimestamp = record.timestamp;
+            }
+            if (isTranscriptConversationRecord(record)) {
+              appendBranchPointRecord(
+                branchPointRecords,
+                record as unknown as ChatRecord,
+              );
+              if (record.timestamp) startTime ??= record.timestamp;
+              leafUuid = record.uuid;
+            }
+            const existing = byUuid.get(record.uuid);
+            const physicalHint: PhysicalRecordHint = {
+              uuid: record.uuid,
+              parentUuid: record.parentUuid,
+              type: record.type,
+              ...(record.subtype !== undefined
+                ? { subtype: record.subtype }
+                : {}),
+            };
+            physicalRecords.push(physicalHint);
+            estimatedIndexBytes +=
+              INDEX_CONTAINER_SLOT_BYTES +
+              estimatePhysicalRecordHintBytes(physicalHint);
+            const segment = {
+              offset,
+              length,
+              sequence: sequence++,
+              fragmentIndex,
+            };
+            fragmentIndex++;
+            if (existing) {
+              const target: UuidIndexEntry = usedBase
+                ? {
+                    ...existing,
+                    segments: [...existing.segments, segment],
+                    turnHint: { ...existing.turnHint },
+                  }
+                : existing;
+              if (usedBase) {
+                byUuid.set(record.uuid, target);
+              } else {
+                target.segments.push(segment);
+              }
+              const fragmentRecord = {
+                ...(record as unknown as ChatRecord),
+                type: target.type,
+                subtype: target.subtype,
+                systemPayload: target.navigationTextSuppressed
+                  ? { displayText: '', hookContext: '' }
+                  : undefined,
+              } as ChatRecord;
+              estimatedIndexBytes +=
+                INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
+              target.sessionIdMatchesFile &&= record.sessionId === sessionId;
+              target.navigationKind ??= navigationKindForRecord(fragmentRecord);
+              target.assistantPreviewCandidate ||=
+                isAssistantPreviewCandidate(fragmentRecord);
+              target.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
+                ...(record as unknown as ChatRecord),
+                type: target.type,
+                subtype: target.subtype,
+              } as ChatRecord);
+              if (target.type === 'assistant' && record.usageMetadata) {
+                target.resumeTokenCountsCandidate =
+                  isResumeTokenCountsCandidate({
+                    ...(record as unknown as ChatRecord),
+                    type: target.type,
+                    subtype: target.subtype,
+                  } as unknown as ChatRecord);
+              }
+              target.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
+                record as unknown as ChatRecord,
+                sessionId,
+              ).countsAsUserPrompt;
+            } else {
+              const chatRecord = record as unknown as ChatRecord;
+              const entry = newIndexEntry(chatRecord, sessionId, [segment]);
+              byUuid.set(record.uuid, entry);
+              estimatedIndexBytes += estimateUuidIndexEntryBytes(
+                record.uuid,
+                entry,
+              );
+            }
+            if (estimatedIndexBytes > maxIndexBuildBytes) {
+              const retryable =
+                transientHeapPressure &&
+                estimatedIndexBytes <= maxIndexEstimateBytes;
               throw new SessionTranscriptTooLargeError(
                 sessionId,
                 snapshotSize,
-                maxHeapGrowthBytes,
+                maxIndexBuildBytes,
                 {
                   dimension: 'index',
-                  measuredBytes: heapGrowth,
-                  retryable: true,
+                  measuredBytes: estimatedIndexBytes,
+                  ...(retryable ? { retryable: true } : {}),
                 },
               );
             }
+            // The cache estimate intentionally stays unchanged. For the hard
+            // build ceiling, periodically sample real heap growth as well —
+            // short-record retention can cost materially more than the estimate
+            // on some runtimes, and estimation alone must not free a 1 GiB heap.
+            // Always sample the first record so a depleted process cannot admit
+            // a build even if there are fewer than 1024 records.
+            if ((++deltaRecords & 1023) === 1) {
+              const heapGrowth =
+                process.memoryUsage().heapUsed - buildHeapUsedStart;
+              if (heapGrowth > maxHeapGrowthBytes) {
+                throw new SessionTranscriptTooLargeError(
+                  sessionId,
+                  snapshotSize,
+                  maxHeapGrowthBytes,
+                  {
+                    dimension: 'index',
+                    measuredBytes: heapGrowth,
+                    retryable: true,
+                  },
+                );
+              }
+            }
+          }
+        },
+        {
+          startOffset: scanStartOffset,
+          signal,
+          onRawChunk: (chunk) => {
+            if (chunk.length > 0) {
+              snapshotHash.update(chunk);
+              lastByte = chunk[chunk.length - 1]!;
+            }
+          },
+        },
+      );
+    } catch (error) {
+      if (isFileMissingError(error)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      throw error;
+    }
+    sourceReadComplete &&= executionEngine.sourceComplete;
+
+    for (const [uuid, entry] of byUuid) {
+      if (!entry.sessionIdMatchesFile) {
+        debugLogger.warn(
+          `transcript session mismatch session=${sessionId} uuid=${uuid}`,
+        );
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+    }
+
+    if (!leafUuid || !firstRecordUuid) {
+      debugLogger.warn(
+        `index build failed: no active transcript records session=${sessionId}`,
+      );
+      throw new EmptySessionTranscriptError(sessionId);
+    }
+    const rawStartTime = startTime;
+    const resolvedStartTime = startTime ?? lastUpdated;
+    const restoreStartTime = firstRecordTimestamp ?? resolvedStartTime;
+
+    const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
+      const entry = byUuid.get(uuid);
+      return entry && isTranscriptConversationRecord(entry)
+        ? {
+            uuid,
+            parentUuid: entry.parentUuid,
+            sessionId,
+            timestamp: resolvedStartTime,
+            type: 'system',
+          }
+        : undefined;
+    });
+    const runtimeUuids = [...chain.uuids];
+    const sourceBoundary = runtimeUuids.findIndex(
+      (uuid) => byUuid.get(uuid)?.sideTaskSource === true,
+    );
+    const replayUuids =
+      sourceBoundary >= 0
+        ? runtimeUuids
+            .slice(sourceBoundary)
+            .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
+        : [...runtimeUuids];
+    const goalStatePositions: number[] = [];
+    const navigationTurns: TranscriptNavigationTurnHint[] = [];
+    let currentPromptTurn: TranscriptNavigationTurnHint | undefined;
+    let currentRealtimeTurn: TranscriptNavigationTurnHint | undefined;
+    for (let position = 0; position < replayUuids.length; position++) {
+      const uuid = replayUuids[position]!;
+      const entry = byUuid.get(uuid);
+      if (entry?.type === 'system' && entry.subtype === 'goal_state') {
+        goalStatePositions.push(position);
+      }
+      if (entry?.navigationKind) {
+        const turn: TranscriptNavigationTurnHint = {
+          turnId: uuid,
+          replayPosition: position,
+          kind: entry.navigationKind,
+          ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
+        };
+        const ordinal = navigationTurns.length;
+        if (entry.navigationOrdinal !== ordinal) {
+          if (usedBase) {
+            byUuid.set(uuid, { ...entry, navigationOrdinal: ordinal });
+          } else {
+            entry.navigationOrdinal = ordinal;
           }
         }
-      },
-    );
-  } catch (error) {
-    if (isFileMissingError(error)) {
-      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-    }
-    throw error;
-  }
-  sourceReadComplete &&= executionEngine.sourceComplete;
-
-  for (const [uuid, entry] of byUuid) {
-    if (!entry.sessionIdMatchesFile) {
-      debugLogger.warn(
-        `transcript session mismatch session=${sessionId} uuid=${uuid}`,
-      );
-      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-    }
-  }
-
-  if (!leafUuid || !firstRecordUuid) {
-    debugLogger.warn(
-      `index build failed: no active transcript records session=${sessionId}`,
-    );
-    throw new EmptySessionTranscriptError(sessionId);
-  }
-  startTime ??= lastUpdated;
-  const restoreStartTime = firstRecordTimestamp ?? startTime;
-
-  const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
-    const entry = byUuid.get(uuid);
-    return entry && isTranscriptConversationRecord(entry)
-      ? {
-          uuid,
-          parentUuid: entry.parentUuid,
-          sessionId,
-          timestamp: startTime,
-          type: 'system',
+        navigationTurns.push(turn);
+        if (entry.navigationKind === 'realtime') {
+          currentRealtimeTurn = turn;
+        } else {
+          currentPromptTurn = turn;
+          currentRealtimeTurn = undefined;
         }
-      : undefined;
-  });
-  const runtimeUuids = [...chain.uuids];
-  const sourceBoundary = runtimeUuids.findIndex(
-    (uuid) => byUuid.get(uuid)?.sideTaskSource === true,
-  );
-  const replayUuids =
-    sourceBoundary >= 0
-      ? runtimeUuids
-          .slice(sourceBoundary)
-          .filter((uuid) => byUuid.get(uuid)?.inherited !== true)
-      : [...runtimeUuids];
-  const goalStatePositions: number[] = [];
-  const navigationTurns: TranscriptNavigationTurnHint[] = [];
-  let currentPromptTurn: TranscriptNavigationTurnHint | undefined;
-  let currentRealtimeTurn: TranscriptNavigationTurnHint | undefined;
-  for (let position = 0; position < replayUuids.length; position++) {
-    const uuid = replayUuids[position]!;
-    const entry = byUuid.get(uuid);
-    if (entry?.type === 'system' && entry.subtype === 'goal_state') {
-      goalStatePositions.push(position);
-    }
-    if (entry?.navigationKind) {
-      const turn: TranscriptNavigationTurnHint = {
-        turnId: uuid,
-        replayPosition: position,
-        kind: entry.navigationKind,
-        ...(entry.daemonPromptId ? { promptId: entry.daemonPromptId } : {}),
-      };
-      entry.navigationOrdinal = navigationTurns.length;
-      navigationTurns.push(turn);
-      if (entry.navigationKind === 'realtime') {
-        currentRealtimeTurn = turn;
-      } else {
-        currentPromptTurn = turn;
-        currentRealtimeTurn = undefined;
+        continue;
       }
-      continue;
+      if (entry?.assistantPreviewCandidate) {
+        const targetTurn =
+          entry.subtype === 'realtime_message'
+            ? currentRealtimeTurn
+            : currentPromptTurn;
+        if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
+      }
+      if (entry?.turnResultPromptId && currentPromptTurn) {
+        currentPromptTurn.promptId ??= entry.turnResultPromptId;
+        currentPromptTurn = undefined;
+      }
     }
-    if (entry?.assistantPreviewCandidate) {
-      const targetTurn =
-        entry.subtype === 'realtime_message'
-          ? currentRealtimeTurn
-          : currentPromptTurn;
-      if (targetTurn) targetTurn.finalAssistantRecordId = uuid;
+    if (usedBase) {
+      const activeTurnIds = new Set(navigationTurns.map((turn) => turn.turnId));
+      for (const previousTurn of usedBase.index.navigationTurns) {
+        if (activeTurnIds.has(previousTurn.turnId)) continue;
+        const staleEntry = byUuid.get(previousTurn.turnId);
+        if (staleEntry && staleEntry.navigationOrdinal !== undefined) {
+          const cleared = { ...staleEntry };
+          delete cleared.navigationOrdinal;
+          byUuid.set(previousTurn.turnId, cleared);
+        }
+      }
     }
-    if (entry?.turnResultPromptId && currentPromptTurn) {
-      currentPromptTurn.promptId ??= entry.turnResultPromptId;
-      currentPromptTurn = undefined;
+    const gaps: HistoryGap[] = [...chain.gaps];
+    if (chain.cycleUuid) {
+      debugLogger.debug(
+        `active chain terminated: cycle session=${sessionId} uuid=${chain.cycleUuid}`,
+      );
     }
-  }
-  const gaps: HistoryGap[] = [...chain.gaps];
-  if (chain.cycleUuid) {
+
+    const branchPointsByAssistantUuid = new Map(
+      [
+        ...resolveBranchPoints(
+          replayUuids.flatMap((uuid) => {
+            const record = branchPointRecords.get(uuid);
+            return record ? [record] : [];
+          }),
+        ).values(),
+      ].map((point) => [point.assistantRecordUuid, point.checkpointUuid]),
+    );
+
     debugLogger.debug(
-      `active chain terminated: cycle session=${sessionId} uuid=${chain.cycleUuid}`,
+      `index build complete session=${sessionId} mode=${usedBase ? 'incremental' : 'full'} ` +
+        `startOffset=${scanStartOffset} records=${byUuid.size} ` +
+        `runtime=${runtimeUuids.length} replay=${replayUuids.length} ` +
+        `turns=${navigationTurns.length} gaps=${gaps.length} ` +
+        `branchPoints=${branchPointsByAssistantUuid.size}`,
     );
-  }
 
-  const branchPointsByAssistantUuid = new Map(
-    [
-      ...resolveBranchPoints(
-        replayUuids.flatMap((uuid) => {
-          const record = branchPointRecords.get(uuid);
-          return record ? [record] : [];
-        }),
-      ).values(),
-    ].map((point) => [point.assistantRecordUuid, point.checkpointUuid]),
-  );
-
-  debugLogger.debug(
-    `index build complete session=${sessionId} records=${byUuid.size} ` +
-      `runtime=${runtimeUuids.length} replay=${replayUuids.length} ` +
-      `turns=${navigationTurns.length} gaps=${gaps.length} ` +
-      `branchPoints=${branchPointsByAssistantUuid.size}`,
-  );
-
-  const builtIndex: TranscriptIndex = {
-    executionEngine: executionEngine.finish({
+    builtIndex = {
+      executionEngine: executionEngine.finish({
+        filePath,
+        ...fileIdentity,
+        size: snapshotSize,
+        lastUpdated,
+      }),
       filePath,
-      ...fileIdentity,
-      size: snapshotSize,
+      fileIdentity,
+      snapshotSize,
+      leafUuid,
+      firstRecordUuid,
+      physicalRecords,
+      sourceReadComplete,
+      runtimeUuids,
+      replayUuids,
+      navigationTurns,
+      goalStatePositions,
+      gaps,
+      restoreStartTime,
+      startTime: resolvedStartTime,
       lastUpdated,
-    }),
-    filePath,
-    fileIdentity,
-    snapshotSize,
-    leafUuid,
-    firstRecordUuid,
-    physicalRecords,
-    sourceReadComplete,
-    runtimeUuids,
-    replayUuids,
-    navigationTurns,
-    goalStatePositions,
-    gaps,
-    restoreStartTime,
-    startTime,
-    lastUpdated,
-    byUuid,
-    branchPointsByAssistantUuid,
-  };
-  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
-  if (finalEstimatedBytes > maxIndexBuildBytes) {
-    const retryable =
-      transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
-    throw new SessionTranscriptTooLargeError(
-      sessionId,
-      snapshotSize,
-      maxIndexBuildBytes,
-      {
-        dimension: 'index',
-        measuredBytes: finalEstimatedBytes,
-        ...(retryable ? { retryable: true } : {}),
-      },
-    );
-  }
-  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
-  if (finalHeapGrowth > maxHeapGrowthBytes) {
-    throw new SessionTranscriptTooLargeError(
-      sessionId,
-      snapshotSize,
-      maxHeapGrowthBytes,
-      {
-        dimension: 'index',
-        measuredBytes: finalHeapGrowth,
-        retryable: true,
-      },
-    );
+      byUuid,
+      branchPointsByAssistantUuid,
+    };
+    const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
+    if (finalEstimatedBytes > maxIndexBuildBytes) {
+      const retryable =
+        transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxIndexBuildBytes,
+        {
+          dimension: 'index',
+          measuredBytes: finalEstimatedBytes,
+          ...(retryable ? { retryable: true } : {}),
+        },
+      );
+    }
+    const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+    if (finalHeapGrowth > maxHeapGrowthBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxHeapGrowthBytes,
+        {
+          dimension: 'index',
+          measuredBytes: finalHeapGrowth,
+          retryable: true,
+        },
+      );
+    }
+
+    pendingIncrementalIndexStates.set(builtIndex, {
+      branchPointRecords,
+      executionEngine: executionEngine.snapshot(),
+      firstRecordTimestamp,
+      rawStartTime,
+      loopEstimatedBytes: estimatedIndexBytes,
+      prefixSha256: snapshotHash.digest('hex'),
+      endsWithNewline: lastByte === 0x0a,
+    });
+  } finally {
+    releaseBuild();
   }
 
+  indexBuildModeHookForTest?.({
+    filePath,
+    mode: usedBase ? 'incremental' : 'full',
+    startOffset: scanStartOffset,
+    snapshotSize,
+  });
   await indexBuildCompleteHookForTest?.(filePath);
 
   return builtIndex;
@@ -3000,8 +3647,10 @@ async function getCachedIndex(params: {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   lastUpdated: string;
+  signal?: AbortSignal;
   onCacheState?: (state: 'hit' | 'pending' | 'miss') => void;
 }): Promise<TranscriptIndex> {
+  params.signal?.throwIfAborted();
   const now = Date.now();
   pruneCache(now);
   const key = makeCacheKey(
@@ -3018,157 +3667,165 @@ async function getCachedIndex(params: {
     params.onCacheState?.('hit');
     return cached.value;
   }
-  if (cached?.pending && cached.expiresAt > now) {
+  if (cached?.pending && cached.expiresAt > now && !cached.task?.aborted()) {
     debugLogger.debug(`index cache pending hit ${key}`);
     params.onCacheState?.('pending');
-    return cached.pending;
+    return cached.task ? cached.task.attach(params.signal) : cached.pending;
   }
 
   debugLogger.debug(`index cache miss ${key}`);
   params.onCacheState?.('miss');
+  const base = findExtendableBaseIndex(
+    params.filePath,
+    params.fileIdentity,
+    params.snapshotSize,
+    now,
+  );
   // Waiters share the verified completion, not the raw build: a snapshot
   // rewritten under the build must fail every sharer closed, not only the
-  // initiator's cache admission. The wrapper compares its own promise
-  // against the cache entry; a const self-reference trips TS2454, so the
-  // binding is a let assigned exactly once.
-  let pending: Promise<TranscriptIndex> | undefined;
-  // eslint-disable-next-line prefer-const -- assigned once, see above
-  pending = (async () => {
-    const value = await buildIndex(params);
-    // A build can complete after the file was rewritten or replaced under it
-    // (equal-size mtime move, identity change, truncation). Re-verify the
-    // frozen snapshot before ANY early return or admission: cache-entry
-    // ownership only governs cache writes and deletes, never whether the
-    // built index is safe to serve, so every sharer of the build fails
-    // closed together. allowAppend keeps a prefix frozen across a concurrent
-    // append valid.
-    let verifiedSize: number | undefined;
+  // initiator's cache admission.
+  const owner: { task?: SharedAbortableTask<TranscriptIndex> } = {};
+  const clearIfOwned = () => {
+    if (owner.task && indexCache.get(key)?.task === owner.task) {
+      indexCache.delete(key);
+    }
+  };
+  const task = createSharedAbortableTask(async (taskSignal) => {
     try {
-      verifiedSize = await verifiedSnapshotSize(
-        params.filePath,
-        params.fileIdentity,
-        params.snapshotSize,
-        params.lastUpdated,
-        true,
-      );
-    } catch (error) {
-      // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
-      // unknown: serve the built snapshot uncached rather than fail a page
-      // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
-      if (indexCache.get(key)?.pending === pending) {
-        indexCache.delete(key);
-      }
-      debugLogger.debug(
-        `index cache skipped verify after stat error ${key}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return value;
-    }
-    if (verifiedSize === undefined) {
-      if (indexCache.get(key)?.pending === pending) {
-        indexCache.delete(key);
-      }
-      debugLogger.debug(`index cache skipped changed snapshot ${key}`);
-      throw new SessionTranscriptSnapshotUnavailableError(
-        path.basename(params.filePath, '.jsonl'),
-      );
-    }
-    // The signature check yielded; the pending entry may have been replaced
-    // (TTL expiry or the 32-entry LRU). The verified value is still safe to
-    // serve, but this completion no longer owns the cache slot. Everything
-    // from here to the cache write is synchronous: the ownership check, the
-    // class budget math and the reclaim all see one consistent cache state,
-    // and the reclaim uses the length the signature was verified against
-    // instead of a second stat that could fail or observe a newer file.
-    if (indexCache.get(key)?.pending !== pending) {
-      debugLogger.debug(`index cache skipped stale completion ${key}`);
-      return value;
-    }
-    const byteSize = estimateIndexCacheBytes(value);
-    const oversized = byteSize > getIndexCacheMaxBytes();
-    const classBudget = oversized
-      ? getIndexCacheOversizedMaxBytes()
-      : getIndexCacheMaxBytes();
-    if (byteSize > classBudget) {
-      if (indexCache.get(key)?.pending === pending) {
-        indexCache.delete(key);
-      }
-      debugLogger.debug(
-        `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
-      );
-      return value;
-    }
-    const classBytes = getIndexCacheBytesByClass();
-    if (
-      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
-      classBudget
-    ) {
-      // Evict superseded prefixes only when the new snapshot fits after the
-      // reclaim; otherwise the eviction would force their still-readable
-      // frozen cursors to rebuild for an admission that is refused anyway.
-      // The verified current file length decides whether a longer cached
-      // prefix is unreachable (a same-millisecond truncation keeps the
-      // mtime).
-      const reclaimable = supersededSnapshotBytes(
-        params.filePath,
-        params.snapshotSize,
-        params.lastUpdated,
-        params.fileIdentity,
-        { size: verifiedSize, verified: true },
-        oversized,
-      );
-      if (
-        (oversized ? classBytes.oversized : classBytes.shared) -
-          reclaimable +
-          byteSize >
-        classBudget
-      ) {
-        indexCache.delete(key);
+      const value = await buildIndex({
+        ...params,
+        signal: taskSignal,
+        base,
+      });
+      // A build can complete after the file was rewritten or replaced under it
+      // (equal-size mtime move, identity change, truncation). Re-verify the
+      // frozen snapshot before ANY early return or admission: cache-entry
+      // ownership only governs cache writes and deletes, never whether the
+      // built index is safe to serve, so every sharer of the build fails
+      // closed together. allowAppend keeps a prefix frozen across a concurrent
+      // append valid.
+      let verifiedSize: number | undefined;
+      try {
+        verifiedSize = await verifiedSnapshotSize(
+          params.filePath,
+          params.fileIdentity,
+          params.snapshotSize,
+          params.lastUpdated,
+          true,
+        );
+      } catch (error) {
+        // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
+        // unknown: serve the built snapshot uncached rather than fail a page
+        // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
+        clearIfOwned();
         debugLogger.debug(
-          `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+          `index cache skipped verify after stat error ${key}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
         return value;
       }
-      evictSupersededSnapshots(
-        params.filePath,
-        params.snapshotSize,
-        params.lastUpdated,
-        params.fileIdentity,
-        { size: verifiedSize, verified: true },
-        oversized,
+      if (verifiedSize === undefined) {
+        clearIfOwned();
+        debugLogger.debug(`index cache skipped changed snapshot ${key}`);
+        throw new SessionTranscriptSnapshotUnavailableError(
+          path.basename(params.filePath, '.jsonl'),
+        );
+      }
+      // The signature check yielded; the pending entry may have been replaced
+      // (TTL expiry or the 32-entry LRU). The verified value is still safe to
+      // serve, but this completion no longer owns the cache slot. Everything
+      // from here to the cache write is synchronous: the ownership check, the
+      // class budget math and the reclaim all see one consistent cache state,
+      // and the reclaim uses the length the signature was verified against
+      // instead of a second stat that could fail or observe a newer file.
+      if (indexCache.get(key)?.task !== owner.task) {
+        debugLogger.debug(`index cache skipped stale completion ${key}`);
+        return value;
+      }
+      const { byteSize, oversized, classBudget, incrementalState } =
+        resolveAdmissionSizeAndIncrementalState(value);
+      pendingIncrementalIndexStates.delete(value);
+      if (byteSize > classBudget) {
+        clearIfOwned();
+        debugLogger.debug(
+          `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
+        );
+        return value;
+      }
+      const classBytes = getIndexCacheBytesByClass();
+      if (
+        (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+        classBudget
+      ) {
+        // Evict superseded prefixes only when the new snapshot fits after the
+        // reclaim; otherwise the eviction would force their still-readable
+        // frozen cursors to rebuild for an admission that is refused anyway.
+        // The verified current file length decides whether a longer cached
+        // prefix is unreachable (a same-millisecond truncation keeps the
+        // mtime).
+        const reclaimable = supersededSnapshotBytes(
+          params.filePath,
+          params.snapshotSize,
+          params.lastUpdated,
+          params.fileIdentity,
+          { size: verifiedSize, verified: true },
+          oversized,
+        );
+        if (
+          (oversized ? classBytes.oversized : classBytes.shared) -
+            reclaimable +
+            byteSize >
+          classBudget
+        ) {
+          indexCache.delete(key);
+          debugLogger.debug(
+            `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+          );
+          return value;
+        }
+        evictSupersededSnapshots(
+          params.filePath,
+          params.snapshotSize,
+          params.lastUpdated,
+          params.fileIdentity,
+          { size: verifiedSize, verified: true },
+          oversized,
+        );
+      }
+      // Map.set updates an existing key in place; the placeholder has held
+      // its insertion position through the build while the count-cap prune
+      // skipped it. Delete first so the completion lands at the MRU tail
+      // instead of being the prune's first eviction candidate.
+      indexCache.delete(key);
+      const cacheEntry: CacheEntry = {
+        value,
+        byteSize,
+        expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
+      };
+      indexCache.set(key, cacheEntry);
+      if (incrementalState) {
+        incrementalIndexStates.set(value, incrementalState);
+      }
+      pruneCache();
+      return value;
+    } catch (error) {
+      clearIfOwned();
+      debugLogger.debug(
+        `index cache completion rejected ${key}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
+      throw error;
     }
-    // Map.set updates an existing key in place; the placeholder has held
-    // its insertion position through the build while the count-cap prune
-    // skipped it. Delete first so the completion lands at the MRU tail
-    // instead of being the prune's first eviction candidate.
-    indexCache.delete(key);
-    indexCache.set(key, {
-      value,
-      byteSize,
-      expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
-    });
-    pruneCache();
-    return value;
-  })();
+  }, clearIfOwned);
+  owner.task = task;
   indexCache.set(key, {
-    pending,
+    pending: task.promise,
+    task,
     expiresAt: now + INDEX_CACHE_TTL_MS,
   });
-  try {
-    return await pending;
-  } catch (error) {
-    if (indexCache.get(key)?.pending === pending) {
-      indexCache.delete(key);
-    }
-    debugLogger.debug(
-      `index cache completion rejected ${key}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    throw error;
-  }
+  return task.attach(params.signal);
 }
 
 function makeReplayIndex(
@@ -3393,11 +4050,9 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
     index.lastUpdated,
   );
   if (indexCache.has(key)) return;
-  const byteSize = estimateIndexCacheBytes(index);
-  const oversized = byteSize > getIndexCacheMaxBytes();
-  const classBudget = oversized
-    ? getIndexCacheOversizedMaxBytes()
-    : getIndexCacheMaxBytes();
+  const { byteSize, oversized, classBudget, incrementalState } =
+    resolveAdmissionSizeAndIncrementalState(index);
+  pendingIncrementalIndexStates.delete(index);
   if (byteSize > classBudget) {
     debugLogger.debug(
       `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
@@ -3477,6 +4132,9 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
     expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
   };
   indexCache.set(key, entry);
+  if (incrementalState) {
+    incrementalIndexStates.set(index, incrementalState);
+  }
   accountManagedProjection(index, entry, {
     size: index.snapshotSize,
     verified: true,
@@ -3544,6 +4202,27 @@ function indexHasManagedHeader(index: TranscriptIndex): boolean {
   );
 }
 
+function assertManagedProjectedBodyBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  maxBodyBytes: number | undefined,
+): void {
+  if (maxBodyBytes === undefined) return;
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBodyBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBodyBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
+}
+
 function assertManagedAllReplayBudget(
   records: readonly ChatRecord[],
   sessionId: string,
@@ -3551,19 +4230,12 @@ function assertManagedAllReplayBudget(
   replay: SessionRestoreReplaySelection,
 ): void {
   if (replay.kind !== 'all') return;
-  const maxBytes = getMaxAllReplayBytes();
-  let total = 0;
-  for (const record of records) {
-    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
-    if (total > maxBytes) {
-      throw new SessionTranscriptTooLargeError(
-        sessionId,
-        snapshotSize,
-        maxBytes,
-        { dimension: 'replay', measuredBytes: total },
-      );
-    }
-  }
+  assertManagedProjectedBodyBudget(
+    records,
+    sessionId,
+    snapshotSize,
+    getMaxAllReplayBytes(),
+  );
 }
 
 /**
@@ -3785,6 +4457,168 @@ function managedPageIndex(
   };
 }
 
+const PROMPT_SCAN_RECORD_TYPES = new Set<TranscriptRecordType>([
+  'user',
+  'assistant',
+  'tool_result',
+  'system',
+]);
+
+interface PromptScanEnvelope {
+  uuid: string;
+  parentUuid: string | null;
+  sessionId: string;
+  type: TranscriptRecordType;
+  subtype?: string;
+  cwd?: string;
+  lastUserPromptAt?: string;
+}
+
+interface PromptScanNode {
+  parentUuid: string | null;
+  conversation: boolean;
+  metadataReanchor?: boolean;
+  lastUserPromptAt?: string;
+}
+
+interface PromptTimeResolution {
+  snapshot: LastUserPromptSnapshot;
+  leafUuid?: string;
+  anchorLeafUuid?: string;
+  prefixSha256?: string;
+  prefixUuidBloom?: SessionPromptTimeUuidBloom;
+  managed?: boolean;
+  shouldPersistSidecar: boolean;
+}
+
+const MAX_PROMPT_TAIL_EXTENSION_RECORDS = 10_000;
+
+function parsePromptScanEnvelope(
+  value: unknown,
+): PromptScanEnvelope | undefined {
+  if (!isObjectRecord(value)) return undefined;
+  const uuid = value['uuid'];
+  const parentUuid = value['parentUuid'];
+  const sessionId = value['sessionId'];
+  const type = value['type'];
+  if (
+    typeof uuid !== 'string' ||
+    uuid.length === 0 ||
+    (typeof parentUuid !== 'string' && parentUuid !== null) ||
+    typeof sessionId !== 'string' ||
+    sessionId.length === 0 ||
+    typeof type !== 'string' ||
+    !PROMPT_SCAN_RECORD_TYPES.has(type as TranscriptRecordType)
+  ) {
+    return undefined;
+  }
+  const subtype =
+    typeof value['subtype'] === 'string' ? value['subtype'] : undefined;
+  const cwd = typeof value['cwd'] === 'string' ? value['cwd'] : undefined;
+  let lastUserPromptAt: string | undefined;
+  if (type === 'user') {
+    const rawTimestamp = value['timestamp'];
+    const validTimestamp =
+      typeof rawTimestamp === 'string' &&
+      Number.isFinite(new Date(rawTimestamp).getTime())
+        ? rawTimestamp
+        : undefined;
+    lastUserPromptAt = userPromptTimestamp({
+      type: 'user',
+      subtype,
+      timestamp: validTimestamp,
+      forkedFrom: value['forkedFrom'],
+      agentId: value['agentId'],
+      isSidechain: value['isSidechain'],
+      provenance: value['provenance'],
+    } as ChatRecord);
+  }
+  return {
+    uuid,
+    parentUuid,
+    sessionId,
+    type: type as TranscriptRecordType,
+    ...(subtype !== undefined ? { subtype } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(lastUserPromptAt !== undefined ? { lastUserPromptAt } : {}),
+  };
+}
+
+function estimatePromptScanNodeBytes(
+  uuid: string,
+  node: PromptScanNode,
+): number {
+  return (
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_HINT_BASE_BYTES * 2 +
+    INDEX_MAP_ENTRY_BYTES +
+    estimateStringBytes(uuid) * 2 +
+    estimateStringBytes(node.parentUuid) +
+    estimateStringBytes(node.lastUserPromptAt)
+  );
+}
+
+function isMetadataReanchorRecord(
+  envelope: Pick<PromptScanEnvelope, 'type' | 'subtype'>,
+): boolean {
+  return (
+    envelope.type === 'system' &&
+    (envelope.subtype === 'custom_title' ||
+      envelope.subtype === 'session_source')
+  );
+}
+
+function promptTimeFromProjectedRecords(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): string | undefined {
+  // projectManagedSessionRecords already validates every record via
+  // validateTranscriptRecord; verify session ownership and scan backwards with
+  // last-wins UUID semantics without allocating an index-sized Map.
+  for (const [position, record] of records.entries()) {
+    if (record.sessionId !== sessionId) {
+      debugLogger.warn(
+        `projected prompt-time record rejected session=${sessionId} position=${position}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+  }
+  const seen = new Set<string>();
+  for (let position = records.length - 1; position >= 0; position--) {
+    const record = records[position]!;
+    if (seen.has(record.uuid)) continue;
+    seen.add(record.uuid);
+    const ts = userPromptTimestamp(record);
+    if (ts !== undefined) return ts;
+  }
+  return undefined;
+}
+
+function resolveSidecarLeaf(
+  leafUuid: string,
+  lookup: (uuid: string) =>
+    | {
+        parentUuid: string | null;
+        conversation: boolean;
+        metadataReanchor: boolean;
+      }
+    | undefined,
+): { leafUuid: string; anchorLeafUuid?: string } {
+  let baseLeafUuid = leafUuid;
+  const seen = new Set<string>();
+  while (!seen.has(baseLeafUuid)) {
+    seen.add(baseLeafUuid);
+    const node = lookup(baseLeafUuid);
+    if (!node?.metadataReanchor || node.parentUuid === null) break;
+    const parentNode = lookup(node.parentUuid);
+    if (!parentNode || !parentNode.conversation) break;
+    baseLeafUuid = node.parentUuid;
+  }
+  return baseLeafUuid !== leafUuid
+    ? { leafUuid: baseLeafUuid, anchorLeafUuid: leafUuid }
+    : { leafUuid: baseLeafUuid };
+}
+
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
@@ -3812,21 +4646,771 @@ export class SessionTranscriptReader {
     );
   }
 
+  private async readManagedPromptTime(
+    sessionId: string,
+    filePath: string,
+    snapshotSize: number,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    signal?.throwIfAborted();
+    let projection: Awaited<
+      ReturnType<typeof readManagedSessionRecordsAndTitle>
+    >;
+    try {
+      projection = await readManagedSessionRecordsAndTitle({
+        transcriptPath: filePath,
+        runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+        sessionKey: localManagedSessionKey(
+          this.storage.getProjectRoot(),
+          sessionId,
+        ),
+        maxBytes: snapshotSize,
+        maxBodyBytes: getMaxAllReplayBytes(),
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      if (error instanceof ManagedSessionProjectionLimitError) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          snapshotSize,
+          error.maxBytes,
+          {
+            dimension: 'replay',
+            measuredBytes: error.measuredBytes,
+          },
+        );
+      }
+      if (error instanceof ManagedSessionRecordError) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      throw error;
+    }
+    signal?.throwIfAborted();
+    return promptTimeFromProjectedRecords(projection.records, sessionId);
+  }
+
+  private async tryTailExtendPromptTime(params: {
+    sessionId: string;
+    filePath: string;
+    fileIdentity: SessionTranscriptFileIdentity;
+    snapshotSize: number;
+    lastUpdated: string;
+    sidecar: {
+      snapshotSize: number;
+      lastUserPromptAt: string | null;
+      leafUuid: string;
+      anchorLeafUuid?: string;
+      firstRecordOwner: { sessionId: string; cwd: string };
+      prefixSha256?: string;
+      prefixUuidBloom?: SessionPromptTimeUuidBloom;
+    };
+    signal: AbortSignal;
+  }): Promise<PromptTimeResolution | undefined> {
+    const {
+      sessionId,
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      sidecar,
+      signal,
+    } = params;
+    // Require both a prefix UUID Bloom filter (zero false negatives against
+    // duplicate UUIDs) and a full-prefix SHA-256 digest (rejects any in-place
+    // prefix edit before appending).
+    const bloom = sidecar.prefixUuidBloom
+      ? decodePromptUuidBloom(sidecar.prefixUuidBloom)
+      : undefined;
+    if (!bloom || !sidecar.prefixSha256) {
+      return undefined;
+    }
+    let linear = true;
+    let hasManagedHeader = false;
+    let sessionIdMismatch = false;
+    // Accept both legacy-chained metadata records (next record chains off the
+    // title/source UUID) and sibling re-anchors (next record chains off the
+    // preceding conversation tail) as linear continuations.
+    let baseLeafUuid = sidecar.leafUuid;
+    let anchorLeafUuid = sidecar.anchorLeafUuid;
+    let allowedParents = new Set<string>(
+      anchorLeafUuid !== undefined
+        ? [baseLeafUuid, anchorLeafUuid]
+        : [baseLeafUuid],
+    );
+    let latestPrompt = sidecar.lastUserPromptAt ?? undefined;
+    let tailConversationRecords = 0;
+    let tailChunks: Buffer[] | undefined = [];
+    let tailBufferedBytes = 0;
+    let nextPrefixSha256: string | undefined;
+
+    const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
+    try {
+      signal.throwIfAborted();
+      if (
+        !(await verifyByteIsNewline(filePath, sidecar.snapshotSize - 1, signal))
+      ) {
+        return undefined;
+      }
+      await forEachLineInSnapshot(
+        filePath,
+        snapshotSize,
+        sessionId,
+        (line) => {
+          if (!linear) return false;
+          const text = line.toString('utf8').trim();
+          if (text.length === 0) return;
+          const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+            text,
+            filePath,
+          );
+          for (const value of parsed.records) {
+            const envelope = parsePromptScanEnvelope(value);
+            if (!envelope) continue;
+            if (envelope.sessionId !== sessionId) {
+              sessionIdMismatch = true;
+            }
+            if (envelope.subtype === MANAGED_SESSION_HEADER_SUBTYPE) {
+              hasManagedHeader = true;
+              linear = false;
+              return false;
+            }
+            if (promptUuidBloomMayContain(bloom, envelope.uuid)) {
+              linear = false;
+              return false;
+            }
+            if (!isTranscriptConversationRecord(envelope)) {
+              addPromptUuidToBloom(bloom, envelope.uuid);
+              continue;
+            }
+            if (isMetadataReanchorRecord(envelope)) {
+              if (
+                envelope.parentUuid === null ||
+                !allowedParents.has(envelope.parentUuid)
+              ) {
+                linear = false;
+                return false;
+              }
+              addPromptUuidToBloom(bloom, envelope.uuid);
+              allowedParents.add(envelope.uuid);
+              anchorLeafUuid = envelope.uuid;
+              continue;
+            }
+            const maxTailRecords =
+              maxPromptTailRecordsForTest ?? MAX_PROMPT_TAIL_EXTENSION_RECORDS;
+            if (
+              tailConversationRecords >= maxTailRecords ||
+              envelope.parentUuid === null ||
+              !allowedParents.has(envelope.parentUuid)
+            ) {
+              linear = false;
+              return false;
+            }
+            addPromptUuidToBloom(bloom, envelope.uuid);
+            tailConversationRecords += 1;
+            baseLeafUuid = envelope.uuid;
+            anchorLeafUuid = undefined;
+            allowedParents = new Set([envelope.uuid]);
+            if (envelope.lastUserPromptAt !== undefined) {
+              latestPrompt = envelope.lastUserPromptAt;
+            }
+          }
+          return true;
+        },
+        {
+          startOffset: sidecar.snapshotSize,
+          signal,
+          onRawChunk: (chunk) => {
+            if (!tailChunks || chunk.length === 0) return;
+            tailBufferedBytes += chunk.length;
+            if (tailBufferedBytes > MAX_TAIL_HASH_BUFFER_BYTES) {
+              tailChunks = undefined;
+              return;
+            }
+            tailChunks.push(Buffer.from(chunk));
+          },
+        },
+      );
+      if (!linear || hasManagedHeader) {
+        return undefined;
+      }
+      if (sessionIdMismatch) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      // Verify the entire prefix digest only after the tail passed linear and
+      // Bloom checks, so early-invalidating rewinds never spend I/O hashing
+      // the prefix.
+      const prefixHash = await verifyPrefixSha256(
+        filePath,
+        sidecar.snapshotSize,
+        sidecar.prefixSha256,
+        signal,
+      );
+      if (!prefixHash) {
+        return undefined;
+      }
+      if (tailChunks !== undefined) {
+        for (const chunk of tailChunks) {
+          prefixHash.update(chunk);
+        }
+        nextPrefixSha256 = prefixHash.digest('hex');
+      } else if (
+        await updateHashFromRange(
+          filePath,
+          sidecar.snapshotSize,
+          snapshotSize,
+          prefixHash,
+          signal,
+        )
+      ) {
+        nextPrefixSha256 = prefixHash.digest('hex');
+      }
+    } catch (error) {
+      if (isFileMissingError(error)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      throw error;
+    } finally {
+      releaseBuild();
+    }
+
+    promptTimeScanModeHookForTest?.({
+      filePath,
+      mode: 'sidecar_tail',
+      startOffset: sidecar.snapshotSize,
+      snapshotSize,
+    });
+    await indexBuildCompleteHookForTest?.(filePath);
+    if (
+      !(await hasSnapshotSignature(
+        filePath,
+        fileIdentity,
+        snapshotSize,
+        lastUpdated,
+        true,
+      ))
+    ) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    const nextBloom = encodePromptUuidBloom(bloom);
+    return {
+      snapshot: {
+        lastUserPromptAt: latestPrompt,
+        firstRecordOwner: sidecar.firstRecordOwner,
+      },
+      leafUuid: baseLeafUuid,
+      ...(anchorLeafUuid !== undefined ? { anchorLeafUuid } : {}),
+      ...(nextPrefixSha256 !== undefined
+        ? { prefixSha256: nextPrefixSha256 }
+        : {}),
+      ...(nextBloom !== undefined ? { prefixUuidBloom: nextBloom } : {}),
+      managed: false,
+      shouldPersistSidecar: true,
+    };
+  }
+
+  private async scanLastUserPromptAt(params: {
+    sessionId: string;
+    filePath: string;
+    fileIdentity: SessionTranscriptFileIdentity;
+    snapshotSize: number;
+    lastUpdated: string;
+    signal: AbortSignal;
+  }): Promise<PromptTimeResolution> {
+    const {
+      sessionId,
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      signal,
+    } = params;
+    const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+    const buildHeapUsedStart = process.memoryUsage().heapUsed;
+    const heapSizeLimit = getHeapStatistics().heap_size_limit;
+    const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
+    const remainingHeapBudget =
+      availableHeapBudgetForTest ??
+      Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+    const estimatedOldSpaceAvailableBytes = Math.max(
+      0,
+      availableHeapBytes - 96 * 1024 * 1024,
+    );
+    const maxHeapGrowthBytes =
+      availableHeapBudgetForTest ??
+      Math.max(
+        64 * 1024,
+        Math.min(
+          Math.floor((availableHeapBytes * 5) / 8),
+          Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+        ),
+      );
+    const maxIndexBuildBytes = Math.min(
+      maxIndexEstimateBytes,
+      remainingHeapBudget,
+    );
+    const transientHeapPressure =
+      availableHeapBudgetForTest !== undefined
+        ? remainingHeapBudget < maxIndexEstimateBytes
+        : remainingHeapBudget < maxIndexEstimateBytes &&
+          buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
+
+    let estimatedBytes =
+      INDEX_ENTRY_BASE_BYTES +
+      INDEX_CONTAINER_BASE_BYTES * 2 +
+      estimateStringBytes(filePath);
+    const nodes = new Map<string, PromptScanNode>();
+    let recordCount = 0;
+    let leafUuid: string | undefined;
+    let firstRecordOwner: Pick<ChatRecord, 'sessionId' | 'cwd'> | undefined;
+    let hasManagedHeader = false;
+    let sessionIdMismatch = false;
+    let timestamp: string | undefined;
+    const prefixHash = crypto.createHash('sha256');
+
+    const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
+    try {
+      signal.throwIfAborted();
+      try {
+        await forEachLineInSnapshot(
+          filePath,
+          snapshotSize,
+          sessionId,
+          (line) => {
+            const text = line.toString('utf8').trim();
+            if (text.length === 0) return;
+            const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+              text,
+              filePath,
+            );
+            for (const value of parsed.records) {
+              const envelope = parsePromptScanEnvelope(value);
+              if (!envelope) continue;
+              recordCount += 1;
+              if (firstRecordOwner === undefined) {
+                firstRecordOwner = {
+                  sessionId: envelope.sessionId,
+                  cwd: envelope.cwd as string,
+                };
+              }
+              if (envelope.sessionId !== sessionId) {
+                sessionIdMismatch = true;
+              }
+              if (envelope.subtype === MANAGED_SESSION_HEADER_SUBTYPE) {
+                hasManagedHeader = true;
+              }
+              const conversation = isTranscriptConversationRecord(envelope);
+              const metadataReanchor = isMetadataReanchorRecord(envelope);
+              if (conversation) {
+                leafUuid = envelope.uuid;
+              }
+              if (!nodes.has(envelope.uuid)) {
+                const node: PromptScanNode = {
+                  parentUuid: envelope.parentUuid,
+                  conversation,
+                  ...(metadataReanchor ? { metadataReanchor: true } : {}),
+                  ...(envelope.lastUserPromptAt !== undefined
+                    ? { lastUserPromptAt: envelope.lastUserPromptAt }
+                    : {}),
+                };
+                nodes.set(envelope.uuid, node);
+                estimatedBytes += estimatePromptScanNodeBytes(
+                  envelope.uuid,
+                  node,
+                );
+              }
+              if (estimatedBytes > maxIndexBuildBytes) {
+                const retryable =
+                  transientHeapPressure &&
+                  estimatedBytes <= maxIndexEstimateBytes;
+                throw new SessionTranscriptTooLargeError(
+                  sessionId,
+                  snapshotSize,
+                  maxIndexBuildBytes,
+                  {
+                    dimension: 'index',
+                    measuredBytes: estimatedBytes,
+                    ...(retryable ? { retryable: true } : {}),
+                  },
+                );
+              }
+              if ((recordCount & 1023) === 1) {
+                const heapGrowth =
+                  process.memoryUsage().heapUsed - buildHeapUsedStart;
+                if (heapGrowth > maxHeapGrowthBytes) {
+                  throw new SessionTranscriptTooLargeError(
+                    sessionId,
+                    snapshotSize,
+                    maxHeapGrowthBytes,
+                    {
+                      dimension: 'index',
+                      measuredBytes: heapGrowth,
+                      retryable: true,
+                    },
+                  );
+                }
+              }
+            }
+          },
+          {
+            signal,
+            onRawChunk: (chunk) => {
+              if (chunk.length > 0) prefixHash.update(chunk);
+            },
+          },
+        );
+      } catch (error) {
+        if (isFileMissingError(error)) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        throw error;
+      }
+
+      if (sessionIdMismatch) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      if (!leafUuid || !firstRecordOwner) {
+        throw new EmptySessionTranscriptError(sessionId);
+      }
+
+      if (hasManagedHeader) {
+        signal.throwIfAborted();
+        timestamp = await this.readManagedPromptTime(
+          sessionId,
+          filePath,
+          snapshotSize,
+          signal,
+        );
+      } else {
+        const visited = new Set<string>();
+        let currentUuid: string | null = leafUuid;
+        while (currentUuid !== null && !visited.has(currentUuid)) {
+          visited.add(currentUuid);
+          const node = nodes.get(currentUuid);
+          if (!node || !node.conversation) break;
+          if (node.lastUserPromptAt !== undefined) {
+            timestamp = node.lastUserPromptAt;
+            break;
+          }
+          currentUuid = node.parentUuid;
+        }
+      }
+
+      const finalHeapGrowth =
+        process.memoryUsage().heapUsed - buildHeapUsedStart;
+      if (finalHeapGrowth > maxHeapGrowthBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          snapshotSize,
+          maxHeapGrowthBytes,
+          {
+            dimension: 'index',
+            measuredBytes: finalHeapGrowth,
+            retryable: true,
+          },
+        );
+      }
+    } finally {
+      releaseBuild();
+    }
+
+    promptTimeScanModeHookForTest?.({
+      filePath,
+      mode: hasManagedHeader ? 'managed_scan' : 'lightweight_scan',
+      startOffset: 0,
+      snapshotSize,
+    });
+    await indexBuildCompleteHookForTest?.(filePath);
+    if (
+      !(await hasSnapshotSignature(
+        filePath,
+        fileIdentity,
+        snapshotSize,
+        lastUpdated,
+        true,
+      ))
+    ) {
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
+    const prefixUuidBloom = hasManagedHeader
+      ? undefined
+      : buildPromptUuidBloom(nodes.keys(), nodes.size);
+    const prefixSha256 = hasManagedHeader
+      ? undefined
+      : prefixHash.digest('hex');
+    const resolvedLeaf = hasManagedHeader
+      ? { leafUuid }
+      : resolveSidecarLeaf(leafUuid, (uuid) => {
+          const node = nodes.get(uuid);
+          return node
+            ? {
+                parentUuid: node.parentUuid,
+                conversation: node.conversation,
+                metadataReanchor: node.metadataReanchor === true,
+              }
+            : undefined;
+        });
+    return {
+      snapshot: {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner,
+      },
+      leafUuid: resolvedLeaf.leafUuid,
+      ...(resolvedLeaf.anchorLeafUuid !== undefined
+        ? { anchorLeafUuid: resolvedLeaf.anchorLeafUuid }
+        : {}),
+      ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
+      ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
+      managed: hasManagedHeader,
+      shouldPersistSidecar: true,
+    };
+  }
+
+  private async resolvePromptTimeCold(params: {
+    sessionId: string;
+    filePath: string;
+    fileIdentity: SessionTranscriptFileIdentity;
+    snapshotSize: number;
+    lastUpdated: string;
+    signal: AbortSignal;
+  }): Promise<PromptTimeResolution> {
+    const {
+      sessionId,
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      signal,
+    } = params;
+    signal.throwIfAborted();
+
+    // Reuse an already warm exact-match dense index before touching disk.
+    const indexKey = makeCacheKey(
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+    );
+    const cachedIndexEntry = indexCache.get(indexKey);
+    if (cachedIndexEntry?.value && cachedIndexEntry.expiresAt > Date.now()) {
+      const index = cachedIndexEntry.value;
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      signal.throwIfAborted();
+      if (!firstRecord) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      const managed = indexHasManagedHeader(index);
+      const timestamp = managed
+        ? promptTimeFromProjectedRecords(
+            await this.readManagedRecords(
+              sessionId,
+              index,
+              { signal },
+              getMaxAllReplayBytes(),
+            ),
+            sessionId,
+          )
+        : lastUserPromptFromIndex(index);
+      signal.throwIfAborted();
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          snapshotSize,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      const indexIncrementalState = incrementalIndexStates.get(index);
+      const prefixSha256 =
+        !managed && indexIncrementalState
+          ? indexIncrementalState.prefixSha256
+          : undefined;
+      const prefixUuidBloom = managed
+        ? undefined
+        : buildPromptUuidBloom(index.byUuid.keys(), index.byUuid.size);
+      const resolvedLeaf = managed
+        ? { leafUuid: index.leafUuid }
+        : resolveSidecarLeaf(index.leafUuid, (uuid) => {
+            const entry = index.byUuid.get(uuid);
+            return entry
+              ? {
+                  parentUuid: entry.parentUuid,
+                  conversation: isTranscriptConversationRecord(entry),
+                  metadataReanchor: isMetadataReanchorRecord(entry),
+                }
+              : undefined;
+          });
+      promptTimeScanModeHookForTest?.({
+        filePath,
+        mode: 'index_cache',
+        startOffset: snapshotSize,
+        snapshotSize,
+      });
+      return {
+        snapshot: {
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: {
+            sessionId: firstRecord.sessionId,
+            cwd: firstRecord.cwd,
+          },
+        },
+        leafUuid: resolvedLeaf.leafUuid,
+        ...(resolvedLeaf.anchorLeafUuid !== undefined
+          ? { anchorLeafUuid: resolvedLeaf.anchorLeafUuid }
+          : {}),
+        ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
+        ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
+        managed,
+        shouldPersistSidecar: true,
+      };
+    }
+
+    const sidecarPath = sessionPromptTimeSidecarPath(
+      path.dirname(filePath),
+      sessionId,
+    );
+    const sidecar = await readSessionPromptTimeSidecarAsync(sidecarPath, {
+      signal,
+    });
+    if (sidecar && sameFileIdentity(sidecar.fileIdentity, fileIdentity)) {
+      if (
+        snapshotSize === sidecar.snapshotSize &&
+        lastUpdated === sidecar.lastUpdated
+      ) {
+        promptTimeScanModeHookForTest?.({
+          filePath,
+          mode: 'sidecar_exact',
+          startOffset: snapshotSize,
+          snapshotSize,
+        });
+        return {
+          snapshot: {
+            lastUserPromptAt: sidecar.lastUserPromptAt ?? undefined,
+            firstRecordOwner: sidecar.firstRecordOwner,
+          },
+          leafUuid: sidecar.leafUuid,
+          managed: sidecar.managed ?? false,
+          shouldPersistSidecar: false,
+        };
+      }
+      if (
+        fileIdentity.ino !== 0 &&
+        snapshotSize > sidecar.snapshotSize &&
+        !sidecar.managed
+      ) {
+        const extended = await this.tryTailExtendPromptTime({
+          sessionId,
+          filePath,
+          fileIdentity,
+          snapshotSize,
+          lastUpdated,
+          sidecar,
+          signal,
+        });
+        if (extended) return extended;
+      }
+    }
+
+    return this.scanLastUserPromptAt({
+      sessionId,
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      signal,
+    });
+  }
+
+  private async maybePersistPromptTimeSidecar(
+    entry: LastUserPromptCacheEntry,
+    filePath: string,
+    sessionId: string,
+    key: string,
+    readOptions: LastUserPromptReadOptions,
+  ): Promise<void> {
+    if (readOptions.allowSidecarWrite === false) return;
+    const pending = entry.pendingSidecar;
+    if (!pending) return;
+    if (promptTimeScope(filePath, this.workspaceCwd).get(key) !== entry) return;
+    const ownerMatches = readOptions.validateFirstRecord
+      ? await readOptions.validateFirstRecord(pending.firstRecordOwner)
+      : pending.firstRecordOwner.sessionId.toLowerCase() ===
+          sessionId.toLowerCase() &&
+        pending.firstRecordOwner.cwd === this.workspaceCwd;
+    if (!ownerMatches) return;
+    const sidecarPath = sessionPromptTimeSidecarPath(
+      path.dirname(filePath),
+      sessionId,
+    );
+    const [currentStats, existing] = await Promise.all([
+      fsp.stat(filePath).catch(() => undefined),
+      readSessionPromptTimeSidecarAsync(sidecarPath),
+    ]);
+    if (promptTimeScope(filePath, this.workspaceCwd).get(key) !== entry) return;
+    if (entry.pendingSidecar !== pending) return;
+    entry.pendingSidecar = undefined;
+    if (
+      !currentStats ||
+      !sameFileIdentity(
+        fileIdentityFromStats(currentStats),
+        pending.fileIdentity,
+      ) ||
+      currentStats.size < pending.snapshotSize
+    ) {
+      return;
+    }
+    if (
+      existing &&
+      existing.fileIdentity.dev === pending.fileIdentity.dev &&
+      existing.fileIdentity.ino === pending.fileIdentity.ino &&
+      existing.snapshotSize > pending.snapshotSize &&
+      currentStats.size >= existing.snapshotSize
+    ) {
+      return;
+    }
+    if (!writeSessionPromptTimeSidecar(sidecarPath, pending)) {
+      debugLogger.debug(
+        `prompt-time sidecar write skipped session=${sessionId} path=${sidecarPath}`,
+      );
+    }
+  }
+
   async getLastUserPromptAt(
     sessionId: string,
     archiveState: 'active' | 'archived' = 'active',
     readOptions: LastUserPromptReadOptions = {},
   ): Promise<string | undefined> {
+    readOptions.signal?.throwIfAborted();
     const filePath = this.getSessionFilePath(sessionId, archiveState);
     let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
     const key = JSON.stringify([filePath, this.workspaceCwd]);
     const warm = readOptions.preferCache
       ? lastUserPromptCache.get(key)
       : undefined;
-    if (warm) {
-      let snapshot = await warm.snapshot;
+    if (warm && !warm.task?.aborted()) {
+      let snapshot = warm.task
+        ? await warm.task.attach(readOptions.signal)
+        : await warm.snapshot;
+      let activeEntry = warm;
       const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
-      if (current && current !== warm) snapshot = await current.snapshot;
+      if (current && current !== warm && !current.task?.aborted()) {
+        activeEntry = current;
+        snapshot = current.task
+          ? await current.task.attach(readOptions.signal)
+          : await current.snapshot;
+      }
+      await this.maybePersistPromptTimeSidecar(
+        activeEntry,
+        filePath,
+        sessionId,
+        key,
+        readOptions,
+      );
       return readOptions.validateFirstRecord &&
         (!snapshot.firstRecordOwner ||
           !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
@@ -3834,12 +5418,14 @@ export class SessionTranscriptReader {
         : snapshot.lastUserPromptAt;
     }
     const stats = await fsp.stat(filePath);
+    readOptions.signal?.throwIfAborted();
     lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
     const fileIdentity = fileIdentityFromStats(stats);
     const lastUpdated = new Date(stats.mtimeMs).toISOString();
     const cached = lastUserPromptCache.get(key);
     if (
       cached &&
+      !cached.task?.aborted() &&
       fileIdentity.ino === 0 &&
       cached.fileIdentity.ino === 0 &&
       (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
@@ -3847,17 +5433,33 @@ export class SessionTranscriptReader {
       return undefined;
     if (
       cached &&
+      !cached.task?.aborted() &&
       sameFileIdentity(cached.fileIdentity, fileIdentity) &&
       stats.size >= cached.size &&
       (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
     ) {
       lastUserPromptCache.delete(key);
       lastUserPromptCache.set(key, cached);
-      let snapshot = await cached.snapshot;
+      let snapshot = cached.task
+        ? await cached.task.attach(readOptions.signal)
+        : await cached.snapshot;
+      let activeEntry = cached;
       const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
-      if (current && current !== cached) snapshot = await current.snapshot;
+      if (current && current !== cached && !current.task?.aborted()) {
+        activeEntry = current;
+        snapshot = current.task
+          ? await current.task.attach(readOptions.signal)
+          : await current.snapshot;
+      }
       cached.size = stats.size;
       cached.lastUpdated = lastUpdated;
+      await this.maybePersistPromptTimeSidecar(
+        activeEntry,
+        filePath,
+        sessionId,
+        key,
+        readOptions,
+      );
       return readOptions.validateFirstRecord &&
         (!snapshot.firstRecordOwner ||
           !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
@@ -3868,87 +5470,112 @@ export class SessionTranscriptReader {
     // large transcripts. Restore/paging reads use the expanded limit below;
     // prompt timestamps are optional metadata, not worth an entire index scan.
     if (stats.size > SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES) return undefined;
-    const pending = (async (): Promise<LastUserPromptSnapshot> => {
-      let index: TranscriptIndex;
-      try {
-        index = await getCachedIndex({
-          filePath,
-          fileIdentity,
-          snapshotSize: stats.size,
-          lastUpdated,
-        });
-      } catch (error) {
-        if (
-          error instanceof SessionTranscriptTooLargeError &&
-          error.retryable === true
-        ) {
-          // Memory available to this process may change. Do not retain a
-          // missing prompt timestamp until the session file is rewritten.
+
+    const owner: { entry?: LastUserPromptCacheEntry } = {};
+    const clearIfOwned = () => {
+      if (!owner.entry) return;
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === owner.entry) currentScope.delete(key);
+    };
+    const task = createSharedAbortableTask<LastUserPromptSnapshot>(
+      async (taskSignal) => {
+        try {
+          let resolved: PromptTimeResolution;
+          try {
+            resolved = await this.resolvePromptTimeCold({
+              sessionId,
+              filePath,
+              fileIdentity,
+              snapshotSize: stats.size,
+              lastUpdated,
+              signal: taskSignal,
+            });
+          } catch (error) {
+            if (taskSignal.aborted) throw error;
+            if (
+              error instanceof SessionTranscriptTooLargeError &&
+              error.retryable === true
+            ) {
+              // Memory available to this process may change. Do not retain a
+              // missing prompt timestamp until the session file is rewritten.
+              throw error;
+            }
+            if (
+              (error instanceof EmptySessionTranscriptError ||
+                error instanceof SessionTranscriptTooLargeError ||
+                error instanceof SessionTranscriptPageTooLargeError) &&
+              (await hasSnapshotSignature(
+                filePath,
+                fileIdentity,
+                stats.size,
+                lastUpdated,
+                true,
+              ))
+            ) {
+              return {};
+            }
+            throw error;
+          }
+
+          if (
+            owner.entry &&
+            resolved.shouldPersistSidecar &&
+            resolved.leafUuid &&
+            resolved.snapshot.firstRecordOwner &&
+            promptTimeScope(filePath, this.workspaceCwd).get(key) ===
+              owner.entry
+          ) {
+            owner.entry.pendingSidecar = {
+              fileIdentity,
+              snapshotSize: stats.size,
+              lastUpdated,
+              lastUserPromptAt: resolved.snapshot.lastUserPromptAt ?? null,
+              leafUuid: resolved.leafUuid,
+              ...(resolved.anchorLeafUuid !== undefined
+                ? { anchorLeafUuid: resolved.anchorLeafUuid }
+                : {}),
+              firstRecordOwner: resolved.snapshot.firstRecordOwner,
+              ...(resolved.prefixSha256 !== undefined
+                ? { prefixSha256: resolved.prefixSha256 }
+                : {}),
+              ...(resolved.prefixUuidBloom !== undefined
+                ? { prefixUuidBloom: resolved.prefixUuidBloom }
+                : {}),
+              ...(resolved.managed ? { managed: true } : {}),
+            };
+            await this.maybePersistPromptTimeSidecar(
+              owner.entry,
+              filePath,
+              sessionId,
+              key,
+              readOptions,
+            );
+          }
+
+          return resolved.snapshot;
+        } catch (error) {
+          clearIfOwned();
           throw error;
         }
-        if (
-          (error instanceof EmptySessionTranscriptError ||
-            error instanceof SessionTranscriptTooLargeError ||
-            error instanceof SessionTranscriptPageTooLargeError) &&
-          (await hasSnapshotSignature(
-            filePath,
-            fileIdentity,
-            stats.size,
-            lastUpdated,
-            true,
-          ))
-        )
-          return {};
-        throw error;
-      }
-      const [firstRecord] = await readAggregatedRecords(index, [
-        index.firstRecordUuid,
-      ]);
-      if (!firstRecord)
-        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-      const effective = indexHasManagedHeader(index)
-        ? managedPageIndex(
-            index,
-            await this.readManagedRecords(sessionId, index, {}),
-          )
-        : index;
-      const timestamp = lastUserPromptFromIndex(effective);
-      if (
-        !(await hasSnapshotSignature(
-          filePath,
-          fileIdentity,
-          stats.size,
-          lastUpdated,
-          true,
-        ))
-      ) {
-        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-      }
-      return {
-        lastUserPromptAt: timestamp,
-        firstRecordOwner: {
-          sessionId: firstRecord.sessionId,
-          cwd: firstRecord.cwd,
-        },
-      };
-    })();
-    const entry = {
+      },
+      clearIfOwned,
+    );
+    const entry: LastUserPromptCacheEntry = {
       fileIdentity,
       size: stats.size,
       lastUpdated,
-      snapshot: pending,
+      snapshot: task.promise,
+      task,
     };
+    owner.entry = entry;
     lastUserPromptCache.set(key, entry);
     trimPromptTimeScopes();
-    let snapshot: LastUserPromptSnapshot;
-    try {
-      snapshot = await pending;
-      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
-      if (current && current !== entry) snapshot = await current.snapshot;
-    } catch (error) {
-      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
-      if (currentScope.get(key) === entry) currentScope.delete(key);
-      throw error;
+    let snapshot = await task.attach(readOptions.signal);
+    const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+    if (current && current !== entry && !current.task?.aborted()) {
+      snapshot = current.task
+        ? await current.task.attach(readOptions.signal)
+        : await current.snapshot;
     }
     return readOptions.validateFirstRecord &&
       (!snapshot.firstRecordOwner ||
@@ -4021,7 +5648,9 @@ export class SessionTranscriptReader {
   private async readTurnIndexSnapshot(
     sessionId: string,
     encodedSnapshot?: string,
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     const snapshot =
       encodedSnapshot === undefined
         ? undefined
@@ -4032,6 +5661,7 @@ export class SessionTranscriptReader {
 
     const filePath = this.getSessionFilePath(sessionId);
     const stats = await fsp.stat(filePath);
+    signal?.throwIfAborted();
     const currentIdentity = fileIdentityFromStats(stats);
     const snapshotSize = snapshot?.snapshotSize ?? stats.size;
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
@@ -4054,6 +5684,7 @@ export class SessionTranscriptReader {
         fileIdentity,
         snapshotSize,
         lastUpdated,
+        signal,
       });
     } catch (error) {
       if (!(error instanceof EmptySessionTranscriptError)) throw error;
@@ -4093,12 +5724,17 @@ export class SessionTranscriptReader {
     const { index, snapshotState } = await this.readTurnIndexSnapshot(
       sessionId,
       options.snapshot,
+      options.signal,
     );
+    options.signal?.throwIfAborted();
     const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
-        ? await this.readManagedRecords(sessionId, index, {})
+        ? await this.readManagedRecords(sessionId, index, {
+            signal: options.signal,
+          })
         : undefined;
+    options.signal?.throwIfAborted();
     const navigationTurns = projected
       ? managedNavigationTurns(projected)
       : (index?.navigationTurns ?? []);
@@ -4136,6 +5772,7 @@ export class SessionTranscriptReader {
         if (detail) details.set(record.uuid, detail);
       }
     };
+    options.signal?.throwIfAborted();
     if (projected) {
       const wanted = new Set(selectedUuids);
       for (const record of projected) {
@@ -4148,6 +5785,7 @@ export class SessionTranscriptReader {
         collectPreview,
       );
     }
+    options.signal?.throwIfAborted();
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
       const historyPromptId = projected
@@ -4191,6 +5829,7 @@ export class SessionTranscriptReader {
     promptId: string,
     options: SessionTranscriptReadTurnIndexOptions = {},
   ): Promise<HookTurnPage | undefined> {
+    options.signal?.throwIfAborted();
     const limit = normalizeLimit(options.limit ?? 50);
     const start = options.start ?? 0;
     if (
@@ -4201,7 +5840,9 @@ export class SessionTranscriptReader {
     const { index, snapshotState } = await this.readTurnIndexSnapshot(
       sessionId,
       options.snapshot,
+      options.signal,
     );
+    options.signal?.throwIfAborted();
     if (!index) return undefined;
     const base = {
       sessionId,
@@ -4420,6 +6061,7 @@ export class SessionTranscriptReader {
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
           entry?.subtype === 'memory_catalog_snapshot' ||
+          entry?.subtype === 'permission_context_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
@@ -4958,6 +6600,7 @@ export class SessionTranscriptReader {
     // would blank out the daemon's restore timings for these sessions.
     const startedAt = performance.now();
     try {
+      readOptions.signal?.throwIfAborted();
       // The first physical record proves which project the session belongs to.
       // Projecting without that gate would restore another project's session.
       let firstRecordSeen = false;
@@ -4975,6 +6618,7 @@ export class SessionTranscriptReader {
           firstRecordSeen = true;
         },
       );
+      readOptions.signal?.throwIfAborted();
       if (!firstRecordSeen) {
         throw new SessionTranscriptSnapshotUnavailableError(sessionId);
       }
@@ -4983,7 +6627,14 @@ export class SessionTranscriptReader {
       // the whole log on every request. The gate above stays outside the cache
       // because it authorises this caller, not the projection.
       let projection = managedProjections.get(index);
-      if (projection === undefined) {
+      if (projection !== undefined) {
+        assertManagedProjectedBodyBudget(
+          projection.records,
+          sessionId,
+          index.snapshotSize,
+          maxBodyBytes,
+        );
+      } else {
         try {
           projection = await readManagedSessionRecordsAndTitle({
             transcriptPath: index.filePath,
@@ -4996,8 +6647,12 @@ export class SessionTranscriptReader {
             // the same prefix rather than from records appended since.
             maxBytes: index.snapshotSize,
             ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
+            ...(readOptions.signal !== undefined
+              ? { signal: readOptions.signal }
+              : {}),
           });
         } catch (error) {
+          if (readOptions.signal?.aborted) throw readOptions.signal.reason;
           if (error instanceof ManagedSessionProjectionLimitError) {
             throw new SessionTranscriptTooLargeError(
               sessionId,
@@ -5313,8 +6968,10 @@ export class SessionTranscriptReader {
       throw new InvalidSessionTranscriptCursorError();
     }
 
+    options.signal?.throwIfAborted();
     const filePath = this.getSessionFilePath(sessionId);
     const stats = await fsp.stat(filePath);
+    options.signal?.throwIfAborted();
     const currentIdentity = fileIdentityFromStats(stats);
     const snapshotSize =
       cursor?.snapshotSize ?? snapshot?.snapshotSize ?? stats.size;
@@ -5366,7 +7023,9 @@ export class SessionTranscriptReader {
         cursor?.lastUpdated ??
         snapshot?.lastUpdated ??
         new Date(stats.mtimeMs).toISOString(),
+      signal: options.signal,
     });
+    options.signal?.throwIfAborted();
     // The physical lines of a Managed log are the authority's wrapper records,
     // so paging that index would hand a client those envelopes as if they were
     // the conversation. Page the projection instead, the way the restore and
@@ -5374,9 +7033,12 @@ export class SessionTranscriptReader {
     const index = indexHasManagedHeader(physicalIndex)
       ? managedPageIndex(
           physicalIndex,
-          await this.readManagedRecords(sessionId, physicalIndex, {}),
+          await this.readManagedRecords(sessionId, physicalIndex, {
+            signal: options.signal,
+          }),
         )
       : physicalIndex;
+    options.signal?.throwIfAborted();
     const frozenLeafUuid = cursor?.leafUuid ?? snapshot?.leafUuid;
     if (frozenLeafUuid !== undefined && frozenLeafUuid !== index.leafUuid) {
       debugLogger.warn(
@@ -5525,6 +7187,48 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   cooperativeYieldHookForTest = undefined;
   selectedLineReadHookForTest = undefined;
   indexBuildCompleteHookForTest = undefined;
+  maxConcurrentTranscriptBuildsForTest = undefined;
+  indexBuildModeHookForTest = undefined;
+  promptTimeScanModeHookForTest = undefined;
+  readStreamBytesHookForTest = undefined;
+  maxPromptTailRecordsForTest = undefined;
+}
+
+export function setSessionTranscriptMaxConcurrentBuildsForTest(
+  maxConcurrent: number | undefined,
+): void {
+  maxConcurrentTranscriptBuildsForTest = maxConcurrent;
+}
+
+export function setSessionTranscriptIndexBuildModeHookForTest(
+  hook: ((event: TranscriptIndexBuildModeEvent) => void) | undefined,
+): void {
+  indexBuildModeHookForTest = hook;
+}
+
+export function setSessionTranscriptPromptTimeScanModeHookForTest(
+  hook: ((event: PromptTimeScanModeEvent) => void) | undefined,
+): void {
+  promptTimeScanModeHookForTest = hook;
+}
+
+export function setSessionTranscriptReadStreamBytesHookForTest(
+  hook: ((event: TranscriptReadStreamBytesEvent) => void) | undefined,
+): void {
+  readStreamBytesHookForTest = hook;
+}
+
+export function setSessionTranscriptMaxPromptTailRecordsForTest(
+  maxRecords: number | undefined,
+): void {
+  maxPromptTailRecordsForTest = maxRecords;
+}
+
+export function getSessionTranscriptBuildSemaphoreStatsForTest(): {
+  active: number;
+  queued: number;
+} {
+  return transcriptBuildSemaphore.stats();
 }
 
 export function clearSessionTranscriptIndexCacheEntriesForTest(): void {

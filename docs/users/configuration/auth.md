@@ -6,7 +6,30 @@ Qwen Code’s first-run `/auth` menu has five top-level options. Pick the one th
 - **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup.
 - **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
-- **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
+- **Custom Provider**: connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
+
+For a custom OpenAI-compatible (Chat Completions or Responses) or Anthropic
+connection, the CLI fetches available model IDs after you enter the base URL and
+API key. This authenticated request happens before saving and has a five-second
+timeout. The model step supports search, Space to toggle candidates, and Tab or
+arrow keys to move between manual input, search and the list. Enter confirms
+your choices; configuration is saved only after the final review. Esc cancels
+loading or goes back. Re-entering the step fetches a fresh list.
+
+If the endpoint cannot list models, enter IDs manually as before. Gemini retains
+manual entry. Discovery adds no background polling and does not infer model
+capabilities: use Advanced Config for explicit limits or modalities. Custom
+discovery does not follow redirects with your API key.
+
+This workflow is available in both Ink and OpenTUI. To try the local OpenTUI
+build, run the bundle with Bun and explicitly select the renderer:
+
+```bash
+QWEN_TUI_RENDERER=opentui QWEN_TUI_RENDERER_STRICT=1 bun dist/cli.js
+```
+
+Then use `/auth` → **Custom Provider**. Strict renderer selection reports a
+startup failure instead of silently falling back to Ink.
 
 ## **Option 1: Qwen OAuth —** [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli)
 

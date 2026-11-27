@@ -5,12 +5,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import { isSystemOverloadedError } from '../session/httpErrors.js';
 import { createDaemonWorkspaceActions } from './actions.js';
 
 // Assert the native REST request sent by the SDK, including auth and bodies.
-function makeActions(token?: string) {
+function makeActions(
+  token?: string,
+  features: string[] = ['scheduled_task_owner_selection'],
+) {
   return createDaemonWorkspaceActions({
-    getClient: () => ({}) as never,
+    getClient: () => ({ capabilities: async () => ({ features }) }) as never,
     getWorkspaceCwd: () => '/ws',
     baseUrl: '',
     token,
@@ -22,11 +27,7 @@ const ok = (body: unknown) => ({
   status: 200,
   json: async () => body,
 });
-const fail = (status: number, body: unknown) => ({
-  ok: false,
-  status,
-  json: async () => body,
-});
+const fail = (status: number, body: unknown) => Response.json(body, { status });
 
 describe('scheduled-tasks workspace actions', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -102,6 +103,24 @@ describe('scheduled-tasks workspace actions', () => {
     ).rejects.toThrow(/bad cron/);
   });
 
+  it('preserves overload error identity for fresh task creation and a cold run', async () => {
+    const body = {
+      error: 'System overloaded (cpu_load)',
+      code: 'system_overloaded',
+    };
+    for (const operation of [
+      () =>
+        makeActions().createScheduledTask({ cron: '0 9 * * *', prompt: 'p' }),
+      () => makeActions().runScheduledTask('task-1'),
+    ]) {
+      fetchMock.mockResolvedValueOnce(fail(503, body));
+      await expect(operation()).rejects.toSatisfy(
+        (error) =>
+          error instanceof DaemonHttpError && isSystemOverloadedError(error),
+      );
+    }
+  });
+
   describe('workspace-qualified targeting', () => {
     it('lists a named workspace via the qualified route', async () => {
       fetchMock.mockResolvedValue(ok({ v: 1, tasks: [] }));
@@ -139,6 +158,26 @@ describe('scheduled-tasks workspace actions', () => {
       );
     });
 
+    it('sends the expected session on mutation routes, including null', async () => {
+      fetchMock.mockResolvedValue(ok({ id: 'a' }));
+      await makeActions().updateScheduledTask(
+        'a',
+        { enabled: false },
+        undefined,
+        'session-a',
+      );
+      await makeActions().runScheduledTask('unbound', undefined, null);
+      await makeActions().deleteScheduledTask('a', 'ws-2', 'session/b');
+
+      const urls = fetchMock.mock.calls.map(
+        ([url]) => new URL(url, 'http://local'),
+      );
+      expect(urls[0].searchParams.get('expectedSessionId')).toBe('session-a');
+      expect(urls[1].searchParams.get('expectedSessionId')).toBe('');
+      expect(urls[2].pathname).toBe('/workspaces/ws-2/scheduled-tasks/a');
+      expect(urls[2].searchParams.get('expectedSessionId')).toBe('session/b');
+    });
+
     it('url-encodes both the workspace selector and the task id', async () => {
       fetchMock.mockResolvedValue(ok({ id: 'a' }));
       await makeActions().updateScheduledTask(
@@ -158,6 +197,42 @@ describe('scheduled-tasks workspace actions', () => {
       expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
       expect(fetchMock.mock.calls[1][0]).toBe('/scheduled-tasks');
     });
+  });
+});
+
+describe('owner-selected scheduled-task mutations', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends an owner-selected mutation when the capability is advertised', async () => {
+    fetchMock.mockResolvedValue(ok({ id: 'child' }));
+    await makeActions().updateScheduledTask(
+      'child',
+      { enabled: false },
+      undefined,
+      'session-a',
+    );
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/scheduled-tasks/child?expectedSessionId=session-a',
+    );
+  });
+
+  it('rejects owner selection before HTTP when the daemon lacks the capability', async () => {
+    await expect(
+      makeActions(undefined, []).deleteScheduledTask(
+        'child',
+        undefined,
+        'session-a',
+      ),
+    ).rejects.toThrow('expectedSessionId');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

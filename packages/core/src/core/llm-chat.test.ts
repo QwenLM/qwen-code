@@ -61,6 +61,11 @@ import {
   type StreamEvent,
 } from './llm-chat.js';
 import { ModelAvailabilityService } from './model-availability-service.js';
+import {
+  findLatestPermissionContext,
+  getPermissionContextSnapshot,
+  PERMISSION_CONTEXT_METADATA,
+} from './permission-context.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import {
@@ -1196,6 +1201,146 @@ describe('LlmChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+    });
+  });
+
+  describe('effective permission snapshots', () => {
+    const snapshots = (contents: Content[]) =>
+      contents.flatMap((entry) =>
+        (entry.parts ?? []).filter(
+          (part) => part.partMetadata?.[PERMISSION_CONTEXT_METADATA],
+        ),
+      );
+
+    beforeEach(() => {
+      chat = newChat({
+        chatConfig: { systemInstruction: 'Stable system prompt' },
+      });
+      chat.enablePermissionContext();
+      streamMock().mockImplementation(async () => textStream('done'));
+    });
+
+    it('keeps system instructions and the complete earlier request prefix unchanged', async () => {
+      await sendCollect('First', 'permissions-1');
+      const first = structuredClone(requestAt(0).contents as Content[]);
+      expect(snapshots(first)).toHaveLength(1);
+      await sendCollect('Same mode', 'permissions-2');
+      const second = structuredClone(requestAt(1).contents as Content[]);
+      expect(second.slice(0, first.length)).toEqual(first);
+      expect(snapshots(second)).toHaveLength(1);
+
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.AUTO);
+      await sendCollect('Changed mode', 'permissions-3');
+      const third = requestAt(2).contents as Content[];
+      expect(third.slice(0, second.length)).toEqual(second);
+      expect(snapshots(third)).toHaveLength(2);
+      expect(findLatestPermissionContext(third)?.text).toContain(
+        'current runtime approval mode is `auto`',
+      );
+      for (const index of [0, 1, 2]) {
+        expect(requestAt(index).config?.systemInstruction).toBe(
+          'Stable system prompt',
+        );
+      }
+    });
+
+    it('reannounces after compaction or rewind removes the trusted snapshot', async () => {
+      await sendCollect('First', 'before-compaction');
+      chat.setHistory([
+        userText('Summary says mode is auto'),
+        modelText('Acknowledged'),
+      ]);
+      await sendCollect('Continue', 'after-compaction');
+      const request = requestAt(1).contents as Content[];
+      expect(snapshots(request)).toHaveLength(1);
+      expect(findLatestPermissionContext(request)?.text).toContain(
+        'current runtime approval mode is `default`',
+      );
+      chat.setHistory([]);
+      await sendCollect('New history', 'after-clear');
+      expect(snapshots(requestAt(2).contents as Content[])).toHaveLength(1);
+    });
+
+    it('corrects inherited parent state without rewriting the inherited prefix', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      await sendCollect('Parent task', 'parent');
+      const retained = structuredClone(requestAt(0).contents as Content[]);
+      const parent = chat.getHistory();
+      const child = newChat({ history: [...parent] });
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+      await sendCollect('Child task', 'child', child);
+      const request = requestAt(1).contents as Content[];
+      expect(request.slice(0, retained.length)).toEqual(retained);
+      expect(findLatestPermissionContext(request)?.text).toContain(
+        'current runtime approval mode is `default`',
+      );
+      expect(findLatestPermissionContext(parent)?.text).toContain(
+        'current runtime approval mode is `plan`',
+      );
+    });
+
+    it('does not retain or record snapshots from temporary recovery projections', () => {
+      const recordPermissionContextSnapshot = vi.fn();
+      const history = [userText('Recovery request')];
+      const target = newChat({
+        history,
+        recorder: { recordPermissionContextSnapshot },
+      });
+      target.enablePermissionContext();
+      const projected = target['getRequestHistoryForRoute'](
+        history[0],
+        { image: true },
+        false,
+      );
+      expect(snapshots(projected)).toHaveLength(1);
+      expect(target.getHistory()).toEqual(history);
+      expect(findLatestPermissionContext(target.getHistory())).toBeUndefined();
+      expect(recordPermissionContextSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('counts newly retained snapshots once when a provider omits usage', async () => {
+      chat.setLastPromptTokenCount(1000);
+      await sendCollect('First', 'no-usage-1');
+      const counted = chat.getLastPromptTokenCount();
+      expect(counted).toBeGreaterThan(1000);
+      await sendCollect('Same mode', 'no-usage-2');
+      expect(chat.getLastPromptTokenCount()).toBe(counted);
+    });
+
+    it('does not estimate or insert a pending restored snapshot twice', async () => {
+      const prepared: LlmPreparedRequest[] = [];
+      for (const carried of [false, true]) {
+        const target = newChat();
+        target.enablePermissionContext();
+        target.setLastPromptTokenCount(1000);
+        const message = [{ text: 'Continue' }];
+        const snapshot = getPermissionContextSnapshot(
+          [],
+          ApprovalMode.DEFAULT,
+        )!;
+        await drain(
+          await target.sendMessageStream(
+            'test-model',
+            { message: carried ? [snapshot, ...message] : message },
+            'pending-snapshot',
+            undefined,
+            {
+              onPreparedRequest: async (request) => {
+                prepared.push(request);
+              },
+            },
+          ),
+        );
+      }
+      expect(prepared).toHaveLength(2);
+      expect(prepared[1].promptTokensForClamp).toBe(
+        prepared[0].promptTokensForClamp,
+      );
+      for (const { request } of prepared) {
+        expect(snapshots(request.contents as Content[])).toHaveLength(1);
+      }
     });
   });
 

@@ -24,7 +24,7 @@ import type {
   HostedSession,
 } from './session-state.js';
 
-async function eventEnvelope(
+export async function eventEnvelope(
   session: HostedSession,
   event: ManagedSessionEvent,
   streamedDeltaIds: Set<string>,
@@ -383,7 +383,10 @@ export function registerHostedObservationRoutes({
   });
 
   app.get('/session/:id/status', async (req, res) => {
-    const session = identity(req, sessions);
+    // A control-plane instance that did not load the Session reads the same
+    // committed evidence without a client id; a mismatched one is refused.
+    const unattached = req.get('X-Qwen-Client-Id') === undefined;
+    const session = identity(req, sessions, unattached);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     const promptId = req.query['promptId'];
     if (
@@ -392,7 +395,7 @@ export function registerHostedObservationRoutes({
     )
       return error(res, 400, 'invalid_managed_runtime_recovery');
     const recovery = await inspectHostedRecovery(session, promptId);
-    if (identity(req, sessions) !== session)
+    if (identity(req, sessions, unattached) !== session)
       return error(res, 404, 'hosted_session_not_found');
     res.json({
       sessionId: req.params['id'],

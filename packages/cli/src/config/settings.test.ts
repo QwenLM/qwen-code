@@ -790,6 +790,49 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it('warns that the removed loop-detection settings are ignored', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                model: { loopProtection: 'stop', skipLoopDetection: false },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Setting 'model.loopProtection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+        `Warning: Setting 'model.skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
+
+    it('does not point a legacy top-level skipLoopDetection at the removed key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                skipLoopDetection: false,
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Legacy setting 'skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,

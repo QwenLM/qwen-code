@@ -9,10 +9,6 @@ import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
-import {
-  isLoopProtectionMode,
-  type LoopProtectionMode,
-} from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
@@ -1662,25 +1658,6 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
-// Reported once per value for the same reason as the output-style warnings.
-const loopProtectionWarningsShown = new Set<string>();
-
-/**
- * Resolves `model.loopProtection`. An invalid value (a typo or the wrong
- * case) falls back to the default with a warning, so a user who asked for
- * `stop` learns that the turn will not stop.
- */
-function resolveLoopProtection(value: unknown): LoopProtectionMode | undefined {
-  if (value === undefined || isLoopProtectionMode(value)) return value;
-  const warning = `Invalid model.loopProtection value ${JSON.stringify(value)}: expected "warn", "stop" or "off"; using the default "warn".`;
-  if (loopProtectionWarningsShown.has(warning)) return undefined;
-  loopProtectionWarningsShown.add(warning);
-  debugLogger.warn(warning);
-  // eslint-disable-next-line no-console
-  console.error(`WARNING: ${warning}`);
-  return undefined;
-}
-
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1744,6 +1721,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
+    modelPreferences?: ConfigParameters['modelPreferences'];
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1805,6 +1783,10 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const modelPreferences =
+    !bareMode && !sshWorkspace && !modelConfiguration
+      ? hostPolicy?.modelPreferences
+      : undefined;
   const executionSandboxSettings = agentHostReadOnly
     ? undefined
     : validateExecutionSandboxSelection(settings, argv);
@@ -2346,6 +2328,7 @@ export async function loadCliConfig(
           },
           settings,
           selectedAuthType,
+          deferReasoningEffort: modelPreferences !== undefined,
           env: process.env as Record<string, string | undefined>,
         });
 
@@ -2662,6 +2645,11 @@ export async function loadCliConfig(
 
   const configParams: ConfigParameters = {
     sessionId,
+    modelPreferences,
+    modelPreferenceDefaultEffort:
+      modelPreferences === undefined
+        ? undefined
+        : settings.model?.reasoningEffort,
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
@@ -2996,8 +2984,6 @@ export async function loadCliConfig(
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
-    skipLoopDetection: settings.model?.skipLoopDetection ?? true,
-    loopProtection: resolveLoopProtection(settings.model?.loopProtection),
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
