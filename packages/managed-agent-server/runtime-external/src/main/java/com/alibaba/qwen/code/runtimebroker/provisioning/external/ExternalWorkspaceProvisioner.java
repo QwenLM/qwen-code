@@ -432,6 +432,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 || !alias.equals(storage.tenantWorkspaceId())
                 || !request.getScope().getWorkspaceId().equals(storage.tenantWorkspaceId())
                 || !provider.equals(storage.providerId())
+                || storage.isolationClass() != null && !storage.isolationClass().equals(request.getScope().getIsolationClass())
                 || !request.getScope().getCanonicalCwd().equals(storage.mountRoot())
                 || (!WorkspaceExecutionProfile.admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
                         && !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest()))) {

@@ -238,6 +238,14 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void aSharedRegistrationCannotProvisionASeparateSessionWorker() {
+        var registered = new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1, ALIAS, ALIAS_PATH, MOUNT, null, "workspace");
+        var refused = failure(provisioner(registered).ensureResource(request(), seed("wrong-isolation"), null));
+        assertEquals("external_storage_registration_mismatch", refused.getCode());
+        assertTrue(client.provisions.isEmpty());
+    }
+
+    @Test
     void aRegistrationForAnotherMountRootIsRefused() {
         RuntimeBrokerException refused = failure(provisioner(
                 registration(PROVIDER, 1, "/workspace/other")).ensureResource(request(), seed("mount"), null));

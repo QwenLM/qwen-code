@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 /** Operator metadata only; registration does not attest or mount storage. */
 public record ExternalStorageRegistration(ExternalStorageIdentity identity, StorageAlias alias) {
@@ -39,11 +40,19 @@ public record ExternalStorageRegistration(ExternalStorageIdentity identity, Stor
         }
     }
 
-    public record StorageAlias(String tenantWorkspaceId, String aliasPath, String mountRoot) {
+    public record StorageAlias(String tenantWorkspaceId, String aliasPath, String mountRoot,
+            @JsonInclude(JsonInclude.Include.NON_NULL) String isolationClass) {
+        public StorageAlias(String tenantWorkspaceId, String aliasPath, String mountRoot) {
+            this(tenantWorkspaceId, aliasPath, mountRoot, null);
+        }
+
         public StorageAlias {
             identifier(tenantWorkspaceId);
             path(aliasPath);
             path(mountRoot);
+            if (isolationClass != null && !"session".equals(isolationClass) && !"workspace".equals(isolationClass)) {
+                throw invalid();
+            }
         }
 
         @Override

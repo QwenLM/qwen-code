@@ -78,11 +78,11 @@ public class JdbcManagedWorkspaceRegistry
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
-        return externalFilesAvailable() && externalBindingCurrent(binding);
+        return externalFilesAvailable() && externalBindingCurrent(binding, false);
     }
 
     public boolean externalShellAllowed(ContextBinding binding) {
-        return externalShellAvailable() && externalBindingCurrent(binding);
+        return externalShellAvailable() && externalBindingCurrent(binding, true);
     }
 
     /**
@@ -92,13 +92,11 @@ public class JdbcManagedWorkspaceRegistry
      * Shell still requires its own flag and negotiation.
      */
     public boolean externalExecutionAllowed(ContextBinding binding) {
-        return externalFilesAllowed(binding)
-                || externalShellAvailable() && externalBindingCurrent(binding);
+        return externalFilesAllowed(binding) || externalShellAllowed(binding);
     }
 
-    private boolean externalBindingCurrent(ContextBinding binding) {
+    private boolean externalBindingCurrent(ContextBinding binding, boolean shell) {
         if (binding == null || properties == null || externalRegistrations == null
-                || !".".equals(binding.getCwdRelative())
                 || !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(binding.getContextConfigRef())) {
             return false;
         }
@@ -112,7 +110,8 @@ public class JdbcManagedWorkspaceRegistry
         }
         var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
         return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
-                && properties.getRuntimeBroker().getExternalProviderId().equals(registered.providerId());
+                && properties.getRuntimeBroker().getExternalProviderId().equals(registered.providerId())
+                && ("workspace".equals(registered.isolationClass()) ? !shell : ".".equals(binding.getCwdRelative()));
     }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -371,7 +370,11 @@ public class JdbcManagedWorkspaceRegistry
         var external = java.util.stream.IntStream.range(0, rows.size())
                 .filter(index -> managedExternal(rows.get(index).storageKind()))
                 .boxed().toList();
-        if (external.isEmpty() || !externalFilesAvailable() && !externalShellAvailable()) {
+        if (external.isEmpty()) {
+            return result;
+        }
+        boolean files = externalFilesAvailable();
+        if (!files && !externalShellAvailable()) {
             return result;
         }
         java.util.Map<String, ExternalStorageRegistrationStore.RegistrationState> states =
@@ -384,7 +387,7 @@ public class JdbcManagedWorkspaceRegistry
                     && "ROOT".equals(row.workspaceKind())
                     && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF
                             .equals(descriptorRef(row.configRef(), row.policyRef()))
-                    && state != null && state.current()
+                    && state != null && state.current() && (files || !"workspace".equals(state.isolationClass()))
                     && row.workspaceId().equals(state.tenantWorkspaceId())
                     && properties.getRuntimeBroker().getExternalProviderId().equals(state.providerId());
         }
@@ -522,9 +525,7 @@ public class JdbcManagedWorkspaceRegistry
                 || !"ROOT".equals(records.getFirst().kind()))) {
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
-        if (isExternal(binding)
-                && (!ExternalWorkspaceSessionPolicies.externalAllowedOrRefuse(this, binding)
-                        || !".".equals(binding.getCwdRelative()))) {
+        if (isExternal(binding) && !ExternalWorkspaceSessionPolicies.externalAllowedOrRefuse(this, binding)) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace execution is unavailable.");
         }
         return new ResolvedBinding(binding, record.getConfigRef(),

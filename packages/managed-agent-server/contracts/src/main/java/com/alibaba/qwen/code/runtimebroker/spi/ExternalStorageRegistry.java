@@ -42,7 +42,9 @@ public interface ExternalStorageRegistry {
                 || !(root.get("identity") instanceof java.util.Map<?, ?> identity)
                 || !(root.get("alias") instanceof java.util.Map<?, ?> alias)
                 || !identity.keySet().equals(java.util.Set.of("providerId", "physicalKey", "registrationRevision"))
-                || !alias.keySet().equals(java.util.Set.of("tenantWorkspaceId", "aliasPath", "mountRoot"))
+                || !alias.keySet().equals(alias.containsKey("isolationClass")
+                        ? java.util.Set.of("tenantWorkspaceId", "aliasPath", "mountRoot", "isolationClass")
+                        : java.util.Set.of("tenantWorkspaceId", "aliasPath", "mountRoot"))
                 || !(identity.get("registrationRevision") instanceof Number revision)
                 || !(revision instanceof Long || revision instanceof Integer)) {
             throw new IllegalArgumentException("Invalid external storage registration.");
@@ -50,13 +52,13 @@ public interface ExternalStorageRegistry {
         return new RegisteredExternalStorage((String) identity.get("providerId"),
                 (String) identity.get("physicalKey"), revision.longValue(),
                 (String) alias.get("tenantWorkspaceId"), (String) alias.get("aliasPath"),
-                (String) alias.get("mountRoot"));
+                (String) alias.get("mountRoot"), null, (String) alias.get("isolationClass"));
     }
 
     /** One persisted registration, in the shape the boot document needs. */
     public record RegisteredExternalStorage(String providerId, String physicalKey,
             long registrationRevision, String tenantWorkspaceId,
-            String aliasPath, String mountRoot, String ephemeralTenantId) {
+            String aliasPath, String mountRoot, String ephemeralTenantId, String isolationClass) {
         /**
          * Largest integer both sides of the wire represent exactly (2^53-1),
          * mirrored from the persisted registration record; the two must agree
@@ -66,7 +68,12 @@ public interface ExternalStorageRegistry {
 
         public RegisteredExternalStorage(String providerId, String physicalKey, long registrationRevision,
                 String tenantWorkspaceId, String aliasPath, String mountRoot) {
-            this(providerId, physicalKey, registrationRevision, tenantWorkspaceId, aliasPath, mountRoot, null);
+            this(providerId, physicalKey, registrationRevision, tenantWorkspaceId, aliasPath, mountRoot, null, null);
+        }
+
+        public RegisteredExternalStorage(String providerId, String physicalKey, long registrationRevision,
+                String tenantWorkspaceId, String aliasPath, String mountRoot, String ephemeralTenantId) {
+            this(providerId, physicalKey, registrationRevision, tenantWorkspaceId, aliasPath, mountRoot, ephemeralTenantId, null);
         }
 
         public RegisteredExternalStorage {
@@ -75,6 +82,7 @@ public interface ExternalStorageRegistry {
                             ? physicalKey == null || !physicalKey.matches("[A-Za-z0-9._-]{1,128}")
                             : physicalKey != null || !ephemeralTenantId.matches("[A-Za-z0-9._:-]{1,128}"))
                     || tenantWorkspaceId == null || !tenantWorkspaceId.matches("[A-Za-z0-9._-]{1,128}")
+                    || isolationClass != null && (ephemeralTenantId != null || !"session".equals(isolationClass) && !"workspace".equals(isolationClass))
                     || !registeredPath(aliasPath) || !registeredPath(mountRoot) || registrationRevision < 1
                     || registrationRevision > MAX_REGISTRATION_REVISION) {
                 throw new IllegalArgumentException(

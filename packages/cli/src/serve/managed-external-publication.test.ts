@@ -26,7 +26,13 @@ import {
   createManagedToolSet,
   ManagedToolExecutor,
 } from './managed-runtime-tool-executor.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  WORKSPACE_ACTIVATION_ROUTE,
+  WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CONTEXT_CONFIG_REF,
+  WORKSPACE_EXECUTION_PROFILE,
+} from './managed-workspace-activation.js';
+import { computeManagedContextDigest } from './managed-workspace-binding.js';
 
 let root: string;
 let boot: ManagedExternalContextBoot;
@@ -308,6 +314,101 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     };
     return { worker, headers };
   }
+
+  it('preserves the other Session directory when one shared external Workspace context is released', async () => {
+    boot = { ...boot, isolationClass: 'workspace' };
+    const { worker } = await startWorker();
+    const headers = {
+      authorization: `Bearer ${boot.token}`,
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+      'x-qwen-managed-lease-id': boot.leaseId,
+      'x-qwen-managed-lease-epoch': String(boot.epoch),
+    };
+    const post = async (route: string, body: unknown) => {
+      const response = await fetch(worker.ready.url + route, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const install = async (sessionId: string) => {
+      const cwdRelative = `conversations/${sessionId}`;
+      await fs.mkdir(path.join(boot.mountRoot, cwdRelative), {
+        recursive: true,
+      });
+      const binding = {
+        tenantId: boot.tenantId,
+        workspaceId: boot.workspaceId,
+        workspaceGeneration: boot.workspaceGeneration,
+        storageId: boot.storageId,
+        cwdRelative,
+        contextRevision: '1',
+        contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+      };
+      const contextDigest = computeManagedContextDigest(binding);
+      await post('/internal/managed-runtime/v3/context', {
+        protocolVersion: 3,
+        managedContext: 'managed-context/1',
+        operationId: `install-${sessionId}`,
+        sessionId,
+        binding,
+        contextDigest,
+      });
+      const activation = {
+        protocolVersion: 1,
+        sessionId,
+        contextDigest,
+        contextConfigRef: binding.contextConfigRef,
+        profile: WORKSPACE_EXECUTION_PROFILE,
+      };
+      await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+        ...activation,
+        operation: 'activate',
+      });
+      return activation;
+    };
+    const execute = async (
+      sessionId: string,
+      toolName: string,
+      input: Record<string, string>,
+    ) => {
+      const result = await post('/internal/managed-runtime/v2/execute', {
+        protocolVersion: 2,
+        reference: {
+          sessionId,
+          promptId: 'prompt',
+          callId: `${toolName}-${sessionId}`,
+          argsDigest: managedToolDigest(input),
+        },
+        toolName,
+        input,
+      });
+      expect(result.result.executionStatus).toBe('success');
+      return result;
+    };
+    const first = await install('alpha');
+    await install('bravo');
+    for (const id of ['alpha', 'bravo']) {
+      await execute(id, 'write_file', { file_path: 'note.txt', content: id });
+      expect(
+        await fs.readFile(
+          path.join(boot.mountRoot, 'conversations', id, 'note.txt'),
+          'utf8',
+        ),
+      ).toBe(id);
+    }
+    await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+      ...first,
+      operation: 'release',
+    });
+    const remaining = await execute('bravo', 'read_file', {
+      file_path: 'note.txt',
+    });
+    expect(JSON.stringify(remaining.result)).toContain('bravo');
+  });
 
   it('shares publication channels across main and legacy listeners with closed identity checks', async () => {
     const { worker, headers } = await startWorker();
