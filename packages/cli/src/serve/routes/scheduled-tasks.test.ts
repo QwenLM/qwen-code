@@ -997,10 +997,14 @@ describe('scheduled-tasks routes', () => {
     expect(withFailedDispatch.status).toBe(200);
     const id = owned.body.id as string;
     const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
+    let tasksDuringDispatch: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let genBeforeDelete: number | undefined;
+    let staleDeleteStatus: number | undefined;
+    let genAfterDelete: number | undefined;
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await spawnOrAttach(req);
-      expect(await readCronTasks(h.workspace)).toEqual([]);
-      const before = async () => {
+      tasksDuringDispatch = await readCronTasks(h.workspace);
+      const readGen = async () => {
         let generation: number | undefined;
         await updateCronTasks(h.workspace, (tasks) => tasks, {
           observeDeletionIds: [id],
@@ -1010,14 +1014,14 @@ describe('scheduled-tasks routes', () => {
         });
         return generation;
       };
-      expect(await before()).toBe(0);
+      genBeforeDelete = await readGen();
       const staleDelete = await request(h.app)
         .delete(`/scheduled-tasks/${id}`)
         .query({
           expectedSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
         });
-      expect(staleDelete.status).toBe(404);
-      expect(await before()).toBe(0);
+      staleDeleteStatus = staleDelete.status;
+      genAfterDelete = await readGen();
       return { ...child, modelApplied: false };
     });
 
@@ -1025,7 +1029,12 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(tasksDuringDispatch).toEqual([]);
+    expect(genBeforeDelete).toBe(0);
+    expect(staleDeleteStatus).toBe(404);
+    expect(genAfterDelete).toBe(0);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
         id,
@@ -1047,23 +1056,26 @@ describe('scheduled-tasks routes', () => {
     });
     expect(created.status).toBe(201);
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let childSessionId: string | undefined;
+    let spawnParentSessionId: string | undefined;
+    let tasksDuringDispatch: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let deleteStatus: number | undefined;
+    let bareDeletionGeneration: number | undefined;
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
-      expect(child.sessionId).not.toBe(created.body.sessionId);
-      expect(req.parentSessionId).toBe(created.body.sessionId);
-      expect(await readCronTasks(h.workspace)).toEqual([]);
+      childSessionId = child.sessionId;
+      spawnParentSessionId = req.parentSessionId;
+      tasksDuringDispatch = await readCronTasks(h.workspace);
       const deleted = await request(h.app).delete(
         `/scheduled-tasks/${created.body.id}`,
       );
-      expect(deleted.status).toBe(404);
-      let bareDeletionGeneration: number | undefined;
+      deleteStatus = deleted.status;
       await updateCronTasks(h.workspace, (tasks) => tasks, {
         observeDeletionIds: [created.body.id],
         onDeletionGenerations: (generations) => {
           bareDeletionGeneration = generations.get(created.body.id);
         },
       });
-      expect(bareDeletionGeneration).toBe(1);
       return { ...child, modelApplied: false };
     });
 
@@ -1071,7 +1083,13 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${created.body.id}/run`)
       .query({ expectedSessionId: created.body.sessionId });
 
+    expect(childSessionId).not.toBe(created.body.sessionId);
+    expect(spawnParentSessionId).toBe(created.body.sessionId);
+    expect(tasksDuringDispatch).toEqual([]);
+    expect(deleteStatus).toBe(404);
+    expect(bareDeletionGeneration).toBe(1);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
@@ -1095,14 +1113,16 @@ describe('scheduled-tasks routes', () => {
       .send({ modelServiceId: 'missing-model' });
     expect(patched.status).toBe(200);
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let tasksDuringDispatch: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let duplicateDeleteStatus: number | undefined;
+    let ownerDeletionGeneration: number | undefined;
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
-      expect(await readCronTasks(h.workspace)).toEqual([]);
+      tasksDuringDispatch = await readCronTasks(h.workspace);
       const duplicateDelete = await request(h.app)
         .delete(`/scheduled-tasks/${owned.body.id}`)
         .query({ expectedSessionId: owned.body.sessionId });
-      expect(duplicateDelete.status).toBe(404);
-      let ownerDeletionGeneration: number | undefined;
+      duplicateDeleteStatus = duplicateDelete.status;
       const deletionKey = JSON.stringify([owned.body.sessionId, owned.body.id]);
       await updateCronTasks(h.workspace, (tasks) => tasks, {
         observeDeletionIds: [deletionKey],
@@ -1110,7 +1130,6 @@ describe('scheduled-tasks routes', () => {
           ownerDeletionGeneration = generations.get(deletionKey);
         },
       });
-      expect(ownerDeletionGeneration).toBe(1);
       return { ...child, modelApplied: false };
     });
 
@@ -1118,7 +1137,11 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${owned.body.id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(tasksDuringDispatch).toEqual([]);
+    expect(duplicateDeleteStatus).toBe(404);
+    expect(ownerDeletionGeneration).toBe(1);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
@@ -1146,15 +1169,17 @@ describe('scheduled-tasks routes', () => {
       expect(owned.status).toBe(201);
       const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let tasksDuringDispatch: Awaited<ReturnType<typeof readCronTasks>> = [];
+      let deleteStatus: number | undefined;
       vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(
         async (req) => {
           const child = await originalSpawn(req);
-          expect(await readCronTasks(h.workspace)).toEqual([]);
+          tasksDuringDispatch = await readCronTasks(h.workspace);
           if (scenario === 'corrupt-rebuild') {
             const deleted = await request(h.app)
               .delete(`/scheduled-tasks/${owned.body.id}`)
               .query({ expectedSessionId: owned.body.sessionId });
-            expect(deleted.status).toBe(404);
+            deleteStatus = deleted.status;
             await fsp.writeFile(
               `${getCronFilePath(h.workspace)}.deletions`,
               '{corrupt',
@@ -1166,7 +1191,7 @@ describe('scheduled-tasks routes', () => {
             const deleted = await request(h.app)
               .delete(`/scheduled-tasks/${owned.body.id}`)
               .query({ expectedSessionId: owned.body.sessionId });
-            expect(deleted.status).toBe(404);
+            deleteStatus = deleted.status;
             await updateCronTasks(h.workspace, (tasks) => tasks, {
               deletionIds: Array.from(
                 { length: 10_000 },
@@ -1182,14 +1207,24 @@ describe('scheduled-tasks routes', () => {
         },
       );
 
+      let runStatus: number | undefined;
+      let runCode: string | undefined;
       try {
         const run = await request(h.app)
           .post(`/scheduled-tasks/${owned.body.id}/run`)
           .query({ expectedSessionId: owned.body.sessionId });
-        expect(run.status).toBe(500);
+        runStatus = run.status;
+        runCode = run.body.code;
       } finally {
         warn.mockRestore();
       }
+
+      expect(tasksDuringDispatch).toEqual([]);
+      if (scenario === 'corrupt-rebuild' || scenario === 'eviction') {
+        expect(deleteStatus).toBe(404);
+      }
+      expect(runStatus).toBe(500);
+      expect(runCode).toBe('scheduled_task_session_dispatch_failed');
 
       const remaining = await readCronTasks(h.workspace);
       if (expectRestored) {
@@ -1220,13 +1255,15 @@ describe('scheduled-tasks routes', () => {
     });
     expect(owned.status).toBe(201);
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let tasksDuringDispatch: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let deleteStatus: number | undefined;
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
-      expect(await readCronTasks(h.workspace)).toEqual([]);
+      tasksDuringDispatch = await readCronTasks(h.workspace);
       const deleted = await request(h.app)
         .delete(`/scheduled-tasks/${owned.body.id}`)
         .query({ expectedSessionId: owned.body.sessionId });
-      expect(deleted.status).toBe(404);
+      deleteStatus = deleted.status;
       return { ...child, modelApplied: false };
     });
 
@@ -1234,7 +1271,10 @@ describe('scheduled-tasks routes', () => {
       `/scheduled-tasks/${owned.body.id}/run`,
     );
 
+    expect(tasksDuringDispatch).toEqual([]);
+    expect(deleteStatus).toBe(404);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
@@ -1288,16 +1328,19 @@ describe('scheduled-tasks routes', () => {
       [owned.body.sessionId, id],
     ] as const;
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let sessionIdsDuringDispatch: Array<string | undefined> = [];
+    let removedStatus: number | undefined;
+    let generationsAfterDelete: Array<number | undefined> = [];
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
-      expect(
-        (await readCronTasks(h.workspace)).map((task) => task.sessionId),
-      ).toEqual([other.body.sessionId]);
+      sessionIdsDuringDispatch = (await readCronTasks(h.workspace)).map(
+        (task) => task.sessionId,
+      );
       const removed = await request(h.app)
         .delete(`/scheduled-tasks/${id}`)
         .query({ expectedSessionId: other.body.sessionId });
-      expect(removed.status).toBe(200);
-      expect(await Promise.all(keys.map(generationOf))).toEqual([1, 0]);
+      removedStatus = removed.status;
+      generationsAfterDelete = await Promise.all(keys.map(generationOf));
       return { ...child, modelApplied: false };
     });
 
@@ -1305,7 +1348,11 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(sessionIdsDuringDispatch).toEqual([other.body.sessionId]);
+    expect(removedStatus).toBe(200);
+    expect(generationsAfterDelete).toEqual([1, 0]);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
         id,
@@ -1313,6 +1360,48 @@ describe('scheduled-tasks routes', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('rejects bracketed array expectedSessionId query spellings without mutating the task file', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'keep untouched',
+      recurring: true,
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const beforeBytes = await fsp.readFile(
+      getCronFilePath(h.workspace),
+      'utf8',
+    );
+
+    const delBracketArray = await request(h.app).delete(
+      `/scheduled-tasks/${id}?expectedSessionId[0]=a&expectedSessionId[1]=b`,
+    );
+    expect(delBracketArray.status).toBe(400);
+    expect(delBracketArray.body.code).toBe('invalid_expected_session_id');
+
+    const delEncodedBracket = await request(h.app).delete(
+      `/scheduled-tasks/${id}?expectedSessionId%5B0%5D=sessB`,
+    );
+    expect(delEncodedBracket.status).toBe(400);
+    expect(delEncodedBracket.body.code).toBe('invalid_expected_session_id');
+
+    const patchBracket = await request(h.app)
+      .patch(`/scheduled-tasks/${id}?expectedSessionId[]=a`)
+      .send({ enabled: false });
+    expect(patchBracket.status).toBe(400);
+    expect(patchBracket.body.code).toBe('invalid_expected_session_id');
+
+    const runBracket = await request(h.app).post(
+      `/scheduled-tasks/${id}/run?expectedSessionId[0]=a`,
+    );
+    expect(runBracket.status).toBe(400);
+    expect(runBracket.body.code).toBe('invalid_expected_session_id');
+
+    expect(await fsp.readFile(getCronFilePath(h.workspace), 'utf8')).toBe(
+      beforeBytes,
+    );
   });
 
   it('restores a failed one-shot despite a same-id task from another owner', async () => {

@@ -944,7 +944,17 @@ function readExpectedScheduledTaskOwner(
   req: Request,
   res: Response,
 ): ExpectedScheduledTaskOwner | undefined {
+  const hasBracketedSelector = Object.keys(req.query).some((key) =>
+    key.startsWith('expectedSessionId['),
+  );
   const value = req.query['expectedSessionId'];
+  if (hasBracketedSelector) {
+    res.status(400).json({
+      error: 'expectedSessionId must be a single session id or an empty value',
+      code: 'invalid_expected_session_id',
+    });
+    return undefined;
+  }
   if (value === undefined) return { provided: false, sessionId: null };
   if (typeof value !== 'string') {
     res.status(400).json({

@@ -2720,6 +2720,77 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledOnce();
   });
 
+  it('hydrates and edits a default unbound durable task created in the active session', async () => {
+    const unboundTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-secondary',
+      workspaceId: 'secondary-id',
+      sessionId: null,
+      prompt: 'Default unbound durable prompt',
+    };
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([unboundTask]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...unboundTask,
+      prompt: 'Updated unbound prompt',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          sourceSessionId: 'active-session',
+          liveSessionScheduledTasksOwnerSessionId: 'active-session',
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+          task: {
+            id: unboundTask.id,
+            prompt: unboundTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn).toBeDefined();
+    expect(editBtn?.disabled).toBe(false);
+
+    act(() => editBtn!.click());
+    await flush();
+    const promptInput =
+      document.body.querySelector<HTMLTextAreaElement>('textarea');
+    expect(promptInput).not.toBeNull();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(promptInput, 'Updated unbound prompt');
+      promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Save',
+    );
+    expect(saveBtn).toBeDefined();
+    await act(async () => {
+      saveBtn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      unboundTask.id,
+      expect.objectContaining({ prompt: 'Updated unbound prompt' }),
+      'secondary-id',
+      null,
+    );
+  });
+
   it('rejects an untrusted primary durable task without issuing a request', async () => {
     mockWorkspace.capabilities = {
       ...mockWorkspace.capabilities,

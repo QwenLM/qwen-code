@@ -764,4 +764,36 @@ describe('useBackgroundTasks', () => {
     await act(() => vi.advanceTimersByTimeAsync(9_000));
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
   });
+
+  it('re-syncs immediately when scheduledTaskActivityKey changes while polling at 30s cadence', async () => {
+    vi.useFakeTimers();
+    sdkMock.actions.getTasks.mockImplementation(() => {
+      const result = snapshot('session-a', []);
+      result.scheduledTasks = [
+        {
+          id: 'active-cron',
+          source: 'cron',
+          cronExpr: '*/5 * * * *',
+          prompt: 'watch',
+          recurring: true,
+          createdAt: 100,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: 90_000,
+          enabled: true,
+        },
+      ];
+      return Promise.resolve(result);
+    });
+    scheduledTaskActivityKey = 'create-1';
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    // Settled at the 30s cadence; a new cron_delete/cron_create bumps
+    // scheduledTaskActivityKey and must trigger an immediate refresh without
+    // waiting for the 30s timer.
+    scheduledTaskActivityKey = 'create-1|delete-1';
+    await rerenderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  });
 });

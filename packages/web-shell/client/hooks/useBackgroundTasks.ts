@@ -196,6 +196,7 @@ export function useBackgroundTasks(
     connected,
     owner,
     pollingActive,
+    scheduledTaskActivityKey,
     sessionId,
     taskActivityActive,
     taskActivityKey,

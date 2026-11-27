@@ -276,6 +276,7 @@ export function EnvironmentPanel({
   }, [scheduledTasksOwnerSessionId, workspaceCwd]);
   const hasVisibleScheduledCountdown =
     !hidden &&
+    items.includes('scheduledTasks') &&
     scheduledTasksExpanded &&
     Boolean(
       scheduledTasks?.some((task) => task.enabled && task.nextRunAt !== null),
@@ -314,6 +315,15 @@ export function EnvironmentPanel({
         ? scheduledTaskOpenerRefs.current.get(pending.nextKey)
         : undefined;
       pendingScheduledTaskFocusRef.current = null;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        active !== document.documentElement &&
+        !scheduledSectionRef.current?.contains(active)
+      ) {
+        return;
+      }
       if (scheduledTasksExpanded && nextOpener) {
         nextOpener.focus();
       } else if (scheduledSectionHeaderRef.current) {

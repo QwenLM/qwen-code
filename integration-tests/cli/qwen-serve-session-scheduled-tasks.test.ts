@@ -391,6 +391,7 @@ describe('real daemon session scheduled tasks', () => {
   it('lists and cancels a pending loop wakeup over the real daemon', async () => {
     const loopSession = await client.createOrAttachSession({
       workspaceCwd: HOME,
+      approvalMode: 'yolo',
     });
     await client.promptNonBlocking(loopSession.sessionId, {
       prompt: [{ type: 'text', text: 'CREATE_LOOP_WAKEUP_1' }],

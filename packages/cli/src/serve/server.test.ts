@@ -1280,8 +1280,9 @@ interface FakeBridgeOpts {
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    taskKind: Parameters<AcpSessionBridge['cancelSessionTask']>[2],
     context?: BridgeClientRequestContext,
+    source?: Parameters<AcpSessionBridge['cancelSessionTask']>[4],
   ) => Promise<{ cancelled: boolean }>;
   controlSessionWorkflowTaskImpl?: (
     sessionId: string,
@@ -2943,7 +2944,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
         ...(source ? { source } : {}),
       });
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
+      return cancelSessionTaskImpl(
+        sessionId,
+        taskId,
+        taskKind,
+        context,
+        source,
+      );
     },
     async controlSessionWorkflowTask(
       sessionId,

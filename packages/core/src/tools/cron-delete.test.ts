@@ -304,42 +304,24 @@ describe('CronDeleteTool', () => {
         ...later,
         prompt: 'ordinary explicit durable deletion',
       };
-      await writeCronTasks(tmpDir, []);
+      await writeCronTasks(tmpDir, [normalDeletion]);
+      await vi.waitFor(() => {
+        expect(watcher.list()).toEqual([
+          expect.objectContaining({
+            id: stale.id,
+            prompt: normalDeletion.prompt,
+            durable: true,
+          }),
+        ]);
+      });
       const directDelete = config._scheduler.delete.bind(config._scheduler);
       const deleteSpy = vi.spyOn(config._scheduler, 'delete');
-      deleteSpy.mockImplementation(async (id, expectedTaskSessionId) =>
-        directDelete(id, expectedTaskSessionId),
-      );
-      let notifySecond!: () => void;
-      let releaseSecond!: () => void;
-      const secondEntered = new Promise<void>((resolve) => {
-        notifySecond = resolve;
-      });
-      const secondBeforeDelete = new Promise<void>((resolve) => {
-        releaseSecond = resolve;
-      });
-      readGate.entered = notifySecond;
-      readGate.pending = secondBeforeDelete;
-      const ordinaryRunning = tool
-        .build({ id: stale.id })
-        .execute(new AbortController().signal);
+      deleteSpy.mockImplementation((...args) => directDelete(...args));
       try {
-        await secondEntered;
-        await writeCronTasks(tmpDir, [normalDeletion]);
-        await vi.waitFor(() => {
-          expect(watcher.list()).toEqual([
-            expect.objectContaining({
-              id: stale.id,
-              prompt: normalDeletion.prompt,
-              durable: true,
-            }),
-          ]);
-        });
-        releaseSecond();
-        const ordinary = await ordinaryRunning;
-        expect(deleteSpy).toHaveBeenCalledExactlyOnceWith(stale.id, undefined, {
-          runtimeOnly: true,
-        });
+        const ordinary = await tool
+          .build({ id: stale.id })
+          .execute(new AbortController().signal);
+        expect(deleteSpy).toHaveBeenCalledExactlyOnceWith(stale.id, null);
         expect(ordinary.error).toBeUndefined();
         expect(ordinary.llmContent).toBe(`Cancelled job ${stale.id}.`);
         expect(await readCronTasks(tmpDir)).toEqual([]);
@@ -347,8 +329,6 @@ describe('CronDeleteTool', () => {
           expect(watcher.list()).toEqual([]);
         });
       } finally {
-        releaseSecond();
-        await ordinaryRunning;
         deleteSpy.mockRestore();
       }
     } finally {

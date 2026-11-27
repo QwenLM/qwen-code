@@ -60687,11 +60687,24 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/repo/owner';
     });
-    const rawCallbacks: Array<Record<string, () => unknown>> = [];
-    mockSessionActions.sendPrompt.mockImplementation(
-      (_prompt: string, options: unknown) => {
-        rawCallbacks.push(options as Record<string, () => unknown>);
-        return new Promise<void>(() => {});
+    const rawCallbacks: Array<{
+      beforeDispatch?: () => void | Promise<void>;
+    }> = [];
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+        };
+        rawCallbacks.push(opts);
+        try {
+          await opts.beforeDispatch?.();
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return { stopReason: 'cancelled' };
+          }
+          throw error;
+        }
+        return undefined;
       },
     );
     const revalidation = deferred<void>();
@@ -60706,25 +60719,134 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
         remoteRevalidation,
       ).catch((error) => error);
     });
-    await vi.waitFor(() => {
-      expect(rawCallbacks[0]?.beforeDispatch).toBeDefined();
-    });
-    const queued = Promise.resolve(rawCallbacks[0]!.beforeDispatch!());
-    queued.catch(() => {});
     await vi.waitFor(() => expect(remoteRevalidation).toHaveBeenCalledOnce());
 
-    testState.prompt = '/resume session-2';
+    testState.prompt = '/resume session-3';
     await clickSubmit(container);
     await vi.waitFor(() => {
-      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
         workspaceCwd: undefined,
       });
     });
     revalidation.resolve();
 
-    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
     const result = await settlement;
     expect(isScheduledTaskCancellation(result)).toBe(true);
+    expect(rawCallbacks).toHaveLength(1);
+  });
+
+  it('does not cancel an already-dispatched bound run when navigating before onAdmitted', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/repo/owner';
+    });
+    const admitGate = deferred<void>();
+    let admissionStarted = false;
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (_prompt: string, options: unknown) => {
+        const opts = options as {
+          beforeDispatch?: () => void | Promise<void>;
+          onAdmissionStarted?: () => void;
+          onAdmitted?: (admission: { promptId: string }) => void;
+        };
+        opts.onAdmissionStarted?.();
+        admissionStarted = true;
+        await opts.beforeDispatch?.();
+        await admitGate.promise;
+        opts.onAdmitted?.({ promptId: 'prompt-in-flight' });
+        return undefined;
+      },
+    );
+
+    let firstOutcome: unknown = 'pending';
+    let firstPromise!: Promise<void>;
+    act(() => {
+      firstPromise = run('record me', 'session-2', '/repo/owner', () => false)
+        .then(() => {
+          firstOutcome = 'recorded';
+        })
+        .catch((error) => {
+          firstOutcome = error;
+        });
+    });
+    await vi.waitFor(() => expect(admissionStarted).toBe(true));
+
+    // Navigating away after the HTTP POST is already in flight must not cancel
+    // the dispatching run, and an incoming second bound run must be refused
+    // instead of killing it.
+    testState.prompt = '/resume session-3';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+        workspaceCwd: undefined,
+      });
+    });
+    const secondOutcome = await run(
+      'incoming',
+      'session-4',
+      '/repo/owner',
+    ).catch((error) => error);
+    expect(isScheduledTaskCancellation(secondOutcome)).toBe(true);
+
+    admitGate.resolve();
+    await firstPromise;
+    expect(firstOutcome).toBe('recorded');
+  });
+
+  it('keeps a pending bound run alive when re-opening its own target session without a workspace cwd', async () => {
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const initialLoad = deferred<void>();
+    mockSessionActions.loadSession
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockResolvedValueOnce(undefined);
+
+    let outcome: unknown = 'pending';
+    let running!: Promise<void>;
+    act(() => {
+      running = run('keep me', 'session-2', '/repo/owner', () => false)
+        .then(() => {
+          outcome = 'admitted';
+        })
+        .catch((error) => {
+          outcome = error;
+        });
+    });
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+        'session-2',
+        expect.objectContaining({ workspaceCwd: '/repo/owner' }),
+      ),
+    );
+
+    // /resume session-2 opens the exact same target session with workspaceCwd: undefined.
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await vi.waitFor(() =>
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+        workspaceCwd: undefined,
+      }),
+    );
+
+    mockConnection.sessionId = 'session-2';
+    mockConnection.workspaceCwd = '/repo/owner';
+    await act(async () => {
+      initialLoad.resolve();
+      rerender();
+      await Promise.resolve();
+    });
+    await running;
+
+    expect(outcome).toBe('admitted');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'keep me',
+      expect.any(Object),
+    );
   });
 
   it('R21 binds a live stale guard to the raw dispatch hooks', async () => {

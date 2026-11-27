@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
-import { act, type ReactNode } from 'react';
+import { act, Profiler, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
@@ -1660,6 +1660,150 @@ describe('EnvironmentPanel', () => {
         Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
       }
       vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { items: ['environment'] as const, expectTicks: false },
+    { items: ['environment', 'scheduledTasks'] as const, expectTicks: true },
+  ])(
+    'only subscribes to the 1 Hz countdown clock when scheduledTasks is in items (expectTicks=$expectTicks)',
+    ({ items, expectTicks }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-11-27T00:00:00Z'));
+      let renders = 0;
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const futureEntry: SessionScheduledTask = {
+        scope: 'session',
+        id: 'hidden-countdown',
+        source: 'cron',
+        title: 'Hidden countdown',
+        prompt: 'tick',
+        cronExpr: '*/5 * * * *',
+        recurring: true,
+        enabled: true,
+        createdAt: Date.now() - 10_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 60_000,
+      };
+      try {
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <Profiler
+                id="env-countdown"
+                onRender={() => {
+                  renders += 1;
+                }}
+              >
+                <EnvironmentPanel
+                  tasks={[]}
+                  items={[...items]}
+                  workspaceCwd="/work/qwen-code"
+                  scheduledTasks={[futureEntry]}
+                  onOpenTask={() => {}}
+                />
+              </Profiler>
+            </I18nProvider>,
+          );
+        });
+        const initialRenders = renders;
+        act(() => {
+          vi.advanceTimersByTime(2_500);
+        });
+        if (expectTicks) {
+          expect(renders).toBeGreaterThan(initialRenders);
+        } else {
+          expect(renders).toBe(initialRenders);
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('does not yank focus back from an outside node focused while deletion awaits resolution', async () => {
+    const firstTask: SessionDurableScheduledTask = {
+      scope: 'durable',
+      id: 'd-focus-outside',
+      title: 'Slow delete task',
+      prompt: 'Slow delete task',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: null,
+      gate: null,
+      workspaceId: 'ws-1',
+      task: {
+        id: 'd-focus-outside',
+        name: 'Slow delete task',
+        cron: '0 9 * * *',
+        prompt: 'Slow delete task',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: null,
+        sessionId: 'session-1',
+        sessionMode: 'persistent',
+      },
+    };
+    let resolveDelete!: (value: boolean) => void;
+    const pendingDelete = new Promise<boolean>((resolve) => {
+      resolveDelete = resolve;
+    });
+    const onDeleteScheduledTask = vi.fn(() => pendingDelete);
+    const outsideInput = document.createElement('textarea');
+    document.body.appendChild(outsideInput);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderTasks = (tasks: SessionScheduledTask[]) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <EnvironmentPanel
+              tasks={[]}
+              workspaceCwd="/work/qwen-code"
+              scheduledTasks={tasks}
+              scheduledTasksOwnerSessionId="session-1"
+              onOpenTask={() => {}}
+              onDeleteScheduledTask={onDeleteScheduledTask}
+            />
+          </I18nProvider>,
+        );
+      });
+    try {
+      renderTasks([firstTask]);
+      const deleteBtn = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Delete"]',
+      );
+      expect(deleteBtn).not.toBeNull();
+      act(() => {
+        deleteBtn!.focus();
+        deleteBtn!.click();
+      });
+      // User moves focus to the composer while the daemon round trip is in flight.
+      outsideInput.focus();
+      expect(document.activeElement).toBe(outsideInput);
+
+      await act(async () => {
+        resolveDelete(true);
+        await pendingDelete;
+      });
+      renderTasks([]);
+      expect(document.activeElement).toBe(outsideInput);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      outsideInput.remove();
     }
   });
 });

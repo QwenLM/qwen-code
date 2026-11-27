@@ -14834,9 +14834,13 @@ export function App({
         // `/clear` carry, mirroring loadSidebarSession.
         pendingManualTitleRef.current = undefined;
         if (pendingBoundRunRef.current) {
-          pendingBoundRunRef.current.reject(
-            createScheduledTaskCancellation('Bound run target was replaced'),
-          );
+          const stale = pendingBoundRunRef.current;
+          stale.cancelledBeforeAdmission = true;
+          if (!stale.dispatchStarted) {
+            stale.reject(
+              createScheduledTaskCancellation('Bound run target was replaced'),
+            );
+          }
         }
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
@@ -18183,9 +18187,15 @@ export function App({
         if (nextContext?.kind === 'live') {
           pendingManualTitleRef.current = undefined;
           if (pendingBoundRunRef.current) {
-            pendingBoundRunRef.current.reject(
-              createScheduledTaskCancellation('Bound run target was replaced'),
-            );
+            const stale = pendingBoundRunRef.current;
+            stale.cancelledBeforeAdmission = true;
+            if (!stale.dispatchStarted) {
+              stale.reject(
+                createScheduledTaskCancellation(
+                  'Bound run target was replaced',
+                ),
+              );
+            }
           }
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
@@ -18294,9 +18304,13 @@ export function App({
       try {
         autoRecapVersionRef.current += 1;
         if (pendingBoundRunRef.current) {
-          pendingBoundRunRef.current.reject(
-            createScheduledTaskCancellation('Bound run target was replaced'),
-          );
+          const stale = pendingBoundRunRef.current;
+          stale.cancelledBeforeAdmission = true;
+          if (!stale.dispatchStarted) {
+            stale.reject(
+              createScheduledTaskCancellation('Bound run target was replaced'),
+            );
+          }
         }
         const clearPromise = (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
@@ -19358,14 +19372,20 @@ export function App({
         (entry) => entry.cwd === workspaceCwd,
       );
       const boundRun = pendingBoundRunRef.current;
-      if (
-        boundRun &&
-        (boundRun.sessionId !== sessionId ||
-          boundRun.workspaceCwd !== navigationWorkspaceCwd)
-      ) {
-        boundRun.reject(
-          createScheduledTaskCancellation('Bound run target was replaced'),
-        );
+      const targetMatchesBoundRun =
+        boundRun !== null &&
+        boundRun.sessionId === sessionId &&
+        (navigationWorkspaceCwd === undefined ||
+          boundRun.workspaceCwd === undefined ||
+          getLogicalSessionKey(sessionId, navigationWorkspaceCwd) ===
+            getLogicalSessionKey(boundRun.sessionId, boundRun.workspaceCwd));
+      if (boundRun && !targetMatchesBoundRun) {
+        boundRun.cancelledBeforeAdmission = true;
+        if (!boundRun.dispatchStarted) {
+          boundRun.reject(
+            createScheduledTaskCancellation('Bound run target was replaced'),
+          );
+        }
       }
       navigationRef.current?.beginSessionNavigation(
         sessionId,
@@ -19947,7 +19967,7 @@ export function App({
     resolve: () => void;
     reject: (err: unknown) => void;
     timer?: ReturnType<typeof setTimeout>;
-    owner?: { isCurrent(): boolean };
+    loadCompleted?: boolean;
     taskIsStale?: () => boolean;
     beforeTaskDispatch?: () => void | Promise<void>;
   } | null>(null);
@@ -19969,10 +19989,13 @@ export function App({
       currentLogicalSessionKey !== undefined &&
       currentLogicalSessionKey !== pending.logicalSessionKey
     ) {
-      clearPendingBoundRun(pending.sessionId);
-      pending.reject(
-        createScheduledTaskCancellation('Bound run target was replaced'),
-      );
+      pending.cancelledBeforeAdmission = true;
+      if (!pending.dispatchStarted) {
+        clearPendingBoundRun(pending.sessionId);
+        pending.reject(
+          createScheduledTaskCancellation('Bound run target was replaced'),
+        );
+      }
     }
   }, [clearPendingBoundRun, connection.sessionId, connection.workspaceCwd]);
   // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
@@ -20209,10 +20232,7 @@ export function App({
       );
       return;
     }
-    if (
-      pending.owner === undefined ||
-      pending.logicalSessionKey === undefined
-    ) {
+    if (!pending.loadCompleted || pending.logicalSessionKey === undefined) {
       return;
     }
     if (
@@ -20220,14 +20240,6 @@ export function App({
       getLogicalSessionKey(conn.sessionId, conn.workspaceCwd) !==
         pending.logicalSessionKey
     ) {
-      clearPendingBoundRun(pending.sessionId);
-      pending.reject(
-        createScheduledTaskCancellation('Bound run session was replaced'),
-      );
-      return;
-    }
-    pending.owner = sessionOwnerGuard.capture();
-    if (!pending.owner.isCurrent()) {
       clearPendingBoundRun(pending.sessionId);
       pending.reject(
         createScheduledTaskCancellation('Bound run session was replaced'),
@@ -20284,7 +20296,7 @@ export function App({
       },
       (error: unknown) => pending.reject(error),
     );
-  }, [clearPendingBoundRun, enqueueManualRun, sessionOwnerGuard]);
+  }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
     (
       prompt: string,
@@ -20316,8 +20328,17 @@ export function App({
       }
       // A newer bound run supersedes an older one still waiting on the latch;
       // reject the old promise so its caller doesn't record a dropped run.
+      // Once the older run has already started dispatching, refuse the
+      // incoming run instead of cancelling an in-flight POST.
       const prev = pendingBoundRunRef.current;
       if (prev) {
+        if (prev.dispatchStarted) {
+          return Promise.reject(
+            createScheduledTaskCancellation(
+              'Another scheduled run is already dispatching',
+            ),
+          );
+        }
         if (prev.timer !== undefined) clearTimeout(prev.timer);
         pendingBoundRunRef.current = null;
         prev.reject(new Error('superseded by another run'));
@@ -20367,7 +20388,7 @@ export function App({
               );
               return;
             }
-            pending.owner = sessionOwnerGuard.capture();
+            pending.loadCompleted = true;
             pending.logicalSessionKey = getLogicalSessionKey(
               sessionId,
               connectionRef.current.workspaceCwd,
@@ -20389,7 +20410,6 @@ export function App({
       enqueueManualRun,
       loadSidebarSession,
       showChat,
-      sessionOwnerGuard,
       tryFireBoundRun,
       workspace.client,
     ],
@@ -20397,10 +20417,13 @@ export function App({
   useEffect(() => {
     const pending = pendingBoundRunRef.current;
     if (pending && pending.runtimeClient !== workspace.client) {
-      clearPendingBoundRun(pending.sessionId);
-      pending.reject(
-        createScheduledTaskCancellation('Bound run runtime was replaced'),
-      );
+      pending.cancelledBeforeAdmission = true;
+      if (!pending.dispatchStarted) {
+        clearPendingBoundRun(pending.sessionId);
+        pending.reject(
+          createScheduledTaskCancellation('Bound run runtime was replaced'),
+        );
+      }
       return;
     }
     tryFireBoundRun();
@@ -20417,6 +20440,8 @@ export function App({
     () => () => {
       const pending = pendingBoundRunRef.current;
       if (!pending) return;
+      pending.cancelledBeforeAdmission = true;
+      if (pending.dispatchStarted) return;
       if (pending.timer !== undefined) clearTimeout(pending.timer);
       pendingBoundRunRef.current = null;
       pending.reject(

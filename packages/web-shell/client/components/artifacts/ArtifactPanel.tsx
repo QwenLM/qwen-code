@@ -2202,7 +2202,7 @@ function matchesScheduledTaskScope(
 ): boolean {
   return (
     candidate.id === id &&
-    candidate.sessionId === sourceSessionId &&
+    (candidate.sessionId == null || candidate.sessionId === sourceSessionId) &&
     (candidate.workspaceId === undefined ||
       candidate.workspaceId === workspaceId)
   );
@@ -2372,6 +2372,13 @@ function ScheduledTaskDetail({
       )
         return;
       const match =
+        tasks.find(
+          (item) =>
+            item.id === task.id &&
+            item.sessionId === sourceSessionId &&
+            (item.workspaceId === undefined ||
+              item.workspaceId === workspaceId),
+        ) ??
         tasks.find((item) =>
           matchesScheduledTaskScope(
             item,
@@ -2379,7 +2386,8 @@ function ScheduledTaskDetail({
             workspaceId,
             sourceSessionId,
           ),
-        ) ?? null;
+        ) ??
+        null;
       setLoadedTask(match);
       if (showFormRef.current) return;
       if (match) {
@@ -2433,20 +2441,26 @@ function ScheduledTaskDetail({
       setShowDeleteConfirm(false);
       return;
     }
-    if (
-      !liveDurableTask &&
-      !(hasLiveDurableScheduledSnapshot && sourceSessionId)
-    )
+    if (liveDurableTask) {
+      loadRequestRef.current += 1;
+      setLoadedTask(liveDurableTask);
+      setLoading(false);
+      setLoadError(null);
+      // External updates must not replace a draft the user is still editing.
+      if (showFormRef.current) return;
+      setName(liveDurableTask.name ?? '');
+      setPrompt(liveDurableTask.prompt);
+      setBuilder(parseCronToBuilder(liveDurableTask.cron));
       return;
-    loadRequestRef.current += 1;
-    setLoadedTask(liveDurableTask ?? null);
-    setLoading(false);
-    setLoadError(null);
-    // External updates must not replace a draft the user is still editing.
-    if (!liveDurableTask || showFormRef.current) return;
-    setName(liveDurableTask.name ?? '');
-    setPrompt(liveDurableTask.prompt);
-    setBuilder(parseCronToBuilder(liveDurableTask.cron));
+    }
+    if (hasLiveDurableScheduledSnapshot && sourceSessionId) {
+      // The session-filtered snapshot only lists tasks bound to
+      // sourceSessionId; an unbound task (sessionId == null) is legitimately
+      // absent from it and keeps its workspace-list hydration.
+      setLoadedTask((previous) =>
+        previous && previous.sessionId == null ? previous : null,
+      );
+    }
   }, [
     confirmedDurableDeletion,
     hasLiveDurableScheduledSnapshot,
@@ -2532,7 +2546,7 @@ function ScheduledTaskDetail({
           name: name.trim() || null,
         },
         workspaceId,
-        loadedTask.sessionId,
+        loadedTask.sessionId ?? null,
       );
       if (
         !isCurrentRequest(
@@ -2602,7 +2616,7 @@ function ScheduledTaskDetail({
           enabled: !loadedTask.enabled,
         },
         workspaceId,
-        loadedTask.sessionId,
+        loadedTask.sessionId ?? null,
       );
       if (
         !isCurrentRequest(
@@ -2662,7 +2676,7 @@ function ScheduledTaskDetail({
       await actions.deleteScheduledTask(
         loadedTask.id,
         workspaceId,
-        loadedTask.sessionId,
+        loadedTask.sessionId ?? null,
       );
       if (
         !isCurrentRequest(
@@ -2677,7 +2691,11 @@ function ScheduledTaskDetail({
       setLoadedTask(null);
       setDurableDeletionConfirmed(true);
       setShowDeleteConfirm(false);
-      onDurableTaskDeleted?.(loadedTask.id, task.workspaceId, sourceSessionId);
+      onDurableTaskDeleted?.(
+        loadedTask.id,
+        task.workspaceId,
+        loadedTask.sessionId ?? undefined,
+      );
       onMutated?.();
     } catch (err) {
       if (

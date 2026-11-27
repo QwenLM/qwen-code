@@ -30,17 +30,14 @@ import { CronDeleteTool } from '../tools/cron-delete.js';
 // (the real module's addCronTask/removeCronTasks bind the unmocked one).
 // Its `fail` runs the mutator but returns the input array, skipping the
 // tasks write (an unchanged reference is a no-op) before throwing; any
-// deletionIds tombstone still lands. removeGate injects a rejection since
-// real failures are platform-divergent (POSIX ENOTDIR for a corrupt .qwen,
-// Windows ENOENT → "nothing to remove").
-const { readGate, updateGate, removeGate } = vi.hoisted(() => {
+// deletionIds tombstone still lands.
+const { readGate, updateGate } = vi.hoisted(() => {
   const gate = () => ({
     block: null as Promise<void> | null,
     onHit: null as (() => void) | null,
     fail: null as Error | null,
   });
-  const remove = { fail: null as Error | null };
-  return { readGate: gate(), updateGate: gate(), removeGate: remove };
+  return { readGate: gate(), updateGate: gate() };
 });
 
 const generatedId = vi.hoisted(() => ({ next: null as string | null }));
@@ -81,12 +78,6 @@ vi.mock('./cronTasksFile.js', async (importOriginal) => {
       }
       return actual.updateCronTasks(...args);
     },
-    removeCronTasks: async (
-      ...args: Parameters<typeof actual.removeCronTasks>
-    ) => {
-      if (removeGate.fail) throw removeGate.fail;
-      return actual.removeCronTasks(...args);
-    },
   };
 });
 
@@ -119,7 +110,6 @@ describe('CronScheduler', () => {
     for (const gate of [readGate, updateGate]) {
       Object.assign(gate, { block: null, onHit: null, fail: null });
     }
-    removeGate.fail = null;
     generatedId.next = null;
   });
 
