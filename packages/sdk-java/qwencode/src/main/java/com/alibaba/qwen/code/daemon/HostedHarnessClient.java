@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,6 +48,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             "qwen.daemon.managedRuntimeRecovery";
 
     private static final int PROTOCOL_VERSION = 1;
+    private static final Duration UNATTACHED_STATUS_TIMEOUT = Duration.ofSeconds(2);
     private static final Pattern UUID_PATTERN = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
                     + "[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -1557,28 +1560,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         long observedClock = observed != null ? observed.sendClock() : 0;
         boolean observedSettled = observed != null && observed.isSettled();
         String operation = "GET /session/:id/status";
-        HttpSupport.Response response = sendRead(
-                sessionPath(ref.getHarnessSessionId()) + "/status"
-                        + (targetPromptId == null ? "" : "?promptId=" + encodeQuery(targetPromptId)), ref,
+        HttpSupport.Response response = sendRead(statusPath(ref.getHarnessSessionId(), targetPromptId),
+                ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        HarnessSessionStatus status = parseStatus(response, ref.getHarnessSessionId(), targetPromptId,
                 operation);
-        DaemonClient.requireStatus(response, 200, operation);
-        Map<String, Object> json = JsonSupport.parseObject(response.getBody(),
-                "Hosted Harness status response");
-        String responseSessionId = parseWireUuid(
-                JsonSupport.requiredString(json, "sessionId", "status"),
-                "status.sessionId");
-        if (!ref.getHarnessSessionId().equals(responseSessionId)) {
-            throw new DaemonProtocolException(
-                    "Hosted Harness status sessionId does not match");
-        }
-        boolean active = JsonSupport.requiredBoolean(json,
-                "hasActivePrompt", "status");
-        HarnessSessionStatus status = new HarnessSessionStatus(responseSessionId, active, json);
-        if (targetPromptId != null && status.getRecovery() != null
-                && !targetPromptId.equals(status.getRecovery().getPromptId())) {
-            throw new DaemonProtocolException("Hosted recovery promptId does not match");
-        }
-        if (targetPromptId == null && !active && observedSettled) {
+        if (targetPromptId == null && !status.hasActivePrompt() && observedSettled) {
             // Clear only the exact record the snapshot read, and only while
             // no send attempt has opened or closed since: the answer
             // describes the evaluation instant, so an attempt that
@@ -1588,6 +1574,51 @@ public final class HostedHarnessClient implements AutoCloseable {
                             && current.isSettled()
                             && current.sendClock() == observedClock
                             ? null : current);
+        }
+        return status;
+    }
+
+    /**
+     * Reads the committed recovery evidence of a Session that this client did
+     * not attach, without loading it. Returns null when the Session is not
+     * resident in this Harness, or the Harness only answers its attachment.
+     * The status exchange is bounded to two seconds or the configured
+     * request timeout, whichever is shorter.
+     */
+    public HarnessSessionStatus getUnattachedStatus(String harnessSessionId, String promptId) {
+        ensureOpen();
+        String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
+        String targetPromptId = promptId == null ? null : requireUuid(promptId, "promptId");
+        String operation = "GET /session/:id/status";
+        HttpSupport.Response response = sendRead(statusPath(sessionId, targetPromptId), sessionId, null,
+                operation);
+        return response.getStatusCode() == 404 ? null
+                : parseStatus(response, sessionId, targetPromptId, operation);
+    }
+
+    private static String statusPath(String sessionId, String targetPromptId) {
+        return sessionPath(sessionId) + "/status"
+                + (targetPromptId == null ? "" : "?promptId=" + encodeQuery(targetPromptId));
+    }
+
+    private static HarnessSessionStatus parseStatus(HttpSupport.Response response, String sessionId,
+            String targetPromptId, String operation) {
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> json = JsonSupport.parseObject(response.getBody(),
+                "Hosted Harness status response");
+        String responseSessionId = parseWireUuid(
+                JsonSupport.requiredString(json, "sessionId", "status"),
+                "status.sessionId");
+        if (!sessionId.equals(responseSessionId)) {
+            throw new DaemonProtocolException(
+                    "Hosted Harness status sessionId does not match");
+        }
+        boolean active = JsonSupport.requiredBoolean(json,
+                "hasActivePrompt", "status");
+        HarnessSessionStatus status = new HarnessSessionStatus(responseSessionId, active, json);
+        if (targetPromptId != null && status.getRecovery() != null
+                && !targetPromptId.equals(status.getRecovery().getPromptId())) {
+            throw new DaemonProtocolException("Hosted recovery promptId does not match");
         }
         return status;
     }
@@ -2487,15 +2518,25 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private HttpSupport.Response sendRead(String path,
             HarnessSessionRef session, String operation) {
+        return sendRead(path, session.getHarnessSessionId(),
+                session.getHarnessClientId(), operation);
+    }
+
+    private HttpSupport.Response sendRead(String path, String sessionId,
+            String clientId, String operation) {
         try {
-            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null,
-                    session.getHarnessClientId());
+            boolean unattached = clientId == null;
+            Duration timeout = unattached && requestTimeout.compareTo(UNATTACHED_STATUS_TIMEOUT) > 0
+                    ? UNATTACHED_STATUS_TIMEOUT : requestTimeout;
+            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null, clientId,
+                    timeout, new AtomicBoolean(), unattached);
             validateGeneration(raw.headers(), raw.statusCode());
             return HttpSupport.consume(raw, operation);
         } catch (HostedHarnessGenerationException e) {
-            // Same rule as the heartbeat entrances: the peer restarted,
-            // so every local record for it is dead, ledger included.
-            discardLocalSessionState(session.getHarnessSessionId());
+            // Only attachment-backed reads can retire local replay identity.
+            if (clientId != null) {
+                discardLocalSessionState(sessionId);
+            }
             throw e;
         } catch (IOException e) {
             throw new DaemonTransportException(
@@ -2625,6 +2666,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             Map<String, Object> body, String clientId, Duration timeout,
             AtomicBoolean dispatched)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, timeout, dispatched, false);
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout,
+            AtomicBoolean dispatched, boolean boundResponseBody)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
@@ -2657,7 +2705,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         // failure from here on is mid-flight.
         dispatched.set(true);
         try {
-            return pending.get();
+            return boundResponseBody ? pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS) : pending.get();
+        } catch (TimeoutException e) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("Hosted Harness response timed out");
         } catch (InterruptedException e) {
             pending.cancel(true);
             throw e;

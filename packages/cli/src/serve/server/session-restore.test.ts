@@ -347,6 +347,45 @@ describe('restoreSessionCore', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['cancellation', 'bridge failure'] as const)(
+    'releases inherited worktree ownership on %s',
+    async (outcome) => {
+      mocks.readWorktreeSessionStrict.mockResolvedValue(strictSidecar());
+      const handoffRelease = vi.fn();
+      const bridge = fakeBridge({
+        ...(outcome === 'bridge failure'
+          ? {
+              loadSession: vi.fn(async () => {
+                throw new Error('bridge exploded');
+              }),
+            }
+          : {}),
+      });
+      const { options, release } = coreOptions(fakeRuntime(bridge), {
+        isCancelled: () => outcome === 'cancellation',
+        worktreeRestoreHandoff: {
+          worktreeKey: strictSidecar().session.worktreePath,
+          release: handoffRelease,
+        },
+      });
+
+      if (outcome === 'cancellation') {
+        await expect(restoreSessionCore(options)).resolves.toEqual({
+          kind: 'cancelled',
+        });
+        expect(bridge.killSession).toHaveBeenCalledWith(SESSION_ID, {
+          requireZeroAttaches: true,
+        });
+      } else {
+        await expect(restoreSessionCore(options)).rejects.toThrow(
+          'bridge exploded',
+        );
+      }
+      expect(handoffRelease).toHaveBeenCalledTimes(1);
+      expect(release).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('publishes the resolved workspace once for an internal runtime', async () => {
     const bridge = fakeBridge();
     const onWorkspaceResolved = vi.fn();

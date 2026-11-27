@@ -2,8 +2,8 @@
 
 [English](generated-ui-copy-download.md) | [简体中文](generated-ui-copy-download.zh-CN.md)
 
-Status: in progress. Step 1 (card runtime and host) is implemented by the PR
-that adds this document. Step 2 (skill and evaluation) is not implemented yet.
+Status: implemented. Step 1 (card runtime and host) landed in #18158. Step 2
+(skill and evaluation) is implemented by the PR that updates this document.
 
 ## Problem
 
@@ -162,11 +162,11 @@ bundled card whether or not it has a card id.
 
 ## Rollout
 
-1. **Runtime and host** (this PR): `ui.copy` and `ui.download` in the guest,
+1. **Runtime and host** (#18158): `ui.copy` and `ui.download` in the guest,
    the `effect` round field, the App's round rule, notices and requests, and
    Web Shell's validation, copy, download, fallback button and outcome
    attributes, in every locale.
-2. **Skill and evaluation:** teach both calls in the Generated UI skill and
+2. **Skill and evaluation** (this PR): teach both calls in the Generated UI skill and
    tool description, give the reference bill splitter and comparator a copy and
    an export through them, and flip `bill.copies-current` and
    `comparator.exports-current-csv` to pass.
@@ -213,8 +213,9 @@ Step 2:
 
 - Replay: `bill.copies-current` and `comparator.exports-current-csv` pass and
   every other pin is unchanged.
-- A live run of the bill splitter and comparator cases with the gating model,
-  reported in the PR.
+- A live run of all four cases with the gating model, reported in the PR. The
+  bill splitter and comparator check the two flipped pins; the checklist and
+  activity form check that the larger skill changes nothing else.
 
 ## Acceptance criteria
 

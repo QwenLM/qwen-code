@@ -500,7 +500,6 @@ export default {
   'Screen Reader Mode': 'Modo de Leitor de Tela',
   'Max Session Turns': 'Máximo de Turnos da Sessão',
   'Skip Next Speaker Check': 'Pular Verificação do Próximo Falante',
-  'Skip Loop Detection': 'Pular Detecção de Loop',
   'Skip Startup Context': 'Pular Contexto de Inicialização',
   'Enable OpenAI Logging': 'Ativar Log do OpenAI',
   'OpenAI Logging Directory': 'Diretório de Log do OpenAI',
@@ -775,6 +774,8 @@ export default {
   'List all configured hooks': 'Listar todos os hooks configurados',
   // Hooks - Dialog
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Um hook interrompeu o turno: {{reason}}',
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',

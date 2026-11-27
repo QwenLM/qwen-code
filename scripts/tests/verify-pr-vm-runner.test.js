@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -22,9 +23,11 @@ import http from 'node:http';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  DEFAULT_MAX_BUNDLE_BYTES,
+  buildInputManifest,
   fetchRoundInputFromSocket,
   materializeTwoOidWorktrees,
   startLoopbackToUdsBridge,
@@ -39,6 +42,7 @@ import {
   inspectPidState,
   writeExecutionRecordAndBoundary,
 } from '../../scripts/verify-pr-vm-lifecycle.mjs';
+import { reapedPid } from './reaped-pid.js';
 import {
   buildAliyunAgentSandboxPlan,
   buildAliyunProviderPlan,
@@ -55,6 +59,18 @@ const CHECK_SCRIPT = fileURLToPath(
 );
 const RUNNER_SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-vm-runner.mjs', import.meta.url),
+);
+const BUDGET_RACE_DRIVER = fileURLToPath(
+  new URL('./verify-pr-vm-budget-race-driver.cjs', import.meta.url),
+);
+const COPY_BOUNDARY_DRIVER = fileURLToPath(
+  new URL('./verify-pr-vm-copy-boundary-driver.cjs', import.meta.url),
+);
+const PREBUILT_SNAPSHOT_DRIVER = fileURLToPath(
+  new URL('./verify-pr-vm-prebuilt-snapshot-driver.cjs', import.meta.url),
+);
+const ROUND_PREP_DRIVER = fileURLToPath(
+  new URL('./verify-pr-vm-round-prep-driver.cjs', import.meta.url),
 );
 
 const BASE_OID = 'a'.repeat(40);
@@ -435,7 +451,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       trustedInputDigest: SHA('5'),
       kernelDigest: SHA('6'),
       rootfsDigest: SHA('7'),
-      workerPid: 999911,
+      workerPid: reapedPid(),
       workerExe: '/firecracker-v1.18.0-aarch64',
       workerExitEvidence: 'absent',
     });
@@ -445,7 +461,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       artifactDir: vault,
       verifyLivePid: true,
     });
-    expect(fin.ok).toBe(true);
+    expect(fin.ok, fin.errors?.join('\n')).toBe(true);
 
     const chk = spawnSync(
       process.execPath,
@@ -463,7 +479,7 @@ describe('verify-pr-vm-runner backend launch plans', () => {
       ],
       { encoding: 'utf8' },
     );
-    expect(chk.status).toBe(0);
+    expect(chk.status, chk.stderr).toBe(0);
     expect(chk.stdout).toMatch(/ok: verdict=merge-ready/);
   });
 });
@@ -508,6 +524,610 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
       contextSha256: createHash('sha256').update(text, 'utf8').digest('hex'),
     };
   }
+
+  it('forwards fixed entropy through the real CLI and still rejects a stale input digest', () => {
+    const root = mkdtempSync('/tmp/qc-en-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const entropyHex = '01'.repeat(32);
+    const kernel = join(root, 'kernel');
+    const golden = join(root, 'golden');
+    const bundlePath = join(root, 'fixture.bundle');
+    const bundleBytes = Buffer.from('prebuilt fixture bytes; never booted');
+    const bundleSha256 = createHash('sha256').update(bundleBytes).digest('hex');
+    writeFileSync(kernel, 'fixture kernel; never booted');
+    writeFileSync(golden, 'fixture golden; never booted');
+    writeFileSync(bundlePath, bundleBytes, { mode: 0o600 });
+    const exitFastBin = join(root, 'exit-fast.sh');
+    writeFileSync(exitFastBin, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+
+    const runCli = (runId, trustedInputDigest = null) => {
+      const plan = buildFirecrackerLaunchPlan({
+        runId,
+        jailBaseDir: join(root, `${runId}-jail`),
+        jailerBin: exitFastBin,
+        firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+        vmmUid: process.getuid?.() || 65534,
+        vmmGid: process.getgid?.() || 65534,
+        inputVsockPort: 53,
+      });
+      mkdirSync(plan.jailRoot, { recursive: true });
+      writeFileSync(plan.kernelPath, 'fixture kernel; never booted');
+      writeFileSync(
+        plan.ownershipTemplate.workDiskPath,
+        'fixture golden; never booted',
+      );
+      const built = buildInputManifest({
+        runId,
+        repo: 'QwenLM/qwen-code',
+        prNumber: 18181,
+        baseRefOid: BASE_OID,
+        headRefOid: HEAD_OID,
+        bundleSha256,
+        bundleBytes: bundleBytes.length,
+        modelProxy: null,
+        entropyHex,
+      });
+      const launcherDir = join(root, `${runId}-launcher`);
+      const cfgPath = join(root, `${runId}.json`);
+      writeFileSync(
+        cfgPath,
+        `${JSON.stringify(
+          {
+            backend: 'firecracker',
+            planOptions: {
+              runId,
+              jailBaseDir: join(root, `${runId}-jail`),
+              jailerBin: exitFastBin,
+              firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+              vmmUid: process.getuid?.() || 65534,
+              vmmGid: process.getgid?.() || 65534,
+              inputVsockPort: 53,
+            },
+            ...ctx,
+            launcherDir,
+            vaultDir: join(root, `${runId}-vault`),
+            approvedRoots: [root],
+            backendVersion: 'v1.18.0',
+            platform: 'linux-aarch64',
+            sourceKernelPath: kernel,
+            sourceRootfsPath: golden,
+            trustedInputDigest: trustedInputDigest ?? built.trustedInputDigest,
+            roundInput: { bundlePath, entropyHex },
+            modelProxy: null,
+          },
+          null,
+          2,
+        )}\n`,
+        { mode: 0o600 },
+      );
+      const proc = spawnSync(
+        process.execPath,
+        [RUNNER_SCRIPT, 'run', '--config', cfgPath],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            PATH: process.env.PATH,
+            HOME: process.env.HOME,
+            TMPDIR: process.env.TMPDIR ?? '/tmp',
+          },
+        },
+      );
+      expect(proc.error, proc.stderr).toBeUndefined();
+      expect(proc.status, proc.stderr).toBe(1);
+      return {
+        result: JSON.parse(proc.stdout),
+        expectedDigest: built.trustedInputDigest,
+        launcherDir,
+      };
+    };
+
+    const fixed = runCli('cli-entropy-fixed');
+    expect(fixed.result.trustedInputDigest).toBe(fixed.expectedDigest);
+    expect(fixed.result.errors.join('\n')).not.toMatch(
+      /trustedInputDigest does not match/,
+    );
+
+    const stale = runCli('cli-entropy-stale', SHA('f'));
+    expect(stale.result.errors).toContain(
+      'trustedInputDigest does not match generated roundInput manifest digest',
+    );
+    expect(existsSync(join(stale.launcherDir, 'token.json'))).toBe(false);
+  });
+
+  it('enforces guest bundle capacity while allowing harmless larger host budgets', async () => {
+    const root = mkdtempSync('/tmp/qc-guest-bundle-budget-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const bundlePath = join(root, 'prebuilt.bundle');
+    writeFileSync(bundlePath, 'small prebuilt payload', { mode: 0o600 });
+    let allocations = 0;
+    const providerDriver = {
+      allocate: async () => {
+        allocations += 1;
+        throw new Error('budget-probe-allocation');
+      },
+      destroy: async () => ({ terminated: true, diskDeleted: true }),
+    };
+    const plan = buildAliyunProviderPlan({
+      runId: 'guest-byte-budget',
+      headRefOid: HEAD_OID,
+      region: 'cn-hangzhou',
+      zone: 'cn-hangzhou-b',
+      vpcId: 'vpc-1',
+      vSwitchId: 'vsw-1',
+      imageId: 'debian_12.vhd',
+    });
+    const launchAtBoundary = (size) =>
+      runHardwareRound({
+        ...ctx,
+        launcherDir: join(root, `launcher-${size}`),
+        vaultDir: join(root, `vault-${size}`),
+        approvedRoots: [root],
+        plan,
+        roundInput: {
+          bundlePath,
+          maxBundleBytes: DEFAULT_MAX_BUNDLE_BYTES + 1,
+        },
+        providerDriver,
+      });
+
+    truncateSync(bundlePath, DEFAULT_MAX_BUNDLE_BYTES + 1);
+    const oversized = await launchAtBoundary(DEFAULT_MAX_BUNDLE_BYTES + 1);
+    expect(oversized.ok).toBe(false);
+    expect(oversized.errors.join('\n')).toContain(
+      `bundle-size-budget:${DEFAULT_MAX_BUNDLE_BYTES}`,
+    );
+    expect(allocations).toBe(0);
+
+    truncateSync(bundlePath, 2048);
+    // The allocator is only a sentinel, not a VM or cloud execution result.
+    const small = await launchAtBoundary(2048);
+    expect(allocations).toBe(1);
+    expect(small.errors.join('\n')).toContain('budget-probe-allocation');
+    expect(small.errors.join('\n')).not.toContain('round-input-rejected');
+  });
+
+  it('rejects prebuilt bundles that change across the validation budget boundary', () => {
+    for (const mode of ['replacement', 'growth']) {
+      const child = spawnSync(
+        process.execPath,
+        [BUDGET_RACE_DRIVER, pathToFileURL(RUNNER_SCRIPT).href, mode],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+        },
+      );
+      expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+      const report = JSON.parse(child.stdout);
+      expect(report).toMatchObject({
+        mode,
+        injected: true,
+        allocations: 0,
+        pass: true,
+      });
+      expect(report.finalSize).toBe(
+        1024 * 1024 +
+          (mode === 'replacement' ? 1 : report.growthAppends * 128 * 1024),
+      );
+      if (mode === 'growth') {
+        expect(report.growthAppends).toBeGreaterThan(0);
+        expect(report.growthAppends).toBeLessThanOrEqual(12);
+        expect(report.readBytes).toBeGreaterThan(1024 * 1024);
+        expect(report.readBytes).toBeLessThanOrEqual(1024 * 1024 + 256 * 1024);
+        expect(report.readBytes).toBeLessThan(report.finalSize);
+      } else {
+        expect(report.readBytes).toBe(0);
+      }
+    }
+  });
+
+  it('rejects a same-size prebuilt rewrite after the source was hashed', () => {
+    const child = spawnSync(
+      process.execPath,
+      [COPY_BOUNDARY_DRIVER, RUNNER_SCRIPT, 'copy-rewrite'],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+    const report = JSON.parse(child.stdout);
+    expect(report).toMatchObject({
+      mode: 'copy-rewrite',
+      injected: true,
+      copiedAfterHashWithSameSize: true,
+      allocations: 0,
+      copiedBytes: 64,
+      stagedExistsAfter: false,
+      pass: true,
+    });
+    expect(report.sourceShaAfter).toBe(report.expectedSourceSha);
+    expect(report.errors.join('\n')).toContain(
+      'roundInput.bundlePath changed while its private copy was made',
+    );
+  });
+
+  it('allows private prebuilt reuse and refuses unsafe existing targets', () => {
+    for (const mode of [
+      'private-retry',
+      'private-multi-link',
+      'private-symlink',
+    ]) {
+      const child = spawnSync(
+        process.execPath,
+        [COPY_BOUNDARY_DRIVER, RUNNER_SCRIPT, mode],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+        },
+      );
+      expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+      const report = JSON.parse(child.stdout);
+      expect(report).toMatchObject({
+        mode,
+        allocations: mode === 'private-retry' ? 2 : 0,
+        privateTargetPreserved: true,
+        stagedExistsAfter: false,
+        pass: true,
+      });
+      expect(report.rounds).toHaveLength(mode === 'private-retry' ? 2 : 1);
+      if (mode === 'private-retry') {
+        for (const round of report.rounds) {
+          expect(round.errors.join('\n')).toContain('allocation-sentinel');
+          expect(round.errors.join('\n')).not.toContain('round-input-rejected');
+        }
+      } else {
+        expect(report.errors.join('\n')).toContain(
+          'refusing to overwrite a non-regular or multi-link private bundle',
+        );
+      }
+    }
+  });
+
+  it('bounds prebuilt staging writes and preserves caller-owned collision inputs', () => {
+    for (const mode of ['copy-growth', 'staging-collision']) {
+      const child = spawnSync(
+        process.execPath,
+        [COPY_BOUNDARY_DRIVER, RUNNER_SCRIPT, mode],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+        },
+      );
+      expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+      const report = JSON.parse(child.stdout);
+      expect(report).toMatchObject({
+        mode,
+        injected: true,
+        growthAfterFirstRead: mode === 'copy-growth',
+        allocations: 0,
+        sourceExistsAfter: true,
+        stagedExistsAfter: mode === 'staging-collision',
+        pass: true,
+      });
+      expect(report.copiedBytes).toBeLessThanOrEqual(1024);
+      expect(report.sourceShaAfter).toBe(report.expectedSourceSha);
+      expect(report.errors.join('\n')).toContain(
+        mode === 'copy-growth' ? 'bundle-size-budget:1024' : 'EEXIST',
+      );
+    }
+  });
+
+  it('bounds repository generation diagnostics and validates entropy before reading a bundle', () => {
+    const child = spawnSync(
+      process.execPath,
+      [ROUND_PREP_DRIVER, fileURLToPath(new URL('../..', import.meta.url))],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+    const report = JSON.parse(child.stdout);
+    expect(report).toMatchObject({
+      realBundleVerified: true,
+      allocations: 1,
+      pass: true,
+    });
+    expect(report.fixtureGitStderrBytes).toHaveLength(
+      report.bundleBuffers.length,
+    );
+    expect(
+      report.fixtureGitStderrBytes.every((bytes) => bytes >= 48 * 1024),
+    ).toBe(true);
+    expect(report.bundleBuffers).toEqual(report.expectedBuffers);
+    expect(report.repoErrors.join('\n')).toContain(
+      'round-prep-allocation-sentinel',
+    );
+    expect(report.entropyErrors).toHaveLength(3);
+    for (const errors of report.entropyErrors) {
+      expect(errors.join('\n')).toContain(
+        'entropyHex must be a 64-char lowercase hex string',
+      );
+      expect(errors.join('\n')).not.toContain('allocation-sentinel');
+    }
+  });
+
+  it('hands off prebuilt bundles through a verified private snapshot after source replacement', () => {
+    const child = spawnSync(
+      process.execPath,
+      [PREBUILT_SNAPSHOT_DRIVER, RUNNER_SCRIPT],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    expect(child.status, `${child.stderr}\n${child.stdout}`).toBe(0);
+    const report = JSON.parse(child.stdout);
+    expect(report).toMatchObject({
+      pass: true,
+      injected: true,
+      allocationCount: 1,
+      handoff: {
+        sha256: report.originalSha256,
+        mode: 0o600,
+      },
+      fetched: {
+        sha256: report.originalSha256,
+        matchesManifest: true,
+      },
+      fetchError: null,
+    });
+    expect(report.errors.join('\n')).toContain(
+      'prebuilt-snapshot-allocation-sentinel',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'strips VMM child credentials and rejects over-budget prebuilt bundles before startup',
+    async () => {
+      const root = mkdtempSync('/tmp/qc-input-env-budget-');
+      tmpDirs.push(root);
+      const ctx = writeHostContext(root);
+      const kernel = join(root, 'fixture-kernel');
+      const golden = join(root, 'fixture-rootfs');
+      const bundlePath = join(root, 'fixture.bundle');
+      writeFileSync(kernel, 'fixture kernel; never booted');
+      writeFileSync(golden, 'fixture rootfs; never booted');
+      writeFileSync(bundlePath, 'fixture bundle bytes', { mode: 0o600 });
+      const capturePath = join(root, 'vmm-environment.json');
+      const helper = join(root, 'fixture-jailer.py');
+      const canaries = [
+        'REVIEW_OPENAI_API_KEY',
+        'GH_TOKEN',
+        'NPM_CONFIG_TOKEN',
+        'QC_FIXTURE_HOST_SECRET',
+      ];
+      const original = new Map(
+        canaries.map((name) => [name, process.env[name]]),
+      );
+      for (const name of canaries) {
+        process.env[name] = `not-a-secret-${name}`;
+      }
+      try {
+        const plan = buildFirecrackerLaunchPlan({
+          runId: 'env-spawn',
+          jailBaseDir: join(root, 'env-jail'),
+          jailerBin: helper,
+          firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+          vmmUid: process.getuid?.() || 65534,
+          vmmGid: process.getgid?.() || 65534,
+          inputVsockPort: 53,
+        });
+        mkdirSync(plan.jailRoot, { recursive: true });
+        writeFileSync(plan.kernelPath, 'fixture kernel; never booted');
+        writeFileSync(
+          plan.ownershipTemplate.workDiskPath,
+          'fixture rootfs; never booted',
+        );
+        // This captures a real child process environment; it is not a VM boot.
+        writeFileSync(
+          helper,
+          `#!/usr/bin/env python3
+import json
+import os
+with open(${JSON.stringify(capturePath)}, "w") as fp:
+    json.dump({"inheritedCanaries": [name for name in ${JSON.stringify(canaries)} if name in os.environ], "hasPath": bool(os.environ.get("PATH")), "path": os.environ.get("PATH")}, fp)
+with open(${JSON.stringify(plan.workerPidFile)}, "w") as fp:
+    fp.write(str(os.getpid()))
+os.execv("/bin/sleep", ["sleep", "0.2"])
+`,
+          { mode: 0o700 },
+        );
+        await runHardwareRound({
+          ...ctx,
+          launcherDir: join(root, 'env-launcher'),
+          vaultDir: join(root, 'env-vault'),
+          approvedRoots: [root],
+          plan,
+          sourceKernelPath: kernel,
+          sourceRootfsPath: golden,
+          roundInput: { bundlePath },
+          runChecker: false,
+        });
+        expect(JSON.parse(readFileSync(capturePath, 'utf8'))).toEqual({
+          inheritedCanaries: [],
+          hasPath: true,
+          path: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+        });
+
+        const fallbackHelper = join(root, 'np.py');
+        const pythonProbe = spawnSync(
+          'python3',
+          ['-c', 'import sys; print(sys.executable)'],
+          { encoding: 'utf8' },
+        );
+        expect(pythonProbe.status, pythonProbe.stderr).toBe(0);
+        writeFileSync(
+          fallbackHelper,
+          readFileSync(helper, 'utf8').replace(
+            /^#![^\n]*/,
+            `#!${pythonProbe.stdout.trim()}`,
+          ),
+          { mode: 0o700 },
+        );
+        const fallbackPlan = buildFirecrackerLaunchPlan({
+          runId: 'np',
+          jailBaseDir: join(root, 'np'),
+          jailerBin: fallbackHelper,
+          firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+          vmmUid: process.getuid?.() || 65534,
+          vmmGid: process.getgid?.() || 65534,
+          inputVsockPort: 53,
+        });
+        mkdirSync(fallbackPlan.jailRoot, { recursive: true });
+        writeFileSync(fallbackPlan.kernelPath, 'fixture kernel; never booted');
+        writeFileSync(
+          fallbackPlan.ownershipTemplate.workDiskPath,
+          'fixture rootfs; never booted',
+        );
+        unlinkSync(capturePath);
+        const originalPath = process.env.PATH;
+        try {
+          delete process.env.PATH;
+          const fallbackResult = await runHardwareRound({
+            ...ctx,
+            launcherDir: join(root, 'env-launcher-without-path'),
+            vaultDir: join(root, 'env-vault-without-path'),
+            approvedRoots: [root],
+            plan: fallbackPlan,
+            sourceKernelPath: kernel,
+            sourceRootfsPath: golden,
+            roundInput: { bundlePath },
+            runChecker: false,
+          });
+          expect(
+            existsSync(capturePath),
+            fallbackResult.errors.join('\n'),
+          ).toBe(true);
+        } finally {
+          if (originalPath === undefined) delete process.env.PATH;
+          else process.env.PATH = originalPath;
+        }
+        expect(JSON.parse(readFileSync(capturePath, 'utf8'))).toEqual({
+          inheritedCanaries: [],
+          hasPath: true,
+          path: '/usr/local/bin:/usr/bin:/bin',
+        });
+
+        const budgetPlan = buildFirecrackerLaunchPlan({
+          runId: 'input-budget',
+          jailBaseDir: join(root, 'budget-jail'),
+          jailerBin: helper,
+          firecrackerBin: '/opt/firecracker-v1.18.0-aarch64',
+          vmmUid: process.getuid?.() || 65534,
+          vmmGid: process.getgid?.() || 65534,
+          inputVsockPort: 53,
+        });
+        mkdirSync(budgetPlan.jailRoot, { recursive: true });
+        writeFileSync(budgetPlan.kernelPath, 'fixture kernel; never booted');
+        writeFileSync(
+          budgetPlan.ownershipTemplate.workDiskPath,
+          'fixture rootfs; never booted',
+        );
+        let launchCalls = 0;
+        const rejected = await runHardwareRound({
+          ...ctx,
+          launcherDir: join(root, 'budget-launcher'),
+          vaultDir: join(root, 'budget-vault'),
+          approvedRoots: [root],
+          plan: budgetPlan,
+          sourceKernelPath: kernel,
+          sourceRootfsPath: golden,
+          roundInput: { bundlePath, maxBundleBytes: 1 },
+          launchBackend: async () => {
+            launchCalls += 1;
+            throw new Error('over-budget input must not launch');
+          },
+        });
+        expect(rejected.ok).toBe(false);
+        expect(rejected.errors.join('\n')).toMatch(/bundle-size-budget:1/);
+        expect(launchCalls).toBe(0);
+        expect(existsSync(join(root, 'budget-launcher', 'token.json'))).toBe(
+          false,
+        );
+      } finally {
+        for (const [name, value] of original) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+      }
+    },
+  );
+
+  it('rejects guest model-proxy endpoint mismatches before startup', async () => {
+    const root = mkdtempSync('/tmp/qc-proxy-binding-');
+    tmpDirs.push(root);
+    const ctx = writeHostContext(root);
+    const kernel = join(root, 'kernel');
+    const golden = join(root, 'golden');
+    const bundlePath = join(root, 'fixture.bundle');
+    writeFileSync(kernel, 'fixture kernel; never booted');
+    writeFileSync(golden, 'fixture golden; never booted');
+    writeFileSync(bundlePath, 'prebuilt fixture bytes', { mode: 0o600 });
+
+    for (const kind of ['host-tcp', 'alternate-uds', 'missing-vsock-path']) {
+      const caseRoot = join(root, kind);
+      mkdirSync(caseRoot);
+      mkdirSync(join(caseRoot, 'sock'));
+      writeFileSync(join(caseRoot, 'work'), 'fixture golden; never booted');
+      const plan = buildVfkitLaunchPlan({
+        runId: `proxy-${kind}`,
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/sb',
+        pocDir: caseRoot,
+        socketDir: join(caseRoot, 'sock'),
+        kernelPath: kernel,
+        initramfsPath: kernel,
+        rootfsPath: join(caseRoot, 'work'),
+        guestLogPath: join(caseRoot, 'guest.log'),
+        pidFile: join(caseRoot, 'vfkit.pid'),
+        homeDir: join(caseRoot, 'home'),
+        tmpDir: caseRoot,
+        inputVsockPort: 53,
+        ...(kind === 'missing-vsock-path' ? {} : { modelVsockPort: 54 }),
+      });
+      if (kind === 'missing-vsock-path') plan.modelVsockPath = null;
+      let launchCalls = 0;
+      const result = await runHardwareRound({
+        ...ctx,
+        launcherDir: join(caseRoot, 'launcher'),
+        vaultDir: join(caseRoot, 'vault'),
+        approvedRoots: [root],
+        sourceKernelPath: kernel,
+        sourceRootfsPath: golden,
+        plan,
+        roundInput: { bundlePath },
+        modelProxy: {
+          baseUrl: 'http://127.0.0.1:65535/v1',
+          apiKey: 'fixture-key-not-a-secret',
+          maxRequests: 1,
+          ...(kind === 'host-tcp' ? { listenHost: '127.0.0.1' } : {}),
+          ...(kind === 'alternate-uds'
+            ? { socketPath: join(caseRoot, 'alternate.sock') }
+            : {}),
+        },
+        launchBackend: async () => {
+          launchCalls += 1;
+          throw new Error('fixture launcher must not run');
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(launchCalls).toBe(0);
+      expect(existsSync(join(caseRoot, 'launcher', 'token.json'))).toBe(false);
+      expect(result.errors).toContain(
+        'roundInput with modelProxy must bind plan.modelVsockPath for guest access',
+      );
+    }
+  });
 
   it('orchestrates model proxy (auth/budget/revocation), UDS collector (incl. PNG), live worker reap, finalize, and verify-pr-check end to end', async () => {
     const root = mkdtempSync('/tmp/qc-orch-');

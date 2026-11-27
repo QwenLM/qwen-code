@@ -3,17 +3,19 @@
 `/autofix-pr` watches one of your pull requests from a local Qwen Code session and fixes what comes up: failed CI checks, review feedback from people you trust, and merge conflicts. Each fix is made and verified in a worktree of its own, pushed to the PR branch and answered on the PR, under your own git and `gh` identity. It stops by itself when the PR is merged or closed. It gets the PR ready to merge and keeps it there, and no further: it never approves a PR, changes its review state, merges or closes it, or turns on auto-merge. The repository's reviews and checks still decide, and merging stays yours — combine the watch with the repository's auto-merge to merge as soon as they pass.
 
 ```text
-/autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
+/autofix-pr [<pr-number>|<pr-url>] [--once] [--watch] [--in-place] [--every <minutes>] [--no-reply] [--yes] [instructions...]
 /autofix-pr status [<pr-number>]
 /autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```
 
 - No PR argument: the PR whose head is your current branch.
-- `--once`: check and fix once, schedule nothing, and end the watch afterwards (a later `--once` starts afresh, from the PR's history). On a PR this session already watches, the running watch is left as it is.
-- `--every <minutes>`: how often to check, one of 1, 2, 5, 10, 15, 30 or 60. Default 2.
+- `--once`: check and fix once, schedule nothing, and end the watch afterwards (a later `--once` starts afresh, from the PR's history). On a PR this session already watches, the running watch is left as it is. Cannot be combined with `--watch` or `--every`.
+- `--watch`: watch the PR on a schedule. In worktree mode (the default without `--in-place`), watching is already the default and `--watch` is an explicit synonym; with `--in-place`, `--watch` (or `--every <minutes>`, which implies `--watch`) turns the normally one-shot in-place co-driving flow into a standing watch whose scheduled rounds ask before editing.
+- `--in-place`: fix in your own checkout of the PR head branch (foreground, under your approval mode, never discarding uncommitted edits or switching branches). Alone (or with `--once`), it runs one attended round and cleans up its watch files; with `--watch` (or `--every <minutes>`), it schedules a standing watch where each scheduled round summarizes new events and asks **Fix it / Not now / Stop watching** before editing. Never runs unattended or in the background; `--yes` does not skip its confirmation.
+- `--every <minutes>`: how often to check, one of 1, 2, 5, 10, 15, 30 or 60. Default 2. With `--in-place`, implies `--watch`.
 - `--no-reply`: push fixes, post nothing on the PR.
-- `--yes`: skip the start confirmation. Needed where no dialog can be shown.
+- `--yes`: skip the start confirmation (not honored with `--in-place` or when the PR author cannot push). Needed where no dialog can be shown.
 - Free text is passed to every fix, for example `/autofix-pr 123 do not change the public API`.
 
 ## Before you start

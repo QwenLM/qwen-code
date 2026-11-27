@@ -2270,7 +2270,7 @@ class HostedAutomationFaultGatesIT {
         Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -2304,7 +2304,7 @@ class HostedAutomationFaultGatesIT {
                 }
             });
         }
-        startSpring(cli, root, brokerPort);
+        startSpring(cli, root);
         harnessCli = cli;
         startHarness();
         register(root);
@@ -2394,7 +2394,7 @@ class HostedAutomationFaultGatesIT {
         return !drop;
     }
 
-    private void startSpring(Path cli, Path root, int brokerPort) {
+    private void startSpring(Path cli, Path root) {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -2412,7 +2412,6 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.automation.enabled=true",
                 "--qwen.managed-agent.automation.scan-delay=1s",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="

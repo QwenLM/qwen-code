@@ -4,30 +4,81 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  DaemonSessionStatsModelMetrics,
-  DaemonSessionStatsStatus,
-} from '@qwen-code/web-shell/daemon-react-sdk';
-import { isLegacySpeed, tokensPerSecond } from './TokenUsageTrend';
+export interface SessionUsageTokens {
+  readonly prompt: number;
+  readonly candidates: number;
+  readonly total: number;
+  readonly cached: number;
+  readonly thoughts: number;
+}
 
-type ModelTokens = DaemonSessionStatsModelMetrics['tokens'];
-type ModelGeneration = NonNullable<
-  DaemonSessionStatsModelMetrics['generation']
->;
+export interface SessionUsageGeneration {
+  readonly timedRequests: number;
+  readonly totalTtftMs: number;
+  readonly totalGenerationDurationMs: number;
+  readonly totalThroughputOutputTokens: number;
+  readonly totalTimedGenerationDurationMs?: number;
+  readonly totalOutputSpeedTokens?: number;
+  readonly totalOutputSpeedDurationMs?: number;
+}
+
+export interface SessionUsageModelMetrics {
+  readonly api: {
+    readonly totalRequests: number;
+    readonly totalErrors: number;
+    readonly totalLatencyMs: number;
+  };
+  readonly tokens: SessionUsageTokens;
+  readonly generation?: SessionUsageGeneration;
+}
+
+export interface SessionUsageStatsSnapshot {
+  readonly sessionId: string;
+  readonly promptCount: number;
+  readonly models: Readonly<Record<string, SessionUsageModelMetrics>>;
+  /**
+   * True when the backend does not report cached token counts for any request,
+   * so the bar omits the cache-hit segment instead of showing `0%`.
+   */
+  readonly cacheHitUnknown?: boolean;
+}
+
+/**
+ * Whether these totals come from a backend without full-request output speed.
+ * Its sums and samples only support the rate over the generation window.
+ */
+export function isLegacySpeed(
+  generation: SessionUsageGeneration | undefined,
+): boolean {
+  return generation?.totalOutputSpeedDurationMs === undefined;
+}
+
+/**
+ * Output tokens per second over `durationMs`; undefined without output tokens
+ * (no usage reported) or time.
+ */
+export function tokensPerSecond(
+  outputTokenCount: number,
+  durationMs: number,
+): number | undefined {
+  return outputTokenCount > 0 && durationMs > 0
+    ? outputTokenCount / (durationMs / 1000)
+    : undefined;
+}
 
 /** Prompt-side tokens; `prompt` already includes the cached part. */
-export function inputTokens(tokens: ModelTokens): number {
+export function inputTokens(tokens: SessionUsageTokens): number {
   return tokens.prompt > 0 ? tokens.prompt : tokens.cached;
 }
 
-export function totalTokens(tokens: ModelTokens): number {
+export function totalTokens(tokens: SessionUsageTokens): number {
   const input = inputTokens(tokens);
   return tokens.total > 0
     ? Math.max(tokens.total, input + tokens.candidates)
     : input + tokens.candidates + tokens.thoughts;
 }
 
-export function outputTokens(tokens: ModelTokens): number {
+export function outputTokens(tokens: SessionUsageTokens): number {
   return Math.max(0, totalTokens(tokens) - inputTokens(tokens));
 }
 
@@ -50,7 +101,7 @@ function trimZeros(value: string): string {
  * the generation window.
  */
 export function outputSpeed(
-  generation: DaemonSessionStatsModelMetrics['generation'],
+  generation: SessionUsageGeneration | undefined,
   legacy: boolean,
 ): number | undefined {
   if (!generation) return undefined;
@@ -73,14 +124,22 @@ export interface SessionUsageTotals {
   total: number;
   requests: number;
   failed: number;
-  generation: Required<ModelGeneration>;
-  /** The daemon predates the full-request speed fields. */
+  generation: {
+    timedRequests: number;
+    totalTtftMs: number;
+    totalGenerationDurationMs: number;
+    totalThroughputOutputTokens: number;
+    totalTimedGenerationDurationMs: number;
+    totalOutputSpeedTokens: number;
+    totalOutputSpeedDurationMs: number;
+  };
+  /** The backend predates or omits the full-request speed fields. */
   legacySpeed: boolean;
 }
 
 /** Session-wide sums over every model that served a request. */
 export function summarizeSessionUsage(
-  status: DaemonSessionStatsStatus,
+  status: SessionUsageStatsSnapshot,
 ): SessionUsageTotals {
   const totals: SessionUsageTotals = {
     prompt: 0,

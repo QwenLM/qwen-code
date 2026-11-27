@@ -12,6 +12,7 @@ import {
   isRecoverableAcpCapacityError,
   isAcpChildCapacityError,
   isSessionLimitExceededError,
+  isSystemOverloadedError,
 } from './httpErrors';
 
 describe('child capacity classification', () => {
@@ -119,4 +120,24 @@ it('only resumes a standalone creation after confirmed rollback', () => {
       ),
     ),
   ).toBe(true);
+});
+
+describe('system overload classification', () => {
+  it.each([
+    { code: 'system_overloaded' },
+    { data: { errorKind: 'system_overloaded' } },
+    { data: { code: 'system_overloaded' } },
+  ])('recognizes an overload refusal in %j', (body) => {
+    expect(
+      isSystemOverloadedError(new DaemonHttpError(503, body, 'load')),
+    ).toBe(true);
+  });
+  it.each([{ code: 'daemon_draining' }, undefined, null, []])(
+    'does not classify unrelated 503s (%j)',
+    (body) => {
+      expect(isSystemOverloadedError(new DaemonHttpError(503, body, 'x'))).toBe(
+        false,
+      );
+    },
+  );
 });

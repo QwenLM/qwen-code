@@ -1,3 +1,10 @@
+{{- $internalOrigin := "http://127.0.0.1:8081" -}}
+{{- $harnesses := list (dict "name" "harness" "port" "4170") (dict "name" "harness-b" "port" "4172") -}}
+{{- $instances := list -}}
+{{- range $member := $harnesses -}}
+{{- $instances = append $instances (dict "instance-id" $member.name "base-url" (printf "http://127.0.0.1:%s" $member.port)) -}}
+{{- end -}}
+{{- $pool := dict "enabled" true "instances" $instances -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -81,15 +88,17 @@ spec:
             - name: QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT
               value: '8081'
             - name: QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL
-              value: 'http://127.0.0.1:8081'
+              value: {{ $internalOrigin | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_ID
               value: {{ "/workspace" | sha256sum | trunc 16 | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_CWD
               value: /workspace
             - name: QWEN_MANAGED_AGENT_HARNESS_ENABLED
               value: 'true'
-            - name: QWEN_MANAGED_AGENT_HARNESS_BASE_URL
-              value: 'http://127.0.0.1:4170'
+            - name: SPRING_APPLICATION_JSON
+              value: {{ dict "qwen" (dict "managed-agent" (dict "harness" (dict "pool" $pool))) | toJson | quote }}
+            - name: QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED
+              value: 'true'
             - name: QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED
               value: {{ .Values.runtime.enabled | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED
@@ -171,11 +180,12 @@ spec:
               mountPath: /etc/machine-id
               readOnly: true
             {{- end }}
-        - name: harness
-          image: {{ required "Set harness.image to the matching built Qwen CLI image." .Values.harness.image | quote }}
-          imagePullPolicy: {{ .Values.imagePullPolicy }}
+        {{- range $member := $harnesses }}
+        - name: {{ $member.name }}
+          image: {{ required "Set harness.image to the matching built Qwen CLI image." $.Values.harness.image | quote }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
           command: [qwen]
-          args: [serve, --profile, hosted-harness, --hostname, '127.0.0.1', --port, '4170', --no-web]
+          args: [serve, --profile, hosted-harness, --hostname, '127.0.0.1', --port, {{ $member.port | quote }}, --no-web]
           workingDir: /workspace
           securityContext:
             runAsNonRoot: true
@@ -186,13 +196,15 @@ spec:
             capabilities:
               drop: [ALL]
           env:
+            - name: QWEN_HOSTED_HARNESS_INSTANCE_ID
+              value: {{ $member.name | quote }}
             - name: QWEN_HOME
               value: /home/node/.qwen
             - name: QWEN_RUNTIME_DIR
               value: /home/node/.qwen/runtime
-            {{- if .Values.runtime.enabled }}
+            {{- if $.Values.runtime.enabled }}
             - name: QWEN_MANAGED_RUNTIME_BROKER_URL
-              value: 'http://127.0.0.1:4182'
+              value: {{ $internalOrigin | quote }}
             - name: QWEN_MANAGED_RUNTIME_BROKER_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -208,25 +220,25 @@ spec:
             {{- end }}
           startupProbe:
             exec:
-              command: &harness-health
+              command: &{{ $member.name }}-health
                 - node
                 - -e
-                - "fetch('http://127.0.0.1:4170/health',{headers:{authorization:'Bearer '+process.env.QWEN_SERVER_TOKEN},signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+                - {{ printf "fetch('http://127.0.0.1:%s/health',{headers:{authorization:'Bearer '+process.env.QWEN_SERVER_TOKEN},signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" $member.port | quote }}
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 60
           livenessProbe:
             exec:
-              command: *harness-health
+              command: *{{ $member.name }}-health
             timeoutSeconds: 3
           readinessProbe:
             exec:
-              command: *harness-health
+              command: *{{ $member.name }}-health
             timeoutSeconds: 3
           resources:
-            {{- toYaml .Values.harness.resources | nindent 12 }}
+            {{- toYaml $.Values.harness.resources | nindent 12 }}
           volumeMounts:
-            - name: harness-home
+            - name: {{ $member.name }}-home
               mountPath: /home/node/.qwen
             - name: config
               mountPath: /home/node/.qwen/settings.json
@@ -234,8 +246,9 @@ spec:
               readOnly: true
             - name: workspace
               mountPath: /workspace
-            - name: harness-tmp
+            - name: {{ $member.name }}-tmp
               mountPath: /tmp
+        {{- end }}
         {{- if .Values.web.enabled }}
         - name: web
           image: {{ default .Values.harness.image .Values.web.image | quote }}
@@ -311,14 +324,16 @@ spec:
         - name: config
           configMap:
             name: {{ .Release.Name }}-config
-        - name: harness-home
-          emptyDir: {}
         - name: workspace
           emptyDir: {}
         - name: server-tmp
           emptyDir: {}
-        - name: harness-tmp
+        {{- range $member := $harnesses }}
+        - name: {{ $member.name }}-home
           emptyDir: {}
+        - name: {{ $member.name }}-tmp
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.runtime.enabled }}
         - name: workspaces
           persistentVolumeClaim:

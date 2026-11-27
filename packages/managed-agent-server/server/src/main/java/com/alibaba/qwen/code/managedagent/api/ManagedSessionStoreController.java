@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.IngestEventsRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.IngestReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RecoveryStateReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RenewWriterRequest;
@@ -22,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStor
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventIngest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
@@ -65,6 +68,8 @@ public class ManagedSessionStoreController {
     private final JdbcSessionResourceObjects resourceObjects;
     @Autowired
     private ManagedSessionModelConfigs modelConfigs;
+    @Autowired
+    private HarnessEventIngest eventIngest;
     @Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
     private boolean wakeDispatch;
     @Value("${qwen.managed-agent.action-parking.enabled:false}")
@@ -186,7 +191,9 @@ public class ManagedSessionStoreController {
         if (grant == null) {
             return null;
         }
-        WriterGrant advertised = wakeDispatch ? grant.withWakeDispatch() : grant;
+        WriterGrant advertised = wakeDispatch
+                ? grant.withWakeDispatch().withSuspensionPlacementRelease()
+                : grant;
         advertised = runtimeObservation ? advertised.withRuntimeObservation() : advertised;
         return actionParking ? advertised.withActionParking() : advertised;
     }
@@ -227,6 +234,18 @@ public class ManagedSessionStoreController {
             @Valid @RequestBody BlockRecoveryRequest request) {
         return store.blockRecovery(tenant.tenantId(), sessionId,
                 writerToken, request);
+    }
+
+    // Not transactional: authentication commits before the events are
+    // recorded, each in the stream consumer's own transactions.
+    @PostMapping("/events:ingest")
+    public IngestReceipt ingestEvents(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
+                    String writerToken,
+            @Valid @RequestBody IngestEventsRequest request) {
+        return eventIngest.ingest(tenant.tenantId(), sessionId, writerToken,
+                request);
     }
 
     @PostMapping({"/transactions:commit", "/transactions:commit-v2"})

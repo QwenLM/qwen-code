@@ -125,7 +125,6 @@ import type {
   HistoryItemToolGroup,
   HistoryItemLlm,
   InlineImageData,
-  LoopDetectionConfirmationRequest,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -184,10 +183,7 @@ import {
   type QueuedMessage,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import {
-  describeLoopStop,
-  formatInteractiveLoopDetectedMessage,
-} from '../../utils/loop-detected-message.js';
+import { formatInteractiveLoopDetectedMessage } from '../../utils/loop-detected-message.js';
 import type { LoopStop } from '../../utils/loop-detected-message.js';
 import {
   LoopReason,
@@ -1535,6 +1531,7 @@ export const useLlmStream = (
     const group = mapTrackedToolCallsToDisplay(
       toolCalls,
       config.getProjectRoot(),
+      config.getProjectMemoryOwner?.(),
     );
     group.batchId = getToolBatchId(toolCalls[0].request.callId);
     return group;
@@ -1552,13 +1549,8 @@ export const useLlmStream = (
   }, [toolCalls]);
 
   const loopDetectedRef = useRef(false);
-  // Type and reason of the stop behind loopDetectedRef, for the dialog and
-  // the message after it.
+  // Type and reason of the stop behind loopDetectedRef, for its message.
   const loopStopRef = useRef<LoopStop | undefined>(undefined);
-  const [
-    loopDetectionConfirmationRequest,
-    setLoopDetectionConfirmationRequest,
-  ] = useState<LoopDetectionConfirmationRequest | null>(null);
 
   const stopRetryCountdownTimer = useCallback(() => {
     if (retryCountdownTimerRef.current) {
@@ -3131,44 +3123,17 @@ export const useLlmStream = (
     [addItem],
   );
 
-  const handleLoopDetectionConfirmation = useCallback(
-    (
-      result: { userSelection: 'disable' | 'keep' },
-      stop: LoopStop | undefined,
-    ) => {
-      setLoopDetectionConfirmationRequest(null);
-
-      if (result.userSelection === 'disable') {
-        config.getLlmClient().getLoopDetectionService().disableForSession();
-        addItem(
-          {
-            type: 'info',
-            text: `Loop detection has been disabled for this session. Please try your request again.`,
-          },
-          Date.now(),
-        );
-      } else {
-        addItem(
-          {
-            type: 'info',
-            text: formatInteractiveLoopDetectedMessage(stop),
-          },
-          Date.now(),
-        );
-      }
-    },
-    [config, addItem],
-  );
-
   const handleLoopDetectedEvent = useCallback(
     (stop: LoopStop | undefined) => {
-      // Show the confirmation dialog to choose whether to disable loop detection
-      setLoopDetectionConfirmationRequest({
-        cause: describeLoopStop(stop),
-        onComplete: (result) => handleLoopDetectionConfirmation(result, stop),
-      });
+      addItem(
+        {
+          type: 'info',
+          text: formatInteractiveLoopDetectedMessage(stop),
+        },
+        Date.now(),
+      );
     },
-    [handleLoopDetectionConfirmation],
+    [addItem],
   );
 
   const handleUserPromptSubmitBlockedEvent = useCallback(
@@ -7082,9 +7047,46 @@ export const useLlmStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
-      const terminatesTurn = llmTools.some(
-        (toolCall) => toolCall.response.terminateTurn === true,
-      );
+      const toolEndsTurn =
+        (shared !== undefined || toolGoalBinding !== undefined) &&
+        llmTools.some((toolCall) => toolCall.response.terminateTurn === true);
+      const quotaSwitchStopsTurn =
+        !toolEndsTurn && modelSwitchedFromQuotaErrorRef.current;
+      // Recheck capacity when the continuation would send. A slot can free
+      // up after the shared batch settled. Scheduler-owned calls can also
+      // be drained with the shared batch and report launches in their results.
+      const backgroundLaunchExhaustedCapacity =
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        llmTools.some((toolCall) =>
+          sharedResultsByCallId.has(toolCall.request.callId)
+            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
+              true
+            : launchedBackgroundAgent(toolCall.request, toolCall.response),
+        ) &&
+        backgroundSlotsSpent(config);
+      const hookStopReason =
+        shared &&
+        !toolEndsTurn &&
+        !quotaSwitchStopsTurn &&
+        !backgroundLaunchExhaustedCapacity
+          ? llmTools.find(
+              (toolCall) => toolCall.response.hookStopReason !== undefined,
+            )?.response.hookStopReason
+          : undefined;
+      if (hookStopReason !== undefined) {
+        addItem(
+          {
+            type: 'info',
+            text: t('A hook stopped the turn: {{reason}}', {
+              reason: hookStopReason,
+            }),
+          },
+          Date.now(),
+        );
+      }
+      // A tool hook's stop ends the turn as a tool that ends it does.
+      const terminatesTurn = toolEndsTurn || hookStopReason !== undefined;
       if (terminatesTurn && toolGoalBinding) {
         llmClient.addHistory({ role: 'user', parts: responsesToSend });
         let goalFinishFailed = false;
@@ -7245,7 +7247,7 @@ export const useLlmStream = (
       // Don't continue if model was switched due to quota error. On the
       // shared loop the results answer the calls in history, as in a Goal
       // turn.
-      if (modelSwitchedFromQuotaErrorRef.current) {
+      if (quotaSwitchStopsTurn) {
         if (shared || toolGoalBinding) {
           llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         }
@@ -7260,16 +7262,6 @@ export const useLlmStream = (
         return;
       }
 
-      // The shared batch noted the launches of the calls it executed; calls
-      // the scheduler ran alone, drained with it, are read from their
-      // results. The slots are checked now, as the continuation would wait.
-      const backgroundLaunchExhaustedCapacity =
-        llmTools.some((toolCall) =>
-          sharedResultsByCallId.has(toolCall.request.callId)
-            ? shared?.backgroundLaunchCallIds.has(toolCall.request.callId) ===
-              true
-            : launchedBackgroundAgent(toolCall.request, toolCall.response),
-        ) && backgroundSlotsSpent(config);
       if (backgroundLaunchExhaustedCapacity) {
         llmClient?.addHistory({ role: 'user', parts: responsesToSend });
         if (toolGoalBinding) {
@@ -7600,6 +7592,7 @@ export const useLlmStream = (
       const toolGroupDisplay = mapTrackedToolCallsToDisplay(
         calls as TrackedToolCall[],
         config.getProjectRoot(),
+        config.getProjectMemoryOwner?.(),
       );
       toolGroupDisplay.batchId = batchId;
       addItem(toolGroupDisplay, Date.now());
@@ -8813,7 +8806,6 @@ export const useLlmStream = (
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,
     activePtyId,
-    loopDetectionConfirmationRequest,
     streamingResponseLengthRef,
     isReceivingContent,
     /** True once the user cancels the current turn; reset when one starts. */

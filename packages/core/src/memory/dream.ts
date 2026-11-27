@@ -6,18 +6,25 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
-  getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildProjectMemoryIndexLocked,
+} from './indexer.js';
+import {
+  markProjectMemoryIndexPendingLocked,
+  updateProjectMemoryMetadata,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
+import type { AutoMemoryType } from './types.js';
 import { logMemoryDream, MemoryDreamEvent } from '../telemetry/index.js';
 import * as path from 'node:path';
 import {
@@ -60,6 +67,7 @@ export interface DreamSnapshotEntry {
 export async function snapshotDreamFiles(
   memoryRoot: string,
   scope: 'project' | 'user' = 'project',
+  owner?: ProjectMemoryOwner,
 ): Promise<Map<string, DreamSnapshotEntry>> {
   // Enumerate through the trusted helper every other memory scanner uses: a
   // directory named `*.md` or an unreadable file must not fail the whole
@@ -69,7 +77,7 @@ export async function snapshotDreamFiles(
   // refused, matching the scan and write paths.
   const files = await listTrustedMemoryMarkdownFiles(
     memoryRoot,
-    getMemoryRootTrustedAnchor(memoryRoot),
+    getMemoryRootTrustedAnchor(memoryRoot, owner),
     AUTO_MEMORY_INDEX_FILENAME,
     { followRootSymlink: scope === 'user' },
   );
@@ -207,20 +215,24 @@ async function runDreamByAgent(
   projectRoot: string,
   config: Config,
   abortSignal?: AbortSignal,
-  options: { suppressChatRecording?: boolean } = {},
+  options: {
+    suppressChatRecording?: boolean;
+    projectMemoryOwner?: ProjectMemoryOwner;
+  } = {},
 ): Promise<AutoMemoryDreamResult> {
-  const memoryRoot = getAutoMemoryRoot(projectRoot);
+  const owner = options.projectMemoryOwner;
+  const memoryRoot = getAutoMemoryRoot(projectRoot, owner);
   await fs.rm(path.join(memoryRoot, DREAM_OPERATIONS_FILENAME), {
     force: true,
   });
-  const before = await snapshotDreamFiles(memoryRoot);
+  const before = await snapshotDreamFiles(memoryRoot, 'project', owner);
   let result;
   try {
     result = await planManagedAutoMemoryDreamByAgent(
       config,
       projectRoot,
       abortSignal,
-      { suppressChatRecording: options.suppressChatRecording },
+      options,
     );
   } catch (error) {
     await fs
@@ -231,7 +243,7 @@ async function runDreamByAgent(
   let operations: AppliedDreamOperations;
   let after: Map<string, DreamSnapshotEntry>;
   try {
-    const written = await snapshotDreamFiles(memoryRoot);
+    const written = await snapshotDreamFiles(memoryRoot, 'project', owner);
     const writtenPaths = dreamRelativePaths(
       memoryRoot,
       result.filesWritten ?? result.filesTouched,
@@ -246,8 +258,23 @@ async function runDreamByAgent(
       skipPreviouslyInvalid: true,
     });
     abortSignal?.throwIfAborted();
-    operations = await applyDreamOperations(memoryRoot, before, abortSignal);
-    after = await snapshotDreamFiles(memoryRoot);
+    operations = await withProjectMemoryCommit(
+      memoryRoot,
+      async () => {
+        const applied = await applyDreamOperations(
+          memoryRoot,
+          before,
+          abortSignal,
+          () => markProjectMemoryIndexPendingLocked(memoryRoot, owner),
+        );
+        if (applied.deletedPaths.length > 0) {
+          await rebuildProjectMemoryIndexLocked(memoryRoot, owner);
+        }
+        return applied;
+      },
+      owner,
+    );
+    after = await snapshotDreamFiles(memoryRoot, 'project', owner);
     for (const deletedPath of operations.deletedPaths) {
       writtenPaths.add(deletedPath);
     }
@@ -290,6 +317,7 @@ export async function runManagedAutoMemoryDream(
   abortSignal?: AbortSignal,
   options: {
     trigger?: 'auto' | 'manual';
+    projectMemoryOwner?: ProjectMemoryOwner;
     recordMetadata?: boolean;
     suppressChatRecording?: boolean;
     // Manual runs pass the session so the metadata's same-session dedupe
@@ -303,7 +331,8 @@ export async function runManagedAutoMemoryDream(
     migrationStalled?: boolean;
   } = {},
 ): Promise<AutoMemoryDreamResult> {
-  await ensureAutoMemoryScaffold(projectRoot, now);
+  const owner = options.projectMemoryOwner ?? config?.getProjectMemoryOwner?.();
+  await ensureAutoMemoryScaffold(projectRoot, now, owner);
   const t0 = Date.now();
 
   if (!config) {
@@ -329,8 +358,10 @@ export async function runManagedAutoMemoryDream(
     config.getMemoryRecallMode() !== 'structured' &&
     (
       await scanMemoryMetadataMigrationCandidates(
-        getAutoMemoryRoot(projectRoot),
+        getAutoMemoryRoot(projectRoot, owner),
         'project',
+        abortSignal,
+        owner,
       )
     ).length > 0
   ) {
@@ -349,6 +380,7 @@ export async function runManagedAutoMemoryDream(
 
   const agentResult = await runDreamByAgent(projectRoot, config, abortSignal, {
     suppressChatRecording: options.suppressChatRecording,
+    projectMemoryOwner: owner,
   });
   // Cancel-aware ordering:
   //   1. If aborted before this point, return the agent's partial result
@@ -375,7 +407,7 @@ export async function runManagedAutoMemoryDream(
     agentResult.touchedTopics.length > 0 ||
     agentResult.hasFilesystemChanges === true;
   if (hasChanges) {
-    await rebuildManagedAutoMemoryIndex(projectRoot);
+    await rebuildManagedAutoMemoryIndex(projectRoot, owner);
   }
   if (options.recordMetadata) {
     await updateDreamMetadataResult(
@@ -384,6 +416,7 @@ export async function runManagedAutoMemoryDream(
       agentResult.touchedTopics,
       options.sessionId,
       hasChanges,
+      owner,
     );
   }
 
@@ -411,23 +444,24 @@ async function updateDreamMetadataResult(
   touchedTopics: AutoMemoryType[],
   sessionId?: string,
   hasChanges = touchedTopics.length > 0,
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
-    const content = await fs.readFile(metadataPath, 'utf-8');
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    metadata.lastDreamAt = now.toISOString();
-    metadata.lastDreamTouchedTopics = touchedTopics;
-    metadata.lastDreamStatus = hasChanges ? 'updated' : 'noop';
-    if (sessionId !== undefined) {
-      metadata.lastDreamSessionId = sessionId;
-      metadata.recentSessionIdsSinceDream = [];
-    }
-    await atomicWriteFile(
-      metadataPath,
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      { encoding: 'utf-8' },
+    await updateProjectMemoryMetadata(
+      projectRoot,
+      now,
+      (metadata) => {
+        const iso = now.toISOString();
+        if (metadata.lastDreamAt && metadata.lastDreamAt > iso) return;
+        metadata.lastDreamAt = iso;
+        metadata.lastDreamTouchedTopics = touchedTopics;
+        metadata.lastDreamStatus = hasChanges ? 'updated' : 'noop';
+        if (sessionId !== undefined) {
+          metadata.lastDreamSessionId = sessionId;
+          metadata.recentSessionIdsSinceDream = [];
+        }
+      },
+      owner,
     );
   } catch {
     // Best-effort metadata bump.
@@ -445,6 +479,14 @@ export async function writeDreamManualRunToMetadata(
   projectRoot: string,
   sessionId: string,
   now = new Date(),
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  return updateDreamMetadataResult(projectRoot, now, [], sessionId);
+  return updateDreamMetadataResult(
+    projectRoot,
+    now,
+    [],
+    sessionId,
+    false,
+    owner,
+  );
 }

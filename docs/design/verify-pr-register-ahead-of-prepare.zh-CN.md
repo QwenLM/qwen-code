@@ -54,7 +54,19 @@ prior?.artifactDir ?? null`——标记优先，再先前判定，再无），�
 
 ### Skill 契约（`.qwen/skills/verify-pr/SKILL.md`）
 
-watch prompt 与手动复验步骤均改为：
+**当前契约／迁移说明（后来加入的 preflight）：** 下列编号命令保留原始提案
+及当时的 CLI 演进，不应按字面替代现行规则。注册若使用显式外部／受信
+`--state-root`，之后的每次 start、完成／replay、release 与 restart 都必须
+使用完全相同的 root。真正旧的默认可信 clone/container 调用继续保持原来的
+省略形式，不因此新增必填项。带 nonce 的状态条目必须给出精确匹配的
+`--registration-nonce`；旧的裸 prompt 必须找回那一次 start 的输出，或只读
+同一 root 中匹配的 live／verified 条目并显式传值，不能从当前状态推断。
+只有确实没有 `registrationNonce` 的 legacy 条目，才可对同一
+head/round/root 省略该参数。评论批准仍要求 legacy 在飞条目先 release 并
+restart，取得新 nonce 与新标记。成功的 withheld/no-publish 轮次以不带
+comment ID 的 complete 完成并保留 `commentId: null`，而不是 release。
+
+watch prompt 与手动复验步骤均改为（历史提案）：
 
 1. **先注册**：`verify-pr-watch-state.mjs <n> --start --head <H> --round <r>
 --repo <owner>/<repo>`（不带 `--artifact-dir`——prepare 尚未运行）。
@@ -64,20 +76,27 @@ watch prompt 与手动复验步骤均改为：
 --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
    ——目录在此记录（可选：重放完成省略它以继承已记录的目录）。
 
+**对下文历史「从不读取」表述的现行修正：** container-only prepare 保留原提案
+不读注册状态的行为，local-trust 也不取注册锁；但协调后的 comment 批准 prepare
+现在会只读检查 live registration——在最后一次网络应答后取得状态锁，复核同一
+显式 root 的 head/round/nonce，并在任何 authority 写入前拒绝陈旧身份。因此瞬时
+重试保留并再次校验该注册，而不是绕过它。
+
 新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**按轮次状态恢复。
 *瞬时*失败（轮次仍在运行）时标记完好——prepare 从不读 watch 状态——故直接对完好
 标记重试 prepare 并按原轮次完成，无需 release（第 7 轮）；先 release 会使 head 在
 release 与重启之间失去记录，若在该窗口被杀则重新打开静默丢弃。*已死*的轮次用
 `--release --head <H> --round <r> --repo <owner>/<repo>` **并随后重新启动该
-head**（`--start --head <H> --round <r+1> --repo <owner>/<repo>`）再重试 prepare。
-单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
+head**（`--start --head <H> --round <r> --repo <owner>/<repo>`）再重试 prepare。
+重启保持同一轮次编号；新的 registrationNonce 才是新鲜度边界。`<r+1>` 仍是评论
+批准的显式可选路径，但必须在 `<r+1>` 重新注册并重新标记。单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
 deferral，且无任何动词打印它——故 head 失去记录，而探针游标已越过它，不会再有
 触发投递它（R1-1 第 2 轮）。release 必须与重启成对，正如本文件死轮段落把两者
 成对写出。`--start` 记录 repo 后两者 `--repo` 必填；每个动词都对已记录 repo 拒绝
 省略 `--repo`）。用 `--release` + 重启，**而非** `--complete inconclusive`：
 inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），
 故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。重启后的轮次
-编号（`<r+1>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
+编号（`<r>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
 分支：若 prepare 因点名的 head 不是本轮注册的 head 而拒绝——前移或 force-push；
 prepare 从实时 `gh pr view` 重取 `headRefOid`、精确相等判定、不含顺序信息——注册的
 head 永远无法 prepare：`--release` 它（带标记的 `--round`）且**不要**重启（R9-1
@@ -118,7 +137,7 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   `--artifact-dir`；`--complete` 命令钉加上 `--artifact-dir <dir>`；**位置**钉
   断言注册句先于每节的 `Then run prepare` 句（watch 用 `<headSha>`、手动用
   `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo` **及重启子句**
-  （`--start … --round <r+1>`；删任一变红）；watch prompt 的 exit-3 死标记条目
+  （`--start … --round <r>`；删任一变红）；watch prompt 的 exit-3 死标记条目
   钉住完整 `--release … --repo` 形式（R2-1）。第 6 轮加按节切片的钉，使共享句在
   一节的副本不为另一节作不在场证明：无 `--artifact-dir` 不变量与重放省略子句各钉
   在本节切片上，错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
@@ -199,4 +218,4 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
   head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
   `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
-  （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。
+  （`--start … --round <r>`）——单独 release 会让 head 失去记录。

@@ -28,6 +28,12 @@ const beta = 'model-beta(anthropic)';
 const gamma = 'model-gamma(openai)';
 const models = [
   { id: alpha, label: 'Example Alpha' },
+  ...(params.has('manyModels')
+    ? Array.from({ length: 12 }, (_, index) => ({
+        id: `model-extra-${index}(openai)`,
+        label: `Example Extra ${index + 1}`,
+      }))
+    : []),
   { id: beta, label: 'Example Beta' },
 ];
 const unavailableModels = [
@@ -63,6 +69,7 @@ const mountHeader: WebShellModelPickerMount<WebShellModelPickerContext> = (
   const text = container.ownerDocument.createElement('span');
   text.dataset.demoHeader = pane(initial);
   text.style.cssText = 'display:block;padding:8px;font-size:12px';
+  if (params.has('tallHeader')) text.style.minHeight = '220px';
   container.append(text);
   const update = (context: WebShellModelPickerContext) => {
     text.textContent = `${pane(context)}: ${context.currentModelId ?? 'none'}`;
@@ -103,7 +110,12 @@ const mountRow: WebShellModelPickerMount<WebShellModelPickerItemContext> = (
   const rate = document.createElement('span');
   rate.textContent = '0.5×';
   rate.style.marginLeft = 'auto';
-  content.append(label, badge, rate);
+  const description = document.createElement('span');
+  description.id = `${initial.sessionId}-${initial.model.id}-rate`;
+  description.className = 'sr-only';
+  description.textContent = 'Special rate of 0.5×.';
+  initial.rowElement.setAttribute('aria-describedby', description.id);
+  content.append(label, badge, rate, description);
   container.append(content);
 
   const card = document.createElement('div');
@@ -195,6 +207,7 @@ const mountRow: WebShellModelPickerMount<WebShellModelPickerItemContext> = (
       initial.rowElement.removeEventListener('focus', focus);
       initial.rowElement.removeEventListener('blur', leave);
       initial.rowElement.removeEventListener('click', touch);
+      initial.rowElement.removeAttribute('aria-describedby');
       card.remove();
       content.remove();
     },

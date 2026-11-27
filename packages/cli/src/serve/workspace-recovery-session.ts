@@ -73,7 +73,10 @@ import {
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
-import { readHostedSkills } from './hosted-skill-catalog.js';
+import {
+  parseSessionSkillsRef,
+  readHostedSkills,
+} from './hosted-skill-catalog.js';
 import {
   hasHostedExternalExcludedOptions,
   isHostedWorkspaceExternalProfile,
@@ -316,6 +319,21 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
     checkpoint.followUp.notificationIds.length === 0 &&
     checkpoint.followUp.childRunIds.length === 0
   );
+}
+
+/**
+ * Whether the definition's Session Skills reference passes the same parse the
+ * resident load applies. A malformed reference rejects through the gate's own
+ * vocabulary instead of escaping with the parser's message.
+ */
+function admitsSessionSkillsRef(ref: unknown): boolean {
+  if (ref === undefined) return true;
+  try {
+    parseSessionSkillsRef(ref);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function verifyRecoverySession(
@@ -855,6 +873,13 @@ export async function verifyRecoverySession(
               definition,
               definition['toolProfile'],
             )) &&
+          // The external lanes admit a Session skill catalog, so the malformed
+          // reference the exclusion list used to reject needs its own check:
+          // the resident load parses the same field and would fail every turn.
+          // Deliberately every hosted profile, not just external: a definition
+          // that reaches recovery carrying a broken reference must be refused
+          // whatever lane wrote it.
+          admitsSessionSkillsRef(definition['sessionSkillsRef']) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',

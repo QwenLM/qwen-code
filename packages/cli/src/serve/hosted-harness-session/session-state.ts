@@ -64,6 +64,7 @@ import type {
   HostedShellTurnOptions,
   HostedWorkspaceToolProfile,
 } from '../hosted-workspace-tool-turn.js';
+import type { HostedEventIngest } from './event-ingest.js';
 
 export interface HostedSession {
   placement?: HostedHarnessPlacement;
@@ -105,6 +106,8 @@ export interface HostedSession {
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
+  /** Event-ingest pushers by prompt; each also stops through `streams`. */
+  eventIngests?: Map<string, HostedEventIngest>;
   active?: { promptId: string; digest: string; abort: AbortController };
   deadlineTimer?: NodeJS.Timeout;
   admissions: Map<string, { digest: string; lastEventId: number }>;
@@ -114,6 +117,8 @@ export interface HostedSession {
    * until the block clears. Only `managed_session_store_unavailable` goes
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
+  /** Original prompt parked by a Broker that has yet to adopt its Runtime. */
+  runtimeRecoveryPromptId?: string;
   /** The one A6 block whose pre-aborted managed cancel can still settle. */
   recoveryCancelPromptId?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;

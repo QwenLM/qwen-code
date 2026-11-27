@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type { HostedHarnessReleaseReceipt } from '@qwen-code/qwen-code-core/managed-runtime/hosted-harness-release.js';
 import type { ManagedSessionWakeStamp } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import {
@@ -18,7 +19,10 @@ import {
   hostedCommandStepResumeShapeRefusal,
 } from '../hosted-action-parking.js';
 import { findHostedApprovalContinuation } from '../hosted-approval-continuation.js';
-import { detachBackgroundPublishers } from '../hosted-background-delivery-recovery.js';
+import {
+  detachBackgroundPublishers,
+  resolveBackgroundRuntimeSessions,
+} from '../hosted-background-delivery-recovery.js';
 import type { HostedHarnessInstance } from '../hosted-harness-instance.js';
 import { wakeHasPriorAttempt } from '../hosted-monitor-wake.js';
 import {
@@ -39,12 +43,18 @@ import {
   hasHostedCleanupDebtExcluding,
 } from '../hosted-turn-cleanup.js';
 import { pendingSessionInputs } from '../hosted-wake-intake.js';
-import type { HostedWorkspaceBrokerOptions } from '../hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
+  type HostedWorkspaceBrokerOptions,
+} from '../hosted-workspace-broker.js';
 import { isHostedWorkspacePublicShellProfile } from '../hosted-workspace-profiles.js';
 import { compressionBusy } from './lifecycle-routes.js';
 import {
   type HostedRuntimeOwnership,
+  releaseIsSatisfied,
   retryHostedCleanup,
+  sessionReloadStableOwnerIds,
 } from './runtime-ownership.js';
 import type {
   HostedHarnessSessionOptions,
@@ -454,6 +464,46 @@ export function createHostedSessionSuspension({
       isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2);
 
+  const releaseSettledMonitorHold = async (
+    session: HostedSession,
+    broker: HostedWorkspaceBrokerOptions,
+    promptId: string,
+  ): Promise<void> => {
+    const separator = promptId.lastIndexOf(':notify:');
+    if (separator < 0 || session.heldRuntimeTurns.size === 0) return;
+    const monitorId = promptId.slice(0, separator);
+    const run = session.monitors?.record(monitorId)?.run;
+    if (run?.execution !== 'settled' || !run.runtime) return;
+    const runtimeIds = await resolveBackgroundRuntimeSessions(
+      session.managed,
+      new Set([monitorId]),
+    );
+    const stableOwners = sessionReloadStableOwnerIds(session);
+    const currentRuntimeId = hostedRuntimeSessionId(promptId);
+    for (const held of session.heldRuntimeTurns) {
+      const runtimeId = hostedRuntimeSessionId(held);
+      if (
+        runtimeId === currentRuntimeId ||
+        !runtimeIds.has(runtimeId) ||
+        stableOwners.has(runtimeId)
+      )
+        continue;
+      try {
+        await new HostedWorkspaceBroker(
+          broker,
+          session.managed.authority.sessionHeader.sessionKey,
+          runtimeId,
+        ).release({
+          bindingId: run.runtime.runtimeBindingId,
+          generation: run.runtime.generation,
+        });
+      } catch (cause) {
+        if (!releaseIsSatisfied(cause)) continue;
+      }
+      session.heldRuntimeTurns.delete(held);
+    }
+  };
+
   const attemptSuspend = async (sessionId: string): Promise<void> => {
     const session = sessions.get(sessionId);
     const suspension = suspensions.get(sessionId);
@@ -469,6 +519,8 @@ export function createHostedSessionSuspension({
       owners: false,
       lease: false,
       publishers: false,
+      quiesced: false,
+      sealed: false,
       writer: false,
     };
     // The background certificate is re-derived on every eligibility pass,
@@ -537,6 +589,17 @@ export function createHostedSessionSuspension({
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
             pending.some((input) => input.turnId !== park.promptId);
+          // A Monitor may exit after emitting this wake. Its terminal no longer
+          // certifies a background hold, but the originating Runtime still needs
+          // a confirmed release before the wake's approval can park.
+          if (
+            !marked &&
+            !blocked &&
+            !backgroundCertified &&
+            broker &&
+            pending.some((input) => input.source === 'monitor')
+          )
+            await releaseSettledMonitorHold(session, broker, park.promptId);
           if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
           return blocked;
         }
@@ -655,7 +718,17 @@ export function createHostedSessionSuspension({
             await session.backgroundLane?.publisher?.close();
             done.publishers = true;
           }
-          if (!done.writer) {
+          const placement =
+            session.stores?.supportsSuspensionPlacementRelease?.() === true
+              ? session.placement
+              : undefined;
+          if (!done.sealed) {
+            // A pusher's live-writer request would race the seal; a parked
+            // Turn's pusher posts its marker after the seal instead.
+            for (const ingest of session.eventIngests?.values() ?? [])
+              await ingest.pause();
+            if (actionPark)
+              await session.eventIngests?.get(actionPark.promptId)?.flush();
             // The writer lease's own renewal timer lives in the Store client,
             // not in the activation renewal below. End it before the release
             // and seal so a failure here leaves a lease that lapses instead of
@@ -664,6 +737,11 @@ export function createHostedSessionSuspension({
             // Outside the authority serial queue: the renewal runs inside
             // it, so waiting from within would deadlock.
             await session.managed.stopRenewal();
+            if (placement !== undefined && !done.quiesced) {
+              session.ownershipRelease ??= { operationId: randomUUID() };
+              await session.stores!.quiesceOwnership(placement);
+              done.quiesced = true;
+            }
             await session.managed.releaseActivation();
             // The memoized seal: a retry reconciles this same seal. The wake
             // stamp is what the pump would pick from the prefix this seal
@@ -704,8 +782,30 @@ export function createHostedSessionSuspension({
                     };
             }
             await session.managed.authority.close(wake);
-            done.writer = true;
+            done.sealed = true;
           }
+          // The park marker rides the sealed incarnation, which the
+          // placement release below fences.
+          if (actionPark)
+            await session.eventIngests?.get(actionPark.promptId)?.park();
+          if (placement !== undefined) {
+            const release = session.ownershipRelease!;
+            release.proof ??= session.managed.authority.commitProof;
+            try {
+              release.result ??= session.stores!.releaseOwnership({
+                ...placement,
+                operationId: release.operationId,
+                commitProof: release.proof,
+              });
+              await release.result;
+            } catch (cause) {
+              release.result = undefined;
+              throw cause;
+            }
+          }
+          // A confirmed seal makes placement release independently retryable;
+          // activation release and the seal must not run again for its retry.
+          done.writer = true;
           // Only after every step confirmed: stopLocal fences the seal
           // reconciliation requests too, so it must come last.
           await session.stores!.stopLocal();
