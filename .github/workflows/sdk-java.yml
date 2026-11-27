@@ -934,7 +934,7 @@ jobs:
             port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${container}")"
             echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"
           done
-      - name: 'Configure the database packet budget for large-object tests'
+      - name: 'Configure the database packet budget and the managed OSS test database'
         run: |-
           # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
           # query, so the budget must sit above it: the inventory's byte-limit
@@ -943,6 +943,13 @@ jobs:
           for fork in 1 2; do
             docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
           done
+          # Pre-provisioned for #17471, which moves SessionOssStorageMySqlIT
+          # from the isolated schema helper onto the O4 settings. That class
+          # validates qwen.o4.mysql.url and rejects createDatabaseIfNotExist,
+          # so the database must exist before Maven connects. No *MySqlIT on
+          # main reads the O4 settings yet; the -Po4-mysql-gates lane keeps
+          # its own copy of this database.
+          docker exec "${MYSQL_CONTAINER}-1" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE IF NOT EXISTS qwen_o4_ci"'
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -981,6 +988,9 @@ jobs:
           # resolve from this job's seeded copy (pinned in
           # scripts/tests/sdk-java-workflow.test.js).
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+          # Password for the -Dqwen.o4.mysql.url below, read from the
+          # environment by the O4 helper that #17471 moves the OSS IT onto.
+          QWEN_O4_MYSQL_PASSWORD: 'runtime-broker'
         run: |-
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
@@ -1027,12 +1037,19 @@ jobs:
             if [ "${mvn_status}" -eq 0 ]; then
               # Keep mysql.url for release runs that check out an older tag.
               mvn_stage='mysql integration suite'
+              # #17471 moves SessionOssStorageMySqlIT onto these O4 settings,
+              # which the O4 URL validator only accepts against an existing
+              # database; until then no *MySqlIT here reads them.
+              # SessionOssStorageMySqlIT is a non-Hosted *MySqlIT, so the split
+              # roster expects it in this lane.
               mvn --batch-mode --no-transfer-progress -Pmysql-integration \
                 -Dmysql.integration.forks=2 \
                 -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
                 -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-                -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check || mvn_status=$?
+                -Dmysql.user=root -Dmysql.password=runtime-broker \
+                -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dqwen.o4.mysql.user=root clean verify checkstyle:check || mvn_status=$?
             fi
           fi
           # Only the write-back mutates host-shared state, so only it takes

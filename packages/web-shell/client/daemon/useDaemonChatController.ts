@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type {
+  Admission,
   ChatCapabilities,
   ChatStatusFacts,
   PendingApproval,
   PendingQuestion,
   SessionChatController,
 } from '../chat-core/contract.js';
-import type { DaemonPromptSettledEvent } from './session/types.js';
+import type {
+  DaemonConnectionState,
+  DaemonPromptSettledEvent,
+  DaemonSessionActions,
+} from './session/types.js';
 import {
   regionsToCapabilities,
   type ChatRegion,
@@ -27,6 +32,7 @@ import {
   useDaemonPromptSettled,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptHistory,
+  useOptionalDaemonPromptSettled,
 } from './session/DaemonSessionProvider.js';
 import {
   createDaemonChatController,
@@ -34,10 +40,42 @@ import {
   type DaemonPromptSettlement,
 } from './chat-controller.js';
 import { DAEMON_CHAT_CAPABILITY_MAP } from './chat-capabilities.js';
-import {
-  derivePermissionSignals,
-  questionSubmitOptionId,
-} from './permission-signals.js';
+import { derivePermissionSignals } from './permission-signals.js';
+
+export interface DaemonChatControllerFromStateOptions {
+  readonly connection: Pick<
+    DaemonConnectionState,
+    | 'sessionId'
+    | 'workspaceCwd'
+    | 'capabilities'
+    | 'loadingTranscript'
+    | 'missingSession'
+    | 'planExecutionMode'
+  >;
+  readonly actions: Pick<
+    DaemonSessionActions,
+    'cancel' | 'submitPermission' | 'respondToPermission'
+  > &
+    Partial<Pick<DaemonSessionActions, 'submitPrompt'>>;
+  readonly transcriptHistory: Pick<
+    ReturnType<typeof useDaemonTranscriptHistory>,
+    'hasMore' | 'loading' | 'capacityReached' | 'paginationError' | 'loadMore'
+  >;
+  readonly messages: SessionChatController['messages'];
+  readonly pendingApprovals: readonly PendingApproval[];
+  readonly pendingQuestions: readonly PendingQuestion[];
+  readonly pendingSignature: string;
+  readonly transcriptState?: SessionChatController['transcriptState'];
+  readonly submitPermission?: (
+    requestId: string,
+    optionId: string,
+  ) => Promise<Admission>;
+}
+
+const DEFAULT_STATUS_FACTS: ChatStatusFacts = {
+  queueLength: 0,
+  goalActive: false,
+};
 
 interface LiveFacts {
   messages: SessionChatController['messages'];
@@ -70,80 +108,28 @@ function capabilitiesFromFeatures(
   return regionsToCapabilities(regions);
 }
 
-/**
- * Binds the daemon session provider to the backend-neutral chat controller
- * (slice 2d). It constructs {@link createDaemonChatController} once per session
- * and feeds it live provider facts, wiring the intent transports to the session
- * actions and deriving the two evidence channels the provider does not expose
- * explicitly: prompt settlement comes from the terminal-event subscription, and
- * approval currency / decision settlement are derived from the pending-permission
- * set (see {@link derivePermissionSignals}).
- *
- * The optional capability-gated sub-controllers (model / approval-mode / context
- * usage / session ops) are not bound yet; their regions stay hidden until a later
- * increment wires them, so this binding is additive and renders nothing on its own.
- */
-export function useDaemonChatController(): SessionChatController {
-  const { t } = useI18n();
-  const connection = useDaemonConnection();
-  const actions = useDaemonActions();
-  const blocks = useDaemonTranscriptBlocks();
-  const pendingPermissions = useDaemonPendingPermissions();
-  const transcriptHistory = useDaemonTranscriptHistory();
-  const messages = useMessagesFromBlocks(t, blocks);
-
+function useDaemonChatControllerCore({
+  connection,
+  actions,
+  transcriptHistory,
+  messages,
+  pendingApprovals,
+  pendingQuestions,
+  pendingSignature,
+  transcriptState,
+  submitPermission: submitPermissionOverride,
+}: DaemonChatControllerFromStateOptions): {
+  readonly controller: SessionChatController;
+  readonly onPromptSettled: (event: DaemonPromptSettledEvent) => void;
+} {
   const sessionId = connection.sessionId;
-  const pendingSplitRef = useRef<{
-    signature: string;
-    pendingApprovals: readonly PendingApproval[];
-    pendingQuestions: readonly PendingQuestion[];
-  } | null>(null);
-  // Questions are permission blocks too; split them from tool approvals the same
-  // way the existing UI does, so a question is answered with answers rather than
-  // routed through the approval lane as a bare vote. The provider re-runs its
-  // uncached pending selector on every streaming delta, so `pendingPermissions`
-  // arrives as a fresh array even when the pending content is unchanged. Key the
-  // split on a content signature (request id + question/approval classification
-  // + a cheap payload revision) cached in a ref, so the array identities — and
-  // the derivation effect below — stay stable across those deltas. The signature
-  // is content-derived, not id-derived: a re-emitted request under the same id
-  // can change its classification or its title/options, and the revision term
-  // (updatedAt + title + option ids) forces a re-extraction so the cached
-  // render-ready request never goes stale. Classification and the revision use
-  // cheap block-level reads rather than the full payload extraction, so a delta
-  // does not re-serialize each payload.
-  const classifiedPending = pendingPermissions.map((permission) => ({
-    block: permission,
-    id: permission.requestId,
-    isQuestion: isAskUserPermissionBlock(permission),
-  }));
-  const pendingSignature = classifiedPending
-    .map(
-      ({ block, id, isQuestion }) =>
-        `${id}:${isQuestion ? 'q' : 'a'}:${pendingPermissionRevision(block)}`,
-    )
-    .join('|');
-  let pendingSplit = pendingSplitRef.current;
-  if (!pendingSplit || pendingSplit.signature !== pendingSignature) {
-    const approvals: PendingApproval[] = [];
-    const questions: PendingQuestion[] = [];
-    for (const { block, id, isQuestion } of classifiedPending) {
-      // The render-ready request is extracted only on a content change (the
-      // signature cache), not per streaming delta. Pending blocks are unresolved
-      // by the selector, so the extraction yields a request.
-      const request = extractPendingPermission([block]);
-      if (!request) continue;
-      if (isQuestion) questions.push({ id, request });
-      else approvals.push({ id, status: 'pending', request });
-    }
-    pendingSplit = {
-      signature: pendingSignature,
-      pendingApprovals: approvals,
-      pendingQuestions: questions,
-    };
-    pendingSplitRef.current = pendingSplit;
-  }
-  const { pendingApprovals, pendingQuestions } = pendingSplit;
+  const resolvedTranscriptState: SessionChatController['transcriptState'] =
+    transcriptState ??
+    (connection.missingSession
+      ? 'error'
+      : connection.loadingTranscript
+        ? 'loading'
+        : 'ready');
 
   const factsRef = useRef<LiveFacts>({
     messages,
@@ -154,7 +140,7 @@ export function useDaemonChatController(): SessionChatController {
     historyPaginationError: false,
     pendingApprovals,
     pendingQuestions,
-    statusFacts: { queueLength: 0, goalActive: false },
+    statusFacts: DEFAULT_STATUS_FACTS,
     capabilities: regionsToCapabilities([]),
     settledPhase: 'idle',
   });
@@ -163,20 +149,14 @@ export function useDaemonChatController(): SessionChatController {
     // Only a missing session makes the transcript unavailable; a plain
     // connection error keeps the transcript readable (the surfaces render a
     // banner over it), so it must not collapse the transcript to an error view.
-    transcriptState: connection.missingSession
-      ? 'error'
-      : connection.loadingTranscript
-        ? 'loading'
-        : 'ready',
+    transcriptState: resolvedTranscriptState,
     hasOlderHistory: transcriptHistory.hasMore,
     loadingOlderHistory: transcriptHistory.loading,
     historyCapacityReached: transcriptHistory.capacityReached,
     historyPaginationError: transcriptHistory.paginationError,
     pendingApprovals,
     pendingQuestions,
-    // Queue length and goal activity are surfaced by the ChatSurface increment;
-    // the provider exposes no direct selector/hook for them yet.
-    statusFacts: { queueLength: 0, goalActive: false },
+    statusFacts: DEFAULT_STATUS_FACTS,
     capabilities: capabilitiesFromFeatures(
       connection.capabilities?.features ?? [],
     ),
@@ -189,11 +169,11 @@ export function useDaemonChatController(): SessionChatController {
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
 
-  const pendingPermissionsRef = useRef(pendingPermissions);
-  pendingPermissionsRef.current = pendingPermissions;
-
   const transcriptHistoryRef = useRef(transcriptHistory);
   transcriptHistoryRef.current = transcriptHistory;
+
+  const submitPermissionOverrideRef = useRef(submitPermissionOverride);
+  submitPermissionOverrideRef.current = submitPermissionOverride;
 
   const promptListenerRef = useRef<
     ((e: DaemonPromptSettlement) => void) | undefined
@@ -270,13 +250,15 @@ export function useDaemonChatController(): SessionChatController {
           ? livePromptsBySessionRef.current.get(boundSessionId)
           : undefined,
         async submitPrompt(input, onAdmitted) {
+          const submit = actionsRef.current.submitPrompt;
+          if (!submit) return 'rejected';
           const settledDuringSubmit = new Set<string>();
           pendingSubmitSettledRef.current.add(settledDuringSubmit);
           try {
             // submitPrompt is non-blocking and resolves the prompt id; it does
             // not invoke an onAdmitted option (only sendPrompt does), so bind
             // the id from the resolved result.
-            const accepted = await actionsRef.current.submitPrompt(input.text, {
+            const accepted = await submit(input.text, {
               images: input.images ? [...input.images] : undefined,
               files: input.files ? [...input.files] : undefined,
               // The composer's @-file references reach the daemon only through
@@ -318,14 +300,26 @@ export function useDaemonChatController(): SessionChatController {
         async submitPermission(requestId, optionId) {
           answeredRef.current.add(requestId);
           try {
+            const override = submitPermissionOverrideRef.current;
+            if (override) {
+              const admission = await override(requestId, optionId);
+              if (admission !== 'accepted') {
+                answeredRef.current.delete(requestId);
+              }
+              return admission;
+            }
             // A plan approval must carry the CURRENT expectedPlanExecutionMode;
             // the core denies an ExitPlanMode approve without it. submitPermission
             // cannot carry that field, so vote through respondToPermission with
             // the mode read per call, exactly like the existing surfaces.
-            const block = pendingPermissionsRef.current.find(
-              (candidate) => candidate.requestId === requestId,
-            );
-            const permission = block ? extractPendingPermission([block]) : null;
+            const permission =
+              factsRef.current.pendingApprovals.find(
+                (candidate) => candidate.id === requestId,
+              )?.request ??
+              factsRef.current.pendingQuestions.find(
+                (candidate) => candidate.id === requestId,
+              )?.request ??
+              null;
             const option = permission?.options.find((o) => o.id === optionId);
             const planMode = connectionRef.current.planExecutionMode;
             const approvesPlan =
@@ -354,21 +348,18 @@ export function useDaemonChatController(): SessionChatController {
           // the answers attached — the same wire shape AskUserQuestion uses.
           // Voting with no optionId sends a 'cancelled' outcome, which discards
           // the answers and cancels the question, so require the submit option.
-          const submitOptionId = questionSubmitOptionId(
-            pendingPermissionsRef.current,
-            requestId,
-          );
+          const permission = factsRef.current.pendingQuestions.find(
+            (candidate) => candidate.id === requestId,
+          )?.request;
+          const submitOptionId = permission?.options.find(
+            (option) => option.kind === 'allow_once',
+          )?.id;
           if (!submitOptionId) return 'rejected';
           // The daemon keys answers by the question's decimal index (the shape
           // AskUserQuestion.buildResult emits); an id-shaped key would be
           // silently discarded while the vote still succeeds, so validate each
           // questionId against the question count instead.
-          const permission = pendingPermissionsRef.current.find(
-            (candidate) => candidate.requestId === requestId,
-          );
-          const questions = permission
-            ? extractPendingPermission([permission])?.rawInput?.questions
-            : undefined;
+          const questions = permission?.rawInput?.questions;
           const questionCount = Array.isArray(questions) ? questions.length : 0;
           const record: Record<string, string> = {};
           for (const answer of answers) {
@@ -418,40 +409,39 @@ export function useDaemonChatController(): SessionChatController {
     };
   }
 
-  useDaemonPromptSettled(
-    useCallback((event: DaemonPromptSettledEvent) => {
-      for (const settled of pendingSubmitSettledRef.current) {
-        settled.add(event.promptId);
-      }
-      // Remove the settled prompt from its owning session's live queue
-      // (matching event.sessionId when present, or scanning all queues when a
-      // test fixture omits event.sessionId).
-      const targetSessions = event.sessionId
-        ? [event.sessionId]
-        : [...livePromptsBySessionRef.current.keys()];
-      for (const sid of targetSessions) {
-        const queue = livePromptsBySessionRef.current.get(sid);
-        if (!queue) continue;
-        const index = queue.indexOf(event.promptId);
-        if (index !== -1) queue.splice(index, 1);
-        if (queue.length === 0) livePromptsBySessionRef.current.delete(sid);
-      }
-      if (
-        !event.sessionId ||
-        event.sessionId === controllerRef.current?.sessionId
-      ) {
-        promptListenerRef.current?.({
-          promptId: event.promptId,
-          outcome: event.outcome,
-        });
-      }
-    }, []),
-  );
+  const onPromptSettled = useCallback((event: DaemonPromptSettledEvent) => {
+    for (const settled of pendingSubmitSettledRef.current) {
+      settled.add(event.promptId);
+    }
+    // Remove the settled prompt from its owning session's live queue
+    // (matching event.sessionId when present, or scanning all queues when a
+    // test fixture omits event.sessionId).
+    const targetSessions = event.sessionId
+      ? [event.sessionId]
+      : [...livePromptsBySessionRef.current.keys()];
+    for (const sid of targetSessions) {
+      const queue = livePromptsBySessionRef.current.get(sid);
+      if (!queue) continue;
+      const index = queue.indexOf(event.promptId);
+      if (index !== -1) queue.splice(index, 1);
+      if (queue.length === 0) livePromptsBySessionRef.current.delete(sid);
+    }
+    if (
+      !event.sessionId ||
+      event.sessionId === controllerRef.current?.sessionId
+    ) {
+      promptListenerRef.current?.({
+        promptId: event.promptId,
+        outcome: event.outcome,
+      });
+    }
+  }, []);
 
   useEffect(() => {
-    const nextPending = new Set(
-      pendingPermissionsRef.current.map((permission) => permission.requestId),
-    );
+    const nextPending = new Set<string>([
+      ...factsRef.current.pendingApprovals.map((approval) => approval.id),
+      ...factsRef.current.pendingQuestions.map((question) => question.id),
+    ]);
     const signals = derivePermissionSignals(
       prevPendingRef.current,
       nextPending,
@@ -465,9 +455,115 @@ export function useDaemonChatController(): SessionChatController {
     for (const decision of signals.decisions) {
       decisionListenerRef.current?.(decision);
     }
-    // Keyed on the content signature, not the provider's per-delta array
-    // identity, so an unchanged pending set does not re-run the derivation.
-  }, [pendingSignature]);
+    // Keyed on both the content signature and sessionId: an unchanged pending
+    // set within one session does not re-run the derivation, while a session
+    // switch (which resets prevPendingRef) always seeds the new session's
+    // pending set even if both sessions happen to share a signature.
+  }, [pendingSignature, sessionId]);
 
-  return controllerRef.current.controller;
+  return {
+    controller: controllerRef.current.controller,
+    onPromptSettled,
+  };
+}
+
+/**
+ * Binds caller-owned daemon session state (already read from
+ * `DaemonSessionProvider` / `daemon-react-sdk` and frame-throttled transcript
+ * hooks) to {@link SessionChatController} without re-projecting messages or
+ * requiring a second context subscription stack.
+ */
+export function useDaemonChatControllerFromState(
+  options: DaemonChatControllerFromStateOptions,
+): SessionChatController {
+  const { controller, onPromptSettled } = useDaemonChatControllerCore(options);
+  useOptionalDaemonPromptSettled(onPromptSettled);
+  return controller;
+}
+
+/**
+ * Binds the daemon session provider to the backend-neutral chat controller
+ * (slice 2d). It constructs {@link createDaemonChatController} once per session
+ * and feeds it live provider facts, wiring the intent transports to the session
+ * actions and deriving the two evidence channels the provider does not expose
+ * explicitly: prompt settlement comes from the terminal-event subscription, and
+ * approval currency / decision settlement are derived from the pending-permission
+ * set (see {@link derivePermissionSignals}).
+ *
+ * The optional capability-gated sub-controllers (model / approval-mode / context
+ * usage / session ops) are not bound yet; their regions stay hidden until a later
+ * increment wires them, so this binding is additive and renders nothing on its own.
+ */
+export function useDaemonChatController(): SessionChatController {
+  const { t } = useI18n();
+  const connection = useDaemonConnection();
+  const actions = useDaemonActions();
+  const blocks = useDaemonTranscriptBlocks();
+  const pendingPermissions = useDaemonPendingPermissions();
+  const transcriptHistory = useDaemonTranscriptHistory();
+  const messages = useMessagesFromBlocks(t, blocks);
+
+  const pendingSplitRef = useRef<{
+    signature: string;
+    pendingApprovals: readonly PendingApproval[];
+    pendingQuestions: readonly PendingQuestion[];
+  } | null>(null);
+  // Questions are permission blocks too; split them from tool approvals the same
+  // way the existing UI does, so a question is answered with answers rather than
+  // routed through the approval lane as a bare vote. The provider re-runs its
+  // uncached pending selector on every streaming delta, so `pendingPermissions`
+  // arrives as a fresh array even when the pending content is unchanged. Key the
+  // split on a content signature (request id + question/approval classification
+  // + a cheap payload revision) cached in a ref, so the array identities — and
+  // the derivation effect below — stay stable across those deltas. The signature
+  // is content-derived, not id-derived: a re-emitted request under the same id
+  // can change its classification or its title/options, and the revision term
+  // (updatedAt + title + option ids) forces a re-extraction so the cached
+  // render-ready request never goes stale. Classification and the revision use
+  // cheap block-level reads rather than the full payload extraction, so a delta
+  // does not re-serialize each payload.
+  const classifiedPending = pendingPermissions.map((permission) => ({
+    block: permission,
+    id: permission.requestId,
+    isQuestion: isAskUserPermissionBlock(permission),
+  }));
+  const pendingSignature = classifiedPending
+    .map(
+      ({ block, id, isQuestion }) =>
+        `${id}:${isQuestion ? 'q' : 'a'}:${pendingPermissionRevision(block)}`,
+    )
+    .join('|');
+  let pendingSplit = pendingSplitRef.current;
+  if (!pendingSplit || pendingSplit.signature !== pendingSignature) {
+    const approvals: PendingApproval[] = [];
+    const questions: PendingQuestion[] = [];
+    for (const { block, id, isQuestion } of classifiedPending) {
+      // The render-ready request is extracted only on a content change (the
+      // signature cache), not per streaming delta. Pending blocks are unresolved
+      // by the selector, so the extraction yields a request.
+      const request = extractPendingPermission([block]);
+      if (!request) continue;
+      if (isQuestion) questions.push({ id, request });
+      else approvals.push({ id, status: 'pending', request });
+    }
+    pendingSplit = {
+      signature: pendingSignature,
+      pendingApprovals: approvals,
+      pendingQuestions: questions,
+    };
+    pendingSplitRef.current = pendingSplit;
+  }
+  const { pendingApprovals, pendingQuestions } = pendingSplit;
+
+  const { controller, onPromptSettled } = useDaemonChatControllerCore({
+    connection,
+    actions,
+    transcriptHistory,
+    messages,
+    pendingApprovals,
+    pendingQuestions,
+    pendingSignature,
+  });
+  useDaemonPromptSettled(onPromptSettled);
+  return controller;
 }

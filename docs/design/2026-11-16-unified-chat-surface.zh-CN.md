@@ -345,9 +345,15 @@ managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复�
 3. **managed 切换，删除重复编排。** 新增 managed 适配器及其负例测试；
    managed 聊天列渲染 `ChatSurface`；从 `ManagedSessionsPage.tsx` 删除
    被替换的转录/输入框/审批/状态编排。managed 专属面板变为插槽。
-4. **ChatPane 收敛。** 分屏与侧任务经 daemon 适配器渲染 `ChatSurface`；
-   面板 chrome（标题、最大化/关闭、头部操作）以插槽保留；删除
-   `ChatPane` 重复的提交、取消、审批与状态编排。
+4. **ChatPane 收敛。**
+   - **切片 4a（渲染与审批/提问路由）：** 分屏、侧任务与制品面板的只读会话页签
+     （`SessionPanel`）经 daemon 适配器渲染 `ChatSurface`；面板 chrome（标题、
+     最大化/关闭、头部操作）以插槽保留；删除 `ChatPane` 内联的转录、工具审批、
+     提问、编辑器渲染及重复提问处理函数。
+   - **切片 4b（提交/取消/状态后续收口）：** 将 `ChatPane` 剩余由宿主承接的提
+     交（`onComposerSubmit`）、取消（`onComposerCancel`）与 `composerStatus`
+     编排收敛进共享控制器/界面管线，并退场临时的宿主取消与
+     `transcriptProps.isResponding` 覆盖缝隙。
 5. **按能力门控的一致性。** 在后端事实存在的范围内统一两侧的状态栈、
    用量统计与上下文用量/压缩展示。会话内搜索与目标展示在下文未决问题
    解决前保持门控。
