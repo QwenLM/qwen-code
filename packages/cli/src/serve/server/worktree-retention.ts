@@ -686,15 +686,22 @@ async function clearRejectedAttemptBinding(
   );
 }
 
+type RetainedCheckoutRemovalOutcome =
+  | 'removed'
+  | 'skipped'
+  | 'disabled'
+  | 'limit-changed';
+
 async function removeRetainedCheckout(
   runtime: WorkspaceRuntime,
   registry: WorkspaceRegistry,
   coordinator: SessionArchiveCoordinator,
   plan: WorktreeCleanupPlan,
   expectedRoot: RetentionScope['root'],
+  expectedLimit: number,
   canContinue: () => boolean,
   onBindingPersisted?: () => void,
-): Promise<boolean> {
+): Promise<RetainedCheckoutRemovalOutcome> {
   const release = await acquireWorktreeCleanupLock(plan);
   try {
     return await coordinator.runExclusiveMany([plan.sessionId], async () => {
@@ -702,14 +709,24 @@ async function removeRetainedCheckout(
         sessionLiveOnBridge(runtime.bridge, id),
       );
       if (!ownership.ok || plan.sidecar.worktreeRemoved !== undefined) {
-        return false;
+        return 'skipped';
       }
       const organization = new SessionOrganizationService(runtime.workspaceCwd);
       if (await isRetentionSessionPinned(organization, plan.sessionId)) {
-        return false;
+        return 'skipped';
       }
       if (isBridgeSessionRetirementFenced(runtime.bridge, plan.sessionId)) {
-        return false;
+        return 'skipped';
+      }
+      // Re-read the configured retention limit after acquiring the ownership
+      // and session locks, before starting snapshot capture: settings may have
+      // been disabled (`0`) or raised while this candidate waited on the lock.
+      const lockedLimit = retentionLimit(runtime);
+      if (lockedLimit === 0) {
+        return 'disabled';
+      }
+      if (lockedLimit !== expectedLimit) {
+        return 'limit-changed';
       }
       let attemptSnapshot: WorktreeSnapshotPaths | undefined;
       let physicalRemovalEntered = false;
@@ -853,7 +870,9 @@ async function removeRetainedCheckout(
         }
         throw error;
       }
-      if (outcome.removed) return outcome.snapshot !== undefined;
+      if (outcome.removed) {
+        return outcome.snapshot !== undefined ? 'removed' : 'skipped';
+      }
       if (
         attemptSnapshot &&
         !(await clearRejectedAttemptBinding(
@@ -863,7 +882,7 @@ async function removeRetainedCheckout(
           outcome.removal !== undefined,
         ))
       ) {
-        return false;
+        return 'skipped';
       }
       if (
         outcome.snapshot?.checkoutMatchesCapture &&
@@ -877,7 +896,7 @@ async function removeRetainedCheckout(
           canContinue,
         );
       }
-      return false;
+      return 'skipped';
     });
   } finally {
     release();
@@ -992,19 +1011,29 @@ async function sweepWorktreeRetentionOnceInStorage(
         break;
       }
       try {
-        const removed = await removeRetainedCheckout(
+        const outcome = await removeRetainedCheckout(
           runtime,
           registry,
           coordinator,
           plan,
           scope.root,
+          scope.limit,
           canContinue,
           () => {
             bindingPersisted = true;
           },
         );
-        if (removed) report.removed.push(plan.sessionId);
-        else report.skipped.push(plan.sessionId);
+        if (outcome === 'removed') {
+          report.removed.push(plan.sessionId);
+        } else if (outcome === 'disabled') {
+          report.skipped.push('retention disabled during sweep');
+          break;
+        } else if (outcome === 'limit-changed') {
+          report.skipped.push('retention limit changed during sweep');
+          break;
+        } else {
+          report.skipped.push(plan.sessionId);
+        }
       } catch (error) {
         report.issues.push(
           `${plan.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
