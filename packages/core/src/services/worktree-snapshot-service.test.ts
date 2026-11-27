@@ -479,7 +479,12 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     // outside the window. 200ms leaves more than 3x on the green arm while the
     // linear scan misses it by more than 7x.
     expect(maxGapMs).toBeLessThan(200);
-  });
+    // The assertion above bounds a STALL, not the test's duration: total time
+    // scales with the fixture and the capture path (this case went from ~1s to
+    // double-digit seconds as the capture grew), so the runner's default
+    // timeout must not become a second, implicit assertion. Explicit headroom
+    // keeps a slow host from reading as a regression to the linear scan.
+  }, 60_000);
 
   // R1-1 (18494): the archive used to drop every `.qwen/tmp` / `.qwen/logs`
   // descendant unconditionally while the has-work gate counted a tracked edit
