@@ -20465,6 +20465,44 @@ describe('App session callbacks', () => {
   );
 
   it.each([
+    { scenario: 'switch is refused', switchStarted: true },
+    { scenario: 'switch is aborted and never starts', switchStarted: false },
+  ])(
+    'surfaces branch source warnings when the $scenario',
+    async ({ switchStarted }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted,
+        ...(switchStarted ? { switchCompleted: switchCompletion.promise } : {}),
+        sourceWarnings: ['Session sources could not be copied.'],
+      });
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      switchCompletion.resolve(false);
+      await act(async () => {
+        await request;
+      });
+
+      expect(onToast).toHaveBeenCalledWith(
+        'warning',
+        'Session sources could not be copied.',
+      );
+      expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ]);
+    },
+  );
+
+  it.each([
     [
       'worktree is unsupported',
       () =>

@@ -18124,6 +18124,10 @@ export function App({
             : sessionActions.branchSession({ name: options.name });
       const request = branchRequest
         .then(async (result) => {
+          // The branch itself was created, so source-copy warnings apply
+          // whether or not the follow-up switch completes.
+          if (result.sourceWarnings?.length)
+            pushToast('warning', result.sourceWarnings.join(' '));
           if (
             !result.switchStarted ||
             (await result.switchCompleted) === false
@@ -18135,8 +18139,6 @@ export function App({
             }
             return;
           }
-          if (result.sourceWarnings?.length)
-            pushToast('warning', result.sourceWarnings.join(' '));
           store.dispatch([
             {
               type: 'status',
