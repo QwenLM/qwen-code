@@ -1407,19 +1407,26 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       files: [{ path: 'src/a.ts', added: 1, deleted: 0, mode: '100644' }],
       worktree: '/tmp/probe/.qwen/tmp/review-probe',
     };
-    const trustContext = trustInputFromPlan(plan);
-    expect(trustContext).toBeDefined();
-    const boundary = describeExecutionBoundary({
-      policy: 'tiered',
-      verdict: { kind: 'refused', reason: 'no hardware backend' },
-      trustContext,
-      env: { QWEN_REVIEW_SANDBOX: 'tiered', QWEN_REVIEW_FORCE_HARDWARE: '1' },
-      fileSourced: () => false,
-    });
-    expect(boundary.policy).toBe('tiered');
-    expect(boundary.executionClass).toBe('hardware-isolated');
-    expect(boundary.backend).toBe('refused');
-    expect(boundary.escalationReasons).toContain('operator-force-hardware');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-gate-fixture-plan-'));
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify(plan));
+    try {
+      const trustContext = trustInputFromPlan(planPath);
+      expect(trustContext).toBeDefined();
+      const boundary = describeExecutionBoundary({
+        policy: 'tiered',
+        verdict: { kind: 'refused', reason: 'no hardware backend' },
+        trustContext,
+        env: { QWEN_REVIEW_SANDBOX: 'tiered', QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        fileSourced: () => false,
+      });
+      expect(boundary.policy).toBe('tiered');
+      expect(boundary.executionClass).toBe('hardware-isolated');
+      expect(boundary.backend).toBe('refused');
+      expect(boundary.escalationReasons).toContain('operator-force-hardware');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {
