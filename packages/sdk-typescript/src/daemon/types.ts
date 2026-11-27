@@ -4479,11 +4479,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** Tokens plus ended-run counts for daily charts. Mirrors `UsageDailyPoint`. */
+/** Tokens plus distinct active-session counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
-  /** Runs ended on this date, which can differ from their request-token day. */
+  /** Distinct `sessionId`s from ended non-supplement records and ledger rows on this date. */
   sessions: number;
 }
 

@@ -89,12 +89,23 @@ in PR #17902.
   resumed sessions closed without new activity write nothing), clamps
   `endTime = new Date(Math.max(startTime.getTime(), Date.now()))`, and writes a
   `runScoped: true` record via `persistSessionUsage`.
-- Invoke `persistSessionUsageOnClose(session.getConfig(), sessionId)` in
+- Invoke `persistSessionUsageOnClose(session.getConfig(), id)` in
   `QwenAgent.removeStoredSessionEntry` immediately before
-  `uiTelemetryService.removeSession(sessionId)`. Because
-  `removeStoredSessionEntry` guards `this.sessions.get(sessionId) !== session`
-  and `removeSession` deletes the live bucket right after, each session's live
-  spend is persisted at most once, best-effort, without blocking teardown.
+  `uiTelemetryService.removeSession(id)` for both the registry `sessionId` and
+  any rotated `session.getConfig().getSessionId()` produced by `/clear`.
+  Because `removeStoredSessionEntry` guards
+  `this.sessions.get(sessionId) !== session` and `removeSession` deletes the
+  live bucket right after, each session's live spend is persisted at most once,
+  best-effort, without blocking teardown.
+- Do not register the process-wide `persistRunUsageOnExit(config)` cleanup hook
+  in `llm.tsx` when `isAcpMode` is true; otherwise process exit would append a
+  duplicate record under the bootstrap config from process-wide `#liveMetrics`.
+- In `clearCommand.ts`, when `context.executionMode === 'acp'`, persist and
+  reset only the clearing session (`persistSessionUsageOnClose` +
+  `uiTelemetryService.resetSession` for the outgoing and new session ids)
+  instead of calling process-wide `flushRunUsageOnSessionSwap` or
+  `uiTelemetryService.reset()`, so concurrent sibling sessions keep their
+  pending live buckets intact.
 
 ### 2. Ledger-Backed Distinct-Session Census
 
@@ -118,10 +129,12 @@ disk scan is required.
   - `buildDaily` per-day `sessions` (per-day union of `endedRecords` ending on
     that day and ledger `sessionId`s on that day);
   - `loadStatsData` `report.sessionCount` over `[currentStartKey, currentEndKey]`,
-    and both `currentDeltaReport.sessionCount` and `previousReport.sessionCount`
+    both `currentDeltaReport.sessionCount` and `previousReport.sessionCount`
     over their respective completed local-day windows so `delta.sessions`
     compares identical distinct-session definitions on both sides, including
-    windows backed solely by the ledger.
+    windows backed solely by the ledger, and `report.projects[].sessionCount`
+    deduplicated by `sessionId` per project so the Projects table uses the same
+    distinct-session unit as the header.
 - Update the Web Shell daily-sessions subtitle (`daemon.usage.dailySessionsSub`)
   across `en`, `zh-CN`, `zh-TW`, and `ru` to reflect active sessions per day.
 

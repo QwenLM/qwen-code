@@ -36,7 +36,9 @@ PR #17902 已将 Daemon 状态用量面板与 TUI `/stats` 的 token、请求数
 - 暴露只读方法 `getLiveMetricsForSession(sessionId): SessionMetrics | undefined` 与 `getRunStartTimeForSession(sessionId): Date | undefined`。
 - 在 `snapshotForReplay`、`restoreFromReplaySnapshot`、`reset`、`resetSession` 与 `removeSession` 中完整同步维护 `#sessionLiveMetrics` 与 `#sessionRunStartTimes`。
 - 在 `packages/cli/src/utils/usage-persistence.ts` 新增 `persistSessionUsageOnClose(config, sessionId)`：读取该会话的实时指标与起始时间，若 `!hasRunActivity(metrics)` 则直接跳过（保证恢复后无新活动直接关闭零写入），将 `endTime` 钳位至 `Math.max(startTime.getTime(), Date.now())`，调用 `persistSessionUsage` 写入 `runScoped: true` 记录。
-- 在 `QwenAgent.removeStoredSessionEntry` 中紧邻 `uiTelemetryService.removeSession(sessionId)` 之前调用 `persistSessionUsageOnClose(session.getConfig(), sessionId)`。由于 `removeStoredSessionEntry` 入口已有 `this.sessions.get(sessionId) !== session` 幂等守卫，且紧随其后的 `removeSession` 会删除实时桶，每次会话生命周期至多落盘一次，且异常被隔离不会阻断销毁流程。
+- 在 `QwenAgent.removeStoredSessionEntry` 中，对注册表 `sessionId` 以及 `/clear` 轮换出的 `session.getConfig().getSessionId()`，紧邻 `uiTelemetryService.removeSession(id)` 之前调用 `persistSessionUsageOnClose(session.getConfig(), id)`。由于 `removeStoredSessionEntry` 入口已有 `this.sessions.get(sessionId) !== session` 幂等守卫，且紧随其后的 `removeSession` 会删除实时桶，每次会话生命周期至多落盘一次，且异常被隔离不会阻断销毁流程。
+- 在 `llm.tsx` 中当 `isAcpMode` 为真时不注册进程级 `persistRunUsageOnExit(config)` 退出钩子，避免 ACP 子进程退出时把进程级 `#liveMetrics` 以启动配置 session id 再写一次重复记录。
+- 在 `clearCommand.ts` 中当 `context.executionMode === 'acp'` 时，仅对当前执行 `/clear` 的会话执行 `persistSessionUsageOnClose` 与 `uiTelemetryService.resetSession`（覆盖旧 id 与新 id），不再调用进程级 `flushRunUsageOnSessionSwap` 或 `uiTelemetryService.reset()`，确保同 daemon 下其他并发兄弟会话的待落盘实时桶不受影响。
 
 ### 2. 台账口径唯一活跃会话普查
 
@@ -50,7 +52,7 @@ PR #17902 已将 Daemon 状态用量面板与 TUI `/stats` 的 token、请求数
 - 统一在以下位置使用 `countActiveSessions`：
   - `buildUsageDashboard` 的 `summary.sessions`（基于 `endedRecords`、`rangeStartKey`、`todayKey`、`ledgerDaily`、`runtimeScopes`）；
   - `buildDaily` 的按日 `sessions`（每日结束的非 supplement 记录 `sessionId` 与当日台账 `sessionId` 的并集大小）；
-  - `loadStatsData` 的 `report.sessionCount`（窗口 `[currentStartKey, currentEndKey]`），以及 `delta.sessions` 两侧的 `currentDeltaReport.sessionCount` 与 `previousReport.sessionCount`（各自已完成本地日窗口），确保纯台账覆盖周期也能精确计算会话环比。
+  - `loadStatsData` 的 `report.sessionCount`（窗口 `[currentStartKey, currentEndKey]`），`delta.sessions` 两侧的 `currentDeltaReport.sessionCount` 与 `previousReport.sessionCount`（各自已完成本地日窗口，确保纯台账覆盖周期也能精确计算会话环比），以及 `report.projects[].sessionCount` 按项目对 `sessionId` 去重，使项目表格与顶部总计保持同一唯一会话单位。
 - 同步更新 Web Shell 全部语种（`en`、`zh-CN`、`zh-TW`、`ru`）的 `daemon.usage.dailySessionsSub` 文案为每日活跃会话数。
 
 ## 约束与不变量

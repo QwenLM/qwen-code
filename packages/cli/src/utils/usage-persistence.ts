@@ -61,10 +61,10 @@ export function persistSessionUsageOnClose(
   sessionId: string,
 ): void {
   try {
-    const metrics = uiTelemetryService.getLiveMetricsForSession?.(sessionId);
+    const metrics = uiTelemetryService.getLiveMetricsForSession(sessionId);
     if (!metrics || !hasRunActivity(metrics)) return;
     const startTime =
-      uiTelemetryService.getRunStartTimeForSession?.(sessionId) ?? new Date();
+      uiTelemetryService.getRunStartTimeForSession(sessionId) ?? new Date();
     const endTime = new Date(Math.max(startTime.getTime(), Date.now()));
     const project = config.getProjectRoot?.();
     if (!project) return;

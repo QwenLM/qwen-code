@@ -119,11 +119,11 @@ export interface UsageSkillCall {
   count: number;
 }
 
-/** One day's tokens plus the runs whose record ended on that day. */
+/** One day's tokens plus distinct active sessions recorded on that day. */
 export interface UsageDailyPoint {
   date: string;
   tokens: number;
-  /** Runs ended on this day; a cross-midnight run can differ from token day. */
+  /** Distinct `sessionId`s from ended non-supplement records and ledger rows on this day. */
   sessions: number;
 }
 

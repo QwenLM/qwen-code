@@ -1750,4 +1750,38 @@ describe('loadStatsData — per-request ledger accounting', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('counts distinct sessions per project to match report.sessionCount when a session resumes multiple times', async () => {
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+    const now = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 3_000,
+        startTime: now - 3_500,
+        runScoped: true,
+      }),
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 2_000,
+        startTime: now - 2_500,
+        runScoped: true,
+      }),
+      makeRecord({
+        sessionId: 'same-proj-session',
+        project: '/workspace/demo',
+        timestamp: now - 1_000,
+        startTime: now - 1_500,
+        runScoped: true,
+      }),
+    ]);
+
+    const result = await loadStatsData('today');
+    expect(result.report.sessionCount).toBe(1);
+    expect(result.report.projects).toHaveLength(1);
+    expect(result.report.projects[0]?.path).toBe('/workspace/demo');
+    expect(result.report.projects[0]?.sessionCount).toBe(1);
+  });
 });

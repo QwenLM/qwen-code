@@ -5937,6 +5937,31 @@ describe('loadUsageDashboard', () => {
     });
   });
 
+  it('counts ledger-only sessions through the 3-arg buildUsageDashboard fallback without runtimeScopes', async () => {
+    const now = Date.now();
+    const today = dayKey(now);
+    const root = process.env['QWEN_HOME']!;
+    writeTestLedgerRow(root, {
+      timestamp: new Date(now - 1_000).toISOString(),
+      localDate: today,
+      sessionId: 'ledger-only-3arg-session',
+      executionId: 'exec-3arg-1',
+      model: 'qwen-max',
+      authType: 'openai',
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+    });
+    const ledgerDaily = await loadLedgerOrEmpty(today);
+    const dash = buildUsageDashboard([], { range: 'today' }, ledgerDaily);
+    expect(dash.summary).toMatchObject({
+      totalTokens: 100,
+      requests: 1,
+      sessions: 1,
+    });
+    expect(dash.daily).toEqual([{ date: today, tokens: 100, sessions: 1 }]);
+  });
+
   it('returns zeros for an empty history', async () => {
     const dash = await loadUsageDashboard();
     expect(dash.summary.totalTokens).toBe(0);

@@ -4854,15 +4854,23 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    try {
-      persistSessionUsageOnClose(session.getConfig(), sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    try {
-      uiTelemetryService.removeSession(sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
+    const sessionConfig = session.getConfig();
+    const activeSessionId = sessionConfig.getSessionId?.();
+    const sessionIdsToFinalize =
+      activeSessionId && activeSessionId !== sessionId
+        ? [sessionId, activeSessionId]
+        : [sessionId];
+    for (const id of sessionIdsToFinalize) {
+      try {
+        persistSessionUsageOnClose(sessionConfig, id);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        uiTelemetryService.removeSession(id);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
     try {
       await this.turnSkillLeases.collect(sessionId, true);

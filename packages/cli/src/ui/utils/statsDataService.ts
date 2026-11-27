@@ -161,9 +161,10 @@ function buildTokensPerDay(
 
 /**
  * Replaces the report's token-bearing fields with the shared accounting table's
- * window slice. Session-granular fields (sessions, duration, tools, files,
- * skills, projects) stay on the session records: the per-request ledger carries
- * none of them, and it has no project dimension to attribute tokens to.
+ * window slice. Session-granular metadata (duration, tools, files, skills, and
+ * per-project token/session breakdowns) stay on the session records because the
+ * per-request ledger carries no tool, file, skill, or project dimensions; the
+ * top-level session count is filled separately via the ledger-backed census.
  */
 function applyTokenWindow(
   report: AggregatedReport,
@@ -434,6 +435,24 @@ export async function loadStatsData(
     currentEndKey,
     ledgerDaily,
   );
+  // Align per-project sessionCount with the header's distinct-session unit so
+  // resuming one conversation multiple times in a project counts once rather
+  // than once per run record (per-project counts remain record-derived because
+  // the per-request ledger does not store workspace paths).
+  const projectSessionIds = new Map<string, Set<string>>();
+  for (const r of currentRecords) {
+    if (r.transcriptSupplement === true || !r.project || !r.sessionId) continue;
+    let ids = projectSessionIds.get(r.project);
+    if (!ids) {
+      ids = new Set<string>();
+      projectSessionIds.set(r.project, ids);
+    }
+    ids.add(r.sessionId);
+  }
+  for (const proj of report.projects) {
+    const distinct = projectSessionIds.get(proj.path);
+    if (distinct) proj.sessionCount = distinct.size;
+  }
 
   const heatmap = buildHeatmap(table, currentStartKey, currentEndKey);
   const heatmapDates = Object.entries(heatmap)

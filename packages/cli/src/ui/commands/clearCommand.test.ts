@@ -13,11 +13,15 @@ import { SessionEndReason } from '@qwen-code/qwen-code-core';
 const { telemetryMock, persistSessionUsageMock } = vi.hoisted(() => ({
   telemetryMock: {
     reset: vi.fn(),
+    resetSession: vi.fn(),
+    removeSession: vi.fn(),
     resetLiveMetrics: vi.fn(),
     getMetrics: vi.fn(() => ({ models: {} })),
     getLiveMetrics: vi.fn(() => ({ models: {} })),
+    getLiveMetricsForSession: vi.fn(() => undefined),
     getSessionStartTime: vi.fn(() => new Date()),
     getRunStartTime: vi.fn(() => new Date()),
+    getRunStartTimeForSession: vi.fn(() => undefined),
   },
   persistSessionUsageMock: vi.fn(),
 }));
@@ -791,6 +795,100 @@ describe('clearCommand', () => {
       expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('acp multi-session isolation', () => {
+    it('persists and resets only the clearing session without calling process-wide reset', async () => {
+      const acpLiveMetrics = {
+        models: {
+          'qwen-max': {
+            api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 20 },
+            tokens: {
+              prompt: 40,
+              candidates: 10,
+              total: 50,
+              cached: 0,
+              thoughts: 0,
+            },
+          },
+        },
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      } as unknown as SessionMetrics;
+      const runStart = new Date('2026-11-26T10:00:00.000Z');
+      telemetryMock.getLiveMetricsForSession.mockReturnValue(acpLiveMetrics);
+      telemetryMock.getRunStartTimeForSession.mockReturnValue(runStart);
+
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: {
+          config: {
+            getLlmClient: () =>
+              ({
+                resetChat: mockResetChat,
+              }) as unknown as LlmClient,
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasRunningTasks: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundTasks,
+              abortAll: mockAbortBackgroundTasks,
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundShells,
+              abortAll: mockAbortBackgroundShells,
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              hasRunningMonitors: vi.fn().mockReturnValue(false),
+              reset: mockResetMonitors,
+              abortAll: mockAbortMonitors,
+            }),
+            getWorkflowRunRegistry: vi.fn().mockReturnValue({
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              abortAll: vi.fn(),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getSessionId: vi.fn().mockReturnValue('acp-session-a'),
+            getProjectRoot: vi.fn().mockReturnValue('/proj/acp-a'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      await clearCommand.action!(acpContext, '');
+
+      expect(telemetryMock.getLiveMetricsForSession).toHaveBeenCalledWith(
+        'acp-session-a',
+      );
+      expect(persistSessionUsageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'acp-session-a',
+          project: '/proj/acp-a',
+          metrics: acpLiveMetrics,
+        }),
+      );
+      expect(telemetryMock.resetSession).toHaveBeenCalledWith('acp-session-a');
+      expect(telemetryMock.removeSession).toHaveBeenCalledWith('acp-session-a');
+      expect(telemetryMock.resetSession).toHaveBeenCalledWith('new-session-id');
+      expect(telemetryMock.reset).not.toHaveBeenCalled();
+      expect(telemetryMock.resetLiveMetrics).not.toHaveBeenCalled();
     });
   });
 });

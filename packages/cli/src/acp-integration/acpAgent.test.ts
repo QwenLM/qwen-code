@@ -6991,20 +6991,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     it('persists session live usage before removing session telemetry on close', async () => {
       mockPersistSessionUsageOnClose.mockClear();
       vi.mocked(uiTelemetryService.removeSession).mockClear();
-      await setupSessionMocks('hosted-usage-persist');
+      const sessionConfigMock = await setupSessionMocks('hosted-usage-persist');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/session-specific-project');
       vi.mocked(loadSettings).mockReturnValue(messagingOn());
       const { agent, agentPromise } =
         await bootInitializedAcpAgent(messagingOn());
-      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await agent.newSession({
+        cwd: '/tmp/session-specific-project',
+        mcpServers: [],
+      });
 
       await agent.extMethod('qwen/control/session/close', {
         sessionId: 'hosted-usage-persist',
         requireFlush: false,
       });
 
-      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledExactlyOnceWith(
-        expect.any(Object),
-        'hosted-usage-persist',
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(1);
+      const [persistedConfig, persistedId] =
+        mockPersistSessionUsageOnClose.mock.calls[0]!;
+      expect(persistedConfig).toBe(sessionConfigMock);
+      expect(persistedId).toBe('hosted-usage-persist');
+      expect((persistedConfig as Config).getProjectRoot()).toBe(
+        '/tmp/session-specific-project',
       );
       expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
         'hosted-usage-persist',
@@ -7014,6 +7024,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).toBeLessThan(
         vi.mocked(uiTelemetryService.removeSession).mock
           .invocationCallOrder[0]!,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('persists and removes a rotated session id after /clear when closing the registry entry', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      const sessionConfigMock = await setupSessionMocks('hosted-usage-orig');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/rotated-session-project');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({
+        cwd: '/tmp/rotated-session-project',
+        mcpServers: [],
+      });
+      // Simulate /clear rotating Config's active session id while the registry
+      // entry stays keyed by the original id.
+      vi.mocked(sessionConfigMock.getSessionId).mockReturnValue(
+        'hosted-usage-rotated',
+      );
+
+      await agent.extMethod('qwen/control/session/close', {
+        sessionId: 'hosted-usage-orig',
+        requireFlush: false,
+      });
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(2);
+      expect(
+        mockPersistSessionUsageOnClose.mock.calls.map(([cfg, id]) => ({
+          sameConfig: cfg === sessionConfigMock,
+          project: (cfg as Config).getProjectRoot(),
+          id,
+        })),
+      ).toEqual([
+        {
+          sameConfig: true,
+          project: '/tmp/rotated-session-project',
+          id: 'hosted-usage-orig',
+        },
+        {
+          sameConfig: true,
+          project: '/tmp/rotated-session-project',
+          id: 'hosted-usage-rotated',
+        },
+      ]);
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-orig',
+      );
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-rotated',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[1]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[1]!,
       );
       mockConnectionState.resolve();
       await agentPromise;

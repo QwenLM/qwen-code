@@ -3260,6 +3260,9 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getProjectRoot: () => '/bootstrap/proj',
+      shutdownExecutionEnvironments: vi.fn(),
+      shutdown: vi.fn(),
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
@@ -3356,6 +3359,56 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
       expect(mockRunAcpAgent).toHaveBeenCalledOnce();
       expect(mockConstructExtensionFileWatcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['acp', 'experimentalAcp'] as const)(
+    'does not register the process-wide exit usage persist hook in %s mode',
+    async (acpFlag) => {
+      await interactiveMainSetup(false, acpFlag);
+      mockRunAcpAgent.mockClear();
+      mockRunAcpAgent.mockResolvedValue(undefined);
+      mockPersistSessionUsage.mockClear();
+      uiTelemetryService.reset();
+
+      const cleanupModule = await import('./utils/cleanup.js');
+      const cleanupHandlers: Array<() => void | Promise<void>> = [];
+      vi.mocked(cleanupModule.registerCleanup).mockImplementation((fn) => {
+        cleanupHandlers.push(fn);
+        return () => {};
+      });
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+      expect(mockRunAcpAgent).toHaveBeenCalledOnce();
+
+      // Simulate a hosted session that recorded live spend and already closed
+      // via persistSessionUsageOnClose + removeSession (leaving its live event
+      // in process-wide #liveMetrics). Running every exit cleanup handler must
+      // not append a duplicate process-wide exit record.
+      uiTelemetryService.addEvent(
+        {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': new Date().toISOString(),
+          model: 'acp-exit-guard-model',
+          duration_ms: 15,
+          input_token_count: 10,
+          output_token_count: 5,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          tool_token_count: 0,
+          total_token_count: 15,
+          execution_id: 'acp-live-exec-1',
+        } as Parameters<typeof uiTelemetryService.addEvent>[0],
+        'hosted-sess-1',
+      );
+      uiTelemetryService.removeSession('hosted-sess-1');
+      for (const handler of cleanupHandlers) {
+        await handler();
+      }
+      expect(mockPersistSessionUsage).not.toHaveBeenCalled();
     },
   );
 

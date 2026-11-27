@@ -153,4 +153,67 @@ describe('persistSessionUsageOnClose', () => {
       },
     });
   });
+
+  it('preserves sibling session live buckets across ACP /clear and persists post-clear rotated session ids on close', () => {
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 100, 20, 'exec-a-before-clear'),
+      'sess-a-orig',
+    );
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 200, 40, 'exec-b-sibling'),
+      'sess-b',
+    );
+
+    // Simulate ACP /clear in sess-a: persist and reset only sess-a-orig, then
+    // rotate to sess-a-rotated and record post-clear activity.
+    persistSessionUsageOnClose(makeConfig('/proj/a'), 'sess-a-orig');
+    uiTelemetryService.resetSession('sess-a-orig');
+    uiTelemetryService.resetSession('sess-a-rotated');
+
+    // Sibling sess-b must still hold its pending live bucket untouched.
+    expect(
+      uiTelemetryService.getLiveMetricsForSession('sess-b')?.models['qwen-max']
+        ?.tokens.total,
+    ).toBe(240);
+
+    uiTelemetryService.addEvent(
+      apiResponseEvent('qwen-max', 50, 10, 'exec-a-after-clear'),
+      'sess-a-rotated',
+    );
+
+    // Closing the registry entry finalizes both the original and rotated ids.
+    for (const id of ['sess-a-orig', 'sess-a-rotated']) {
+      persistSessionUsageOnClose(makeConfig('/proj/a'), id);
+      uiTelemetryService.removeSession(id);
+    }
+    // Closing sibling sess-b writes its own record intact.
+    persistSessionUsageOnClose(makeConfig('/proj/b'), 'sess-b');
+    uiTelemetryService.removeSession('sess-b');
+
+    const records = readRecords();
+    expect(records).toHaveLength(3);
+    expect(
+      records.map((r) => ({
+        sessionId: r.sessionId,
+        project: r.project,
+        execIds: r.requestExecutionIds,
+      })),
+    ).toEqual([
+      {
+        sessionId: 'sess-a-orig',
+        project: '/proj/a',
+        execIds: ['exec-a-before-clear'],
+      },
+      {
+        sessionId: 'sess-a-rotated',
+        project: '/proj/a',
+        execIds: ['exec-a-after-clear'],
+      },
+      {
+        sessionId: 'sess-b',
+        project: '/proj/b',
+        execIds: ['exec-b-sibling'],
+      },
+    ]);
+  });
 });
