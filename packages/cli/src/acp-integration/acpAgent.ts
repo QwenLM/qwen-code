@@ -348,6 +348,13 @@ import { restoreSessionModelThenAuthenticate } from './session-model-persistence
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { TurnSkillLeases } from './session/turn-skill-leases.js';
+import {
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  UnsupportedTurnExtensionComponentError,
+  runWithTurnSkillSnapshot,
+} from '@qwen-code/qwen-code-core';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
   shouldProbeChildHeap,
@@ -528,9 +535,14 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
+  TURN_SKILL_LEASE_META_KEY,
+  TURN_SKILL_LEASE_METHOD,
+  SESSION_RETIREMENT_RECEIPT_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -4008,6 +4020,7 @@ async function assertManagedConversationDirectoryIdentity(
 
 class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
+  private readonly turnSkillLeases = new TurnSkillLeases();
   private sessions: Map<string, Session> = new Map();
   /**
    * Cross-session messaging for every session this process hosts.
@@ -4630,15 +4643,22 @@ class QwenAgent implements Agent {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const sessions = this.getActiveSessions();
+      const sessionConfigs = new Set(
+        sessions.map((session) => session.getConfig()),
+      );
       const liveConfigs = new Set([
         this.config,
-        ...sessions.map((session) => session.getConfig()),
+        ...sessionConfigs,
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
       for (const config of liveConfigs) {
         try {
-          const cwd = config.getTargetDir();
+          // MCP settings and approvals belong to the workspace that admitted
+          // the session. A session/cd only moves its working directory.
+          const workspaceRoot = sessionConfigs.has(config)
+            ? this.sessionWorkspaceRoot(config)
+            : config.getTargetDir();
           // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
           // — each live Config in this Set may independently be bare/safe or
           // not, so the check is per-config, not hoisted outside the loop.
@@ -4655,7 +4675,7 @@ class QwenAgent implements Agent {
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
-                cwd,
+                workspaceRoot,
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
@@ -4664,7 +4684,7 @@ class QwenAgent implements Agent {
             : recomputeMcpGating(
                 settings,
                 mcpServers,
-                cwd,
+                workspaceRoot,
                 bootAllowed,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
@@ -4843,6 +4863,11 @@ class QwenAgent implements Agent {
     }
     try {
       uiTelemetryService.removeSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -5057,6 +5082,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     opts?: {
       requireFlush?: boolean;
+      retirement?: boolean;
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
@@ -5075,17 +5101,36 @@ class QwenAgent implements Agent {
       skipMemoryFlush?: boolean;
       cancelReason?: 'user';
     },
-  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
+  ): Promise<{
+    closed: boolean;
+    holds: ActiveWorkHoldV1[];
+    retirementUnavailable?: true;
+  }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
+      if (opts?.retirement)
+        throw new Error('Retirement requires a live native session');
       this.mcpPool?.releaseSession(sessionId);
       // Already gone is the outcome the caller wanted, not a refusal.
       return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
+    if (opts?.retirement && !recorder)
+      return { closed: false, holds: [], retirementUnavailable: true };
     const requireFlush = opts?.requireFlush === true;
-    if (requireFlush) await recorder?.flush();
+    if (requireFlush) {
+      try {
+        await recorder?.flush();
+      } catch (error) {
+        if (!opts?.retirement) throw error;
+        debugLogger.warn(
+          'Native retirement refused before close: recorder flush failed',
+          error,
+        );
+        return { closed: false, holds: [], retirementUnavailable: true };
+      }
+    }
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
     // The memory flush below spends only what the close budget has left: the
     // bridge sizes drainTimeoutMs under its own outer wait.
@@ -5198,6 +5243,8 @@ class QwenAgent implements Agent {
         sessionId,
         async () => {
           if (this.sessions.get(sessionId) !== session) {
+            if (opts?.retirement)
+              throw new Error('Native session changed during retirement');
             removedFromStore = true;
             return undefined;
           }
@@ -5243,6 +5290,7 @@ class QwenAgent implements Agent {
           } catch (error) {
             closeError = error;
           }
+          if (opts?.retirement && closeError !== undefined) throw closeError;
           if (recorder?.hasWriteOwnership()) {
             throw closeError ?? new SessionWriterUnavailableError();
           }
@@ -5865,6 +5913,9 @@ class QwenAgent implements Agent {
     }
 
     const responseMeta: Record<string, unknown> = {
+      ...(args._meta?.[SESSION_RETIREMENT_RECEIPT_META_KEY] === 1
+        ? { [SESSION_RETIREMENT_RECEIPT_META_KEY]: 1 }
+        : {}),
       ...(this.managedToolInvocationGuard
         ? {
             [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
@@ -7459,6 +7510,12 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const skillLeaseKey =
+      this.privateParentState === 'trusted' &&
+      typeof meta[TURN_SKILL_LEASE_META_KEY] === 'string'
+        ? (meta[TURN_SKILL_LEASE_META_KEY] as string)
+        : undefined;
+    delete meta[TURN_SKILL_LEASE_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     const suppliedModeBeforeStart =
@@ -7468,6 +7525,8 @@ class QwenAgent implements Agent {
       this.privateParentState === 'trusted'
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
+    const userPrompt = meta[DAEMON_USER_PROMPT_META_KEY];
+    const promptSource = meta[DAEMON_PROMPT_SOURCE_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedChannelWorkflowOrigin =
@@ -7482,6 +7541,14 @@ class QwenAgent implements Agent {
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[SUBMITTED_PROMPT_META_KEY];
     delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
+    delete meta[DAEMON_USER_PROMPT_META_KEY];
+    delete meta[DAEMON_PROMPT_SOURCE_META_KEY];
+    if (this.privateParentState === 'trusted' && userPrompt === false) {
+      meta[DAEMON_USER_PROMPT_META_KEY] = false;
+    }
+    if (this.privateParentState === 'trusted' && promptSource !== undefined) {
+      meta[DAEMON_PROMPT_SOURCE_META_KEY] = promptSource;
+    }
     if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
     }
@@ -7611,12 +7678,26 @@ class QwenAgent implements Agent {
     }
     calls.add(call);
     try {
-      return await session.prompt(
-        sanitizedParams,
-        invocationContext,
-        call.controller.signal,
-        modelPrompt,
-      );
+      const execute = () =>
+        session.prompt(
+          sanitizedParams,
+          invocationContext,
+          call.controller.signal,
+          modelPrompt,
+        );
+      if (!skillLeaseKey) return await execute();
+      const lease = this.turnSkillLeases.claim(sessionId, skillLeaseKey);
+      try {
+        return await runWithTurnSkillSnapshot(lease.snapshot, execute);
+      } finally {
+        this.turnSkillLeases.settle(
+          sessionId,
+          skillLeaseKey,
+          () =>
+            !hasTurnResourceWork(lease.snapshot) &&
+            session.collectActiveWorkHolds(true).length === 0,
+        );
+      }
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
@@ -8227,7 +8308,9 @@ class QwenAgent implements Agent {
             };
             if (isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
-                config.getWorkingDir(),
+                scope === 'session'
+                  ? this.sessionWorkspaceRoot(config)
+                  : config.getWorkingDir(),
                 name,
                 server,
               );
@@ -10418,6 +10501,128 @@ class QwenAgent implements Agent {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     switch (method) {
+      case TURN_SKILL_LEASE_METHOD: {
+        const key = params['key'];
+        if (
+          this.privateParentState !== 'trusted' ||
+          typeof key !== 'string' ||
+          !UUID_V4_RE.test(key) ||
+          typeof sessionId !== 'string' ||
+          !sessionConfig
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation',
+          );
+        if (params['action'] === 'release') {
+          await this.turnSkillLeases.releaseQueued(sessionId, key);
+        } else if (params['action'] === 'prepare') {
+          const session = this.sessions.get(sessionId)!;
+          if (!session.collectActiveWorkHolds().length)
+            await this.turnSkillLeases.collect(sessionId);
+          const expectedDigest = params['expectedDigest'];
+          if (
+            expectedDigest !== undefined &&
+            (typeof expectedDigest !== 'string' ||
+              !/^[a-f0-9]{64}$/.test(expectedDigest))
+          )
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected skill digest',
+            );
+          const expectedGeneration = params['expectedExtensionGeneration'];
+          if (
+            expectedGeneration !== undefined &&
+            (typeof expectedGeneration !== 'number' ||
+              !Number.isSafeInteger(expectedGeneration) ||
+              expectedGeneration < 0)
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid expected extension generation',
+            );
+          }
+          let unavailable = false;
+          let unsupportedComponent = false;
+          let sessionSkillEffectsCompatible: boolean | undefined;
+          try {
+            const digest = await this.turnSkillLeases.prepare(
+              sessionId,
+              key,
+              async () => {
+                let releaseExtensions: (() => Promise<void>) | undefined;
+                if (typeof expectedGeneration === 'number') {
+                  try {
+                    releaseExtensions = await sessionConfig
+                      .getExtensionManager()
+                      .acquireTurnExtensionLease(expectedGeneration);
+                  } catch (error) {
+                    unavailable = true;
+                    unsupportedComponent =
+                      error instanceof UnsupportedTurnExtensionComponentError;
+                    throw error;
+                  }
+                }
+                try {
+                  const manager = sessionConfig.getSkillManager();
+                  if (!manager) throw new Error('Skill manager unavailable');
+                  const skills = await manager.listSkills({ force: true });
+                  if (manager.hasDiscoveryReadErrors())
+                    throw new Error('Skill discovery incomplete');
+                  const enabled = skills.filter(
+                    (skill) =>
+                      skill.level !== 'bundled' &&
+                      sessionConfig.isSkillEnabled(skill),
+                  );
+                  const lease = await prepareTurnSkillSnapshot(enabled, {
+                    baseDirectory: sessionConfig.storage.getProjectTempDir(),
+                    skillManager: manager,
+                    expectedDigest,
+                  });
+                  // Check the material actually reserved by this admission. Trust
+                  // can change while a turn waits for permission.
+                  sessionSkillEffectsCompatible = lease.snapshot.skills.every(
+                    (skill) =>
+                      !skill.allowedTools?.length &&
+                      !Object.keys(skill.hooks ?? {}).length,
+                  );
+                  if (!releaseExtensions) return lease;
+                  const releaseStore = releaseExtensions;
+                  return {
+                    snapshot: lease.snapshot,
+                    dispose: async () => {
+                      try {
+                        await lease.dispose();
+                      } finally {
+                        await releaseStore();
+                      }
+                    },
+                  };
+                } catch (error) {
+                  await releaseExtensions?.();
+                  throw error;
+                }
+              },
+            );
+            return {
+              digest,
+              extensionGeneration: expectedGeneration,
+              sessionSkillEffectsCompatible,
+            };
+          } catch (error) {
+            if (unavailable)
+              return unsupportedComponent
+                ? { unsupportedExtensionComponent: true }
+                : {};
+            throw error;
+          }
+        } else
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid turn skill reservation action',
+          );
+        return {};
+      }
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
         if (
@@ -13175,7 +13380,21 @@ class QwenAgent implements Agent {
             'Invalid session close cancellation reason',
           );
         }
+        const operationId = params['retirementOperationId'];
+        if (
+          operationId !== undefined &&
+          (typeof operationId !== 'string' ||
+            operationId.length !== 36 ||
+            params['requireFlush'] !== true ||
+            params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] !== true ||
+            cancelReason !== undefined)
+        )
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid strict retirement request',
+          );
         const outcome = await this.closeStoredSession(sessionId, {
+          retirement: operationId !== undefined,
           ...(cancelReason === 'user' ? { cancelReason } : {}),
           requireFlush: params['requireFlush'] === true,
           onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
@@ -13185,9 +13404,17 @@ class QwenAgent implements Agent {
         });
         // `holds` rides along only on a refusal, so the response every existing
         // caller already parses keeps its exact shape.
-        return outcome.closed
-          ? { sessionId, closed: true }
-          : { sessionId, closed: false, holds: outcome.holds };
+        return {
+          sessionId,
+          closed: outcome.closed,
+          ...(outcome.closed ? {} : { holds: outcome.holds }),
+          ...(outcome.retirementUnavailable
+            ? { retirementUnavailable: true }
+            : {}),
+          ...(operationId === undefined
+            ? {}
+            : { retirementOperationId: operationId }),
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];

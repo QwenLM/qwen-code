@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -358,7 +359,7 @@ public class JdbcChannelInstanceStore
         if (claims.size() != 1 || !tenantId.equals(claims.getFirst().tenantId())
                 || !sessionId.equals(claims.getFirst().sessionId()) || !deliveryId.equals(claims.getFirst().deliveryId())
                 || !operationId.equals(ChannelInstanceStore.reconciliationOperationId(claims.getFirst()))) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(409,
+            throw new ManagedAgentException(409,
                     "channel_claim_stale", "The channel delivery claim changed before reconciliation committed.");
         }
     }

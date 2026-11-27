@@ -5464,6 +5464,12 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    // Contract: pairing teardown is fire-and-forget from the drain's point of
+    // view. Both services' close() destroys tracked survivors (including
+    // upgraded sockets closeAllConnections() cannot reach), so dispose settles
+    // promptly even over a non-answering paired peer; awaiting it here would
+    // let a future wedged dispose hang the whole drain, while process exit
+    // remains the final backstop for any socket that outlives it.
     const remoteAccessService = app.locals?.['remoteAccessService'] as
       | RemoteAccessService
       | undefined;
@@ -8910,7 +8916,7 @@ async function runQwenServeImpl(
           runtimeAppForCleanup;
         const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
           'stopScheduledTaskKeepaliveForWorkspace'
-        ] as ((workspaceCwd: string) => void) | undefined;
+        ] as ((workspaceCwd: string) => Promise<void> | undefined) | undefined;
         try {
           stopScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain.workspaceCwd);
         } catch (err) {
@@ -9066,13 +9072,19 @@ async function runQwenServeImpl(
               runtimeAppForCleanup;
             const stopWorkspaceGitStateForWorkspace = app?.locals?.[
               'stopWorkspaceGitStateForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const releaseWebTerminalsForWorkspace = app?.locals?.[
               'releaseWebTerminalsForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -9082,7 +9094,7 @@ async function runQwenServeImpl(
               );
             }
             try {
-              stopScheduledTaskKeepaliveForWorkspace?.(
+              await stopScheduledTaskKeepaliveForWorkspace?.(
                 runtimeToDrain.workspaceCwd,
               );
             } catch (err) {

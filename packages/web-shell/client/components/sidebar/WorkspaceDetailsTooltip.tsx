@@ -94,6 +94,17 @@ interface WorkspaceDetailsTooltipProps {
     onBranchChanged: () => void;
   };
   onOpenChange?: (open: boolean) => void;
+  /**
+   * Optional handler invoked when the user clicks a manageable overview row
+   * (MCP, skills, extensions, channels, context, hooks). Rows without a
+   * handler or excluded by `manageableItems` stay read-only.
+   */
+  onOpenOverviewItem?: (item: WorkspaceOverviewItem) => void;
+  /**
+   * Subset of overview facets that render as clickable management rows when
+   * `onOpenOverviewItem` is provided. Defaults to all items when omitted.
+   */
+  manageableItems?: ReadonlySet<WorkspaceOverviewItem>;
   children: ReactElement;
 }
 
@@ -178,6 +189,8 @@ export function WorkspaceDetailsTooltip({
   onOpenTerminalLocally,
   gitActions,
   onOpenChange,
+  onOpenOverviewItem,
+  manageableItems,
   children,
 }: WorkspaceDetailsTooltipProps) {
   const { t, isRtl } = useI18n();
@@ -270,7 +283,7 @@ export function WorkspaceDetailsTooltip({
       // inside either layer — the row, or the picker's own field — is about to
       // unmount with the content, so hand focus to the folder row rather than
       // let it fall to <body>. Focus anywhere else (a pointer user's composer)
-      // is left alone.
+      // is left alone, and facet navigation to a management panel skips restore.
       const active = document.activeElement;
       const focusInsideLayers =
         active instanceof HTMLElement &&
@@ -564,6 +577,45 @@ export function WorkspaceDetailsTooltip({
             const facetLabel = t(`sidebar.overview.${item}`);
             const detail = overviewDetail(t, overview, item);
             const title = `${facetLabel}: ${detail}`;
+            const interactive =
+              Boolean(onOpenOverviewItem) &&
+              (!manageableItems || manageableItems.has(item));
+            const rowContent = (
+              <>
+                <Icon size={14} aria-hidden="true" />
+                <span>{facetLabel}</span>
+                <span className={sidebarStyles.sessionDetailsRowValue}>
+                  {value}
+                </span>
+                {interactive && <ChevronRightIcon aria-hidden="true" />}
+              </>
+            );
+            if (interactive) {
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={cx(
+                    sidebarStyles.sessionDetailsRow,
+                    sidebarStyles.sessionDetailsRowButton,
+                    issue && sidebarStyles.sessionDetailsRowIssue,
+                  )}
+                  title={title}
+                  aria-label={t('sidebar.overview.openFacet', {
+                    facet: facetLabel,
+                    workspace: label,
+                    detail,
+                  })}
+                  data-web-shell-workspace-overview={item}
+                  onClick={() => {
+                    close(false);
+                    onOpenOverviewItem?.(item);
+                  }}
+                >
+                  {rowContent}
+                </button>
+              );
+            }
             return (
               <div
                 key={item}
@@ -575,11 +627,7 @@ export function WorkspaceDetailsTooltip({
                 aria-label={title}
                 data-web-shell-workspace-overview={item}
               >
-                <Icon size={14} aria-hidden="true" />
-                <span>{facetLabel}</span>
-                <span className={sidebarStyles.sessionDetailsRowValue}>
-                  {value}
-                </span>
+                {rowContent}
               </div>
             );
           })}

@@ -6,7 +6,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -21,7 +24,7 @@ public class HarnessEventProjector {
             Map<String, Object> data = object(event.data());
             String stopReason = string(data.get("stopReason"));
             boolean cancelled = stopReason != null
-                    && stopReason.toLowerCase(java.util.Locale.ROOT).contains("cancel");
+                    && stopReason.toLowerCase(Locale.ROOT).contains("cancel");
             String type = cancelled ? "turn.cancelled" : "turn.completed";
             String status = cancelled ? "CANCELLED" : "COMPLETED";
             return new ProjectedEvent(type,
@@ -68,8 +71,8 @@ public class HarnessEventProjector {
             if (id == null || !id.startsWith("umsg_")) {
                 return null;
             }
-            java.util.List<Map<String, Object>> input = new java.util.ArrayList<>();
-            if (data.get("parts") instanceof java.util.List<?> parts) {
+            List<Map<String, Object>> input = new ArrayList<>();
+            if (data.get("parts") instanceof List<?> parts) {
                 for (Object part : parts) {
                     String text = string(object(part).get("text"));
                     if (text != null) {

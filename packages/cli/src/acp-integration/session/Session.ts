@@ -15,13 +15,9 @@ import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import {
-  logLoopProtection,
-  logWorkflowKeyword,
-} from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import { logWorkflowKeyword } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
 import {
   WorkflowKeywordEvent,
-  LoopProtectionEvent,
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
@@ -59,7 +55,6 @@ import {
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
-import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -71,15 +66,6 @@ import {
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
-import {
-  getTurnToolCallCapHalt,
-  shouldRemindTurnToolCallCap,
-} from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
-import {
-  buildLoopReminder,
-  INVALID_PARAMS_REMINDER_AT,
-} from '@qwen-code/qwen-code-core/services/loop-protection.js';
-import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
   enterHookExecutionOwner,
@@ -93,6 +79,9 @@ import {
   hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
 } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import { runUserPromptSubmit } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit.js';
+import type { UserPromptSource } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { getChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
@@ -274,14 +263,10 @@ import {
   isShellProgressData,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
-  GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
-  getToolCallRepeatKey,
   logLoopDetected,
-  logRepeatedToolFailureGuard,
   LoopDetectedEvent,
   LoopType,
-  RepeatedToolFailureGuardEvent,
   acquireSleepInhibitor,
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
@@ -374,7 +359,6 @@ import {
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
-import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 import {
@@ -399,6 +383,8 @@ import {
   DAEMON_ATTACHMENT_CONTEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -454,6 +440,10 @@ import {
 import { modsWanted } from '../../services/display-translation-mod.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  isRepetitiveToolCallsError,
+  REPETITIVE_TOOL_CALLS_HINT,
+} from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -597,24 +587,6 @@ import {
   DaemonTodoStopGuard,
   type TodoStopGuardContinuation,
 } from './daemon-todo-stop-guard.js';
-import {
-  createRepeatedToolFailureGuardState,
-  reduceRepeatedToolFailureGuard,
-  REPEATED_TOOL_FAILURE_REMINDER,
-  REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-  parseRepeatedToolFailureGuardMode,
-  type RepeatedToolFailureBatch,
-  type RepeatedToolFailureObservation,
-  type RepeatedToolFailureGuardMode,
-  type RepeatedToolFailureGuardDecision,
-  type RepeatedToolFailureGuardState,
-} from './repeated-tool-failure-guard.js';
-import {
-  getToolExplorationKind,
-  TOOL_EXPLORATION_REMINDER,
-  ToolExplorationBudget,
-} from '@qwen-code/qwen-code-core/services/tool-exploration-budget.js';
-
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 /** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
@@ -712,6 +684,13 @@ function readDaemonInputAnnotations(
       !!item && typeof item === 'object' && !Array.isArray(item),
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
+}
+function readPromptSource(value: unknown): UserPromptSource | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { sessionId, workspaceCwd } = value as Record<string, unknown>;
+  return typeof sessionId === 'string' && typeof workspaceCwd === 'string'
+    ? { session_id: sessionId, cwd: workspaceCwd }
+    : undefined;
 }
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
@@ -815,7 +794,8 @@ type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
   loopDetected?: boolean;
-  repeatedToolFailureBatch?: RepeatedToolFailureBatch;
+  /** An Agent tool call in this batch ran (it may still have failed). */
+  ranAgentTool?: boolean;
   memoryWriteCandidates?: MemoryWriteCandidate[];
   /**
    * A tool in this batch asked to end the turn once its result is recorded.
@@ -823,6 +803,8 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /** A tool hook returned `continue: false`: the turn ends, with this reason. */
+  hookStopReason?: string;
   /**
    * Hook additionalContext of a code-mode nested call. Its parts are a value
    * for the exec script, so the parent exec delivers this to the model.
@@ -841,7 +823,6 @@ type TodoStopGuardClaimResult = 'claimed' | 'queued' | 'unavailable';
 type NextMessageAfterToolRun = {
   message: Content | null;
   hadMidTurnUserInput: boolean;
-  stoppedByRepeatedToolFailure?: boolean;
 };
 
 type TodoStopGuardBackgroundBaseline = {
@@ -959,9 +940,6 @@ type PendingToolResultRecord = {
   responsePartsWithoutHookContext?: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
-  toolType?: 'native' | 'mcp';
-  executionErrorType?: ToolErrorType;
-  providerDuplicate?: boolean;
   /** Skip the durable JSONL write; the in-memory result is still produced. */
   skipPersistence?: boolean;
   metadata: Omit<Partial<ToolCallResponseInfo>, 'executionStatus'> & {
@@ -982,28 +960,10 @@ type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
 
 export type DaemonToolLoopState = {
   totalToolCalls: number;
-  invalidToolParamErrors: Map<string, number>;
-  /** Per-turn counts of identical (tool, args) calls, by repeat key. */
-  toolCallKeyCounts: Map<string, number>;
-  /** Highest repeat count of any single (tool, args) pair this turn. */
-  maxToolCallKeyRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
-  /** Reason and tool-call numbers of the stop, for shared loop types. */
+  /** Reason and tool-call numbers of the stop. */
   loopDetail?: LoopStopDetail;
-  /** Tool of the (tool, args) pair behind maxToolCallKeyRepeat. */
-  maxToolCallKeyName?: string;
-  /** Loop-protection patterns already reminded or observed this turn. */
-  loopProtectionHandled?: Set<string>;
-  /** Reminders for the next model request that carries tool results. */
-  pendingLoopReminders?: Array<{
-    text: string;
-    loopType: LoopType;
-    detail: LoopStopDetail;
-  }>;
-  repeatedToolFailureMode: RepeatedToolFailureGuardMode;
-  repeatedToolFailureState: RepeatedToolFailureGuardState;
-  explorationBudget?: ToolExplorationBudget;
   /**
    * Per-tool count of refused partial edits, one per model response, for the
    * rejection the tool last got.
@@ -1109,7 +1069,8 @@ type SharedRoundResult =
 const userPromptBlockedNotice = (reason: string | undefined) =>
   `✗ **UserPromptSubmit blocked**: ${reason || 'No reason provided'}`;
 
-const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
+// The refusal of a partial edit adds the retry directive from this count.
+const PARTIAL_EDIT_DIRECTIVE_AT = 2;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
   'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
@@ -1126,9 +1087,6 @@ const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
 // returning (the shell tool on user cancel) instead of throwing.
 const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
-const USER_PROMPT_BLOCKED_TOOL_RESULT =
-  'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
-
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
   assertIdentity: () => Promise<void>;
@@ -1183,96 +1141,8 @@ function managedConversationBindingError(): RequestError {
   );
 }
 
-function createDaemonToolLoopState(
-  repeatedToolFailureMode: RepeatedToolFailureGuardMode,
-): DaemonToolLoopState {
-  return {
-    totalToolCalls: 0,
-    invalidToolParamErrors: new Map(),
-    toolCallKeyCounts: new Map(),
-    maxToolCallKeyRepeat: 0,
-    loopDetected: false,
-    repeatedToolFailureMode,
-    repeatedToolFailureState: createRepeatedToolFailureGuardState(),
-    explorationBudget: new ToolExplorationBudget(),
-  };
-}
-
-function repeatedToolFailureCountBucket(
-  count: number,
-): '0' | '1-2' | '3-4' | '5-7' | '8+' {
-  if (count === 0) return '0';
-  if (count <= 2) return '1-2';
-  if (count <= 4) return '3-4';
-  if (count <= 7) return '5-7';
-  return '8+';
-}
-
-function repeatedToolFailureBatchBucket(count: number): '0' | '1' | '2' | '3+' {
-  if (count === 0) return '0';
-  if (count === 1) return '1';
-  if (count === 2) return '2';
-  return '3+';
-}
-
-function recordRepeatedToolFailureDecision(
-  promptId: string,
-  mode: RepeatedToolFailureGuardMode,
-  previousState: RepeatedToolFailureGuardState,
-  decision: RepeatedToolFailureGuardDecision,
-  batch: RepeatedToolFailureBatch,
-): void {
-  if (mode === 'off' || decision.kind === 'none') {
-    return;
-  }
-
-  const countState = decision.kind === 'reset' ? previousState : decision.state;
-  const telemetryDecision =
-    decision.kind === 'warn'
-      ? 'warned'
-      : decision.kind === 'stop'
-        ? 'stopped'
-        : decision.kind;
-  const key = decision.kind === 'reset' ? undefined : decision.state.key;
-  const matchingToolTypes = new Set(
-    key
-      ? batch.observations
-          .filter(
-            (observation) =>
-              !observation.providerDuplicate &&
-              observation.policyToolName === key.policyToolName &&
-              observation.executionErrorType === key.executionErrorType,
-          )
-          .map((observation) => observation.toolType)
-          .filter((toolType) => toolType !== undefined)
-      : [],
-  );
-  const toolType =
-    matchingToolTypes.size === 1 ? [...matchingToolTypes][0] : undefined;
-
-  logRepeatedToolFailureGuard(
-    new RepeatedToolFailureGuardEvent({
-      prompt_id: promptId,
-      route: 'acp_foreground',
-      mode,
-      phase_before: previousState.phase,
-      phase_after: decision.state.phase,
-      decision: telemetryDecision,
-      failure_count_bucket: repeatedToolFailureCountBucket(
-        countState.failureCount,
-      ),
-      batch_count_bucket: repeatedToolFailureBatchBucket(countState.batchCount),
-      candidate_ordinal: countState.candidateOrdinal,
-      ...(decision.kind === 'reset'
-        ? { reset_reason: decision.reason }
-        : {
-            terminal_status: 'error',
-            execution_status: 'error',
-            execution_error_type: key?.executionErrorType,
-            tool_type: toolType,
-          }),
-    }),
-  );
+function createDaemonToolLoopState(): DaemonToolLoopState {
+  return { totalToolCalls: 0, loopDetected: false };
 }
 
 function recordDaemonLoopDetected(
@@ -1281,10 +1151,9 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
-  options: { recordToQwenLogger?: boolean; loopDetail?: LoopStopDetail } = {},
+  loopDetail?: LoopStopDetail,
 ): true {
   if (!loopState.loopDetected) {
-    const { loopDetail, ...logOptions } = options;
     loopState.loopDetected = true;
     loopState.loopType = loopType;
     loopState.loopDetail = loopDetail;
@@ -1293,7 +1162,6 @@ function recordDaemonLoopDetected(
       logLoopDetected(
         config,
         new LoopDetectedEvent(loopType, promptId, loopDetail),
-        logOptions,
       );
     } catch (error) {
       debugLogger.debug(
@@ -1353,6 +1221,19 @@ function modelStreamError(error: StructuredError): unknown {
   );
 }
 
+function repetitiveToolCallsRequestError(
+  errorMessage: string,
+): RequestError | undefined {
+  if (!isRepetitiveToolCallsError(errorMessage)) return undefined;
+  const message = errorMessage.includes(REPETITIVE_TOOL_CALLS_HINT)
+    ? errorMessage
+    : errorMessage + REPETITIVE_TOOL_CALLS_HINT;
+  return new RequestError(-32603, message, {
+    errorKind: 'repetitive_tool_calls',
+    details: message,
+  });
+}
+
 function createLoopDetectedTurnError(
   loopState: Pick<DaemonToolLoopState, 'loopType' | 'loopDetail'>,
 ): RequestError {
@@ -1390,133 +1271,6 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
-function logDaemonLoopProtection(
-  config: Config,
-  promptId: string,
-  loopType: LoopType,
-  decision: 'reminded' | 'stopped' | 'observed',
-  detail: LoopStopDetail,
-): void {
-  try {
-    logLoopProtection(
-      config,
-      new LoopProtectionEvent({
-        prompt_id: promptId,
-        loop_type: loopType,
-        decision,
-        mode: config.getLoopProtection(),
-        loop_reason: detail.loopReason,
-      }),
-    );
-  } catch (error) {
-    debugLogger.debug(
-      '[Session] Failed to record loop protection telemetry',
-      error,
-    );
-  }
-}
-
-// One reminder per pattern.
-function remindDaemonLoop(
-  loopState: DaemonToolLoopState,
-  key: string,
-  input: LoopReminderInput,
-  detail: LoopStopDetail,
-): void {
-  const handled = (loopState.loopProtectionHandled ??= new Set());
-  if (handled.has(key)) return;
-  handled.add(key);
-  (loopState.pendingLoopReminders ??= []).push({
-    text: buildLoopReminder(input),
-    loopType: input.loopType,
-    detail,
-  });
-}
-
-// Takes the queued reminders for the next request, logging them as
-// delivered.
-function takeDaemonLoopReminders(
-  config: Config,
-  promptId: string,
-  loopState: DaemonToolLoopState,
-): string | undefined {
-  const pending = loopState.pendingLoopReminders;
-  if (!pending?.length) return undefined;
-  loopState.pendingLoopReminders = undefined;
-  for (const { loopType, detail } of pending) {
-    logDaemonLoopProtection(config, promptId, loopType, 'reminded', detail);
-  }
-  return pending.map(({ text }) => text).join('\n\n');
-}
-
-// A governed detector reached its reminder point (#14828).
-function remindDaemonLoopBeforeStop(
-  config: Config,
-  loopState: DaemonToolLoopState,
-  key: string,
-  input: Omit<LoopReminderInput, 'stops'>,
-  detail: LoopStopDetail = {},
-): void {
-  const mode = config.getLoopProtection();
-  if (mode === 'off') return;
-  remindDaemonLoop(
-    loopState,
-    key,
-    { ...input, stops: mode === 'stop' },
-    detail,
-  );
-}
-
-// A governed detector reached its stop point: `stop` halts, `warn` reminds,
-// `off` only records. Returns whether to halt.
-function onDaemonLoopStopPoint(
-  config: Config,
-  promptId: string,
-  loopState: DaemonToolLoopState,
-  key: string,
-  input: Omit<LoopReminderInput, 'stops'>,
-  detail: LoopStopDetail,
-  stopMessage: string,
-): boolean {
-  switch (config.getLoopProtection()) {
-    case 'stop':
-      if (loopState.loopDetected) return true;
-      recordDaemonLoopDetected(
-        config,
-        promptId,
-        input.loopType,
-        stopMessage,
-        loopState,
-        { loopDetail: detail },
-      );
-      logDaemonLoopProtection(
-        config,
-        promptId,
-        input.loopType,
-        'stopped',
-        detail,
-      );
-      return true;
-    case 'warn':
-      remindDaemonLoop(loopState, key, { ...input, stops: false }, detail);
-      return false;
-    default: {
-      const handled = (loopState.loopProtectionHandled ??= new Set());
-      if (!handled.has(key)) {
-        handled.add(key);
-        logDaemonLoopProtection(
-          config,
-          promptId,
-          input.loopType,
-          'observed',
-          detail,
-        );
-      }
-      return false;
-    }
-  }
-}
-
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -1525,171 +1279,23 @@ function recordDaemonToolCalls(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
+  // Checked once per batch, before execution: a batch that would cross the
+  // cap is skipped whole. A retry discards the failed attempt's calls before
+  // they reach here, so nothing needs rolling back.
   loopState.totalToolCalls += calls.length;
-  for (const call of calls) {
-    const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
-    const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
-    loopState.toolCallKeyCounts.set(key, count);
-    if (count > loopState.maxToolCallKeyRepeat) {
-      loopState.maxToolCallKeyRepeat = count;
-      loopState.maxToolCallKeyName = call.name ?? '';
-    }
-  }
-  // Same per-turn cap semantics as the core LoopDetectionService — the
-  // getTurnToolCallCapHalt classifier is shared with core's
-  // checkTurnToolCallCap so the two runtimes cannot drift (an explicit
-  // model.maxToolCallsPerTurn is a hard cap; the default is adaptive —
-  // past the soft cap a productive turn continues until the
-  // stuck-repetition signal or the hard backstop). Unlike core there is
-  // no in-session disable check — that flag is only set by the interactive
-  // loop-detection dialog, which has no ACP equivalent — and this runs
-  // once per batch, before execution: a batch that would cross the cap
-  // check is skipped whole, so a turn never executes past an explicit cap
-  // or the hard backstop (it can halt up to one batch short), while the
-  // adaptive soft cap is exceeded by design, up to the backstop. No retry
-  // rollback is needed for these counters: on RETRY / MODEL_FALLBACK the
-  // daemon stream loops discard the failed attempt's accumulated calls
-  // (functionCalls.length = 0) before re-streaming, so a failed attempt's
-  // calls never reach this function to be double-counted.
   const cap = config.getMaxToolCallsPerTurn();
-  const isExplicitCap = config.isMaxToolCallsPerTurnExplicit();
-  const capHalt = getTurnToolCallCapHalt(
-    loopState.totalToolCalls,
-    loopState.maxToolCallKeyRepeat,
-    cap,
-    isExplicitCap,
-  );
-  const capMessage = `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`;
-  const stuck = {
-    loopType: LoopType.TURN_TOOL_CALL_CAP,
-    toolName: loopState.maxToolCallKeyName,
-    count: loopState.maxToolCallKeyRepeat,
-    softCap: cap,
-  };
-  if (capHalt) {
-    const loopDetail = {
-      loopReason: capHalt.reason,
-      toolCallCount: loopState.totalToolCalls,
-      toolCallLimit: capHalt.limit,
-    };
-    // Budgets (an explicit cap, the backstop) stop in every mode.
-    if (capHalt.reason !== LoopReason.STUCK_REPETITION) {
-      return recordDaemonLoopDetected(
-        config,
-        promptId,
-        LoopType.TURN_TOOL_CALL_CAP,
-        capMessage,
-        loopState,
-        { loopDetail },
-      );
-    }
-    if (
-      onDaemonLoopStopPoint(
-        config,
-        promptId,
-        loopState,
-        'cap',
-        stuck,
-        loopDetail,
-        capMessage,
-      )
-    ) {
-      return true;
-    }
-  } else if (
-    shouldRemindTurnToolCallCap(
-      loopState.totalToolCalls,
-      loopState.maxToolCallKeyRepeat,
-      cap,
-      isExplicitCap,
-    )
-  ) {
-    remindDaemonLoopBeforeStop(config, loopState, 'cap', stuck, {
-      loopReason: LoopReason.STUCK_REPETITION,
-      toolCallCount: loopState.totalToolCalls,
-      toolCallLimit: cap,
-    });
-  }
-  // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
-  // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
-  // it. Gated on skipLoopDetection exactly as in core — that detector class
-  // is the historically false-positive-prone one (long turns legitimately
-  // re-run the same build/test/read), so it ships off by default, and its
-  // false positives would land hardest on exactly the long turns this
-  // adaptive cap exists to enable. The cap's stuck signal above stays
-  // always-on regardless. "Off by default" depends on the CLI layer: core's
-  // Config defaults skipLoopDetection to false and loadCliConfig applies
-  // `?? true` (cli config.ts), so a Config constructed without that layer
-  // would ship this halt on.
-  if (
-    !config.getSkipLoopDetection() &&
-    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD &&
-    onDaemonLoopStopPoint(
-      config,
-      promptId,
-      loopState,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      { loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE },
-      { loopReason: LoopReason.REPEATED_CALL },
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
-    )
-  ) {
-    return true;
-  }
-  // Deliberately after both halt checks: a halted batch is skipped whole and
-  // never executes, so its calls must not feed the exploration budget (nor
-  // trigger the registry lookups classifying them needs).
-  for (const call of calls) {
-    loopState.explorationBudget?.record(
-      getToolExplorationKind(
-        config.getToolRegistry(),
-        call.name ?? '',
-        call.args ?? {},
-      ),
-    );
-  }
-  return false;
-}
-
-function recordDaemonInvalidToolParams(
-  config: Config,
-  promptId: string,
-  loopState: DaemonToolLoopState | undefined,
-  toolName: string,
-  error: Error,
-): boolean {
-  if (!loopState || loopState.loopDetected)
-    return loopState?.loopDetected ?? false;
-  // Intentionally bucket by tool name only: repeated parameter errors for the
-  // same tool mean the model is stuck on that tool's schema.
-  const key = toolName;
-  const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
-  loopState.invalidToolParamErrors.set(key, count);
-  const invalid = {
-    loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-    toolName,
-    count,
-  };
-  if (
-    count >= INVALID_PARAMS_REMINDER_AT &&
-    count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
-  ) {
-    remindDaemonLoopBeforeStop(
-      config,
-      loopState,
-      `invalid:${toolName}`,
-      invalid,
-    );
-  }
-  if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
-  return onDaemonLoopStopPoint(
+  if (loopState.totalToolCalls <= cap) return false;
+  return recordDaemonLoopDetected(
     config,
     promptId,
+    LoopType.TURN_TOOL_CALL_CAP,
+    `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
     loopState,
-    `invalid:${toolName}`,
-    invalid,
-    {},
-    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
+    {
+      loopReason: LoopReason.EXPLICIT_CAP,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: cap,
+    },
   );
 }
 
@@ -1773,6 +1379,7 @@ type DrainedMidTurnMessage =
       kind: 'structured';
       content: ContentBlock[];
       displayText: string;
+      queueOnly?: true;
       attachmentReferences?: SessionAttachmentReference[];
     };
 
@@ -2083,6 +1690,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               item['displayText'],
               willPersistReferences,
             ),
+            ...(item['queueOnly'] === true && getInvocationContext()
+              ? { queueOnly: true }
+              : {}),
             ...(attachmentReferences ? { attachmentReferences } : {}),
           },
         ];
@@ -2876,7 +2486,6 @@ export class Session implements SessionContext {
   private readonly earlyDrainedMidTurnMessages =
     new WeakSet<DrainedMidTurnMessage>();
   private readonly todoStopGuard: DaemonTodoStopGuard;
-  private readonly repeatedToolFailureGuardMode: RepeatedToolFailureGuardMode;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
   private readonly relatedAgentIds = new Set<string>();
   private readonly provisionalRelatedAgentCounts = new Map<string, number>();
@@ -3176,16 +2785,6 @@ export class Session implements SessionContext {
       () => sessionWorkflowEnabledFromSettings,
     );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
-    const configuredGuardMode =
-      process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
-    const parsedGuardMode =
-      parseRepeatedToolFailureGuardMode(configuredGuardMode);
-    this.repeatedToolFailureGuardMode = parsedGuardMode ?? 'shadow';
-    if (configuredGuardMode?.trim() && parsedGuardMode === undefined) {
-      debugLogger.warn(
-        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD} has an invalid value; defaulting to shadow. Expected off, shadow, warn, or enforce.`,
-      );
-    }
     this.todoStopGuardBackgroundBaseline =
       this.#captureTodoStopGuardBackgroundBaseline();
 
@@ -5501,8 +5100,8 @@ export class Session implements SessionContext {
    * wider than anything reported from here (it covers prompts still waiting in
    * the FIFO, which the child cannot see).
    */
-  collectActiveWorkHolds(): ActiveWorkHoldV1[] {
-    if (this.disposed) return [];
+  collectActiveWorkHolds(includeDisposed = false): ActiveWorkHoldV1[] {
+    if (this.disposed && !includeDisposed) return [];
     const holds: ActiveWorkHoldV1[] = [];
     for (const agentId of this.config
       .getBackgroundTaskRegistry()
@@ -7753,7 +7352,16 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const delegatedPromptSource = readPromptSource(
+              promptMetadata?.[DAEMON_PROMPT_SOURCE_META_KEY],
+            );
+            const checkDelegatedPrompt =
+              delegatedPromptSource !== undefined &&
+              this.settings.merged.enableDelegatedPromptHooks === true;
+            // Opted-in delegated text enters message admission, where hooks
+            // can block it or add context before any model request.
             const isSlashInput =
+              !checkDelegatedPrompt &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               isSlashCommand(inputText);
@@ -8012,17 +7620,8 @@ export class Session implements SessionContext {
               );
             }
 
-            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
-            // A runtime continuation is machine-generated, not a user
-            // submission — the same reason `isContinue` is exempt. Firing
-            // the hook on one is also unrecoverable: a block returns before
-            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-            // branch, which re-queues the identical continuation. Nothing in
-            // that cycle can change the goal state, so it spins — no model
-            // call, one persisted transcript record per lap — until someone
-            // pauses or clears the goal.
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             const isFreshUserTurn =
               !isRetry &&
@@ -8051,10 +7650,21 @@ export class Session implements SessionContext {
                   )
                 ? lastStrippedId
                 : undefined;
-            // Channel markers cover both automated and human messages. Keep
-            // that class excluded until its producers distinguish them; see
-            // docs/design/daemon-user-prompt-submit-provenance.md.
+            // Channel prompts still omit the submitted_prompt provenance field.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
+            const isNewUserPrompt =
+              isFreshUserTurn &&
+              (channelTurn
+                ? getChannelWorkflowOrigin()?.userInitiated === true
+                : promptMetadata?.[DAEMON_USER_PROMPT_META_KEY] !== false &&
+                  (!delegatedPromptSource || checkDelegatedPrompt));
+            const hookSubmittedPrompt =
+              isUserSubmissionTurn && submittedPrompt.trim().length > 0
+                ? submittedPrompt
+                : undefined;
+            const hookSource = isUserSubmissionTurn
+              ? delegatedPromptSource
+              : undefined;
             // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
             // through `LlmClient` on the shared agent loop's round: a fresh
             // prompt, a channel's or a Goal turn's included, as a UserQuery,
@@ -8093,21 +7703,12 @@ export class Session implements SessionContext {
             // guard or reminder can run twice.
             const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
-            // A continue, a restore or a runtime continuation runs no
-            // UserPromptSubmit hook.
-            if (
-              sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation
-            ) {
+            if (sharedModelRound && isNewUserPrompt) {
               promptAdmission = await this.config
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
-                  submittedPrompt:
-                    isUserSubmissionTurn && submittedPrompt.trim().length > 0
-                      ? submittedPrompt
-                      : undefined,
+                  submittedPrompt: hookSubmittedPrompt,
+                  source: hookSource,
                   signal: pendingSend.signal,
                 });
               if (promptAdmission.blocked) {
@@ -8142,49 +7743,28 @@ export class Session implements SessionContext {
                     },
                   },
                 });
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
-            } else if (
-              !sharedModelRound &&
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation &&
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  owner: captureHookExecutionOwner(this.config),
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                    ...(isUserSubmissionTurn &&
-                    submittedPrompt.trim().length > 0
-                      ? { submitted_prompt: submittedPrompt }
-                      : {}),
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
+            } else if (isNewUserPrompt) {
+              const decision = await runUserPromptSubmit(
+                this.config,
+                promptText,
+                hookSubmittedPrompt,
+                pendingSend.signal,
+                undefined,
+                hookSource,
               );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
-
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
+              if (decision?.blockReason !== undefined) {
                 await this.messageEmitter.emitAgentMessage(
-                  userPromptBlockedNotice(hookOutput?.getEffectiveReason()),
+                  userPromptBlockedNotice(decision.blockReason),
                 );
-                return { stopReason: 'end_turn' };
+                return {
+                  stopReason: 'end_turn',
+                  _meta: { 'qwen.promptBlocked': true },
+                };
               }
 
               // Add additional context from hooks to the request, wrapped in
@@ -8194,7 +7774,7 @@ export class Session implements SessionContext {
               // the same reason as there — but never when the prompt resolved
               // to no parts, where the append is the only thing keeping the
               // request non-empty (`toParts` rejects an empty array).
-              const additionalContext = hookOutput?.getAdditionalContext();
+              const additionalContext = decision?.additionalContext;
               if (additionalContext) {
                 const alreadyDelivered =
                   parts.length > 0 &&
@@ -8561,13 +8141,9 @@ export class Session implements SessionContext {
             // the Stop hook reached its cap. A round that still answers input
             // taken then runs outside the Goal.
             let goalPermitReleasedByClient = false;
-            let toolLoopState = createDaemonToolLoopState(
-              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
-            );
+            let toolLoopState = createDaemonToolLoopState();
             const resetToolLoopState = () => {
-              toolLoopState = createDaemonToolLoopState(
-                channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
-              );
+              toolLoopState = createDaemonToolLoopState();
             };
             let stopHookCapped = false;
             // The shared round's stop point is the client's: the Stop hook,
@@ -8702,22 +8278,10 @@ export class Session implements SessionContext {
                   toolRun,
                   pendingSend.signal,
                   promptId,
-                  toolLoopState,
                   onFullTurnModel,
-                  rejectOnLoopDetected,
                   sharedToolBatch,
                 );
                 nextMessage = nextAfterTools.message;
-                if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                  return {
-                    stopReason: rejectOnLoopDetected
-                      ? cancelledOrThrowLoopDetected(
-                          pendingSend.signal,
-                          toolLoopState,
-                        )
-                      : getAbortAwareEndTurnStopReason(pendingSend.signal),
-                  };
-                }
                 if (toolRun.loopDetected) {
                   this.todoStopGuard.suspend();
                   await this.#preserveStoppedToolRun(
@@ -8889,6 +8453,9 @@ export class Session implements SessionContext {
                       ...(roundType === SendMessageType.UserQuery && {
                         workflowModeEligible,
                         promptAdmission,
+                        ...(!isNewUserPrompt && {
+                          skipUserPromptSubmit: true as const,
+                        }),
                         // Recall searches the user's words, as the current
                         // path does, not the resolved files and notices
                         // `parts` carries.
@@ -8905,7 +8472,6 @@ export class Session implements SessionContext {
                         ...(historyPromptId !== undefined && {
                           historyPromptId,
                         }),
-                        ...(promptAdmission && { promptAdmission }),
                       }),
                       ...(goalTurn &&
                         !goalPermitReleasedByClient &&
@@ -9288,24 +8854,10 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                       promptId,
-                      toolLoopState,
                       onFullTurnModel,
-                      rejectOnLoopDetected,
                       sharedToolBatch,
                     );
                   nextMessage = nextAfterTools.message;
-                  if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                    modTurn?.fail();
-                    pauseGoalForLoopStop();
-                    return {
-                      stopReason: rejectOnLoopDetected
-                        ? cancelledOrThrowLoopDetected(
-                            pendingSend.signal,
-                            toolLoopState,
-                          )
-                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
-                    };
-                  }
                   if (toolRun.loopDetected) {
                     modTurn?.fail();
                     pauseGoalForLoopStop();
@@ -9657,7 +9209,6 @@ export class Session implements SessionContext {
                 loopStop = event.value;
                 break;
               case LlmEventType.UserPromptSubmitBlocked:
-                // A tool-result round runs UserPromptSubmit too.
                 await this.messageEmitter.emitAgentMessage(
                   userPromptBlockedNotice(event.value.reason),
                 );
@@ -9696,10 +9247,7 @@ export class Session implements SessionContext {
     } catch (error) {
       streamFailed = true;
       if (!cutForInput()) {
-        // A round that threw before its request pushed the
-        // message, such as on a tool-result round whose
-        // UserPromptSubmit hook timed out, keeps it as the stops
-        // below do.
+        // Keep an unsent round's message as the stops below do.
         if (requestUnsent()) {
           if (signal.aborted) {
             markApiHistoryPrompt(message, responseCapture.turnId);
@@ -9725,10 +9273,9 @@ export class Session implements SessionContext {
         pushCountBefore;
       round.onSettled?.(pushed);
       responseInterrupt.end();
-      // A round that stopped, such as on the client's loop
-      // guard, runs none of the calls it already yielded. The
-      // loop guard's calls are skipped, as ACP's guard skips
-      // them.
+      // A round that stopped, such as on the client's tool-call
+      // cap, runs none of the calls it already yielded. They are
+      // skipped, as ACP's own cap skips them.
       if (roundStop === 'loop_detected' && !streamFailed && !signal.aborted) {
         await this.#emitLoopSkippedToolCalls(
           preparationTracker.takePending().map(({ callId, toolName }) => ({
@@ -9756,35 +9303,6 @@ export class Session implements SessionContext {
     }
     if (roundStop === 'user_prompt_blocked') {
       this.todoStopGuard.suspend();
-      // A tool-result round the hook blocked closes its calls
-      // with the block, not with the results it withheld from
-      // the model, nor with the repair's "retry if needed".
-      const blockedCalls = (message.parts ?? []).flatMap(
-        ({ functionResponse }) =>
-          functionResponse?.id
-            ? [
-                {
-                  callId: functionResponse.id,
-                  name: functionResponse.name ?? '',
-                },
-              ]
-            : [],
-      );
-      // Input taken with the results, already shown as
-      // delivered, stays in history with the closed calls, as a
-      // stopped tool run keeps it.
-      if (!pushed && blockedCalls.length > 0) {
-        this.#getCurrentChat().addHistory({
-          role: 'user',
-          parts: [
-            ...buildSyntheticToolResponseParts(
-              blockedCalls,
-              USER_PROMPT_BLOCKED_TOOL_RESULT,
-            ),
-            ...(message.parts ?? []).filter((part) => !part.functionResponse),
-          ],
-        });
-      }
       return { ended: { stopReason: 'end_turn' } };
     }
     if (
@@ -9860,9 +9378,9 @@ export class Session implements SessionContext {
   }> {
     const { promptId, signal, responseCapture } = turn;
     const sharedToolBatch = true;
-    let toolLoopState = createDaemonToolLoopState('off');
+    let toolLoopState = createDaemonToolLoopState();
     const resetToolLoopState = () => {
-      toolLoopState = createDaemonToolLoopState('off');
+      toolLoopState = createDaemonToolLoopState();
     };
     let emitResponseUsage = async () => {};
     const stopPolicies = [
@@ -10005,9 +9523,7 @@ export class Session implements SessionContext {
           toolRun,
           signal,
           promptId,
-          toolLoopState,
           undefined,
-          false,
           sharedToolBatch,
         );
         nextMessage = next.message;
@@ -10068,7 +9584,10 @@ export class Session implements SessionContext {
     ) {
       hookSystem
         .fireStopFailureEvent(
-          classifyApiError({ message: errorMessage, status: errorStatus }),
+          classifyApiError(
+            { message: errorMessage, status: errorStatus },
+            error,
+          ),
           errorMessage,
         )
         .catch((err) => {
@@ -10091,7 +9610,8 @@ export class Session implements SessionContext {
         subscriptionQuota: quota,
       });
     }
-    throw error;
+
+    throw repetitiveToolCallsRequestError(errorMessage) ?? error;
   }
 
   async #handleStopHookLoop(
@@ -10569,7 +10089,7 @@ export class Session implements SessionContext {
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
     let nextGuardContinuation = options.guardContinuation;
-    const toolLoopState = createDaemonToolLoopState('off');
+    const toolLoopState = createDaemonToolLoopState();
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
@@ -11099,10 +10619,10 @@ export class Session implements SessionContext {
         this.todoStopGuard.pauseForTrustedRetry();
         const errorStatus = getErrorStatus(error);
         const errorMessage = getErrorMessage(error);
-        const errorType = classifyApiError({
-          message: errorMessage,
-          status: errorStatus,
-        });
+        const errorType = classifyApiError(
+          { message: errorMessage, status: errorStatus },
+          error,
+        );
         const hookSystem = this.config.getHookSystem?.();
         if (
           !this.config.getDisableAllHooks?.() &&
@@ -11118,7 +10638,7 @@ export class Session implements SessionContext {
         if (errorStatus === 429) {
           throw new RequestError(429, 'Rate limit exceeded. Try again later.');
         }
-        throw error;
+        throw repetitiveToolCallsRequestError(errorMessage) ?? error;
       } finally {
         this.mods?.settleModelText(
           modelTextAttempt,
@@ -11235,24 +10755,9 @@ export class Session implements SessionContext {
           toolRun,
           pendingSend.signal,
           toolPromptId,
-          toolLoopState,
           options.onFullTurnModel,
-          options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
-        if (nextAfterTools.stoppedByRepeatedToolFailure) {
-          options.responseCapture?.modTurn?.fail();
-          return {
-            kind: 'terminal',
-            stopReason: options.rejectOnLoopDetected
-              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
-              : getAbortAwareEndTurnStopReason(pendingSend.signal),
-            loopProtectionStopped: true,
-            ...(supersededAutomaticContinuation
-              ? { supersededAutomaticContinuation: true }
-              : {}),
-          };
-        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -12216,10 +11721,8 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns and requested channel deliveries keep the loop alive for
-   * their final tool-free response; ending on the tool batch would return or
-   * submit an empty response because only a tool-free response is committed
-   * as the channel final.
+   * Channels normally need a final tool-free response for delivery. A hook
+   * stop ends the turn even when a channel is waiting for that response.
    */
   async #endTurnAfterToolRun(
     toolRun: RunToolResult,
@@ -12229,11 +11732,11 @@ export class Session implements SessionContext {
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
+    const hookStop = toolRun.hookStopReason;
     if (
-      toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn ||
-      hasChannelDelivery
+      (hookStop === undefined &&
+        (toolRun.terminateTurn !== true || channelTurn || hasChannelDelivery))
     ) {
       return false;
     }
@@ -12246,6 +11749,15 @@ export class Session implements SessionContext {
       goalTurn.endingToolCallId = toolRun.parts.findLast(
         (part) => part.functionResponse?.id,
       )?.functionResponse?.id;
+    }
+    if (hookStop !== undefined) {
+      try {
+        await this.messageEmitter.emitStopHookNotice(hookStop);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit tool hook stop notice: ${this.#formatError(error)}`,
+        );
+      }
     }
     return true;
   }
@@ -12360,10 +11872,8 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
     promptId: string,
-    toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
-    rejectOnLoopDetected = false,
-    // The client adds the todo and exploration reminders to the request.
+    // The client adds the todo reminder to the request.
     clientToolGuards = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
@@ -12371,7 +11881,6 @@ export class Session implements SessionContext {
       return { message: null, hadMidTurnUserInput: false };
     }
     const drained = await this.#drainMidTurnInput(abortSignal, {
-      watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
     });
     const backgroundParts = await this.#takeCurrentTurnBackgroundParts(
@@ -12391,124 +11900,22 @@ export class Session implements SessionContext {
         (part) =>
           canonicalToolName(part.functionResponse?.name ?? '') ===
           ToolNames.AGENT,
-      ) ||
-      toolRun.repeatedToolFailureBatch?.observations.some(
-        (observation) =>
-          canonicalToolName(observation.policyToolName ?? '') ===
-            ToolNames.AGENT && observation.executionStatus !== 'not_started',
-      );
+      ) || toolRun.ranAgentTool === true;
     const activeTodoReminder = clientToolGuards
       ? undefined
       : carriesAgentToolResult
         ? this.config.takeActiveTodoReminder(promptId, true)
         : this.config.takeActiveTodoReminder(promptId);
-    if (abortSignal.aborted) {
-      return {
-        message: {
-          role: 'user',
-          parts: [
-            ...toolRun.parts,
-            ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
-            ...drained.parts,
-            ...backgroundParts,
-          ],
-        },
-        hadMidTurnUserInput,
-      };
-    }
-    const previousRepeatedToolFailureState =
-      toolLoopState.repeatedToolFailureState;
-    const repeatedToolFailureBatch = toolRun.repeatedToolFailureBatch ?? {
-      complete: false,
-      observations: [],
-    };
-    const repeatedToolFailureDecision = reduceRepeatedToolFailureGuard(
-      previousRepeatedToolFailureState,
-      {
-        mode: toolLoopState.repeatedToolFailureMode,
-        batch: repeatedToolFailureBatch,
-        hasExternalInput: hadMidTurnUserInput,
-        hasQueuedPrompt: drained.hasQueuedPrompt,
-        inputReliable: drained.reliable,
-      },
-    );
-    recordRepeatedToolFailureDecision(
-      promptId,
-      toolLoopState.repeatedToolFailureMode,
-      previousRepeatedToolFailureState,
-      repeatedToolFailureDecision,
-      repeatedToolFailureBatch,
-    );
-    toolLoopState.repeatedToolFailureState = repeatedToolFailureDecision.state;
-    if (repeatedToolFailureDecision.kind !== 'none') {
-      const { state } = repeatedToolFailureDecision;
-      debugLogger.debug(
-        `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
-      );
-    }
-    // A stop sends nothing, so its batch leaves the reminders unlogged.
-    const loopReminder =
-      repeatedToolFailureDecision.kind === 'stop'
-        ? undefined
-        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
-    const parts = [
-      ...toolRun.parts,
-      ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
-      ...(!clientToolGuards &&
-      toolLoopState.explorationBudget?.takeReminder(
-        this.config.getMaxToolCallsPerTurn(),
-      )
-        ? [{ text: TOOL_EXPLORATION_REMINDER }]
-        : []),
-      ...(loopReminder ? [{ text: loopReminder }] : []),
-      ...(repeatedToolFailureDecision.kind === 'warn'
-        ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
-        : []),
-      ...drained.parts,
-      ...backgroundParts,
-    ];
-    if (repeatedToolFailureDecision.kind === 'stop') {
-      this.todoStopGuard.suspend();
-      this.#preserveUnsentMessageHistory(
-        {
-          role: 'user',
-          parts: [
-            ...parts,
-            { text: `System: ${REPEATED_TOOL_FAILURE_STOP_MESSAGE}` },
-          ],
-        },
-        true,
-      );
-      recordDaemonLoopDetected(
-        this.config,
-        promptId,
-        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
-        REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-        toolLoopState,
-        { recordToQwenLogger: false },
-      );
-      if (!rejectOnLoopDetected) {
-        // Rejecting turns publish the structured turn_error as the
-        // user-visible explanation; graceful (non-interactive) stops have
-        // no replacement, so keep the transcript stop message for them.
-        try {
-          await this.messageEmitter.emitAgentMessage(
-            REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-          );
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
-          );
-        }
-      }
-      return {
-        message: null,
-        hadMidTurnUserInput,
-        stoppedByRepeatedToolFailure: true,
-      };
-    }
     return {
-      message: { role: 'user', parts },
+      message: {
+        role: 'user',
+        parts: [
+          ...toolRun.parts,
+          ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+          ...drained.parts,
+          ...backgroundParts,
+        ],
+      },
       hadMidTurnUserInput,
     };
   }
@@ -13165,7 +12572,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       preserveFallbackOnAbort?: boolean;
       prefix?: string;
-      /** Also ends resolution, which then falls back to the message text. */
+      /** Limits attachment resolution while preserving unsent input. */
       deadline?: AbortSignal;
     } = {},
   ): Promise<Part[]> {
@@ -13241,6 +12648,54 @@ export class Session implements SessionContext {
         displayText,
         options.prefix,
       );
+      // Only live input admission can start a prompt hook.
+      if (
+        !abortSignal.aborted &&
+        options.deadline === undefined &&
+        (message.kind !== 'structured' || !message.queueOnly)
+      ) {
+        let decision;
+        try {
+          decision = await runUserPromptSubmit(
+            this.config,
+            message.kind === 'text'
+              ? message.message
+              : message.content
+                  .flatMap((block) =>
+                    block.type === 'text' ? [block.text] : [],
+                  )
+                  .join(' '),
+            undefined,
+            abortSignal,
+          );
+          abortSignal.throwIfAborted();
+        } catch (error) {
+          if (abortSignal.aborted) {
+            // The host already settled these queue IDs. The finalizer keeps
+            // the unsent input without starting another hook check.
+            const unsent = messages.slice(index);
+            for (const item of unsent)
+              this.earlyDrainedMidTurnMessages.add(item);
+            this.midTurnRecoveredMessages.unshift(...unsent);
+            return parts;
+          }
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(this.#formatError(error)),
+          );
+          continue;
+        }
+        if (decision?.blockReason !== undefined) {
+          await this.messageEmitter.emitAgentMessage(
+            userPromptBlockedNotice(decision.blockReason),
+          );
+          continue;
+        }
+        if (decision?.additionalContext) {
+          built.push(
+            createUserPromptSubmitContextPart(decision.additionalContext),
+          );
+        }
+      }
       const recorder = this.config.getChatRecordingService();
       if (message.kind === 'structured' && message.attachmentReferences) {
         const everyAttachmentBlockHasAReference =
@@ -13910,7 +13365,7 @@ export class Session implements SessionContext {
                     { text: modelText },
                   ],
                 };
-                const toolLoopState = createDaemonToolLoopState('off');
+                const toolLoopState = createDaemonToolLoopState();
 
                 while (nextMessage !== null) {
                   turnCount++;
@@ -14119,7 +13574,6 @@ export class Session implements SessionContext {
                         toolRun,
                         ac.signal,
                         promptId,
-                        toolLoopState,
                       );
                     nextMessage = nextAfterTools.message;
                     if (toolRun.loopDetected) {
@@ -14161,6 +13615,7 @@ export class Session implements SessionContext {
                 `[${item.source} error] ${msg}`,
               );
             } finally {
+              await this.#keepUnsentEarlyMidTurnInput(ac.signal);
               this.config.endAutomaticActiveTodoWorkChain(promptId);
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
@@ -15200,6 +14655,7 @@ export class Session implements SessionContext {
           reason: PromptResponse['stopReason'],
           partial = false,
         ): Promise<void> => {
+          await this.#keepUnsentEarlyMidTurnInput(ac.signal);
           if (responseSegmentEmitted && !responseTurnComplete) {
             try {
               await this.#emitBackgroundNotificationResponse(
@@ -15409,7 +14865,7 @@ export class Session implements SessionContext {
             );
             return;
           }
-          const toolLoopState = createDaemonToolLoopState('off');
+          const toolLoopState = createDaemonToolLoopState();
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -15574,7 +15030,6 @@ export class Session implements SessionContext {
                 toolRun,
                 ac.signal,
                 promptId,
-                toolLoopState,
               );
               nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
@@ -16722,7 +16177,7 @@ export class Session implements SessionContext {
         LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
         'Stopping ACP turn after a repeated duplicate provider tool-call id.',
         toolLoopState,
-        { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
+        { loopReason: LoopReason.PROVIDER_DUPLICATE_ID },
       );
       await this.#emitLoopSkippedToolCalls(requests);
       return {
@@ -16733,90 +16188,30 @@ export class Session implements SessionContext {
     }
 
     const registry = this.config.getToolRegistry();
-    const refusedPartialEdits = new Set<string>();
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
-    const observations: RepeatedToolFailureObservation[] = [];
+    let ranAgentTool = false;
     for (const {
       origin,
       executionRequest,
       response,
       status,
     } of batch.results) {
-      const tool = registry.getTool(executionRequest.name);
-      const toolName = executionRequest.name;
-      observations.push({
-        callId: response.callId,
-        policyToolName: tool?.name,
-        toolType: tool
-          ? tool instanceof DiscoveredMCPTool
-            ? 'mcp'
-            : 'native'
-          : undefined,
-        terminalStatus: status,
-        executionStatus: response.executionStatus ?? 'not_started',
-        executionErrorType: response.errorType,
-        providerDuplicate: origin === 'replayed' || origin === 'duplicate',
-      });
-      if (origin !== 'executed') continue;
-      if (status === 'success') {
+      if (
+        canonicalToolName(
+          registry.getTool(executionRequest.name)?.name ?? '',
+        ) === ToolNames.AGENT &&
+        response.executionStatus !== undefined &&
+        response.executionStatus !== 'not_started'
+      ) {
+        ranAgentTool = true;
+      }
+      if (origin === 'executed' && status === 'success') {
         memoryWriteCandidates.push({
-          toolName,
+          toolName: executionRequest.name,
           args: executionRequest.args,
           status,
         });
       }
-      if (abortSignal.aborted) continue;
-      const ran = response.executionStatus !== 'not_started';
-      const partialEdit =
-        !ran &&
-        tool?.kind === Kind.Edit &&
-        (executionRequest.wasOutputTruncated === true ||
-          executionRequest.hadIncompleteArguments === true) &&
-        (response.errorType === ToolErrorType.OUTPUT_TRUNCATED ||
-          response.errorType === ToolErrorType.INVALID_TOOL_PARAMS);
-      if (partialEdit) {
-        const count = recordDaemonPartialEditRefusal(
-          toolLoopState,
-          toolName,
-          executionRequest.wasOutputTruncated === true
-            ? TRUNCATION_EDIT_REJECTION
-            : INCOMPLETE_ARGS_EDIT_REJECTION,
-          { outputTruncated: false, refusedPartialEdits },
-        );
-        if (
-          this.config.getLoopProtection() !== 'warn' &&
-          count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
-        ) {
-          onDaemonLoopStopPoint(
-            this.config,
-            promptId,
-            toolLoopState,
-            `partial-edit:${toolName}`,
-            {
-              loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-              toolName,
-              count,
-            },
-            {},
-            `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
-          );
-        }
-        continue;
-      }
-      if (
-        response.errorType === ToolErrorType.INVALID_TOOL_PARAMS ||
-        response.errorType === ToolErrorType.TOOL_NOT_REGISTERED
-      ) {
-        recordDaemonInvalidToolParams(
-          this.config,
-          promptId,
-          toolLoopState,
-          toolName,
-          response.error ?? new Error(`Invalid parameters for ${toolName}.`),
-        );
-        continue;
-      }
-      if (ran) toolLoopState.partialEditRefusals?.delete(toolName);
     }
 
     // A Managed session's batch closes once its results are recorded.
@@ -16838,10 +16233,10 @@ export class Session implements SessionContext {
       stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
       ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
       ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
-      repeatedToolFailureBatch: {
-        complete: batch.results.length === requests.length,
-        observations,
-      },
+      ...(batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
+      ...(ranAgentTool ? { ranAgentTool: true } : {}),
       memoryWriteCandidates,
     };
   }
@@ -17052,25 +16447,14 @@ export class Session implements SessionContext {
         (left, right) =>
           left.ordinal - right.ordinal || left.sequence - right.sequence,
       );
-      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
-        complete:
-          orderedRecords.length === dedupedFunctionCalls.length &&
-          new Set(orderedRecords.map((record) => record.ordinal)).size ===
-            dedupedFunctionCalls.length,
-        observations: orderedRecords.map((record) => ({
-          callId: record.callId,
-          policyToolName: record.policyToolName,
-          toolType: record.toolType,
-          terminalStatus: record.metadata.status,
-          executionStatus: record.metadata.executionStatus,
-          executionErrorType: record.executionErrorType,
-          providerDuplicate: record.providerDuplicate,
-        })),
-      };
+      const ranAgentTool = orderedRecords.some(
+        (record) =>
+          canonicalToolName(record.policyToolName ?? '') === ToolNames.AGENT &&
+          record.metadata.executionStatus !== 'not_started',
+      );
       if (orderedRecords.length === 0) {
         return {
           ...result,
-          repeatedToolFailureBatch,
           ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
         };
       }
@@ -17078,7 +16462,7 @@ export class Session implements SessionContext {
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
-        repeatedToolFailureBatch,
+        ...(ranAgentTool ? { ranAgentTool: true } : {}),
         ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
       };
     };
@@ -17192,7 +16576,7 @@ export class Session implements SessionContext {
           LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
           message,
           toolLoopState,
-          { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
+          { loopReason: LoopReason.PROVIDER_DUPLICATE_ID },
         );
       } else {
         debugLogger.warn(message);
@@ -17285,7 +16669,6 @@ export class Session implements SessionContext {
         toolName: request.name,
         responseParts: response.responseParts,
         persistedOutputFiles: response.persistedOutputFiles,
-        providerDuplicate: true,
         metadata: {
           callId: response.callId,
           status: 'error',
@@ -17534,18 +16917,6 @@ export class Session implements SessionContext {
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
-          }
-          const invalidToolErrorNearThreshold =
-            toolLoopState &&
-            [...toolLoopState.invalidToolParamErrors.values()].some(
-              (count) => count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD - 1,
-            );
-          if (invalidToolErrorNearThreshold && executing.size > 0) {
-            await Promise.all(executing);
-            if (results.some((result) => result?.loopDetected)) {
-              await fillLoopSkippedFrom(idx + 1);
-              return results;
-            }
           }
         }
       }
@@ -18059,8 +17430,6 @@ export class Session implements SessionContext {
         status: 'error' | 'cancelled';
         errorType: ToolErrorType | undefined;
         executionStatus: ToolExecutionStatus;
-        recordInvalidToolParams?: boolean;
-        invalidToolParamsName?: string;
         stopAfterPermissionCancel?: boolean;
         skipPersistence?: boolean;
         settledMetadata?: {
@@ -18140,11 +17509,6 @@ export class Session implements SessionContext {
           : {}),
         persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
-        toolType,
-        executionErrorType:
-          executionStatus === 'error'
-            ? (executionErrorType ?? opts.errorType)
-            : undefined,
         ...(opts.skipPersistence === true ? { skipPersistence: true } : {}),
         metadata: {
           callId,
@@ -18156,23 +17520,9 @@ export class Session implements SessionContext {
           errorType: opts.status === 'error' ? opts.errorType : undefined,
         },
       });
-      const loopDetected =
-        opts.recordInvalidToolParams === true &&
-        !activeToolAbortSignal.aborted &&
-        // A permission cancellation is the user declining, not the model
-        // re-sending invalid params, so it must not feed loop detection.
-        !opts.stopAfterPermissionCancel &&
-        recordDaemonInvalidToolParams(
-          this.config,
-          promptId,
-          toolLoopState,
-          opts.invalidToolParamsName ?? toolName,
-          error,
-        );
       return {
         parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
-        loopDetected,
         ...nestedHookContextField(opts.status),
       };
     };
@@ -18209,7 +17559,6 @@ export class Session implements SessionContext {
           status: 'error',
           errorType: ToolErrorType.INVALID_TOOL_PARAMS,
           executionStatus: 'not_started',
-          recordInvalidToolParams: true,
         },
       );
     }
@@ -18282,9 +17631,6 @@ export class Session implements SessionContext {
           status: 'error',
           errorType: resolution.errorType,
           executionStatus: 'not_started',
-          recordInvalidToolParams:
-            resolution.errorType === ToolErrorType.INVALID_TOOL_PARAMS,
-          invalidToolParamsName: resolution.targetName,
         });
       }
       toolName = resolution.tool.name;
@@ -18308,7 +17654,6 @@ export class Session implements SessionContext {
           status: 'error',
           errorType: ToolErrorType.TOOL_NOT_REGISTERED,
           executionStatus: 'not_started',
-          recordInvalidToolParams: true,
         },
       );
     }
@@ -18417,8 +17762,6 @@ export class Session implements SessionContext {
           const rejection = outputTruncated
             ? TRUNCATION_EDIT_REJECTION
             : INCOMPLETE_ARGS_EDIT_REJECTION;
-          // A model cut off on every attempt sends different partial content
-          // each time, so only this count can stop the turn.
           const count =
             toolLoopState && !activeToolAbortSignal.aborted
               ? recordDaemonPartialEditRefusal(
@@ -18428,16 +17771,14 @@ export class Session implements SessionContext {
                   response,
                 )
               : 0;
-          const loopProtection = this.config.getLoopProtection();
-          const stops = loopProtection === 'stop';
-          const refusal = await earlyErrorResponse(
+          return earlyErrorResponse(
             new Error(
-              count >= INVALID_PARAMS_REMINDER_AT
+              count >= PARTIAL_EDIT_DIRECTIVE_AT
                 ? `${rejection}${
                     outputTruncated
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
-                  }${stops ? ' Another refused write stops this turn.' : ''}`
+                  }`
                 : rejection,
             ),
             toolName,
@@ -18449,27 +17790,6 @@ export class Session implements SessionContext {
               executionStatus: 'not_started',
             },
           );
-          // `warn` skips the stop point, which would queue the schema reminder
-          // and misread a cut-off write; the refusal already carries the
-          // directive. `off` still logs the loop as observed.
-          const loopDetected =
-            loopProtection !== 'warn' &&
-            toolLoopState !== undefined &&
-            count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD &&
-            onDaemonLoopStopPoint(
-              this.config,
-              promptId,
-              toolLoopState,
-              `partial-edit:${toolName}`,
-              {
-                loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-                toolName,
-                count,
-              },
-              {},
-              `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
-            );
-          return loopDetected ? { ...refusal, loopDetected } : refusal;
         }
 
         // ---- PreToolUse: once, before every input-dependent check ----
@@ -18546,8 +17866,6 @@ export class Session implements SessionContext {
                 mediaPolicyGate.reason === 'invalid_params'
                   ? ToolErrorType.INVALID_TOOL_PARAMS
                   : ToolErrorType.EXECUTION_DENIED,
-              recordInvalidToolParams:
-                mediaPolicyGate.reason === 'invalid_params',
             },
           );
         }
@@ -20725,8 +20043,10 @@ export class Session implements SessionContext {
               );
             }
 
-            // If hook indicates to stop, return an error response
-            if (postHookResult.shouldStop) {
+            // If hook indicates to stop, return an error response. Calls run
+            // outside the shared batch keep that behavior for a
+            // `continue: false` too.
+            if (postHookResult.shouldStop || postHookResult.endsTurn) {
               this.#stopMovedShell(this.movableShells.get(callId));
               const stopMessage =
                 postHookResult.stopReason ||
@@ -20973,9 +20293,6 @@ export class Session implements SessionContext {
               : {}),
             persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
-            toolType,
-            executionErrorType:
-              executionStatus === 'error' ? executionErrorType : undefined,
             metadata: {
               callId,
               status,
@@ -21109,7 +20426,6 @@ export class Session implements SessionContext {
               status,
               errorType,
               executionStatus,
-              recordInvalidToolParams: !toolBuildSucceeded,
               stopAfterPermissionCancel: nestedPermissionCancelled,
             },
           );

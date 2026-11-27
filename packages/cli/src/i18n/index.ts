@@ -276,10 +276,9 @@ export function t(key: string, params?: Record<string, string>): string {
   if (Array.isArray(translation)) {
     return key;
   }
-  if (typeof translation === 'function') {
-    return translation(params);
-  }
-  return interpolate(translation, params);
+  const template =
+    typeof translation === 'function' ? translation(params ?? {}) : translation;
+  return interpolate(template, params);
 }
 
 /**

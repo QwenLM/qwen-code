@@ -118,6 +118,8 @@ export interface AcpToolBatchHost {
 export interface AcpToolBatchResult {
   parts: Part[];
   stop?: AgentLoopStopReason;
+  /** The hook reason to show, including when a tool also ended the turn. */
+  hookStopReason?: string;
   /** A permission request was cancelled: the turn stops after the batch. */
   stopAfterPermissionCancel: boolean;
   /** Every result of the batch, in request order. */
@@ -761,6 +763,9 @@ export async function runAcpToolBatch(
       return {
         parts: budgeted.flatMap(({ responseParts }) => responseParts),
         stop: batch.stop,
+        ...(batch.hookStopReason !== undefined
+          ? { hookStopReason: batch.hookStopReason }
+          : {}),
         stopAfterPermissionCancel,
         results: kept,
       };
@@ -775,6 +780,9 @@ export async function runAcpToolBatch(
     return {
       parts: batch.parts,
       stop: batch.stop,
+      ...(batch.hookStopReason !== undefined
+        ? { hookStopReason: batch.hookStopReason }
+        : {}),
       stopAfterPermissionCancel,
       results: options.requests.flatMap(
         (request) => results.get(request) ?? [],

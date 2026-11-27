@@ -80,9 +80,18 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
 // across independent local transcript/export builds. Keep the house margins:
 // warning = measurement + 713, hard ceiling = measurement + 1,713.
-// The Arabic catalog keeps this branch above that shared-tree baseline; the
-// merged Arabic measurements below are what this cap tracks.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_208_049;
+// Main CI then measured 2,156,327 on a0dced748e (run 45741862667), 2,156,357
+// after #18437, 2,156,880 after #18009 and 2,157,683 after #18140 (build job
+// 139890640548 on run 45814470900), which crossed the old 2,157,286 ceiling.
+// #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
+// catalogs; the export entry inlines the whole table (see above), so none of
+// that PR's component code reaches the document entry and the forbidden-input
+// guard still passes.
+// The Arabic catalog keeps this branch above that shared-tree baseline: the
+// branch measured 2,207,336 against the 2,155,573 baseline (+51,763), and
+// main has since grown +2,110 to 2,157,683, so the merged tree is estimated
+// at 2,209,446. Re-track with the same margins: 2,210,159 / 2,211,159.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_210_159;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main

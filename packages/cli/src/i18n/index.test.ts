@@ -239,6 +239,16 @@ describe('localizeToolDisplayName', () => {
     expect(localizeToolDisplayName('MysteryTool')).toBe('MysteryTool');
   });
 
+  it('distinguishes the Russian session and team task lists', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    await setLanguageAsync('ru');
+
+    expect(localizeToolDisplayName('TodoList')).toBe('Список задач');
+    expect(localizeToolDisplayName('TaskList')).toBe('Список задач команды');
+  });
+
   // Both translating locales, not just zh: `t()` has no cross-locale
   // fallback, so a tool added to zh.js alone renders its raw English badge
   // in a zh-TW session, next to fully-translated siblings.

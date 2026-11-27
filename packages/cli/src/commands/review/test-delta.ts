@@ -39,6 +39,7 @@
 // rescued summary lines. A file this cannot parse is disclosed, never guessed.
 
 import type { CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -46,8 +47,10 @@ import {
   run as runCommand,
   type BuildTestReport,
   type CommandResult,
+  type MicrovmBuildSession,
 } from './build-test.js';
 import {
+  closeGuestSessionSync,
   describeExecutionBoundary,
   mountRootFor,
   refuseUnsandboxedPhase,
@@ -57,7 +60,11 @@ import {
   type ReviewExecutionBoundary,
 } from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { foundNoTests, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import {
+  foundNoTests,
+  lockfileInstaller,
+  TEST_COMMAND_RE,
+} from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
@@ -221,10 +228,40 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // `kind` defaults to 'test', which is the restrictive shape (no network).
   const policy = sandboxPolicy();
   const trustContext = args.plan ? trustInputFromPlan(args.plan) : undefined;
+  const initialVerdict = sandboxVerdict(
+    policy,
+    undefined,
+    undefined,
+    trustContext,
+  );
+  const vmSession: MicrovmBuildSession | undefined =
+    !args.exec && initialVerdict.kind === 'microvm'
+      ? {
+          sessionId: `td-${randomBytes(6).toString('hex')}`,
+          socketPath: initialVerdict.socketPath,
+          initialized: false,
+          installed: false,
+        }
+      : undefined;
+  let closeStatus: 'clean' | 'partial' | undefined;
+  let closeReason: string | undefined;
   const exec =
     args.exec ??
     ((cmd: string, cwd: string, timeoutMs: number) =>
-      runCommand(cmd, cwd, timeoutMs, 'test', trustContext));
+      runCommand(cmd, cwd, timeoutMs, 'test', trustContext, vmSession));
+  // Boundary values are evaluated before the outer finally runs. Close here,
+  // before constructing any returned executionBoundary, while the finally
+  // remains the exception-path fallback.
+  const closeSession = (): void => {
+    if (vmSession?.initialized && closeStatus === undefined) {
+      const closed = closeGuestSessionSync(
+        vmSession.socketPath,
+        vmSession.sessionId,
+      );
+      closeStatus = closed.ok ? 'clean' : 'partial';
+      closeReason = closed.reason;
+    }
+  };
   const baseline = resolve(args.baseline);
   const empty = (note: string): TestDeltaReport => ({
     entries: [],
@@ -268,6 +305,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       policy === 'tiered' && !args.plan
         ? `${refusal}; pass --plan <the Step 1 fetch plan> so a trusted PR can be classified for this rerun`
         : refusal;
+
     return {
       ...empty(
         `the base-side rerun did not happen, so NOTHING was attributed — ${actionable}`,
@@ -302,115 +340,158 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   const entries: DeltaEntry[] = [];
   /** Commands that did not match the emitter's grammar, so were never run. */
   const skippedUnrecognised: string[] = [];
-  for (const t of failed) {
-    if (!RERUNNABLE_COMMAND_RE.test(t.command)) {
-      skippedUnrecognised.push(t.command);
-      continue;
+  try {
+    if (vmSession) {
+      const installer = lockfileInstaller(baseline);
+      if (installer) {
+        const installCommand =
+          installer === 'pnpm'
+            ? 'corepack pnpm install --frozen-lockfile --reporter=append-only'
+            : 'npm ci --no-audit --no-fund';
+        const installation = runCommand(
+          installCommand,
+          baseline,
+          perCommandMs,
+          'install',
+          trustContext,
+          vmSession,
+        );
+        if (installation.exitCode !== 0 || !vmSession.installed) {
+          closeSession();
+          const emptyInstallation = empty(
+            `the base-side dependency install could not complete inside the microVM (exit ${String(installation.exitCode)}; usable guest node_modules = ${String(vmSession.installed)}) — nothing was attributed: no test result can be measured without a usable baseline dependency tree`,
+          );
+          return {
+            ...emptyInstallation,
+            executionBoundary: describeExecutionBoundary({
+              policy,
+              backend:
+                initialVerdict.kind === 'microvm'
+                  ? initialVerdict.backend
+                  : 'refused',
+              trustContext,
+              ...(closeStatus !== undefined
+                ? { teardownStatus: closeStatus }
+                : installation.teardownStatus !== undefined
+                  ? { teardownStatus: installation.teardownStatus }
+                  : {}),
+            }),
+          };
+        }
+      }
     }
-    const remaining = TOTAL_BUDGET_MS - (now() - startedAt);
-    // PRICE the slot against how long the command actually took on the PR
-    // side, the way test-efficacy prices a mutant run against the measured
-    // baseline. A flat 5s floor admits a command with six seconds left, whose
-    // guaranteed timeout `budgetClamped` below then has to explain after the
-    // fact — cheaper, and honester, not to start a rerun the window cannot
-    // hold. `seconds` is the PR side's own duration; the base tree is built
-    // and warm, so it is the closest estimate available. Floored so a
-    // sub-second command still gets a usable window, and capped by the
-    // per-command deadline so a slow command is not skipped for wanting more
-    // than it would ever be given.
-    const estimateMs = Math.max((t.seconds ?? 0) * 1000, 30_000);
-    if (remaining < Math.min(estimateMs, perCommandMs)) {
-      skippedForBudget.push(t.command);
-      continue;
+    for (const t of failed) {
+      if (!RERUNNABLE_COMMAND_RE.test(t.command)) {
+        skippedUnrecognised.push(t.command);
+        continue;
+      }
+      const remaining = TOTAL_BUDGET_MS - (now() - startedAt);
+      // PRICE the slot against how long the command actually took on the PR
+      // side, the way test-efficacy prices a mutant run against the measured
+      // baseline. A flat 5s floor admits a command with six seconds left, whose
+      // guaranteed timeout `budgetClamped` below then has to explain after the
+      // fact — cheaper, and honester, not to start a rerun the window cannot
+      // hold. `seconds` is the PR side's own duration; the base tree is built
+      // and warm, so it is the closest estimate available. Floored so a
+      // sub-second command still gets a usable window, and capped by the
+      // per-command deadline so a slow command is not skipped for wanting more
+      // than it would ever be given.
+      const estimateMs = Math.max((t.seconds ?? 0) * 1000, 30_000);
+      if (remaining < Math.min(estimateMs, perCommandMs)) {
+        skippedForBudget.push(t.command);
+        continue;
+      }
+      // Prefer the set build-test measured off its untrimmed output; fall back to
+      // re-parsing the bounded report only for a report written before that field
+      // existed. Same precedence the base side uses below, and for the same
+      // reason: the trim is lossy and the capture site is not.
+      //
+      // Shape-checked here because this is the one consumer and the report is a
+      // file anything may have edited: a `failingFiles` that is not a string
+      // array reached `.filter` as-is and threw where the honest reading is
+      // "this seam supplied no measurement" — the same fallback an absent field
+      // has always taken.
+      // Non-empty too: the producer OMITS the field when nothing failed to
+      // parse, so an empty array can only be hand-made — and taking it as
+      // authoritative would skip the reparse and understate both sets.
+      const measured =
+        Array.isArray(t.failingFiles) &&
+        t.failingFiles.length > 0 &&
+        t.failingFiles.every((f) => typeof f === 'string')
+          ? t.failingFiles
+          : undefined;
+      const prFailingFiles =
+        measured ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
+      // A clamped deadline is not the same fact as a slow command: if the
+      // budget cut this rerun short, "timed out — infrastructure" would send the
+      // reader hunting a hang that is really an exhausted budget. Record which.
+      const clamped = remaining < perCommandMs;
+      const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
+      if (base.timedOut && clamped) budgetClamped.push(t.command);
+      // Prefer what the run itself measured off the untrimmed text; fall back to
+      // re-parsing the bounded output only for a seam that supplies neither.
+      const baseFailingFiles = base.timedOut
+        ? []
+        : (base.failingFiles ?? failingFilesOf(base.output, baseline));
+      // The PR side is what netNew/shared are derived from, so a PR side that
+      // parsed NOTHING attributes nothing — regardless of what the base rerun
+      // managed to parse. Requiring both sides to be empty silently dropped a
+      // failed command whose FAIL lines the trim had scattered.
+      const unparsed = prFailingFiles.length === 0;
+      // Only when the PR side had to be re-parsed out of build-test's STORED
+      // output, which that command trimmed. A report that carries `failingFiles`
+      // was measured before the trim, so its set is complete and the disclosure
+      // would be a false alarm.
+      //
+      // When the fallback IS in use the loss cuts both ways, and the earlier
+      // wording ("`shared`, not `netNew`") understated it: a file the trim
+      // dropped is missing from `shared` when base fails it too, and missing from
+      // `netNew` when only the PR side does — the direction that loses a failure
+      // the PR caused. Hence the capture-time field; this is the legacy seam.
+      const prTruncated =
+        measured === undefined && TRIM_MARKER_RE.test(t.output ?? '');
+      // A base run that never finished attributes NOTHING: with its failing set
+      // unknowable, promoting the PR side's failures to net-new would
+      // manufacture the strongest evidence this command produces out of an
+      // infrastructure timeout. The files stay unattributed (neither list), and
+      // the note says why.
+      // ...and so does a base rerun that FAILED without naming a single failing
+      // file. An unbuilt base tree, a missing node_modules, a workspace the PR
+      // ADDED (so `npm test --workspace=…` cannot resolve on base), an ENOBUFS
+      // truncation: each exits non-zero with zero FAIL lines, indistinguishable
+      // here from a green base. Reading it as green promotes every PR-side
+      // failure to netNew — the strongest evidence this command emits,
+      // manufactured from a base that never ran a test.
+      // ...and so does a related run (`vitest related`) that found no test to
+      // run on base: it exits 0 ("No test files found", `passWithNoTests`), and
+      // read as green it would promote a failure the base selection merely
+      // left out to netNew. A green base that RAN tests keeps its zero — that
+      // is the measurement this command exists for.
+      const baseRanNothing =
+        base.exitCode === 0 &&
+        baseFailingFiles.length === 0 &&
+        foundNoTests(base.output);
+      const baseUnusable =
+        base.timedOut ||
+        baseRanNothing ||
+        (base.exitCode !== 0 && baseFailingFiles.length === 0);
+      entries.push({
+        command: t.command,
+        prFailingFiles,
+        baseFailingFiles,
+        netNew: baseUnusable
+          ? []
+          : prFailingFiles.filter((f) => !baseFailingFiles.includes(f)),
+        shared: baseUnusable
+          ? []
+          : prFailingFiles.filter((f) => baseFailingFiles.includes(f)),
+        base,
+        unparsed,
+        prTruncated,
+      });
     }
-    // Prefer the set build-test measured off its untrimmed output; fall back to
-    // re-parsing the bounded report only for a report written before that field
-    // existed. Same precedence the base side uses below, and for the same
-    // reason: the trim is lossy and the capture site is not.
-    //
-    // Shape-checked here because this is the one consumer and the report is a
-    // file anything may have edited: a `failingFiles` that is not a string
-    // array reached `.filter` as-is and threw where the honest reading is
-    // "this seam supplied no measurement" — the same fallback an absent field
-    // has always taken.
-    // Non-empty too: the producer OMITS the field when nothing failed to
-    // parse, so an empty array can only be hand-made — and taking it as
-    // authoritative would skip the reparse and understate both sets.
-    const measured =
-      Array.isArray(t.failingFiles) &&
-      t.failingFiles.length > 0 &&
-      t.failingFiles.every((f) => typeof f === 'string')
-        ? t.failingFiles
-        : undefined;
-    const prFailingFiles =
-      measured ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
-    // A clamped deadline is not the same fact as a slow command: if the
-    // budget cut this rerun short, "timed out — infrastructure" would send the
-    // reader hunting a hang that is really an exhausted budget. Record which.
-    const clamped = remaining < perCommandMs;
-    const base = exec(t.command, baseline, Math.min(perCommandMs, remaining));
-    if (base.timedOut && clamped) budgetClamped.push(t.command);
-    // Prefer what the run itself measured off the untrimmed text; fall back to
-    // re-parsing the bounded output only for a seam that supplies neither.
-    const baseFailingFiles = base.timedOut
-      ? []
-      : (base.failingFiles ?? failingFilesOf(base.output, baseline));
-    // The PR side is what netNew/shared are derived from, so a PR side that
-    // parsed NOTHING attributes nothing — regardless of what the base rerun
-    // managed to parse. Requiring both sides to be empty silently dropped a
-    // failed command whose FAIL lines the trim had scattered.
-    const unparsed = prFailingFiles.length === 0;
-    // Only when the PR side had to be re-parsed out of build-test's STORED
-    // output, which that command trimmed. A report that carries `failingFiles`
-    // was measured before the trim, so its set is complete and the disclosure
-    // would be a false alarm.
-    //
-    // When the fallback IS in use the loss cuts both ways, and the earlier
-    // wording ("`shared`, not `netNew`") understated it: a file the trim
-    // dropped is missing from `shared` when base fails it too, and missing from
-    // `netNew` when only the PR side does — the direction that loses a failure
-    // the PR caused. Hence the capture-time field; this is the legacy seam.
-    const prTruncated =
-      measured === undefined && TRIM_MARKER_RE.test(t.output ?? '');
-    // A base run that never finished attributes NOTHING: with its failing set
-    // unknowable, promoting the PR side's failures to net-new would
-    // manufacture the strongest evidence this command produces out of an
-    // infrastructure timeout. The files stay unattributed (neither list), and
-    // the note says why.
-    // ...and so does a base rerun that FAILED without naming a single failing
-    // file. An unbuilt base tree, a missing node_modules, a workspace the PR
-    // ADDED (so `npm test --workspace=…` cannot resolve on base), an ENOBUFS
-    // truncation: each exits non-zero with zero FAIL lines, indistinguishable
-    // here from a green base. Reading it as green promotes every PR-side
-    // failure to netNew — the strongest evidence this command emits,
-    // manufactured from a base that never ran a test.
-    // ...and so does a related run (`vitest related`) that found no test to
-    // run on base: it exits 0 ("No test files found", `passWithNoTests`), and
-    // read as green it would promote a failure the base selection merely
-    // left out to netNew. A green base that RAN tests keeps its zero — that
-    // is the measurement this command exists for.
-    const baseRanNothing =
-      base.exitCode === 0 &&
-      baseFailingFiles.length === 0 &&
-      foundNoTests(base.output);
-    const baseUnusable =
-      base.timedOut ||
-      baseRanNothing ||
-      (base.exitCode !== 0 && baseFailingFiles.length === 0);
-    entries.push({
-      command: t.command,
-      prFailingFiles,
-      baseFailingFiles,
-      netNew: baseUnusable
-        ? []
-        : prFailingFiles.filter((f) => !baseFailingFiles.includes(f)),
-      shared: baseUnusable
-        ? []
-        : prFailingFiles.filter((f) => baseFailingFiles.includes(f)),
-      base,
-      unparsed,
-      prTruncated,
-    });
+  } finally {
+    closeSession();
   }
 
   const netNew = [...new Set(entries.flatMap((e) => e.netNew))].sort();
@@ -477,10 +558,40 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       `${skippedForBudget.length} failed command(s) not rerun — the whole-command budget was exhausted (${skippedForBudget.join(', ')}); their failures stay unattributed, judge them by the diff`,
     );
   }
-  const verdict = sandboxVerdict(policy, undefined, undefined, trustContext);
+  closeSession();
+  const verdict = initialVerdict;
   const mountable = mountRootFor(baseline) !== null;
   const effectiveBackend =
-    verdict.kind === 'container' && mountable ? 'container' : 'direct';
+    verdict.kind === 'microvm'
+      ? verdict.backend
+      : verdict.kind === 'container' && mountable
+        ? 'container'
+        : 'direct';
+  const teardownStatuses = [
+    ...entries
+      .map((e) => e.base.teardownStatus)
+      .filter((s): s is NonNullable<typeof s> => s !== undefined),
+    ...(closeStatus !== undefined ? [closeStatus] : []),
+  ];
+  const teardownStatus = teardownStatuses.includes('failed')
+    ? ('failed' as const)
+    : teardownStatuses.includes('partial')
+      ? ('partial' as const)
+      : teardownStatuses.includes('clean')
+        ? ('clean' as const)
+        : ('not-applicable' as const);
+  const boundaryNote =
+    closeStatus === 'partial' && verdict.kind === 'microvm'
+      ? `microVM (${verdict.backend}) guest session close acknowledgment was missing or invalid — cleanup could not be verified${closeReason ? `: ${closeReason}` : ''}`
+      : teardownStatus === 'failed'
+        ? verdict.kind === 'microvm'
+          ? `microVM (${verdict.backend}) teardown verification failed — worker may still be running`
+          : 'container teardown verification failed — a timed-out container may still be running'
+        : teardownStatus === 'partial' && verdict.kind === 'microvm'
+          ? `microVM (${verdict.backend}) teardown or guest session cleanup could not be fully verified`
+          : verdict.kind === 'container' && !mountable
+            ? 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container'
+            : undefined;
   return {
     entries,
     netNew,
@@ -491,11 +602,8 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       policy,
       backend: effectiveBackend,
       trustContext,
-      ...(verdict.kind === 'container' && !mountable
-        ? {
-            note: 'baseline tree is not under a review temp dir, so reruns executed directly rather than in a container',
-          }
-        : {}),
+      teardownStatus,
+      ...(boundaryNote !== undefined ? { note: boundaryNote } : {}),
     }),
   };
 }

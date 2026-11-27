@@ -192,6 +192,7 @@ import {
   type ToolbarDropdownItem,
 } from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
+import popoverStyles from './GitModePopover.module.css';
 
 const MAX_DROP_DIALOG_ROWS = 100;
 
@@ -2890,6 +2891,7 @@ export const ChatEditor = memo(
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
+      gitBranchDetails: false,
       gitBranch: false,
       mode: false,
       plan: false,
@@ -3312,6 +3314,9 @@ export const ChatEditor = memo(
       isMobile || toolbarLabelVisibility.workspaceSelect;
     const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
     const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
+    const showGitBranchDetails =
+      isMobile ||
+      (showGitBranchLabel && toolbarLabelVisibility.gitBranchDetails);
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showWorkflowLabel = toolbarLabelVisibility.workflow;
@@ -3347,13 +3352,14 @@ export const ChatEditor = memo(
           onNewWorkspaceOpenChange={setWorkspaceNewSubOpen}
         />
       ) : null;
-    const renderGitBranchChip = (compact: boolean) =>
+    const renderGitBranchChip = (compact: boolean, showDetails = true) =>
       gitBranch ? (
         gitModeIntent && onGitModeIntentChange ? (
           <GitModePopover
             branch={gitBranch}
             status={gitStatus}
             compact={compact}
+            showDetails={showDetails}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
             open={activeContextMenu === 'git'}
@@ -3386,12 +3392,76 @@ export const ChatEditor = memo(
                 branch={gitBranch}
                 status={gitStatus}
                 compact={compact}
+                showDetails={showDetails}
                 worktree={gitWorktree}
               />
             </button>
           </BranchPickerPopover>
         )
       ) : null;
+    const renderGitBranchMeasure = (
+      compact: boolean,
+      showDetails: boolean,
+      measureKey: string,
+    ) => {
+      if (!gitBranch) return null;
+      if (gitModeIntent && onGitModeIntentChange) {
+        const isBranch = gitModeIntent.mode === 'branch';
+        const isWorktree = gitModeIntent.mode === 'worktree';
+        const label = isBranch
+          ? `→ ${gitModeIntent.name}`
+          : isWorktree
+            ? t('gitMode.worktree')
+            : gitBranch;
+        return (
+          <span
+            data-toolbar-measure={measureKey}
+            className={popoverStyles.wrap}
+          >
+            <span
+              className={`${popoverStyles.chip} ${isBranch ? popoverStyles.chipBranch : ''} ${isWorktree ? popoverStyles.chipWorktree : ''} ${compact ? popoverStyles.chipCompact : ''}`}
+            >
+              <GitBranchChipContent
+                branch={label}
+                status={gitStatus}
+                compact={compact}
+                showDetails={showDetails}
+                worktree={isWorktree}
+              />
+              <svg
+                className={popoverStyles.chevron}
+                viewBox="0 1 16 16"
+                fill="currentColor"
+                width={9}
+                height={9}
+                aria-hidden="true"
+              >
+                <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z" />
+              </svg>
+            </span>
+            {(isBranch || isWorktree) && (
+              <span className={popoverStyles.clearBtn}>✕</span>
+            )}
+          </span>
+        );
+      }
+      return (
+        <span
+          data-toolbar-measure={measureKey}
+          className={`${styles.gitBranchChip} ${
+            compact ? styles.gitBranchChipCompact : ''
+          }`}
+        >
+          <GitBranchChipContent
+            branch={gitBranch}
+            status={gitStatus}
+            compact={compact}
+            showDetails={showDetails}
+            worktree={gitWorktree}
+          />
+        </span>
+      );
+    };
     const mobileVoiceActive = isMobile && voiceActive;
     const workspaceContextAvailable =
       !isSimple &&
@@ -3510,19 +3580,17 @@ export const ChatEditor = memo(
 
       const update = () => {
         const currentVisibility = toolbarLabelVisibilityRef.current;
-        const expansionWidth = (id: string) => {
-          const collapsed = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:collapsed"]`,
+        const measureWidth = (key: string) =>
+          Math.ceil(
+            measurements
+              .querySelector<HTMLElement>(`[data-toolbar-measure="${key}"]`)
+              ?.getBoundingClientRect().width ?? 0,
           );
-          const expanded = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:expanded"]`,
-          );
-          return Math.max(
+        const expansionWidth = (id: string) =>
+          Math.max(
             0,
-            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
-              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
+            measureWidth(`${id}:expanded`) - measureWidth(`${id}:collapsed`),
           );
-        };
         const items = [
           ...(!isMobile && workspaceChipInToolbar
             ? [
@@ -3543,8 +3611,20 @@ export const ChatEditor = memo(
           ...(!isMobile && gitChipInToolbar
             ? [
                 {
+                  id: 'gitBranchDetails',
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:expanded') -
+                      measureWidth('gitBranch:label'),
+                  ),
+                },
+                {
                   id: 'gitBranch',
-                  expansionWidth: expansionWidth('gitBranch'),
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:label') -
+                      measureWidth('gitBranch:collapsed'),
+                  ),
                 },
               ]
             : []),
@@ -3619,6 +3699,7 @@ export const ChatEditor = memo(
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,
+          gitBranchDetails: itemVisibility.gitBranchDetails ?? false,
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
           plan: itemVisibility.plan ?? false,
@@ -3679,6 +3760,8 @@ export const ChatEditor = memo(
       disabled,
       gitBranch,
       gitChipInToolbar,
+      gitModeIntent,
+      gitStatus,
       isRunning,
       modelLabelReady,
       isSimple,
@@ -3727,6 +3810,7 @@ export const ChatEditor = memo(
           {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
             renderGitBranchChip(
               options?.compactGit ?? (inToolbar && !showGitBranchLabel),
+              inToolbar ? showGitBranchDetails : true,
             )}
           {!inToolbar && gitContextControl}
         </>
@@ -5342,28 +5426,9 @@ export const ChatEditor = memo(
               )}
               {gitChipInToolbar && gitBranch && (
                 <>
-                  <span
-                    data-toolbar-measure="gitBranch:collapsed"
-                    className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact
-                      worktree={gitWorktree}
-                    />
-                  </span>
-                  <span
-                    data-toolbar-measure="gitBranch:expanded"
-                    className={styles.gitBranchChip}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact={false}
-                      worktree={gitWorktree}
-                    />
-                  </span>
+                  {renderGitBranchMeasure(true, false, 'gitBranch:collapsed')}
+                  {renderGitBranchMeasure(false, false, 'gitBranch:label')}
+                  {renderGitBranchMeasure(false, true, 'gitBranch:expanded')}
                 </>
               )}
               <span

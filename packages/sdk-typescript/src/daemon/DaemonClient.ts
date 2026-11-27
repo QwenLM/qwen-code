@@ -960,6 +960,8 @@ export interface RestoreSessionRequest extends ResumeSessionRequest {
   compactedReplayMode?: 'full' | 'summary';
 }
 
+export type RestoreWorktreeSessionRequest = RestoreSessionRequest;
+
 export interface WorktreeResetSessionRequest {
   /**
    * Workspace path the daemon must have registered. Omit to let the daemon use
@@ -979,6 +981,14 @@ export interface PromptRequest {
   /** Per-prompt projection for all subscribers and ring replay; defaults to full. */
   eventDetailMode?: 'full' | 'summary';
   prompt: PromptContentBlock[];
+  /** Opt in when the daemon advertises `turn_skill_file_snapshot`. */
+  pinSkills?: boolean;
+  /** Decline before admission if a captured skill could require unsupported session effects. Requires pinSkills. */
+  requireSessionSkillEffects?: boolean;
+  /** Lowercase SHA-256 of the intended skill material. Requires pinSkills. */
+  expectedSkillDigest?: string;
+  pinExtensions?: boolean;
+  expectedExtensionGeneration?: number;
   /** Deliver the successful final answer directly through a channel worker. */
   delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
@@ -1012,6 +1022,10 @@ export interface PromptRequest {
  */
 export interface NonBlockingPromptAccepted {
   promptId: string;
+  /** The admitted skill-file digest, present when pinSkills was accepted. */
+  skillDigest?: string;
+  sessionSkillEffectsChecked?: true;
+  extensionGeneration?: number;
   lastEventId: number;
   /**
    * Epoch token of the bus that produced `lastEventId`. Clients that seed
@@ -4281,6 +4295,56 @@ export class DaemonClient {
   }
 
   /**
+   * Reconstruct a registered worktree from its managed snapshot. The server
+   * owns archive selection; callers provide the owning workspace, never a
+   * raw archive path or restore target. Secondary workspaces require cwd.
+   */
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-restore`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+          ...(req.approvalMode !== undefined
+            ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.historyPageSize !== undefined
+            ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(req.compactedReplayMode !== undefined
+            ? { compactedReplayMode: req.compactedReplayMode }
+            : {}),
+          ...(req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
+            : {}),
+          ...(req.sourceType !== undefined
+            ? { sourceType: req.sourceType }
+            : {}),
+          ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+        }),
+        signal: req.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-restore',
+          );
+        }
+        return (await res.json()) as DaemonRestoredSession;
+      },
+      timeoutMs,
+    );
+  }
+
+  /**
    * Turn a detached managed worktree into a named branch at its current HEAD
    * ("Create branch here", `POST /session/:id/worktree-branch`, capability
    * `session_worktree_branch_v1`). The session, checkout, and marker owner
@@ -7462,7 +7526,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<PromptResult> {
-    signal?.throwIfAborted();
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const releasePromptSlot = this.reservePromptSlot(sessionId);
     let releaseOnExit = true;
     try {
@@ -7480,7 +7545,7 @@ export class DaemonClient {
       );
 
       if (res.status === 202) {
-        const accept = (await res.json()) as NonBlockingPromptAccepted;
+        const accept = await this.readPromptAcceptance(res, req);
         releaseOnExit = false;
         try {
           return await this._awaitTurnComplete(
@@ -7503,6 +7568,8 @@ export class DaemonClient {
           sessionId,
         );
       }
+      if (req.pinSkills)
+        throw new Error('Expected a skill snapshot admission receipt');
       return (await res.json()) as PromptResult;
     } finally {
       if (releaseOnExit) releasePromptSlot();
@@ -7533,6 +7600,8 @@ export class DaemonClient {
     signal?: AbortSignal,
     clientId?: string,
   ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const capabilityCheck = this.requirePinnedPromptCapability(req, signal);
+    if (capabilityCheck) await capabilityCheck;
     const res = await this.transport.fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/prompt`,
       {
@@ -7544,13 +7613,102 @@ export class DaemonClient {
     );
 
     if (res.status === 202) {
-      return (await res.json()) as NonBlockingPromptAccepted;
+      return this.readPromptAcceptance(res, req);
     }
 
     if (!res.ok) {
       throw await this.failOnError(res, 'POST /session/:id/prompt', sessionId);
     }
+    if (req.pinSkills)
+      throw new Error('Expected a skill snapshot admission receipt');
     return (await res.json()) as PromptResult;
+  }
+
+  private requirePinnedPromptCapability(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined {
+    signal?.throwIfAborted();
+    if (
+      req.expectedSkillDigest !== undefined &&
+      (!req.pinSkills ||
+        typeof req.expectedSkillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(req.expectedSkillDigest))
+    )
+      throw new Error(
+        'expectedSkillDigest requires pinSkills and a lowercase SHA-256 digest',
+      );
+    const generation = req.expectedExtensionGeneration;
+    if (
+      req.pinExtensions
+        ? !req.pinSkills ||
+          typeof generation !== 'number' ||
+          !Number.isSafeInteger(generation) ||
+          generation < 0
+        : generation !== undefined
+    )
+      throw new Error(
+        'pinExtensions requires pinSkills and a nonnegative safe expectedExtensionGeneration',
+      );
+    if (req.requireSessionSkillEffects && !req.pinSkills)
+      throw new Error('requireSessionSkillEffects requires pinSkills');
+    if (!req.pinSkills) return undefined;
+    const features = ['turn_skill_file_snapshot'];
+    if (req.pinExtensions) features.push('turn_extension_store_lease');
+    if (req.requireSessionSkillEffects)
+      features.push('turn_skill_session_effects_check');
+    return this.capabilities().then((caps) => {
+      signal?.throwIfAborted();
+      for (const feature of features) {
+        if (!Array.isArray(caps.features) || !caps.features.includes(feature)) {
+          throw new DaemonCapabilityMissingError(
+            feature,
+            `daemon does not advertise the ${feature} feature`,
+          );
+        }
+      }
+    });
+  }
+
+  private async readPromptAcceptance(
+    res: Response,
+    req: PromptRequest,
+  ): Promise<NonBlockingPromptAccepted> {
+    const accepted = (await res.json()) as NonBlockingPromptAccepted;
+    if (
+      req.pinSkills &&
+      (!accepted ||
+        typeof accepted.promptId !== 'string' ||
+        !accepted.promptId ||
+        !Number.isSafeInteger(accepted.lastEventId) ||
+        accepted.lastEventId < 0)
+    )
+      throw new Error('Daemon did not return a usable pinned prompt receipt');
+    if (
+      req.requireSessionSkillEffects &&
+      accepted.sessionSkillEffectsChecked !== true
+    )
+      throw new Error(
+        'Daemon did not confirm the requested skill session effects check',
+      );
+    if (
+      req.pinSkills &&
+      (typeof accepted.skillDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(accepted.skillDigest) ||
+        (req.expectedSkillDigest &&
+          accepted.skillDigest !== req.expectedSkillDigest))
+    ) {
+      throw new Error('Daemon did not confirm the requested skill snapshot');
+    }
+    if (
+      req.pinExtensions &&
+      (req.expectedExtensionGeneration === undefined ||
+        accepted.extensionGeneration !== req.expectedExtensionGeneration)
+    )
+      throw new Error(
+        'Daemon did not confirm the requested extension generation',
+      );
+    return accepted;
   }
 
   private async _awaitTurnComplete(
@@ -8560,6 +8718,30 @@ export class WorkspaceDaemonClient {
     private readonly client: DaemonClient,
     private readonly workspaceSelector: string,
   ) {}
+
+  async restoreWorktreeSession(
+    sessionId: string,
+    req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    // workspaceByCwd stores an encoded URL selector, not a filesystem path.
+    const selector = decodeURIComponent(this.workspaceSelector);
+    const workspaceCwd =
+      req.workspaceCwd ??
+      (selector.startsWith('/') ||
+      /^[A-Za-z]:[\\/]/.test(selector) ||
+      selector.startsWith('\\\\')
+        ? selector
+        : undefined);
+    if (workspaceCwd === undefined) {
+      throw new Error('Worktree restore requires a registered workspace cwd');
+    }
+    return await this.client.restoreWorktreeSession(
+      sessionId,
+      { ...req, workspaceCwd },
+      clientId,
+    );
+  }
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
@@ -9652,8 +9834,11 @@ export class WorkspaceDaemonClient {
     return this.get('/tools', 'GET /workspaces/:workspace/tools');
   }
 
-  workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
-    return this.get('/memory', 'GET /workspaces/:workspace/memory');
+  workspaceMemory(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus> {
+    const query = options?.includeContent ? '?content=true' : '';
+    return this.get(`/memory${query}`, 'GET /workspaces/:workspace/memory');
   }
 
   previewMemoryImport(

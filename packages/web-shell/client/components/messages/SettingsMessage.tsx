@@ -1,6 +1,8 @@
 import {
   useCallback,
+  useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -31,6 +33,7 @@ import {
   useI18n,
   type WebShellLanguage,
 } from '../../i18n';
+import { ArrowKeyHistoryContext } from '../../WebShellContexts';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
@@ -108,6 +111,8 @@ interface SettingsMessageProps {
    * the Workspace scope tab; omitted when the daemon cannot manage them.
    */
   workspaceDirectoriesSection?: ReactNode;
+  /** Optional workspace switcher rendered beside the scope tabs. */
+  workspaceControl?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
@@ -286,9 +291,20 @@ interface CategoryGroup {
   items: DaemonSettingDescriptor[];
 }
 
+const LOCAL_SETTING_IDS = {
+  chatWidth: 'builtin:chat-width',
+  arrowKeyHistory: 'builtin:arrow-key-history',
+  browserNotifications: 'builtin:browser-notifications',
+} as const;
+
+type LocalSettingItem = {
+  type: 'local';
+  localKey: keyof typeof LOCAL_SETTING_IDS;
+};
+
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
+  | LocalSettingItem
   | { type: 'local-control' }
   | { type: 'live' }
   | { type: 'connections' }
@@ -690,7 +706,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' };
+  | LocalSettingItem;
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -722,12 +738,15 @@ export function SettingsMessage({
   connections,
   archivedSessions,
   workspaceDirectoriesSection,
+  workspaceControl,
   embedded = false,
   initialCategory,
   workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
+  const settingsId = useId();
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
+  const arrowKeyHistory = useContext(ArrowKeyHistoryContext);
   const notifications = useBrowserNotificationSettings();
   const refreshNotificationPermission = notifications?.refreshPermission;
   useEffect(() => {
@@ -746,6 +765,7 @@ export function SettingsMessage({
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
 
+  const hasArrowKeyHistory = arrowKeyHistory !== null;
   const hasNotifications = notifications !== undefined;
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
@@ -765,32 +785,38 @@ export function SettingsMessage({
         })),
       }),
     );
-    const localItem = {
-      type: 'local' as const,
-      localKey: 'chatWidth' as const,
-    };
-    const themeGroup = groups.find((group) =>
-      group.items.some(
-        (item) =>
-          item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
-      ),
-    );
-    if (themeGroup) {
-      const themeIndex = themeGroup.items.findIndex(
+    const localItems: LocalSettingItem[] = [
+      { type: 'local', localKey: 'chatWidth' },
+    ];
+    if (hasArrowKeyHistory) {
+      localItems.push({ type: 'local', localKey: 'arrowKeyHistory' });
+    }
+    const uiGroup =
+      groups.find((group) => group.id === 'UI') ??
+      groups.find((group) =>
+        group.items.some(
+          (item) =>
+            item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
+        ),
+      );
+    if (uiGroup) {
+      const themeIndex = uiGroup.items.findIndex(
         (item) =>
           item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
       );
-      themeGroup.items.splice(themeIndex + 1, 0, localItem);
+      uiGroup.items.splice(themeIndex + 1, 0, ...localItems);
     } else {
       groups.push({
         id: 'UI',
         label: formatSettingCategory('UI', t),
-        items: [localItem],
+        items: localItems,
       });
     }
     if (hasNotifications) {
-      const group = groups.find((item) => item.items.includes(localItem));
-      group?.items.push({ type: 'local', localKey: 'browserNotifications' });
+      (uiGroup?.items ?? localItems).push({
+        type: 'local',
+        localKey: 'browserNotifications',
+      });
     }
     if (liveSetup?.supported) {
       const experimental = groups.find((group) => group.id === 'Experimental');
@@ -856,9 +882,7 @@ export function SettingsMessage({
           }
           const id =
             item.type === 'local'
-              ? item.localKey === 'chatWidth'
-                ? 'builtin:chat-width'
-                : 'builtin:browser-notifications'
+              ? LOCAL_SETTING_IDS[item.localKey]
               : item.type === 'live'
                 ? 'builtin:live-setup'
                 : item.type === 'local-control'
@@ -878,6 +902,7 @@ export function SettingsMessage({
     liveSetup,
     settings,
     t,
+    hasArrowKeyHistory,
     hasNotifications,
     modelManagementSectionProps,
     connections,
@@ -993,7 +1018,10 @@ export function SettingsMessage({
     </Select>
   );
 
-  const renderSettingControl = (setting: DaemonSettingDescriptor) => {
+  const renderSettingControl = (
+    setting: DaemonSettingDescriptor,
+    unsetBadgeId: string | undefined,
+  ) => {
     const value = resolveValue(setting, scope);
     const isBusy = busyKey === setting.key;
     // User-scope settings are editable (this PR enables user-scope writes); the
@@ -1073,12 +1101,17 @@ export function SettingsMessage({
 
     if (setting.type === 'boolean') {
       const checked = value === true;
+      const unsetToggleValue =
+        value === undefined ? setting.unsetToggleValue : undefined;
       return (
         <Switch
           checked={checked}
           disabled={disabled}
-          onCheckedChange={(next) => handleSetValue(setting.key, next)}
+          onCheckedChange={(next) =>
+            handleSetValue(setting.key, unsetToggleValue ?? next)
+          }
           aria-label={formatSettingLabel(setting, t)}
+          aria-describedby={unsetBadgeId}
         />
       );
     }
@@ -1164,16 +1197,21 @@ export function SettingsMessage({
             </div>
           )}
         {activeGroup?.id !== 'Connections' && !showArchivedSessions && (
-          <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-3 py-2">
             <TabsList className="p-0">
               <TabsTrigger value="workspace">
                 {t('settings.scope.workspace')}
               </TabsTrigger>
               <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
             </TabsList>
-            {restartPending && (
-              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {scope === 'workspace' ? workspaceControl : null}
+              {restartPending && (
+                <Badge variant="secondary">
+                  {t('settings.requiresRestart')}
+                </Badge>
+              )}
+            </div>
           </div>
         )}
 
@@ -1243,6 +1281,38 @@ export function SettingsMessage({
                           const separator = index > 0 && (
                             <Separator className="mx-5 w-auto max-md:mx-4" />
                           );
+                          if (
+                            item.type === 'local' &&
+                            item.localKey === 'arrowKeyHistory' &&
+                            arrowKeyHistory
+                          ) {
+                            const label = t('settings.arrowKeyHistory.label');
+                            const disabled =
+                              arrowKeyHistory.setEnabled === undefined;
+                            return (
+                              <div key={item.localKey}>
+                                {separator}
+                                <SettingsRow
+                                  title={label}
+                                  description={t(
+                                    disabled
+                                      ? 'settings.arrowKeyHistory.disabledByHost'
+                                      : 'settings.arrowKeyHistory.description',
+                                  )}
+                                  control={
+                                    <Switch
+                                      aria-label={label}
+                                      checked={arrowKeyHistory.enabled}
+                                      disabled={disabled}
+                                      onCheckedChange={
+                                        arrowKeyHistory.setEnabled
+                                      }
+                                    />
+                                  }
+                                />
+                              </div>
+                            );
+                          }
                           if (
                             item.type === 'local' &&
                             item.localKey === 'browserNotifications' &&
@@ -1395,6 +1465,11 @@ export function SettingsMessage({
                           );
                           const hintKey = scopeHintKey(setting, scope);
                           const hasScopeValue = scopeHasValue(setting, scope);
+                          const unsetBadgeId =
+                            setting.type === 'boolean' &&
+                            resolveValue(setting, scope) === undefined
+                              ? `${settingsId}-unset-${setting.key}`
+                              : undefined;
                           const scopeHint = hintKey
                             ? t(hintKey, {
                                 scope: t(
@@ -1421,13 +1496,17 @@ export function SettingsMessage({
                                         ? t('settings.scope.workspace')
                                         : t('settings.scope.user')}
                                     </Badge>
+                                  ) : unsetBadgeId ? (
+                                    <Badge id={unsetBadgeId} variant="outline">
+                                      {t('settings.value.unset')}
+                                    </Badge>
                                   ) : undefined
                                 }
                                 control={
                                   busyKey === setting.key ? (
                                     <Spinner />
                                   ) : (
-                                    renderSettingControl(setting)
+                                    renderSettingControl(setting, unsetBadgeId)
                                   )
                                 }
                               />

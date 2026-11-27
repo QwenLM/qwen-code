@@ -26,6 +26,7 @@ import {
   RadioTowerIcon,
   RefreshCwIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   SparklesIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -43,7 +44,7 @@ import {
 } from '../ui/dropdown-menu';
 import {
   formatOverviewValue,
-  type WorkspaceManagementTarget,
+  type WorkspaceMenuManagementTarget,
   type WorkspaceOverviewSnapshot,
 } from './workspaceOverviewModel';
 
@@ -53,6 +54,8 @@ import {
  * it gets. An empty action set renders nothing.
  */
 export interface WorkspaceMenuActions {
+  trust?: () => void;
+  trustPending?: boolean;
   rename?: () => void;
   copyPath?: () => void;
   openFolder?: () => void;
@@ -62,7 +65,12 @@ export interface WorkspaceMenuActions {
   createGroup?: () => void;
   moveUp?: () => void;
   moveDown?: () => void;
-  openManagement?: (target: WorkspaceManagementTarget) => void;
+  openManagement?: (target: WorkspaceMenuManagementTarget) => void;
+  /**
+   * Subset of menu management targets offered for this workspace. When
+   * omitted, all five targets are offered whenever `openManagement` is set.
+   */
+  managementTargets?: readonly WorkspaceMenuManagementTarget[];
   reload?: () => void;
   remove?: () => void;
 }
@@ -83,7 +91,7 @@ export interface WorkspaceMenuProps {
 }
 
 const MANAGEMENT_ENTRIES: ReadonlyArray<{
-  target: WorkspaceManagementTarget;
+  target: WorkspaceMenuManagementTarget;
   Icon: typeof PlugIcon;
 }> = [
   { target: 'mcp', Icon: PlugIcon },
@@ -93,10 +101,31 @@ const MANAGEMENT_ENTRIES: ReadonlyArray<{
   { target: 'settings', Icon: SettingsIcon },
 ];
 
+function visibleManagementEntries(actions: WorkspaceMenuActions) {
+  if (!actions.openManagement) return [];
+  if (!actions.managementTargets) return MANAGEMENT_ENTRIES;
+  const allowed = new Set(actions.managementTargets);
+  return MANAGEMENT_ENTRIES.filter((entry) => allowed.has(entry.target));
+}
+
 export function hasWorkspaceMenuActions(
   actions: WorkspaceMenuActions,
 ): boolean {
-  return Object.values(actions).some(Boolean);
+  return Boolean(
+    actions.trust ||
+      actions.rename ||
+      actions.copyPath ||
+      actions.openFolder ||
+      actions.openTerminal ||
+      actions.newSession ||
+      actions.newWorktreeSession ||
+      actions.createGroup ||
+      actions.moveUp ||
+      actions.moveDown ||
+      visibleManagementEntries(actions).length > 0 ||
+      actions.reload ||
+      actions.remove,
+  );
 }
 
 export function WorkspaceMenu({
@@ -126,6 +155,20 @@ export function WorkspaceMenu({
   if (!hasWorkspaceMenuActions(actions)) return null;
 
   const sections: ReactNode[][] = [];
+  if (actions.trust) {
+    sections.push([
+      <DropdownMenuItem
+        key="trust"
+        disabled={actions.trustPending}
+        onSelect={actions.trust}
+      >
+        <ShieldCheckIcon />
+        {actions.trustPending
+          ? t('sidebar.trustingWorkspace')
+          : t('sidebar.trustWorkspace')}
+      </DropdownMenuItem>,
+    ]);
+  }
   const primary: ReactNode[] = [];
   if (actions.rename) {
     primary.push(
@@ -202,14 +245,15 @@ export function WorkspaceMenu({
   if (primary.length > 0) sections.push(primary);
 
   const openManagement = actions.openManagement;
-  if (openManagement) {
+  const managementEntries = visibleManagementEntries(actions);
+  if (openManagement && managementEntries.length > 0) {
     // The section wrapper below supplies the group role; a nested group here
     // would only add an unlabeled boundary for assistive tech.
     sections.push([
       <DropdownMenuLabel key="manage-label">
         {t('sidebar.manageWorkspace')}
       </DropdownMenuLabel>,
-      ...MANAGEMENT_ENTRIES.map(({ target, Icon }) => {
+      ...managementEntries.map(({ target, Icon }) => {
         const count =
           target === 'settings'
             ? undefined

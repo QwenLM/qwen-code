@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
@@ -18,6 +19,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -285,14 +287,14 @@ final class TerminalHolds {
                     // A follow-up abandon after the session was released is a
                     // no-op: there is no active hold left to discharge.
                     Throwable cause = error.getCause() != null ? error.getCause() : error;
-                    if (cause instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException brokerError
+                    if (cause instanceof RuntimeBrokerException brokerError
                             && "runtime_session_not_acquirable".equals(brokerError.getCode())) {
                         return null;
                     }
                     if (cause instanceof RuntimeException runtimeError) {
                         throw runtimeError;
                     }
-                    throw new java.util.concurrent.CompletionException(cause);
+                    throw new CompletionException(cause);
                 });
     }
 }

@@ -7,7 +7,7 @@
 export type TranslationValue =
   | string
   | string[]
-  | ((params?: Record<string, string>) => string);
+  | ((params: Readonly<Record<string, string>>) => string);
 export type TranslationDict = Record<string, TranslationValue>;
 
 export function getTranslationModuleExport(

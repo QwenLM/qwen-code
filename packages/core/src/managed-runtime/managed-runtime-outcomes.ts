@@ -34,6 +34,7 @@ import {
 } from '../core/coreToolScheduler.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { readManagedMessageBody } from './managed-message-chunks.js';
+import { managedCommandId } from './managed-command-id.js';
 
 /** The tool protocol the local host dispatches over. */
 export const MANAGED_RUNTIME_TOOL_CAPABILITY_VERSION =
@@ -149,7 +150,9 @@ export class LocalManagedRuntimeOutcomes {
       await authority.commitCheckpoint(
         {
           operation: 'commitCheckpoint',
-          commandId: `harness:next_turn_ready:${session.activation.activationId}:${promptId}:${authority.committedSequence}`,
+          commandId: managedCommandId(
+            `harness:next_turn_ready:${session.activation.activationId}:${promptId}:${authority.committedSequence}`,
+          ),
           sessionKey: authority.sessionHeader.sessionKey,
           contentDigest: createHash('sha256').update(state).digest('hex'),
         },

@@ -11,6 +11,7 @@ type MemoryMode = 'view' | 'edit';
 type MemoryScope = 'global' | 'workspace';
 
 interface MemoryMessageProps {
+  workspaceCwd?: string;
   addSignal?: number;
   addScope?: DaemonContextFileScope;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
@@ -39,6 +40,7 @@ function scopeLabel(
 }
 
 export function MemoryMessage({
+  workspaceCwd,
   addSignal = 0,
   addScope = 'workspace',
   onMessage,
@@ -55,6 +57,7 @@ export function MemoryMessage({
     writeMemory,
   } = useMemory({
     autoLoad: true,
+    workspaceCwd,
   });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
