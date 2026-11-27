@@ -862,6 +862,21 @@ describe('modelConfigResolver', () => {
         env: { DEEPINFRA_API_KEY: 'test-key' },
       });
       expect(nonFlexResult.config.timeout).toBeUndefined();
+
+      // Hand-written DeepInfra endpoint entry without DEEPINFRA_API_KEY still receives
+      // 10m timeout when service_tier is explicitly flex
+      const handWrittenFlex = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          generationConfig: { service_tier: 'flex' },
+        },
+        settings: { apiKey: 'sk-custom' },
+      });
+      expect(handWrittenFlex.config.service_tier).toBe('flex');
+      expect(handWrittenFlex.config.timeout).toBe(600000);
+      expect(handWrittenFlex.sources['timeout'].kind).toBe('default');
     });
   });
 
