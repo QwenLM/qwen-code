@@ -143,9 +143,13 @@
 | `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.ts`                | 重试在途期间保留已结算轮询错误                               |
 | `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.test.tsx`          | 重试在途保留已结算错误测试                                   |
 | `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | 默认健康 `GET /daemon/status` mock 路由                      |
+| `packages/web-shell/client/hooks/useSessionScheduledTasks.ts`                          | 将手动任务过载拒绝守卫透传至共享 helper                      |
+| `packages/web-shell/client/hooks/useSessionScheduledTasks.test.tsx`                    | 手动任务过载拒绝透传测试                                     |
 | `packages/web-shell/client/i18n.tsx`                                                   | `en` 过载文案                                                |
 | `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` 过载文案                                             |
 | `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` 过载文案                                             |
 | `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` 过载文案                                                |
 | `packages/web-shell/client/i18n.test.ts`                                               | 四语言插值与 parity 测试                                     |
+| `packages/web-shell/client/utils/scheduledTaskManualRun.ts`                            | 共享的手动任务消费/派发前过载拒绝守卫                        |
+| `packages/web-shell/client/utils/scheduledTaskManualRun.test.ts`                       | 共享 helper 过载拒绝与健康放行对照测试                       |
 | `packages/web-templates/src/export-html/build.mjs`                                     | 合并树导出体积预算重记                                       |

@@ -143,9 +143,13 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 | `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.ts`                | Retain settled poll error across pending retries                  |
 | `packages/web-shell/client/daemon/workspace/hooks/useDaemonResource.test.tsx`          | Settled error retention across retry tests                        |
 | `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock                         |
+| `packages/web-shell/client/hooks/useSessionScheduledTasks.ts`                          | Forward overload manual-run refusal into shared helper            |
+| `packages/web-shell/client/hooks/useSessionScheduledTasks.test.tsx`                    | Overload refusal forwarding test                                  |
 | `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                                                |
 | `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                                             |
 | `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                                             |
 | `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                                                |
 | `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test                           |
+| `packages/web-shell/client/utils/scheduledTaskManualRun.ts`                            | Shared pre-consume/pre-dispatch manual-run overload guard         |
+| `packages/web-shell/client/utils/scheduledTaskManualRun.test.ts`                       | Shared helper overload refusal & healthy control tests            |
 | `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track                           |
