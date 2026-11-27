@@ -17,7 +17,9 @@ Subcommands:
 import argparse
 import hashlib
 import json
+import math
 import os
+import re
 import signal
 import socket
 import stat
@@ -29,6 +31,7 @@ GREETING = b"guest-vsock-ready"
 ACK = b"host-vsock-ack"
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024
+MAX_BRIDGE_CONNECTIONS = 64
 CHUNK_SIZE = 64 * 1024
 # Host collector defaults: maxChunkBytes=2048, maxFrameBytes=4096.
 UPLOAD_CHUNK_SIZE = 2048
@@ -76,10 +79,10 @@ def fetch_framed_item(args, command, max_bytes, out_file=None):
         header = recv_line(sock)
         if header.startswith("ERR "):
             raise RuntimeError(f"host rejected {command}: {header[4:]}")
-        parts = header.split(" ")
-        if len(parts) != 2 or parts[0] != "OK" or not parts[1].isdigit():
+        match = re.fullmatch(r"OK ([0-9]+)", header)
+        if match is None:
             raise RuntimeError(f"malformed host header: {header!r}")
-        expected = int(parts[1])
+        expected = int(match[1])
         if expected < 0 or expected > max_bytes:
             raise RuntimeError(f"declared size {expected} exceeds max {max_bytes}")
 
@@ -117,60 +120,152 @@ def fetch_framed_item(args, command, max_bytes, out_file=None):
         return expected, digest.hexdigest(), bytes(buf)
 
 
+def positive_safe_integer(value):
+    # Numeric spellings such as 4.0 and 4e0 are also integers to the Node client.
+    return (
+        type(value) in (int, float)
+        and 0 < value < 2**53
+        and math.isfinite(value)
+        and value == math.trunc(value)
+    )
+
+
+def validate_input_manifest(manifest):
+    def invalid(field):
+        raise RuntimeError(f"invalid manifest field: {field}")
+
+    def require_hex(field, length):
+        value = manifest.get(field)
+        if not isinstance(value, str) or re.fullmatch(
+            rf"[0-9a-f]{{{length}}}", value
+        ) is None:
+            invalid(field)
+
+    if not isinstance(manifest, dict):
+        raise RuntimeError("invalid manifest: expected an object")
+    allowed = {
+        "schemaVersion",
+        "runId",
+        "repo",
+        "prNumber",
+        "baseRefOid",
+        "headRefOid",
+        "bundleSha256",
+        "bundleBytes",
+        "entropyHex",
+        "modelProxy",
+    }
+    if set(manifest) - allowed:
+        invalid("unknown-field")
+    if manifest.get("schemaVersion") != "verify-pr-input-v1":
+        raise RuntimeError(
+            f"unsupported manifest schema: {manifest.get('schemaVersion')!r}"
+        )
+    run_id = manifest.get("runId")
+    if not isinstance(run_id, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,32}", run_id) is None:
+        invalid("runId")
+    repo = manifest.get("repo")
+    if not isinstance(repo, str):
+        invalid("repo")
+    if "prNumber" not in manifest:
+        invalid("prNumber")
+    pr_number = manifest["prNumber"]
+    if pr_number is not None:
+        if not positive_safe_integer(pr_number):
+            invalid("prNumber")
+        manifest["prNumber"] = int(pr_number)
+    require_hex("baseRefOid", 40)
+    require_hex("headRefOid", 40)
+    require_hex("bundleSha256", 64)
+    require_hex("entropyHex", 64)
+    bundle_bytes = manifest.get("bundleBytes")
+    if not positive_safe_integer(bundle_bytes) or bundle_bytes > MAX_BUNDLE_BYTES:
+        invalid("bundleBytes")
+    manifest["bundleBytes"] = int(bundle_bytes)
+
+    if "modelProxy" not in manifest:
+        invalid("modelProxy")
+    proxy = manifest["modelProxy"]
+    if proxy is not None:
+        if not isinstance(proxy, dict) or set(proxy) - {"port", "basePath", "token", "nonce"}:
+            invalid("modelProxy")
+        port = proxy.get("port")
+        if not positive_safe_integer(port):
+            invalid("modelProxy.port")
+        proxy["port"] = int(port)
+        for key in ("token", "nonce"):
+            if (
+                not isinstance(proxy.get(key), str)
+                or not proxy[key]
+                or all(c.isspace() or c == "\ufeff" for c in proxy[key])
+            ):
+                invalid(f"modelProxy.{key}")
+        base_path = proxy.get("basePath")
+        if base_path is not None and not isinstance(base_path, str):
+            invalid("modelProxy.basePath")
+
+
 def cmd_fetch_inputs(args):
     os.makedirs(args.out, mode=0o700, exist_ok=True)
     _, _, manifest_bytes = fetch_framed_item(
         args, "GET manifest", MAX_MANIFEST_BYTES
     )
-    manifest = json.loads(manifest_bytes.decode("utf-8"))
-    if manifest.get("schemaVersion") != "verify-pr-input-v1":
-        raise RuntimeError(
-            f"unsupported manifest schema: {manifest.get('schemaVersion')!r}"
-        )
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid manifest JSON/UTF-8: {exc}") from exc
+    validate_input_manifest(manifest)
 
     tmp_bundle = os.path.join(args.out, f".round.bundle.tmp.{os.getpid()}")
-    bundle_path = os.path.join(args.out, "round.bundle")
+    tmp_manifest = os.path.join(args.out, f".manifest.json.tmp.{os.getpid()}")
+    tmp_entropy = os.path.join(args.out, f".entropy.hex.tmp.{os.getpid()}")
+    staged = [
+        (tmp_bundle, os.path.join(args.out, "round.bundle")),
+        (tmp_manifest, os.path.join(args.out, "manifest.json")),
+        (tmp_entropy, os.path.join(args.out, "entropy.hex")),
+    ]
+    promoted = []
     try:
         size, sha, _ = fetch_framed_item(
             args, "GET bundle", MAX_BUNDLE_BYTES, out_file=tmp_bundle
         )
-        if size != manifest.get("bundleBytes") or sha != manifest.get("bundleSha256"):
+        if size != manifest["bundleBytes"] or sha != manifest["bundleSha256"]:
             raise RuntimeError(
                 f"bundle integrity mismatch: got {size}B/{sha}, "
-                f"expected {manifest.get('bundleBytes')}B/{manifest.get('bundleSha256')}"
+                f"expected {manifest['bundleBytes']}B/{manifest['bundleSha256']}"
             )
-        os.chmod(tmp_bundle, 0o600)
-        os.replace(tmp_bundle, bundle_path)
+        result = {
+            "runId": manifest["runId"],
+            "baseRefOid": manifest["baseRefOid"],
+            "headRefOid": manifest["headRefOid"],
+            "bundleBytes": size,
+            "bundleSha256": sha,
+            "hasModelProxy": manifest["modelProxy"] is not None,
+        }
+
+        with open(tmp_manifest, "wb") as fp:
+            fp.write(manifest_bytes)
+        with open(tmp_entropy, "w", encoding="utf-8") as fp:
+            fp.write(f"{manifest['entropyHex']}\n")
+        for temp_path, _ in staged:
+            os.chmod(temp_path, 0o600)
+        for temp_path, output_path in staged:
+            os.replace(temp_path, output_path)
+            promoted.append(output_path)
     except Exception:
-        try:
-            os.unlink(tmp_bundle)
-        except OSError:
-            pass
+        for temp_path, _ in staged:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        for output_path in promoted:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
         raise
 
-    manifest_path = os.path.join(args.out, "manifest.json")
-    with open(manifest_path, "wb") as fp:
-        fp.write(manifest_bytes)
-    os.chmod(manifest_path, 0o600)
-
-    entropy_path = os.path.join(args.out, "entropy.hex")
-    with open(entropy_path, "w", encoding="utf-8") as fp:
-        fp.write(f"{manifest['entropyHex']}\n")
-    os.chmod(entropy_path, 0o600)
-
-    sys.stdout.write(
-        json.dumps(
-            {
-                "runId": manifest["runId"],
-                "baseRefOid": manifest["baseRefOid"],
-                "headRefOid": manifest["headRefOid"],
-                "bundleBytes": size,
-                "bundleSha256": sha,
-                "hasModelProxy": manifest.get("modelProxy") is not None,
-            }
-        )
-        + "\n"
-    )
+    sys.stdout.write(json.dumps(result) + "\n")
     return 0
 
 
@@ -190,7 +285,7 @@ def relay_half(src, dst):
             pass
 
 
-def handle_bridge_client(client, args):
+def handle_bridge_client(client, args, on_done):
     upstream = None
     try:
         upstream = connect_endpoint(args, timeout=30.0)
@@ -211,6 +306,7 @@ def handle_bridge_client(client, args):
                     sock.close()
                 except OSError:
                     pass
+        on_done()
 
 
 def cmd_model_bridge(args):
@@ -236,6 +332,15 @@ def cmd_model_bridge(args):
     sys.stdout.write(json.dumps({"host": host, "port": port}) + "\n")
     sys.stdout.flush()
 
+    active_connections = 0
+    connections_lock = threading.Lock()
+    saturation_reported = False
+
+    def finish_client():
+        nonlocal active_connections
+        with connections_lock:
+            active_connections -= 1
+
     try:
         while not stop_event.is_set():
             try:
@@ -244,8 +349,22 @@ def cmd_model_bridge(args):
                 continue
             except OSError:
                 break
+            with connections_lock:
+                if active_connections >= MAX_BRIDGE_CONNECTIONS:
+                    if not saturation_reported:
+                        saturation_reported = True
+                        print(
+                            f"model bridge: connection limit {MAX_BRIDGE_CONNECTIONS} reached; refusing extra client",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    client.close()
+                    continue
+                active_connections += 1
             threading.Thread(
-                target=handle_bridge_client, args=(client, args), daemon=True
+                target=handle_bridge_client,
+                args=(client, args, finish_client),
+                daemon=True,
             ).start()
     finally:
         server.close()

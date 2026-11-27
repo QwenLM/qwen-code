@@ -42,15 +42,18 @@ import {
   openSync,
   read,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
+import { TextDecoder } from 'node:util';
 import { isTokenFileRevoked } from './verify-pr-model-proxy.mjs';
 import { validateSocketPathLength } from './verify-pr-vm-collector.mjs';
 
@@ -65,6 +68,24 @@ export const DEFAULT_MAX_COMMAND_BYTES = 128;
 
 const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const PYTHON_ONLY_BLANKS = new Set([
+  '\u001c',
+  '\u001d',
+  '\u001e',
+  '\u001f',
+  '\u0085',
+]);
+
+// Match Python's blank credentials as well as JavaScript trim() semantics.
+function isBlankCredential(value) {
+  for (const character of value) {
+    if (character.trim() !== '' && !PYTHON_ONLY_BLANKS.has(character)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const FORBIDDEN_MANIFEST_KEYS = new Set([
   'apiKey',
   'api_key',
@@ -94,8 +115,12 @@ const HARDENED_GIT_PREFIX = [
   'filter.lfs.clean=',
 ];
 
+function matchesExactPattern(regex, value) {
+  return typeof value === 'string' && regex.exec(value)?.[0] === value;
+}
+
 function assertHex40(label, value) {
-  if (typeof value !== 'string' || !HEX40.test(value)) {
+  if (!matchesExactPattern(HEX40, value)) {
     throw new Error(`${label} must be a 40-char lowercase hex commit OID`);
   }
 }
@@ -124,7 +149,15 @@ function sha256FileChunked(filePath) {
   return { digest: hash.digest('hex'), bytes: total };
 }
 
-function runHardenedGit(args, { cwd = undefined, env = process.env } = {}) {
+function runHardenedGit(
+  args,
+  {
+    cwd = undefined,
+    env = process.env,
+    maxBuffer = 16 * 1024 * 1024,
+    encoding = 'utf8',
+  } = {},
+) {
   const res = spawnSync('git', [...HARDENED_GIT_PREFIX, ...args], {
     cwd,
     env: {
@@ -132,13 +165,24 @@ function runHardenedGit(args, { cwd = undefined, env = process.env } = {}) {
       GIT_TERMINAL_PROMPT: '0',
       GIT_CONFIG_NOSYSTEM: '1',
     },
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
+    encoding,
+    maxBuffer,
   });
-  if (res.error) throw res.error;
+  if (res.error) {
+    if (res.error.code === 'ENOBUFS') {
+      // Preserve the public bundle-budget error while keeping the cause.
+      const error = new Error(
+        `ENOBUFS: bundle size exceeds allowed range (1..${maxBuffer})`,
+      );
+      error.cause = res.error;
+      error.code = res.error.code;
+      throw error;
+    }
+    throw res.error;
+  }
   if (res.status !== 0) {
     throw new Error(
-      `git ${args[0] ?? ''} failed (exit ${res.status}): ${(res.stderr || res.stdout || '').trim()}`,
+      `git ${args[0] ?? ''} failed (exit ${res.status}): ${String(res.stderr || res.stdout || '').trim()}`,
     );
   }
   return res.stdout;
@@ -215,15 +259,20 @@ export function createRoundInputBundle({
       join(scratchBare, 'refs', 'verify', 'head'),
       `${headRefOid}\n`,
     );
-    runHardenedGit([
-      '--git-dir',
-      scratchBare,
-      'bundle',
-      'create',
-      tmpOut,
-      'refs/verify/base',
-      'refs/verify/head',
-    ]);
+    const bundleBytes = runHardenedGit(
+      [
+        '--git-dir',
+        scratchBare,
+        'bundle',
+        'create',
+        '-',
+        'refs/verify/base',
+        'refs/verify/head',
+      ],
+      // Cap stdout before the temporary file consumes any disk space.
+      { maxBuffer: maxBundleBytes, encoding: null },
+    );
+    writeFileSync(tmpOut, bundleBytes, { mode: 0o600 });
     chmodSync(tmpOut, 0o600);
     const { digest, bytes } = sha256FileChunked(tmpOut);
     if (bytes === 0 || bytes > maxBundleBytes) {
@@ -268,18 +317,18 @@ export function buildInputManifest({
   modelProxy = null,
   entropyHex = null,
 }) {
-  if (typeof runId !== 'string' || !/^[A-Za-z0-9._-]{1,32}$/.test(runId)) {
+  if (!matchesExactPattern(/^[A-Za-z0-9._-]{1,32}$/, runId)) {
     throw new Error('runId must match /^[A-Za-z0-9._-]{1,32}$/');
   }
   assertHex40('baseRefOid', baseRefOid);
   assertHex40('headRefOid', headRefOid);
-  if (typeof bundleSha256 !== 'string' || !HEX64.test(bundleSha256)) {
+  if (!matchesExactPattern(HEX64, bundleSha256)) {
     throw new Error('bundleSha256 must be a 64-char lowercase hex SHA-256');
   }
   assertPositiveSafeInt('bundleBytes', bundleBytes);
 
   const entropy = entropyHex ?? randomBytes(32).toString('hex');
-  if (typeof entropy !== 'string' || !HEX64.test(entropy)) {
+  if (!matchesExactPattern(HEX64, entropy)) {
     throw new Error('entropyHex must be a 64-char lowercase hex string');
   }
 
@@ -298,13 +347,13 @@ export function buildInputManifest({
     assertPositiveSafeInt('modelProxy.port', modelProxy.port);
     if (
       typeof modelProxy.token !== 'string' ||
-      modelProxy.token.trim() === ''
+      isBlankCredential(modelProxy.token)
     ) {
       throw new Error('modelProxy.token must be a non-empty string');
     }
     if (
       typeof modelProxy.nonce !== 'string' ||
-      modelProxy.nonce.trim() === ''
+      isBlankCredential(modelProxy.nonce)
     ) {
       throw new Error('modelProxy.nonce must be a non-empty string');
     }
@@ -322,7 +371,7 @@ export function buildInputManifest({
     schemaVersion: INPUT_SCHEMA_VERSION,
     runId,
     repo: typeof repo === 'string' ? repo : '',
-    prNumber: Number.isInteger(prNumber) && prNumber > 0 ? prNumber : null,
+    prNumber: Number.isSafeInteger(prNumber) && prNumber > 0 ? prNumber : null,
     baseRefOid,
     headRefOid,
     bundleSha256,
@@ -782,21 +831,31 @@ function fetchOneFramedItem(
       if (settled) return;
       settled = true;
       client.setTimeout(0);
-      if (ws) ws.destroy();
+      if (ws) {
+        // Cleanup must not run before a pending asynchronous open completes.
+        ws.once('close', () => rejectFetch(err));
+        ws.destroy();
+      } else {
+        rejectFetch(err);
+      }
       client.destroy();
-      rejectFetch(err);
     };
     const succeed = () => {
       if (settled) return;
-      settled = true;
       client.setTimeout(0);
-      const digest = hash.digest('hex');
       if (ws) {
-        ws.end(() => resolveFetch({ bytes: received, sha256: digest }));
+        // A write error may arrive after the end() completion callback.
+        ws.once('close', () => {
+          if (settled) return;
+          settled = true;
+          resolveFetch({ bytes: received, sha256: hash.digest('hex') });
+        });
+        ws.end();
       } else {
+        settled = true;
         resolveFetch({
           bytes: received,
-          sha256: digest,
+          sha256: hash.digest('hex'),
           buffer: Buffer.concat(chunks),
         });
       }
@@ -814,8 +873,16 @@ function fetchOneFramedItem(
         return;
       }
       hash.update(slice);
-      if (ws) ws.write(slice);
-      else chunks.push(slice);
+      if (ws) {
+        if (!ws.write(slice)) {
+          client.pause();
+          ws.once('drain', () => {
+            if (!settled) client.resume();
+          });
+        }
+      } else {
+        chunks.push(slice);
+      }
     };
 
     client.once('error', fail);
@@ -831,6 +898,10 @@ function fetchOneFramedItem(
           if (headerBuf.length > 256) {
             fail(new Error('input-client: response header too long'));
           }
+          return;
+        }
+        if (nl > 256) {
+          fail(new Error('input-client: response header too long'));
           return;
         }
         const line = headerBuf.subarray(0, nl).toString('utf8');
@@ -862,7 +933,7 @@ function fetchOneFramedItem(
         }
         if (outFilePath) {
           ws = createWriteStream(outFilePath, { mode: 0o600 });
-          ws.once('error', fail);
+          ws.on('error', fail);
         }
         appendPayload(rest);
       } else {
@@ -888,6 +959,74 @@ function fetchOneFramedItem(
   });
 }
 
+function assertInputManifestShape(manifest) {
+  function invalid(field) {
+    throw new Error(`input-client: invalid manifest field: ${field}`);
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    invalid('object');
+  }
+  const allowed = new Set([
+    'schemaVersion',
+    'runId',
+    'repo',
+    'prNumber',
+    'baseRefOid',
+    'headRefOid',
+    'bundleSha256',
+    'bundleBytes',
+    'entropyHex',
+    'modelProxy',
+  ]);
+  if (Object.keys(manifest).some((key) => !allowed.has(key))) {
+    invalid('unknown-field');
+  }
+  if (manifest.schemaVersion !== INPUT_SCHEMA_VERSION) {
+    throw new Error('input-client: unsupported manifest schema');
+  }
+  if (!matchesExactPattern(/^[A-Za-z0-9._-]{1,32}$/, manifest.runId)) {
+    invalid('runId');
+  }
+  if (typeof manifest.repo !== 'string') invalid('repo');
+  if (manifest.prNumber !== null && !Number.isSafeInteger(manifest.prNumber)) {
+    invalid('prNumber');
+  }
+  if (manifest.prNumber !== null && manifest.prNumber <= 0) {
+    invalid('prNumber');
+  }
+  assertHex40('baseRefOid', manifest.baseRefOid);
+  assertHex40('headRefOid', manifest.headRefOid);
+  if (!matchesExactPattern(HEX64, manifest.bundleSha256)) {
+    invalid('bundleSha256');
+  }
+  if (!matchesExactPattern(HEX64, manifest.entropyHex)) {
+    invalid('entropyHex');
+  }
+  assertPositiveSafeInt('bundleBytes', manifest.bundleBytes);
+
+  const proxy = manifest.modelProxy;
+  if (proxy !== null) {
+    if (typeof proxy !== 'object' || Array.isArray(proxy)) {
+      invalid('modelProxy');
+    }
+    if (
+      Object.keys(proxy).some(
+        (key) => !['port', 'basePath', 'token', 'nonce'].includes(key),
+      )
+    ) {
+      invalid('modelProxy');
+    }
+    for (const key of ['token', 'nonce']) {
+      if (typeof proxy[key] !== 'string' || isBlankCredential(proxy[key])) {
+        invalid(`modelProxy.${key}`);
+      }
+    }
+    assertPositiveSafeInt('modelProxy.port', proxy.port);
+    const basePath = proxy.basePath ?? '';
+    if (typeof basePath !== 'string') invalid('modelProxy.basePath');
+  }
+}
+
 /**
  * Fetches `manifest` and `bundle` from a host input server UDS, verifies
  * `bundleSha256` and `bundleBytes` fail-closed, and writes `manifest.json`,
@@ -899,22 +1038,45 @@ export async function fetchRoundInputFromSocket({
   maxManifestBytes = DEFAULT_MAX_MANIFEST_BYTES,
   maxBundleBytes = DEFAULT_MAX_BUNDLE_BYTES,
 }) {
+  assertPositiveSafeInt('maxBundleBytes', maxBundleBytes);
+  assertPositiveSafeInt('maxManifestBytes', maxManifestBytes);
   mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const manifestRes = await fetchOneFramedItem(
     socketPath,
     'GET manifest',
     maxManifestBytes,
   );
-  const manifest = JSON.parse(manifestRes.buffer.toString('utf8'));
-  if (
-    !manifest ||
-    typeof manifest !== 'object' ||
-    manifest.schemaVersion !== INPUT_SCHEMA_VERSION
-  ) {
-    throw new Error('input-client: unsupported manifest schema');
+  let manifest;
+  try {
+    manifest = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        manifestRes.buffer,
+      ),
+    );
+  } catch (error) {
+    throw new Error(
+      `input-client: invalid manifest JSON/UTF-8: ${error.message}`,
+      { cause: error },
+    );
   }
-  const tmpBundle = join(outDir, `.round.bundle.tmp.${process.pid}`);
+  assertInputManifestShape(manifest);
+  if (manifest.bundleBytes > maxBundleBytes) {
+    throw new Error(
+      'input-client: manifest bundleBytes exceeds maxBundleBytes',
+    );
+  }
+  const manifestPath = join(outDir, 'manifest.json');
   const bundlePath = join(outDir, 'round.bundle');
+  const entropyPath = join(outDir, 'entropy.hex');
+  const staged = [
+    [join(outDir, `.round.bundle.tmp.${process.pid}`), bundlePath],
+    [join(outDir, `.manifest.json.tmp.${process.pid}`), manifestPath],
+    [join(outDir, `.entropy.hex.tmp.${process.pid}`), entropyPath],
+  ];
+  const tmpBundle = staged[0][0];
+  const tmpManifest = staged[1][0];
+  const tmpEntropy = staged[2][0];
+  const promoted = [];
   try {
     const bundleRes = await fetchOneFramedItem(
       socketPath,
@@ -930,19 +1092,29 @@ export async function fetchRoundInputFromSocket({
         `input-client: bundle integrity mismatch (got ${bundleRes.bytes}B/${bundleRes.sha256}, expected ${manifest.bundleBytes}B/${manifest.bundleSha256})`,
       );
     }
-    renameSync(tmpBundle, bundlePath);
+    writeFileSync(tmpManifest, manifestRes.buffer, { mode: 0o600 });
+    writeFileSync(tmpEntropy, `${manifest.entropyHex}\n`, { mode: 0o600 });
+    for (const [tmpPath, outputPath] of staged) {
+      renameSync(tmpPath, outputPath);
+      promoted.push(outputPath);
+    }
   } catch (error) {
-    try {
-      unlinkSync(tmpBundle);
-    } catch {
-      // Ignore cleanup error.
+    for (const [tmpPath] of staged) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        // Ignore cleanup error.
+      }
+    }
+    for (const outputPath of promoted) {
+      try {
+        unlinkSync(outputPath);
+      } catch {
+        // Ignore cleanup error.
+      }
     }
     throw error;
   }
-  const manifestPath = join(outDir, 'manifest.json');
-  writeFileSync(manifestPath, manifestRes.buffer, { mode: 0o600 });
-  const entropyPath = join(outDir, 'entropy.hex');
-  writeFileSync(entropyPath, `${manifest.entropyHex}\n`, { mode: 0o600 });
   return {
     manifest,
     manifestPath,
@@ -967,12 +1139,51 @@ export function materializeTwoOidWorktrees({
   assertHex40('baseRefOid', baseRefOid);
   assertHex40('headRefOid', headRefOid);
   const absBundle = resolve(bundlePath);
-  for (const [label, dir, oid] of [
+  const dirs = [
     ['base', baseDir, baseRefOid],
     ['head', headDir, headRefOid],
-  ]) {
+  ].map(([label, dir, oid]) => {
     const absDir = resolve(dir);
     mkdirSync(absDir, { recursive: true, mode: 0o700 });
+    const canonicalDir = realpathSync(absDir);
+    return {
+      label,
+      oid,
+      absDir,
+      canonicalDir,
+      identity: statSync(canonicalDir),
+    };
+  });
+  const relations = [
+    relative(dirs[0].canonicalDir, dirs[1].canonicalDir),
+    relative(dirs[1].canonicalDir, dirs[0].canonicalDir),
+  ];
+  if (
+    relations.some(
+      (rel) =>
+        rel === '' ||
+        (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)),
+    )
+  ) {
+    throw new Error(
+      'baseDir and headDir must be distinct, non-nested directories',
+    );
+  }
+  for (const [current, other] of [
+    [dirs[0], dirs[1]],
+    [dirs[1], dirs[0]],
+  ]) {
+    for (let ancestor = current.canonicalDir; ; ancestor = dirname(ancestor)) {
+      const st = statSync(ancestor);
+      if (st.dev === other.identity.dev && st.ino === other.identity.ino) {
+        throw new Error(
+          'baseDir and headDir must be distinct, non-nested directories',
+        );
+      }
+      if (dirname(ancestor) === ancestor) break;
+    }
+  }
+  for (const { label, absDir, oid } of dirs) {
     runHardenedGit(['init', '--quiet'], { cwd: absDir });
     runHardenedGit(['bundle', 'unbundle', absBundle], { cwd: absDir });
     runHardenedGit(['checkout', '--quiet', '--detach', '--force', oid], {
@@ -987,7 +1198,7 @@ export function materializeTwoOidWorktrees({
       );
     }
   }
-  return { baseDir: resolve(baseDir), headDir: resolve(headDir) };
+  return { baseDir: dirs[0].absDir, headDir: dirs[1].absDir };
 }
 
 /**
