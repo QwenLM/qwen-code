@@ -75,11 +75,56 @@ export function pathHasSkippedDirectoryComponent(
     .some((segment) => shouldSkipDirectoryArtifactName(segment));
 }
 
+/**
+ * True when a proper ancestor directory of a workspace-root-relative file
+ * path is named in the artifact skip list (node_modules, .git, __pycache__,
+ * dist, .qwen). This is the issue #17453 direct-file contract: such paths
+ * are never surfaced by the Artifacts panel, independent of ignore files.
+ * The file's own name does not count: a regular file named "dist" at the
+ * workspace root is a panel-visible file. Callers pass a path that is
+ * already worktree-stripped (see stripWorktreeArtifactPrefix).
+ */
+export function pathHasSkippedArtifactDirectoryAncestor(
+  workspaceFilePath: string,
+): boolean {
+  return workspaceFilePath
+    .split('/')
+    .filter(Boolean)
+    .slice(0, -1)
+    .some((segment) => SKIP_DIRECTORY_ARTIFACT_NAMES.has(segment));
+}
+
+/**
+ * True when the Artifacts panel cannot surface the directory itself: the
+ * directory or a proper ancestor above it is named in the artifact skip
+ * list (node_modules, .git, __pycache__, dist, .qwen) — the same 5-name
+ * contract the direct-file gate applies, so a directory expansion refuses
+ * only directories the gate would refuse file by file. A dot-named
+ * directory such as `.github` that the panel actually lists is not
+ * flagged. Callers pass an already worktree-stripped path (see
+ * stripWorktreeArtifactPrefix).
+ */
+export function pathIsOrSitsUnderSkippedArtifactDirectory(
+  workspaceDirPath: string,
+): boolean {
+  const segments = workspaceDirPath.split('/').filter(Boolean);
+  const ownName = segments.at(-1);
+  return (
+    (ownName !== undefined && SKIP_DIRECTORY_ARTIFACT_NAMES.has(ownName)) ||
+    pathHasSkippedArtifactDirectoryAncestor(workspaceDirPath)
+  );
+}
+
 export async function collectRecordableWorkspaceFiles(
   absoluteDir: string,
   relativeDir: string,
   realWorkspace: string,
-  isRecordable?: (relativePath: string) => boolean,
+  /**
+   * Predicate over each child's workspace-root-relative path (relativeDir
+   * plus the child's path below it), so callers can judge the path the
+   * Artifacts panel would show.
+   */
+  isRecordable?: (workspaceRelativePath: string) => boolean,
 ): Promise<RecordableWorkspaceWalkResult> {
   const files: string[] = [];
   const walked = await walkRecordableWorkspaceFiles(
@@ -99,7 +144,7 @@ async function walkRecordableWorkspaceFiles(
   realWorkspace: string,
   files: string[],
   depth: number,
-  isRecordable?: (relativePath: string) => boolean,
+  isRecordable?: (workspaceRelativePath: string) => boolean,
 ): Promise<{
   truncated: boolean;
   depthLimited: boolean;
@@ -207,7 +252,7 @@ async function hasRecordableDescendant(
   absoluteDir: string,
   relativeDir: string,
   remainingDepth: number,
-  isRecordable?: (relativePath: string) => boolean,
+  isRecordable?: (workspaceRelativePath: string) => boolean,
 ): Promise<boolean> {
   if (remainingDepth < 0) {
     return true;

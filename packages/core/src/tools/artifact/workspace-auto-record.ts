@@ -11,8 +11,10 @@ import type { ToolArtifact, ToolArtifactKind } from '../tools.js';
 import {
   ARTIFACT_TITLE_MAX_LENGTH,
   ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+  fileHiddenFromArtifactsPanel,
   hasControlCharacter,
   hasUnsafeDisplayPayload,
+  readPanelIgnoreRuleOptions,
 } from '../record-artifact.js';
 import {
   OFFICE_DOCUMENT_EXTENSIONS,
@@ -159,6 +161,24 @@ function resolveRecordedWorkspaceFile(
     return null;
   }
   if (pathHasSkippedDirectoryComponent(workspacePath)) {
+    return null;
+  }
+  // The pre-existing skip above is broader than the panel-parity gate
+  // below (it also covers dot-named segments and the file's own name), so
+  // auto-record may skip files the explicit record_artifact would accept.
+  // The invariant that must hold is the other direction: the gate refuses
+  // files the panel cannot surface, and auto-record skips the same files,
+  // so it never records a path the panel would not show.
+  if (
+    fileHiddenFromArtifactsPanel(
+      workspacePath,
+      resolvedRoot,
+      readPanelIgnoreRuleOptions(config),
+    )
+  ) {
+    debugLogger.debug('workspace artifact skipped (hidden from panel)', {
+      path: filePath,
+    });
     return null;
   }
   return { filePath: resolvedFile, workspacePath };

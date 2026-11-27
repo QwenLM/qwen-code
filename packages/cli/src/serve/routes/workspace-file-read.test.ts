@@ -722,6 +722,11 @@ describe('artifact workspacePath contract (write_file ⇄ GET /file)', () => {
     const config = {
       isRecordArtifactEnabled: () => true,
       getTargetDir: () => sessionCwd,
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.agentignore', '.aiignore'],
+      }),
     } as unknown as Config;
     const reminder = buildRecordArtifactReminder(config, filePath);
     const match = /workspacePath "([^"]+)"/.exec(reminder ?? '');

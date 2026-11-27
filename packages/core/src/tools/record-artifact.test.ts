@@ -17,6 +17,7 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { ConfigParameters } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ToolResult } from './tools.js';
@@ -31,8 +32,10 @@ const RES = 'https://example.com/resource';
 const RECORDED = 'Recorded artifact';
 const WORKTREE = path.join('.qwen', 'worktrees', 'my-feature');
 
-function makeTool(targetDir = '/') {
-  return new RecordArtifactTool(makeFakeConfig({ targetDir, cwd: targetDir }));
+function makeTool(targetDir = '/', configParams?: Partial<ConfigParameters>) {
+  return new RecordArtifactTool(
+    makeFakeConfig({ targetDir, cwd: targetDir, ...configParams }),
+  );
 }
 
 function run(params: RecordArtifactParams, tool = makeTool()) {
@@ -77,13 +80,16 @@ function expectFailed(result: ToolResult, type: ToolErrorType) {
   expect(result.artifacts).toBeUndefined();
 }
 
-async function createWorkspace(subdir?: string) {
+async function createWorkspace(
+  subdir?: string,
+  configParams?: Partial<ConfigParameters>,
+) {
   const root = await tempDir('record-artifact-');
   const cwd = subdir ? path.join(root, subdir) : root;
   if (subdir) {
     await mkdir(cwd, { recursive: true });
   }
-  const tool = makeTool(cwd);
+  const tool = makeTool(cwd, configParams);
   return {
     root,
     cwd,
@@ -111,8 +117,11 @@ describe('RecordArtifactTool', () => {
     );
   });
 
-  async function workspace(subdir?: string) {
-    const created = await createWorkspace(subdir);
+  async function workspace(
+    subdir?: string,
+    configParams?: Partial<ConfigParameters>,
+  ) {
+    const created = await createWorkspace(subdir, configParams);
     workspaces.push(created);
     return created;
   }
@@ -410,6 +419,67 @@ describe('RecordArtifactTool', () => {
     });
   });
 
+  it('judges worktree-session files with the bound-root ignore rules', async () => {
+    const ws = await workspace(WORKTREE);
+    await ws.write('.gitignore', 'build/\n', ws.root);
+    await ws.write('build/report.csv', 'a,b\n');
+    await ws.write('notes/report.csv', 'a,b\n');
+
+    // The panel loads the bound root's ignore rules and matches the stored
+    // bound-root-canonical path, so the gate does the same: the session's
+    // worktree prefix is stripped for the skip-set and exemptions, while
+    // the rule check runs against the stored path under the bound root's
+    // rules (a rule local to the worktree itself is not a panel rule).
+    expectFailed(
+      await ws.record('Hidden in worktree', 'build/report.csv'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expectFirst(await ws.record('Visible in worktree', 'notes/report.csv'), {
+      workspacePath: '.qwen/worktrees/my-feature/notes/report.csv',
+    });
+  });
+
+  it('records worktree files when the bound root hides .qwen/', async () => {
+    // The bound root's .gitignore hides .qwen/ — exactly what
+    // `qwen /setup-github` writes — yet the worktree session's own files
+    // are the panel's content: the gate judges the worktree-stripped
+    // bound-root-relative path, so the .qwen/ rule cannot hide them.
+    const ws = await workspace(WORKTREE);
+    await ws.write('.gitignore', '.qwen/*\n', ws.root);
+    await ws.write('notes/report.csv', 'a,b\n');
+
+    expectFirst(await ws.record('Worktree report', 'notes/report.csv'), {
+      workspacePath: '.qwen/worktrees/my-feature/notes/report.csv',
+    });
+  });
+
+  it('applies bound-root anchored rules to worktree files', async () => {
+    // An anchored pattern binds to the bound root, the namespace the gate
+    // matches in: /notes/ hides the worktree's notes/report.csv (stripped
+    // to notes/report.csv) even though the stored path nests it under
+    // .qwen/worktrees/.
+    const ws = await workspace(WORKTREE);
+    await ws.write('.gitignore', '/notes/\n', ws.root);
+    await ws.write('notes/report.csv', 'a,b\n');
+
+    expectFailed(
+      await ws.record('Anchored hidden', 'notes/report.csv'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('does not strip a worktree-shaped prefix for a session outside the worktree', async () => {
+    const ws = await workspace();
+    const foreign = path.join('.qwen', 'worktrees', 'other', 'report.csv');
+    await ws.write(foreign, 'a,b\n');
+
+    // The session's cwd is not inside a worktree, so the path is judged in
+    // full: it sits under the .qwen skip directory and is refused.
+    const result = await ws.record('Foreign worktree', foreign);
+    expectFailed(result, ToolErrorType.INVALID_TOOL_PARAMS);
+    expectText(result, ['hidden from the Artifacts panel'], [RECORDED]);
+  });
+
   it('accepts an absolute path that names the workspace through a symlink prefix', async () => {
     const ws = await workspace();
     await ws.write('report.csv', 'a,b\n');
@@ -498,6 +568,229 @@ describe('RecordArtifactTool', () => {
     expectText(result, [], [RECORDED]);
   });
 
+  it('refuses a file the workspace ignore rules hide from the Artifacts panel', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\nnode_modules/\nbuild/\n');
+    await ws.write('.qwen/tmp/shot.png', 'png');
+    await ws.write('node_modules/pkg/index.js', 'js');
+    await ws.write('build/report.html', 'html');
+
+    const shot = await ws.record('Screenshot', '.qwen/tmp/shot.png');
+    expectFailed(shot, ToolErrorType.INVALID_TOOL_PARAMS);
+    expectText(
+      shot,
+      ['hidden from the Artifacts panel', 'ignore rules'],
+      [RECORDED],
+    );
+    expectFailed(
+      await ws.record('Deps file', 'node_modules/pkg/index.js'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expectFailed(
+      await ws.record('Build report', 'build/report.html'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('refuses skipped-directory components without any ignore file', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/tmp/shot.png', 'png');
+    await ws.write('__pycache__/mod.pyc', 'pyc');
+    await ws.write('dist/bundle.js', 'js');
+    await ws.write('node_modules/pkg/index.js', 'js');
+
+    // The issue #17453 contract holds without ignore files: a proper
+    // ancestor named in the skip list is never panel-visible.
+    for (const rel of [
+      '.qwen/tmp/shot.png',
+      '__pycache__/mod.pyc',
+      'dist/bundle.js',
+      'node_modules/pkg/index.js',
+    ]) {
+      const result = await ws.record('Skip dir file', rel);
+      expectFailed(result, ToolErrorType.INVALID_TOOL_PARAMS);
+      expectText(result, ['hidden from the Artifacts panel'], [RECORDED]);
+    }
+  });
+
+  it('records panel-visible files the ignore rules do not hide', async () => {
+    const ws = await workspace();
+    await ws.write('.github/workflows/ci.yml', 'yaml');
+    await ws.write('.config/report.md', 'md');
+
+    // No .gitignore/.qwenignore in this workspace, and .github/.config are
+    // not skipped directories: the panel's file browser lists both paths,
+    // so the gate records them.
+    expectFirst(await ws.record('CI', '.github/workflows/ci.yml'), {
+      title: 'ci.yml',
+      workspacePath: '.github/workflows/ci.yml',
+    });
+    expectFirst(await ws.record('Config report', '.config/report.md'), {
+      title: 'report.md',
+      workspacePath: '.config/report.md',
+    });
+  });
+
+  it('refuses a file hidden by .qwenignore', async () => {
+    const ws = await workspace();
+    await ws.write('.qwenignore', 'secrets/\n');
+    await ws.write('secrets/creds.md', 'md');
+
+    expectFailed(
+      await ws.record('Secrets', 'secrets/creds.md'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('refuses a file a file-only ignore pattern hides', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '*.png\n');
+    await ws.write('shots/shot.png', 'png');
+
+    expectFailed(
+      await ws.record('Shot', 'shots/shot.png'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('records a .gitignore-hidden file when respectGitIgnore is false', async () => {
+    // The gate loads the ignore files the session's fileFiltering
+    // settings say the panel loads: with respectGitIgnore=false the
+    // .gitignore is not among them, so the file stays recordable.
+    const ws = await workspace(undefined, {
+      fileFiltering: { respectGitIgnore: false },
+    });
+    await ws.write('.gitignore', 'build/\n');
+    await ws.write('build/report.html', 'html');
+
+    expectFirst(await ws.record('Build report', 'build/report.html'), {
+      workspacePath: 'build/report.html',
+    });
+  });
+
+  it('records a .qwenignore-hidden file when respectQwenIgnore is false', async () => {
+    const ws = await workspace(undefined, {
+      fileFiltering: { respectQwenIgnore: false },
+    });
+    await ws.write('.qwenignore', 'secrets/\n');
+    await ws.write('secrets/creds.md', 'md');
+
+    expectFirst(await ws.record('Secrets', 'secrets/creds.md'), {
+      workspacePath: 'secrets/creds.md',
+    });
+  });
+
+  it('refuses a file hidden by a configured custom ignore file', async () => {
+    // The loader must read the session's configured customIgnoreFiles,
+    // not only the built-in names: 'special.ignore' is not a default
+    // name, so recording succeeds if the plumbing drops the configured
+    // list.
+    const ws = await workspace(undefined, {
+      fileFiltering: { customIgnoreFiles: ['special.ignore'] },
+    });
+    await ws.write('special.ignore', 'vendored/\n');
+    await ws.write('vendored/lib.md', 'md');
+
+    expectFailed(
+      await ws.record('Vendored', 'vendored/lib.md'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('still records code-review reports under .qwen/reviews', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record(
+      'Code review result',
+      '.qwen/reviews/pr-1.json',
+    );
+
+    expectFirst(result, {
+      title: 'pr-1.json',
+      workspacePath: '.qwen/reviews/pr-1.json',
+    });
+  });
+
+  it('records .qwen/reviews reports even when .qwen/ is gitignored', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\n');
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record(
+      'Code review result',
+      '.qwen/reviews/pr-1.json',
+    );
+
+    expectFirst(result, { workspacePath: '.qwen/reviews/pr-1.json' });
+  });
+
+  it('expands the .qwen/reviews directory into its report files', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+    await ws.write('.qwen/reviews/pr-2.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record('Code reviews', '.qwen/reviews');
+
+    expectAll(result, [
+      { workspacePath: '.qwen/reviews/pr-1.json' },
+      { workspacePath: '.qwen/reviews/pr-2.json' },
+    ]);
+    expectText(result, ['Expanded directory'], [RECORDED]);
+  });
+
+  it('records the "Ask for details" deliverable even when .qwen/ is gitignored', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\n');
+    await ws.write('.qwen/tmp/ask-details.html', '<html></html>');
+    await ws.write('.qwen/tmp/v31-verify/shot.png', 'png');
+
+    // The shipped side-task prompt names this exact file, and write_file's
+    // auto-record skips .qwen/tmp/, so the explicit record must work even
+    // where `.qwen/` is ignored.
+    expectFirst(await ws.record('Details', '.qwen/tmp/ask-details.html'), {
+      workspacePath: '.qwen/tmp/ask-details.html',
+    });
+    // The exemption is the named file only: other `.qwen/tmp` files stay
+    // refused where the ignore rules hide them (issue #17453).
+    expectFailed(
+      await ws.record('Screenshot', '.qwen/tmp/v31-verify/shot.png'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+  });
+
+  it('accepts files whose own names look hidden but live in visible paths', async () => {
+    const ws = await workspace();
+    await ws.write('dist', 'file');
+    await ws.write('.gitignore', 'node_modules');
+    await ws.write('notes/.draft.md', 'draft');
+
+    expectFirst(await ws.record('File named dist', 'dist'), {
+      title: 'dist',
+      workspacePath: 'dist',
+    });
+    expectFirst(await ws.record('Dotfile', '.gitignore'), {
+      title: '.gitignore',
+      workspacePath: '.gitignore',
+    });
+    expectFirst(await ws.record('Draft note', 'notes/.draft.md'), {
+      title: '.draft.md',
+      workspacePath: 'notes/.draft.md',
+    });
+  });
+
+  it('keeps accepting files in visible directories with similar names', async () => {
+    const ws = await workspace();
+    await ws.write('notes/qwen-tmp-report.md', 'md');
+
+    const result = await ws.record('Notes', 'notes/qwen-tmp-report.md');
+
+    expectFirst(result, {
+      title: 'qwen-tmp-report.md',
+      workspacePath: 'notes/qwen-tmp-report.md',
+    });
+  });
+
   it('rejects an empty directory workspacePath', async () => {
     const ws = await workspace();
     await mkdir(path.join(ws.cwd, 'reports'));
@@ -566,6 +859,43 @@ describe('RecordArtifactTool', () => {
 
     expectFailed(result, ToolErrorType.TARGET_IS_DIRECTORY);
     expectText(result, ['skipped directory']);
+  });
+
+  it('expands a dot-named directory the direct-file gate does not skip', async () => {
+    // The pre-check applies the same 5-name skip contract as the
+    // direct-file gate, so a panel-visible dot directory such as
+    // .github expands into its recordable children instead of being
+    // refused as "a skipped directory".
+    const ws = await workspace();
+    await ws.write('.github/workflows/ci.yml', 'yaml');
+
+    const result = await ws.record('CI directory', '.github');
+
+    expectAll(result, [{ workspacePath: '.github/workflows/ci.yml' }]);
+    expectText(result, ['Expanded directory'], [RECORDED]);
+  });
+
+  it('expands a directory without files the direct-file gate hides', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', 'build/out/\n');
+    await ws.write('build/out/report.html', 'html');
+    await ws.write('build/ok.txt', 'txt');
+
+    const result = await ws.record('Build', 'build');
+
+    expectAll(result, [{ workspacePath: 'build/ok.txt' }]);
+    expectText(result, ['build/ok.txt'], ['build/out/report.html']);
+  });
+
+  it('refuses to expand a directory whose files the direct-file gate hides entirely', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', 'build/\n');
+    await ws.write('build/report.html', 'html');
+
+    const result = await ws.record('Build dir', 'build');
+
+    expectFailed(result, ToolErrorType.TARGET_IS_DIRECTORY);
+    expectText(result, ['no recordable files'], [RECORDED, 'report.html']);
   });
 
   it('skips expansion children whose names are not trim-stable', async () => {
