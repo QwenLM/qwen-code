@@ -87,14 +87,18 @@ test('keeps the update action above Settings across sidebar widths @smoke', asyn
   await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
+  let updatePosts = 0;
   await page.route('**/daemon/update**', async (route) => {
+    if (route.request().method() === 'POST') {
+      updatePosts++;
+    }
     await route.fulfill({
       status: 200,
       json: {
         state: 'ready',
         currentVersion: '0.24.4',
         latestVersion: '0.24.6',
-        canInstall: true,
+        canInstall: false,
       } satisfies DaemonUpdateStatus,
     });
   });
@@ -105,17 +109,24 @@ test('keeps the update action above Settings across sidebar widths @smoke', asyn
     }
   });
   await page.goto(`/session/${scenario.sessionId}?language=zh-CN#turn-2`);
+  const sidebar = page.getByRole('complementary', { name: '工作区侧边栏' });
   const entry = page.locator('[data-web-shell-update]');
-  for (const [index, width] of [220, 343, 360, 260].entries()) {
+  const widths = [
+    { stored: 220, expected: 276 },
+    { stored: 343, expected: 343 },
+    { stored: 360, expected: 360 },
+  ];
+  for (const [index, { stored, expected }] of widths.entries()) {
     if (index > 0) {
       await page.evaluate((sidebarWidth) => {
         localStorage.setItem(
           'qwen-code-web-shell-sidebar-width',
           String(sidebarWidth),
         );
-      }, width);
+      }, stored);
       await page.reload();
     }
+    await expect(sidebar).toHaveCSS('width', `${expected}px`);
     await page.getByRole('button', { name: '更多', exact: true }).click();
     await expect(entry).toBeVisible();
     const buttonBox = (await entry.boundingBox())!;
@@ -125,6 +136,7 @@ test('keeps the update action above Settings across sidebar widths @smoke', asyn
     expect(buttonBox.width).toBeGreaterThan(100);
     expect(buttonBox.y + buttonBox.height).toBeLessThan(settingsBox.y);
   }
+  expect(updatePosts).toBe(0);
   await page.screenshot({ path: testInfo.outputPath('update-sidebar.png') });
 });
 
