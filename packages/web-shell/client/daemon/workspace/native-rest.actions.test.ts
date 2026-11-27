@@ -66,6 +66,30 @@ it('keeps a scheduled-task write scoped to its encoded non-primary workspace', a
   expect(acpFetch).not.toHaveBeenCalled();
 });
 
+it('keeps the scheduled-task owner guard on a prefixed native REST URL', async () => {
+  const { actions, restFetch, acpFetch } = setup('https://daemon/prefix/');
+  const capabilities = new Response(
+    JSON.stringify({
+      v: 1,
+      mode: 'native',
+      modelServices: [],
+      features: ['scheduled_task_owner_selection'],
+    }),
+  );
+  acpFetch.mockResolvedValue(capabilities.clone());
+  restFetch.mockImplementation(async (input) =>
+    new URL(input).pathname.endsWith('/capabilities')
+      ? capabilities.clone()
+      : new Response('{}'),
+  );
+  await actions.deleteScheduledTask('task/a', '/secondary b', 'session/a');
+  const url = new URL(restFetch.mock.calls[0][0]);
+  expect(url.pathname).toBe(
+    '/prefix/workspaces/%2Fsecondary%20b/scheduled-tasks/task%2Fa',
+  );
+  expect(url.searchParams.get('expectedSessionId')).toBe('session/a');
+});
+
 it('retains the existing server error for a native goal request on an empty base URL', async () => {
   const { actions, restFetch } = setup('');
   restFetch.mockResolvedValueOnce(

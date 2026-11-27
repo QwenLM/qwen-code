@@ -2,7 +2,9 @@
 
 [English](2026-11-22-managed-action-parking-coverage.md) | [简体中文](2026-11-22-managed-action-parking-coverage.zh-CN.md)
 
-状态：提案，实现前设计。日期：2026-11-22。本文接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入），对照 `main` 的 `5714ee4c53` 核实。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。由 #18149 跟踪，其阶段 0–5 对应 §6 中的切片。下文的代码引用除各项另行注明外均对应该提交；标为"待验证"的结论来自代码阅读，未经测试证实，必须在对应切片实现前用测试确认。
+状态：截至 2026-11-26，阶段 0–5 已在 `main` 的 `6aadde9b6e` 实现。逐切片 CI 验收和放量测量仍待完成（§§6–8）。
+
+本文写于 2026-11-22，接续[审批停靠设计](2026-11-21-managed-action-parking.zh-CN.md)（第四阶段，#18115 已合入）。它逐项处理首个增量排除的等待形态，回答其开放问题 4，以及除团队计划审批外的开放问题 3。[#18149](https://github.com/QwenLM/qwen-code/issues/18149) 跟踪 §6 的各个切片。除另行注明外，基线代码引用与开工前问题均对应 `5714ee4c53`。
 
 ## 1. 问题与现状
 
@@ -19,7 +21,7 @@
 | Hooks                                                              | 资格 `session.hooks`；生产者 `:4528`；`resumeSavedNativeBatch` `:4327`；接管 `:8386`                                       | continuation 不含 Hook 证据，恢复臂拒绝带 Hooks 的 Session。但 Hook 证据本身已持久化：每次 PreToolUse/PermissionRequest 都写 `hook_execution` 记录，并有按记录重放的读取方（`hosted-workspace-tool-turn.ts:3576-3740`）     |
 | MCP                                                                | 资格 `session.mcp`；生产者 `:4528` 及工具白名单；恢复臂 `:8651`                                                            | 恢复时要求工具定义与冷加载后重新发现的声明深度相等；不保留目录时 MCP server 可能宣告不同定义，导致停靠后无法恢复                                                                                                            |
 | extension command-step 审批                                        | 资格 `continuation.plan.commandStep !== undefined`（`:5160`）                                                              | 接管恢复臂已支持（`extensionsCommandStepTakeover`，`:8389-8394`，允许带 Hook catalog），资格只是没放开                                                                                                                      |
-| `uncaptured` 批次                                                  | 生产者拒绝：Workspace Shell profile 的普通批次、白名单外的工具、Hooks/MCP、超过 64 KiB 的计划、无摘要的调用                | 最常见的来源是 Shell profile 下的 `run_shell_command` 审批：G3 只为原生文件建立了 continuation，派发前的 Shell 需要自己的正面证据（G3 §4.3）                                                                                |
+| `uncaptured` 批次                                                  | 生产者拒绝：Workspace Shell profile 的普通批次、白名单外的工具、Hooks/MCP、超过 64 KiB 的计划、无摘要的调用                | 最常见的来源是 Shell profile 下的 `run_shell_command` 审批：G3 为原生文件建立了 continuation，派发前的 Shell 只在 public children Session 上有（#15171，§4.8）；其他 Shell profile Session 需要自己的正面证据（G3 §4.3）    |
 | v1/v2 审批                                                         | 恢复拒绝含 v1/v2 的批次（G3 §4.1）                                                                                         | 只存在于升级前写入的等待，会自然消失                                                                                                                                                                                        |
 
 ### 1.2 一条不变量决定了扩展顺序
@@ -120,6 +122,7 @@
   - 上面停靠的计划是 command step，批次里没有已派发的原生文件工作。S5 仍需证明，第一阶段的"未结算 Runtime 工作"条件能排除所有会让 mount 交还被 R14-2 拒绝的原生批次。
   - 恢复后的运行没有为外层 `skill` 调用触发 PostToolUse。目前还没有和未停靠的运行做过对比。
 - **改动面。** 仅 Harness，但触及 G3 生产者与恢复臂，需要 G3 的 A3/A6 故障门禁覆盖 Hooks 变体。
+- **覆盖面（实现时发现，2026-11-24）。** S5 单独几乎停靠不到任何真实的等待。配置作用域的 Hook owner 只来自 extension 集合，而 extension 只在 Shell 和 MCP profile 上运行。Shell profile 的普通原生批次以 `shell_profile` 拒绝，public children Session 除外（§4.8）。每个 MCP profile Session 都带 MCP server，在 S6 之前都以 `mcp` 拒绝；Files profile Session 的 Hook 总是运行在 activation 作用域的 owner 上。所以 S5 与 S6b 一起交付（决策 9）。
 
 ### 4.6 S6：MCP
 
@@ -128,6 +131,14 @@
 - **continuation 与目录。** continuation 解析器的工具白名单（`hosted-approval-continuation.ts:55-63`），以及写死 `mcp: false` 的恢复请求（`hosted-workspace-tool-turn.ts:4433-4448`），都要支持 MCP 调用及其 MCP 请求身份。`ParkedMcpReclamationJob` 必须跳过 Session 持有审批停靠证书的 owner：`JdbcParkedMcpOwners.sealedFor` 目前只检查 `state = 'SEALED'`，因此 S6 要新增停靠证书谓词和回收测试，保证 continuation 固定的目录仍是 Session 会续接的那个；owner 一旦被回收，每次 pin 检查都会变成拒绝。
 - **不变量。** MCP 调用没有原生文件那样的 prepare/receipt 协议，所以绝不重放已派发的调用；任何调用的派发状态不确定时都拒绝。
 - **改动面。** Harness 生产者与恢复臂、Broker MCP owner 续接，以及 `JdbcParkedMcpOwners.sealedFor` / `ParkedMcpReclamationJob`；新增测试证明持有审批停靠证书的 owner 不会被回收。
+- **S6b 细节**（2026-11-24 修订；本节以下的代码位置均指 #18236 的 `fd457e9d7c`）。回收守卫作为 S6a（#18234）先行合入。S6b 是 Harness 一侧的工作，与 S5 一起交付（决策 9）。
+  - **开工前检查（已确认）。** MCP 工具在 model 中的名字是对服务器、服务器修订、目录修订和连接代次做摘要得到的（`hosted-mcp-session.ts:1496`），所以只有冷加载拿回完全相同的目录，停靠的 MCP 调用才能恢复。一个 Harness 测试在 Broker 声明支持 MCP parking 时，让 MCP Session 经历一次停靠式挂起：持久的 `mcp-*` owner 及其连接都被保留，重新加载时以 revalidate 重新发现、不做新的配置，下一个 Turn 看到的工具声明完全相同。一个 worker 测试表明，ping 有应答时，revalidate 的 discover 返回的整个目录都不变。
+  - **pin 的边界。** 读 worker 的代码（`managed-mcp-runtime.ts:879-890`、`:1055-1070`、`:1103-1114`）可知：停靠期间服务器发出 `tools/list_changed`，会提高目录修订；连接已死，会以新的代次重建。两种情况下工具名都会变，现有的定义检查会拒绝恢复。这属于安全的失败方式，但停靠的 Turn 会结束，而不是继续。
+  - **owner 条件。** 共享形态条件只在 MCP Session 的 owner 是持久的 `mcp-*` owner 或配置作用域 owner 时才接受它。有设置但没有配置行的 MCP Session 会取最近一次 Hook 执行的 owner（`hosted-mcp-session.ts:163-195`），这可能是 activation 作用域的 `hooks-activation-*` id；这种 owner 在捕获时和形态条件中都以 `mcp_activation_owner` 拒绝。带 MCP 的 Hooks Session 在 MCP broker 上运行 Hook，所以 Hook owner 条件同样接受恰好是已被接受的 MCP owner 的 Hook owner。
+  - **无需新字段的目录 pin。** 每个 MCP 调用保存的输入已经写明了它的服务器、服务器修订、配置修订、目录修订和连接代次（`toolInput`，`hosted-mcp-session.ts`）。恢复时，恢复出的调用保留其 MCP 身份，并用保存的 runtime 调用 ID 通过 `toolInput` 重新推导输入。推导结果除 grant 外必须与保存的输入相等，否则拒绝恢复。读代码可知，停靠期间配置无法改变：Turn 活跃时 MCP 管理路由会拒绝，而停靠的 Session 只能通过接管加载回来（待 S6b 的测试验证）。
+  - **grant。** 保存的 grant 租期为 300 秒，任何真实的停靠之后都已过期。执行循环本来就会在每个 MCP 调用 prepare 之前为它签发新的 grant，与线上路径相同，所以这个调用以续签后的摘要 prepare 并派发一次。
+  - **资格（停靠专属）。** 新增拒绝原因 `mcp_not_parkable`：只要挂起会排空而不是停靠 MCP owner，就拒绝停靠，即 Broker 没有声明支持 MCP parking，或者某个保留的配置不处于 active、已结算且已连接的状态。这个判断就是 `suspend()` 已经使用的那一个，只暴露一次并共用。让 MCP Session 上的 command step 保持常驻的停靠专属条件被删除。
+  - **恢复臂。** 接管臂像对待 Hooks Session 那样对待 MCP Session 保存的原生批次：只有显式的接管加载能恢复它，裸加载保持惰性，各个回答流程都跳过它。
 
 ### 4.7 S7：extension command-step 审批
 
@@ -138,9 +149,13 @@
 
 ### 4.8 S8：`uncaptured` 批次
 
-- **派发前的 Shell（S8a）。** 这是价值最高的一项：Shell profile 下的审批大多是 `run_shell_command`。G3 要求派发前的 Shell 建立自己的正面 continuation 与所有权证据。本切片需要先确认 Shell 执行是否和原生文件一样有 `dispatch = false` 的 prepare 和按精确 key 重放的语义（待验证）。如果有，continuation 就按原生文件的做法记录 `runtimeCallId`、prepare key 与参数摘要；如果没有，需要先在 Broker 侧补齐，本切片的工作量会明显变大。无论哪种情况，这都是对 G3 契约的扩展，实现前要单独写一份 G3 扩展设计；本文只列出这个切片。已派发的 Shell 继续拒绝。
+- **派发前的 Shell（S8a，已实现）。** G3 要求派发前的 `run_shell_command` 具备正面的 continuation 和所有权证据。最初的开工前测试对照 `main` 的 `7862c3eef3` 核实。
+  - **Broker 不需要新增语义（已确认）。** Tool v3 的 Shell reservation 以 `dispatch = false` 做 prepare（`RuntimeBrokerService.java:995`）。用同一个 key 和 reference 再次 prepare，返回原来的 reservation，不会派发。同一个 key 下 `publicationId` 或 payload 摘要变了，会以 `runtime_idempotency_conflict` 拒绝（`:1654`）。执行结算之后，同一个 key 返回它原来的记录。
+  - **public children Session 已经覆盖（已确认）。** 从 #15171 起，`publicChildAgentsVersion = 1` 的 Session 会捕获派发前的 Shell。生产者对它跳过 `shell_profile` 拒绝（`hosted-workspace-tool-turn.ts:4532`），并记录每个 Shell 调用的 `publicationId`（`:4620`）。`resumeSavedNativeBatch` 校验这个身份，再通过 `prepareV3` 用保存的 `runtimeCallId`、摘要和 `publicationId` 重新 prepare（`:4435`、`:6081`）。停靠资格里没有 Shell 相关的条件，所以这类等待今天已经能停靠。测试停靠了一个这样的等待，冷加载后 Allow，观察到一次带保存身份的 `prepareV3` 和一次执行。
+  - **G3 审查（决策 8）。** [S8a 设计](2026-11-24-managed-shell-action-parking.zh-CN.md)（#18279）核对了两条通道上已有的 public-children 路径。用例矩阵在停靠及 Harness 死亡后分别验证 Allow、Deny、过期和代为放行的模式切换。后台 Shell 在发布通道上复用一次预留执行。真实进程验收记录见 §7。
+  - **版本 0 公开 Shell。** #18303 覆盖了没有 public children 的 `hosted-workspace-shell/1`、`/3` 和 `/4` profile 的两条通道。读取端从 Session 定义识别保存的计划，并校验 Shell 调用的 `publicationId`（发布通道为 UUID，旧 Shell 通道为 `null`）。team-lead 等待记为 `team_lead_profile`。带 MCP 的公开 Shell 和已派发的 Shell 仍排除。
 - **超过 64 KiB 的计划。** 暂不支持。P0 的拒绝计数会显示它的出现率；只有出现率可观时，才考虑把计划改存为非 inline 资源。
-- **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝；S8 只覆盖派发前的 Shell 和超大计划。
+- **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝。
 - **v1/v2。** 不支持。它们只存在于升级前写入的等待，G3 已明确遗留重建需要单独验证，收益随时间归零。
 
 ## 5. 决策与理由
@@ -156,22 +171,23 @@
    - 个人记忆召回的上下文，在今天已上线的停靠中也是如此：它只进入线上请求，恢复时不会重新召回。
    - 拒绝这类 Turn 会让大多数注入上下文的 Hooks Session 保持常驻，却挡不住上述路径本来就会暴露的内容。
    - 像排队消息那样把改写后的第一条 Prompt 也提交，会改变之后每个 Turn 的历史。这属于后续工作，不在本设计范围内。
+8. **public children 的 Shell 等待继续停靠，无需临时拒绝（S8a）。** S8a 开始时，这类等待已能停靠。[G3 扩展设计](2026-11-24-managed-shell-action-parking.zh-CN.md)已完成该路径的审查。
+   - 停靠没有引入新的恢复路径。Harness 在等待中死亡时，走的本来就是同一条冷恢复，所以决策 1 仍然成立。
+   - 停靠让每个闲置的 Shell 审批都走这条路径。S8a 用例仍是启用 `action-parking.enabled` 的门槛（§8）。定向验收结果与剩余 CI 证据见 §7。
+9. **S5 与 S6b 一起合入（#18236）。** S5 单独放开的等待很少（§4.5），而目标形态，即同时带 Hooks 和 MCP 的 MCP profile Session，无论如何都需要 S6。S6 还必须放宽 S5 的 owner 条件，因为在那里 Hook owner 就是 MCP owner。回收守卫 S6a 先单独合入。
 
 ## 6. 推荐顺序与测量
 
-| 顺序 | #18149 阶段 | 切片                             | 改动面                       | 依赖                     |
-| ---- | ----------- | -------------------------------- | ---------------------------- | ------------------------ |
-| 0    | 0           | P0 共享资格函数 + 拒绝原因       | Harness                      | —                        |
-| 1    | 1           | S1 纯图片 Prompt                 | Harness                      | P0                       |
-| 2    | 1           | S7 command-step                  | Harness                      | P0                       |
-| 3    | 2           | S2 后台 + 审批                   | Harness + Store              | P0、3b                   |
-| 4    | 2           | S4 wake Turn（S4b channel 在后） | Harness + Store              | P0                       |
-| 5    | 3           | S3 子 Session                    | Harness                      | P0、relay 预算缺口已关闭 |
-| 6    | 4           | S5 Hooks                         | Harness（G3）                | P0                       |
-| 7    | 4           | S6 MCP                           | Harness（G3）+ Broker 对齐   | P0、第二阶段 MCP parking |
-| 8    | 5           | S8a 派发前的 Shell               | Harness（G3）+ 可能的 Broker | 单独的 G3 扩展设计       |
+| #18149 阶段 | 切片                                                         | 已合入 PR              |
+| ----------- | ------------------------------------------------------------ | ---------------------- |
+| 0           | P0 共享资格函数、类型化拒绝原因和实例指标                    | #18157、#18173         |
+| 1           | S1 纯图片 Prompt 和 S7 extension command step                | #18164、#18166         |
+| 2           | S2 后台任务 + 审批、S4 wake Turn 和 S4b channel / `pr_event` | #18187、#18194、#18203 |
+| 3           | S3 子 Session 和 session-message relay 等待处理              | #18224                 |
+| 4           | S6a MCP 回收守卫，随后一并交付 S5 Hooks 和 S6b MCP           | #18234、#18236         |
+| 5           | S8a 开工前检查、G3 扩展设计和 Shell 实现                     | #18231、#18279、#18303 |
 
-排序依据是代码级估算：先做改动小、只涉及 Harness 的切片，再做需要 G3 新证据的切片。这些估算未经实测。开始 S3 及之后的切片之前，用 P0 的拒绝计数，结合父设计 §7 的测量，查看各类等待在真实负载中的占比，按占比调整顺序；例如 Shell profile 的部署若占多数，S8a 应提前。
+[CLI/daemon 埋点分析](https://github.com/QwenLM/qwen-code/issues/18149#issuecomment-7121083917)为切片排序提供了依据。Hosted 放量仍需完成父设计的 [§7 测量](2026-11-21-managed-action-parking.zh-CN.md#7-测量启用门槛)，包括目标负载下的停靠率和延迟。
 
 ## 7. 验证计划
 
@@ -185,8 +201,11 @@
 - **S3**：child Session 的审批停靠时证书不带审批 revision，冷加载并批准后工具只执行一次；Harness 在等待中死亡后，新的 Harness 以同样方式完成它。停靠的 child Turn 超过 relay 的消息 Turn 等待时间后仍被当作等待；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）；session-message 步骤遇到 closing 或冷打开名额已满的 Session 时不扣尝试次数。
 - **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。wake 停靠 Turn 的待偿清理既不会进入清理欠账扫描，也不会让恢复视图变成 `operator_required`。S4b：channel Turn 与 `pr_event` Turn 在停靠之后、以及其 Harness 在等待中死掉之后，都能经由决定完成；完成的 channel Turn 恰好规划一条回复。
 - **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。extension 包提供的 Hook 目录（配置作用域 owner）能停靠并恢复。Session 定义提供的 Hook 目录（activation 作用域 owner）在捕获时、停靠资格判断时以及三个恢复入口处都以 `hooks_activation_owner` 拒绝。启动 Hook 改过 Prompt 的 Turn 能停靠，并在已接受的 Prompt 上恢复。对原生批次，停靠时的 mount 交还成功，批准之后的 PostToolUse 在恢复出的 Runtime session 上恰好运行一次。
-- **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。
+- **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放；持有审批停靠证书的 owner 经过回收作业的空闲窗口扫描后仍保留原目录。退回到 activation 作用域 Hook owner 的 owner，在捕获时、停靠资格判断时以及每个恢复入口处都以 `mcp_activation_owner` 拒绝。同一个 owner 上的 Hooks 加 MCP Session 能停靠，并且在停靠之后和 Harness 在等待中死亡之后都能经由决定完成。裸加载不会回答停靠中的 MCP 批次。
+- **S8a**（已经能停靠的 public children Shell；决策 8）：Shell 审批分别经由 Allow、Deny、到期，以及代用户放行的审批模式变更完成，每种都要覆盖停靠之后和 Harness 在等待中死亡之后两种情况。Allow 和模式变更用保存的 reservation 重新 prepare，并恰好执行一次；Deny 和到期执行零次。后台 Shell（`is_background`）的审批要么能停靠并恢复、不启动第二个进程，要么在捕获时和停靠资格判断时都以带类型的原因拒绝。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
+
+截至 2026-11-26，[Linux/MySQL 8.4 定向验收](https://github.com/QwenLM/qwen-code/actions/runs/45668596047/job/139397399975)通过 10 个用例，覆盖 public-children Shell、两条通道的版本 0 Shell，以及 Hooks + MCP。S1、S7、S2、S3、S4 和 S4b 的必跑层级真实进程证据仍待补齐。[#18410](https://github.com/QwenLM/qwen-code/pull/18410)另外补充已停靠 Shell Action 的健康池接管覆盖，当日仍在评审。
 
 ## 8. 验收标准
 

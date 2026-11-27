@@ -526,8 +526,9 @@ jobs:
     # Forks of this repo fall back to ubuntu-latest as before.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Read-only by construction: the agent's GH_TOKEN is this job's
-    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
-    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    # GITHUB_TOKEN. Every write goes through publish-triage's write token
+    # (PAT preferred, else its write-scoped GITHUB_TOKEN). The pre-agent
+    # reaction step uses the PAT explicitly (reactions need write).
     permissions:
       contents: 'read'
       issues: 'read'
@@ -712,6 +713,7 @@ jobs:
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
+          # PAT-only: the job's GITHUB_TOKEN is read-only.
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           NUMBER: '${{ steps.resolve.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -794,16 +796,19 @@ jobs:
       - name: 'Prepare agent context'
         id: 'context'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
         run: |-
           set -euo pipefail
           QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
           mkdir -p "$QWEN_HOME"
-          # Under the read-only GITHUB_TOKEN the agent will run with,
-          # `gh api user` returns github-actions[bot]; the skill's duplicate
-          # guard, reopen guard, and review dedup filter on the PAT's bot
-          # login, so resolve it here and pass it in.
-          BOT_LOGIN="$(gh api user --jq '.login')"
+          # GITHUB_TOKEN returns 403 on GET /user; query API only with a PAT
+          # (no-PAT uses github-actions[bot]; finalize skips without a PAT).
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login')"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
           if [ -z "$BOT_LOGIN" ]; then
             echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
             exit 1
@@ -1572,8 +1577,11 @@ jobs:
     # no agent-provided code runs here. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # No-PAT fallback needs write scopes; only trusted base scripts run here.
     permissions:
       contents: 'read'
+      issues: 'write'
+      pull-requests: 'write'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1588,7 +1596,7 @@ jobs:
 
       # The pool reuses workspaces: an earlier agent run owned this directory
       # and could have planted .git hooks/config that checkout's git commands
-      # would execute — in the job that then publishes with the write PAT.
+      # would execute — in the job that then publishes with the write token.
       # Drop the metadata first, exactly as the triage/tmux/verify jobs do
       # before their checkouts (pinned by
       # qwen-runner-checkout-workflow.test.js).
@@ -1619,7 +1627,8 @@ jobs:
 
       - name: 'Publish triage drafts'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIAGE_RESULT: '${{ needs.triage.result }}'
           QWEN_MAINTAINER_HANDLE: '${{ vars.QWEN_MAINTAINER_HANDLE }}'
@@ -1637,6 +1646,9 @@ jobs:
             echo "::warning::The triage run ended before writing drafts; nothing to publish."
             exit 0
           fi
+          if [ "$HAS_BOT_PAT" != 'true' ]; then
+            export BOT_LOGIN='github-actions[bot]'
+          fi
           node .github/scripts/triage-publish.mjs \
             --drafts triage-drafts \
             --repo "$GITHUB_REPOSITORY" \
@@ -1653,7 +1665,8 @@ jobs:
           startsWith(github.event.comment.body, '@qwen-code /triage')
         shell: 'bash'
         env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          HAS_BOT_PAT: "${{ (secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT) != '' }}"
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT || github.token }}'
           NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -1684,7 +1697,12 @@ jobs:
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
           STANDING=unknown
-          if BOT_LOGIN="$(gh api user --jq '.login')" &&
+          if [ "$HAS_BOT_PAT" = 'true' ]; then
+            BOT_LOGIN="$(gh api user --jq '.login' || true)"
+          else
+            BOT_LOGIN='github-actions[bot]'
+          fi
+          if [ -n "$BOT_LOGIN" ] &&
              REVIEWS="$(
                gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
                  --method GET \
@@ -3346,8 +3364,8 @@ jobs:
         if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
         env:
           TEMURIN_VERSION: '21.0.12.1+1'
-          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
-          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          TEMURIN_SHA256_X64: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_SHA256_AARCH64: '23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223'
           MAVEN_VERSION: '3.9.11'
           MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
         run: |-
@@ -3355,9 +3373,22 @@ jobs:
           prefix=/opt/verify-java
           rm -rf -- "$prefix"
           work="$(mktemp -d)"
+          # Pool runners carry both X64 and ARM64 labels, so the host decides:
+          # an x64 JDK on an ARM host passes the download and checksum and then
+          # dies with "Exec format error" when the launcher runs.
+          case "$(uname -m)" in
+            x86_64) temurin_arch='x64'; temurin_sha="$TEMURIN_SHA256_X64" ;;
+            aarch64|arm64) temurin_arch='aarch64'; temurin_sha="$TEMURIN_SHA256_AARCH64" ;;
+            *)
+              echo "::warning::unsupported runner architecture: $(uname -m); Java changes will be reported as not covered."
+              rm -rf -- "$work"
+              exit 0
+              ;;
+          esac
+          temurin_url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${TEMURIN_VERSION//+/%2B}/OpenJDK21U-jdk_${temurin_arch}_linux_hotspot_${TEMURIN_VERSION//+/_}.tar.gz"
           maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL" \
-            && echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status \
+          if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$temurin_url" \
+            && echo "${temurin_sha}  $work/jdk.tar.gz" | sha256sum --check --status \
             && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url" \
             && echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status \
             && tar -xzf "$work/jdk.tar.gz" -C "$work" \

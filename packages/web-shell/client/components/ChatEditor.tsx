@@ -136,6 +136,7 @@ import {
   ArrowDownIcon,
   ArrowRightIcon,
   ArrowUpIcon,
+  BlocksIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
@@ -191,6 +192,7 @@ import {
   type ToolbarDropdownItem,
 } from './toolbarDropdown';
 import styles from './ChatEditor.module.css';
+import popoverStyles from './GitModePopover.module.css';
 
 const MAX_DROP_DIALOG_ROWS = 100;
 
@@ -1107,6 +1109,16 @@ function ToolbarPopover({
   }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
+  const pickerHeader = pickerContext && modelPicker?.mountHeader && (
+    <ModelPickerContent
+      key={scopeKey}
+      mount={modelPicker.mountHeader}
+      context={pickerContext}
+      overlayRoot={overlayRoot}
+      revision={modelPicker}
+      className={styles.modelPickerContent}
+    />
+  );
   const dropdownItems = (
     <div
       className={`${styles.dropdownList} ${
@@ -1117,6 +1129,7 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
+      {mobileSheet && pickerHeader}
       {visibleItems.map((item) => (
         <ToolbarDropdownRow
           key={JSON.stringify([scopeKey, item.id])}
@@ -1165,7 +1178,9 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
-      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      className={
+        touchSearchField ? 'h-11 min-h-11 text-base md:text-base' : undefined
+      }
       autoCapitalize={touchSearchField ? 'off' : undefined}
       autoCorrect={touchSearchField ? 'off' : undefined}
       spellCheck={touchSearchField ? false : undefined}
@@ -1181,16 +1196,7 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
-      {pickerContext && modelPicker?.mountHeader && (
-        <ModelPickerContent
-          key={scopeKey}
-          mount={modelPicker.mountHeader}
-          context={pickerContext}
-          overlayRoot={overlayRoot}
-          revision={modelPicker}
-          className={styles.modelPickerContent}
-        />
-      )}
+      {!mobileSheet && pickerHeader}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1247,7 +1253,7 @@ function ToolbarPopover({
           <div
             ref={sheetBodyRef}
             tabIndex={-1}
-            className="min-h-0 overflow-y-auto px-3 outline-none"
+            className={`min-h-0 px-3 outline-none ${submenu ? 'overflow-y-auto' : 'flex flex-col overflow-clip'}`}
             data-vaul-no-drag
           >
             {header}
@@ -1285,7 +1291,7 @@ function ToolbarPopover({
                   ref={sheetListRef}
                   tabIndex={-1}
                   data-web-shell-model-sheet-list
-                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] flex max-h-[60vh] flex-col overflow-clip rounded-xl border bg-popover p-2 shadow-lg outline-none"
                   data-vaul-no-drag
                   onClick={(event) => event.stopPropagation()}
                 >
@@ -1584,6 +1590,63 @@ function ModelReasoningControls({
   );
 }
 
+function resolveSlashItemDisplay(
+  item: SlashMenuState['items'][number],
+  menuKind: SlashMenuState['kind'],
+  commandsByName: ReadonlyMap<string, CommandInfo>,
+  skillsByName: ReadonlyMap<string, SkillInfo>,
+): {
+  menuLabel: string;
+  detailLabel: string;
+  extensionName?: string;
+} {
+  if (menuKind === 'subcommand' && item.type !== 'skill') {
+    return {
+      menuLabel: item.label,
+      detailLabel: item.label,
+    };
+  }
+  const name = item.type === 'skill' ? item.label : item.id;
+  const skill = skillsByName.get(name);
+  const isSkill =
+    Boolean(skill) || item.type === 'skill' || item.category === 'skill';
+  const rawExtensionName =
+    skill?.extensionName ??
+    (isSkill &&
+    commandsByName.get(name)?.source === 'plugin-command' &&
+    name.includes(':')
+      ? name.slice(0, name.indexOf(':'))
+      : undefined);
+  const extensionName = rawExtensionName?.trim() || undefined;
+  const prefix = extensionName ? `${extensionName}:` : undefined;
+
+  let detailLabel = isSkill ? name : item.label;
+  if (
+    prefix &&
+    detailLabel.startsWith(prefix) &&
+    detailLabel.length > prefix.length
+  ) {
+    detailLabel = detailLabel.slice(prefix.length);
+  }
+
+  let menuLabel = item.label;
+  if (prefix) {
+    if (
+      menuLabel.startsWith(`/${prefix}`) &&
+      menuLabel.length > prefix.length + 1
+    ) {
+      menuLabel = `/${menuLabel.slice(prefix.length + 1)}`;
+    } else if (
+      menuLabel.startsWith(prefix) &&
+      menuLabel.length > prefix.length
+    ) {
+      menuLabel = menuLabel.slice(prefix.length);
+    }
+  }
+
+  return { menuLabel, detailLabel, extensionName };
+}
+
 function SlashCommandPanel({
   menu,
   commands,
@@ -1619,9 +1682,23 @@ function SlashCommandPanel({
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     extensionName?: string;
-    detail: string;
+    detail?: string;
     side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
+  const skillsByName = useMemo(() => {
+    const map = new Map<string, SkillInfo>();
+    for (const skill of skills) {
+      if (!map.has(skill.name)) map.set(skill.name, skill);
+    }
+    return map;
+  }, [skills]);
+  const commandsByName = useMemo(() => {
+    const map = new Map<string, CommandInfo>();
+    for (const command of commands) {
+      if (!map.has(command.name)) map.set(command.name, command);
+    }
+    return map;
+  }, [commands]);
 
   useEffect(() => {
     itemRefs.current[menu.selectedIndex]?.scrollIntoView({
@@ -1735,6 +1812,12 @@ function SlashCommandPanel({
               >
                 {menu.items.map((item, index) => {
                   const plan = rowPlans[index];
+                  const display = resolveSlashItemDisplay(
+                    item,
+                    menu.kind,
+                    commandsByName,
+                    skillsByName,
+                  );
                   return (
                     <div
                       key={`${item.id}:${index}`}
@@ -1770,7 +1853,10 @@ function SlashCommandPanel({
                         }`}
                         onMouseEnter={(event) => {
                           onSelect(index);
-                          if (!item.detail || compact) {
+                          const detail = item.detail?.trim()
+                            ? item.detail
+                            : undefined;
+                          if ((!detail && !display.extensionName) || compact) {
                             setHoverDetail(null);
                             return;
                           }
@@ -1794,32 +1880,10 @@ function SlashCommandPanel({
                                 : rowRect.top - top >= bottom - rowRect.bottom
                                   ? 'top'
                                   : 'bottom';
-                          const name =
-                            item.type === 'skill' ? item.label : item.id;
-                          const skill = skills.find((s) => s.name === name);
-                          const isSkill =
-                            skill ||
-                            item.type === 'skill' ||
-                            item.category === 'skill';
-                          const extensionName =
-                            skill?.extensionName ??
-                            (isSkill &&
-                            commands.find((c) => c.name === name)?.source ===
-                              'plugin-command' &&
-                            name.includes(':')
-                              ? name.slice(0, name.indexOf(':'))
-                              : undefined);
-                          let label = isSkill ? name : item.label;
-                          if (
-                            extensionName &&
-                            label.startsWith(`${extensionName}:`)
-                          ) {
-                            label = label.slice(extensionName.length + 1);
-                          }
                           setHoverDetail({
-                            label,
-                            extensionName,
-                            detail: item.detail,
+                            label: display.detailLabel,
+                            extensionName: display.extensionName,
+                            detail,
                             side,
                           });
                         }}
@@ -1830,7 +1894,7 @@ function SlashCommandPanel({
                         }}
                       >
                         <span className={styles.slashCommand}>
-                          {item.label}
+                          {display.menuLabel}
                           {item.argumentHint && (
                             <span className={styles.slashArgumentHint}>
                               {' '}
@@ -1891,11 +1955,24 @@ function SlashCommandPanel({
                 {hoverDetail.label}
               </div>
               {hoverDetail.extensionName && (
-                <div className={styles.slashDetailText}>
-                  {t('skills.extension')}: {hoverDetail.extensionName}
+                <div className={styles.slashDetailExtension}>
+                  <span className={styles.slashDetailExtensionLabel}>
+                    <BlocksIcon
+                      className={styles.slashDetailExtensionIcon}
+                      aria-hidden="true"
+                    />
+                    {t('skills.extension')}
+                  </span>
+                  <span className={styles.slashDetailExtensionName}>
+                    {hoverDetail.extensionName}
+                  </span>
                 </div>
               )}
-              <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
+              {hoverDetail.detail && (
+                <div className={styles.slashDetailText}>
+                  {hoverDetail.detail}
+                </div>
+              )}
             </div>
           </PopoverContent>
         )}
@@ -2812,6 +2889,7 @@ export const ChatEditor = memo(
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
+      gitBranchDetails: false,
       gitBranch: false,
       mode: false,
       plan: false,
@@ -3234,6 +3312,9 @@ export const ChatEditor = memo(
       isMobile || toolbarLabelVisibility.workspaceSelect;
     const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
     const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
+    const showGitBranchDetails =
+      isMobile ||
+      (showGitBranchLabel && toolbarLabelVisibility.gitBranchDetails);
     const showModeLabel = toolbarLabelVisibility.mode;
     const showPlanLabel = toolbarLabelVisibility.plan;
     const showWorkflowLabel = toolbarLabelVisibility.workflow;
@@ -3269,13 +3350,14 @@ export const ChatEditor = memo(
           onNewWorkspaceOpenChange={setWorkspaceNewSubOpen}
         />
       ) : null;
-    const renderGitBranchChip = (compact: boolean) =>
+    const renderGitBranchChip = (compact: boolean, showDetails = true) =>
       gitBranch ? (
         gitModeIntent && onGitModeIntentChange ? (
           <GitModePopover
             branch={gitBranch}
             status={gitStatus}
             compact={compact}
+            showDetails={showDetails}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
             open={activeContextMenu === 'git'}
@@ -3308,12 +3390,76 @@ export const ChatEditor = memo(
                 branch={gitBranch}
                 status={gitStatus}
                 compact={compact}
+                showDetails={showDetails}
                 worktree={gitWorktree}
               />
             </button>
           </BranchPickerPopover>
         )
       ) : null;
+    const renderGitBranchMeasure = (
+      compact: boolean,
+      showDetails: boolean,
+      measureKey: string,
+    ) => {
+      if (!gitBranch) return null;
+      if (gitModeIntent && onGitModeIntentChange) {
+        const isBranch = gitModeIntent.mode === 'branch';
+        const isWorktree = gitModeIntent.mode === 'worktree';
+        const label = isBranch
+          ? `→ ${gitModeIntent.name}`
+          : isWorktree
+            ? t('gitMode.worktree')
+            : gitBranch;
+        return (
+          <span
+            data-toolbar-measure={measureKey}
+            className={popoverStyles.wrap}
+          >
+            <span
+              className={`${popoverStyles.chip} ${isBranch ? popoverStyles.chipBranch : ''} ${isWorktree ? popoverStyles.chipWorktree : ''} ${compact ? popoverStyles.chipCompact : ''}`}
+            >
+              <GitBranchChipContent
+                branch={label}
+                status={gitStatus}
+                compact={compact}
+                showDetails={showDetails}
+                worktree={isWorktree}
+              />
+              <svg
+                className={popoverStyles.chevron}
+                viewBox="0 1 16 16"
+                fill="currentColor"
+                width={9}
+                height={9}
+                aria-hidden="true"
+              >
+                <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z" />
+              </svg>
+            </span>
+            {(isBranch || isWorktree) && (
+              <span className={popoverStyles.clearBtn}>✕</span>
+            )}
+          </span>
+        );
+      }
+      return (
+        <span
+          data-toolbar-measure={measureKey}
+          className={`${styles.gitBranchChip} ${
+            compact ? styles.gitBranchChipCompact : ''
+          }`}
+        >
+          <GitBranchChipContent
+            branch={gitBranch}
+            status={gitStatus}
+            compact={compact}
+            showDetails={showDetails}
+            worktree={gitWorktree}
+          />
+        </span>
+      );
+    };
     const mobileVoiceActive = isMobile && voiceActive;
     const workspaceContextAvailable =
       !isSimple &&
@@ -3432,19 +3578,17 @@ export const ChatEditor = memo(
 
       const update = () => {
         const currentVisibility = toolbarLabelVisibilityRef.current;
-        const expansionWidth = (id: string) => {
-          const collapsed = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:collapsed"]`,
+        const measureWidth = (key: string) =>
+          Math.ceil(
+            measurements
+              .querySelector<HTMLElement>(`[data-toolbar-measure="${key}"]`)
+              ?.getBoundingClientRect().width ?? 0,
           );
-          const expanded = measurements.querySelector<HTMLElement>(
-            `[data-toolbar-measure="${id}:expanded"]`,
-          );
-          return Math.max(
+        const expansionWidth = (id: string) =>
+          Math.max(
             0,
-            Math.ceil(expanded?.getBoundingClientRect().width ?? 0) -
-              Math.ceil(collapsed?.getBoundingClientRect().width ?? 0),
+            measureWidth(`${id}:expanded`) - measureWidth(`${id}:collapsed`),
           );
-        };
         const items = [
           ...(!isMobile && workspaceChipInToolbar
             ? [
@@ -3465,8 +3609,20 @@ export const ChatEditor = memo(
           ...(!isMobile && gitChipInToolbar
             ? [
                 {
+                  id: 'gitBranchDetails',
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:expanded') -
+                      measureWidth('gitBranch:label'),
+                  ),
+                },
+                {
                   id: 'gitBranch',
-                  expansionWidth: expansionWidth('gitBranch'),
+                  expansionWidth: Math.max(
+                    0,
+                    measureWidth('gitBranch:label') -
+                      measureWidth('gitBranch:collapsed'),
+                  ),
                 },
               ]
             : []),
@@ -3541,6 +3697,7 @@ export const ChatEditor = memo(
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,
+          gitBranchDetails: itemVisibility.gitBranchDetails ?? false,
           gitBranch: itemVisibility.gitBranch ?? false,
           mode: itemVisibility.mode ?? false,
           plan: itemVisibility.plan ?? false,
@@ -3601,6 +3758,8 @@ export const ChatEditor = memo(
       disabled,
       gitBranch,
       gitChipInToolbar,
+      gitModeIntent,
+      gitStatus,
       isRunning,
       modelLabelReady,
       isSimple,
@@ -3649,6 +3808,7 @@ export const ChatEditor = memo(
           {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
             renderGitBranchChip(
               options?.compactGit ?? (inToolbar && !showGitBranchLabel),
+              inToolbar ? showGitBranchDetails : true,
             )}
           {!inToolbar && gitContextControl}
         </>
@@ -5263,28 +5423,9 @@ export const ChatEditor = memo(
               )}
               {gitChipInToolbar && gitBranch && (
                 <>
-                  <span
-                    data-toolbar-measure="gitBranch:collapsed"
-                    className={`${styles.gitBranchChip} ${styles.gitBranchChipCompact}`}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact
-                      worktree={gitWorktree}
-                    />
-                  </span>
-                  <span
-                    data-toolbar-measure="gitBranch:expanded"
-                    className={styles.gitBranchChip}
-                  >
-                    <GitBranchChipContent
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact={false}
-                      worktree={gitWorktree}
-                    />
-                  </span>
+                  {renderGitBranchMeasure(true, false, 'gitBranch:collapsed')}
+                  {renderGitBranchMeasure(false, false, 'gitBranch:label')}
+                  {renderGitBranchMeasure(false, true, 'gitBranch:expanded')}
                 </>
               )}
               <span

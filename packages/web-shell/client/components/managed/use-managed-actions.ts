@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  ManagedAgentOperationObserver,
   ManagedAgentPendingAction,
   ManagedAgentActionResponse,
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
-import type { ManagedQuestionDraft } from './ManagedQuestionForm';
+import type { ManagedQuestionDraft } from './managed-question-response';
 import {
   canonicalQuestionAnswers,
   questionResponseKey,
@@ -58,6 +59,13 @@ function endedAction(failure: unknown): boolean {
   return typeof code === 'string' && ENDED_ACTION_CODES.has(code);
 }
 
+export type ManagedActionRespondOutcome = 'responded' | 'ended' | 'skipped';
+
+export interface ManagedActionRespondOptions
+  extends ManagedAgentOperationObserver {
+  readonly signal?: AbortSignal;
+}
+
 export interface ManagedActionsState {
   actions: readonly ManagedAgentPendingAction[];
   /** The selected pending request; answered ones stay hidden while they settle. */
@@ -90,7 +98,8 @@ export interface ManagedActionsState {
   respond(
     action: ManagedAgentPendingAction,
     response: ManagedAgentActionResponse,
-  ): Promise<void>;
+    options?: ManagedActionRespondOptions,
+  ): Promise<ManagedActionRespondOutcome>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -352,16 +361,17 @@ export function useManagedActions(
     async (
       requested: ManagedAgentPendingAction,
       response: ManagedAgentActionResponse,
-    ) => {
-      if (current.current.owner !== owner) return;
+      options?: ManagedActionRespondOptions,
+    ): Promise<ManagedActionRespondOutcome> => {
+      if (current.current.owner !== owner) return 'skipped';
       const key = managedActionKey(requested);
       const target = current.current.actions.find(
         (entry) =>
           managedActionKey(entry) === key && !current.current.answered.has(key),
       );
       const actionReader = current.current.reader;
-      if (!target || !actionReader) return;
-      if (inFlight.current.get(key) === owner) return;
+      if (!target || !actionReader) return 'skipped';
+      if (inFlight.current.get(key) === owner) return 'skipped';
       inFlight.current.set(key, owner);
       setSubmitting((current) => new Set(current).add(key));
       const isPending = () =>
@@ -386,12 +396,16 @@ export function useManagedActions(
           target.kind === 'question' && typeof submitted !== 'string'
             ? await questionResponseKey(target, submitted.answers)
             : `${target.actionId}:${submitted}`;
-        if (!isPending()) return;
+        if (!isPending()) return 'skipped';
         await actionReader.respond(target, submitted, {
           clientId,
           idempotencyKey,
+          ...options,
         });
-        if (!isPending()) return;
+        // The send already completed; even if a concurrent re-list dropped the
+        // action before the response settled, report `'responded'` rather than
+        // `'skipped'` so callers do not treat a delivered answer as refused.
+        if (!isPending()) return 'responded';
         setAnswered((current) => new Set(current).add(key));
         setAnswerErrors((current) => {
           const next = new Map(current);
@@ -404,6 +418,7 @@ export function useManagedActions(
           return next;
         });
         setRevision((value) => value + 1);
+        return 'responded';
       } catch (failure) {
         if (
           typeof failure === 'object' &&
@@ -440,7 +455,7 @@ export function useManagedActions(
             return next;
           });
           setRevision((value) => value + 1);
-          return;
+          return 'ended';
         }
         setAnswered((current) => {
           const next = new Set(current);

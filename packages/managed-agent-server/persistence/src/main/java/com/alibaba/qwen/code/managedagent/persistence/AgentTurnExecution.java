@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 final class AgentTurnExecution {
     private final AgentEventJournal eventJournal;
@@ -112,9 +113,8 @@ final class AgentTurnExecution {
                 tenantId, sessionId, turnId, owner);
     }
 
-    boolean markTurnRecoveryBlocked(String tenantId,
-            String sessionId, String turnId, String owner,
-            String errorCode, String errorMessage) {
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode, String errorMessage) {
         long now = clock.millis();
         Long retryAfter = AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(errorCode)
                 ? now + 15_000L : null;
@@ -693,7 +693,7 @@ final class AgentTurnExecution {
         // idle journal may contain this prompt's completed admission: replay
         // its real result instead of replacing it with cancellation. Owed
         // cleanup stays protected and does not prevent cancelling an unadmitted turn.
-        java.util.Set<String> accepted;
+        Set<String> accepted;
         try {
             accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
                     tenantId, sessionId, true,

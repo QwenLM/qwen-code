@@ -6,11 +6,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { PermissionRequest } from '../../adapters/types';
-import { AskUserQuestion } from './AskUserQuestion';
+import { AskUserQuestion, type AskUserQuestionDraft } from './AskUserQuestion';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -101,6 +101,7 @@ function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
   onAskDetails?: () => void,
+  disabled?: boolean,
 ): void {
   act(() =>
     root!.render(
@@ -111,6 +112,7 @@ function rerender(
           onError={onError}
           keyboardActive={keyboardActive}
           onAskDetails={onAskDetails}
+          disabled={disabled}
         />
       </I18nProvider>,
     ),
@@ -121,11 +123,12 @@ function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
   onAskDetails?: () => void,
+  disabled?: boolean,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, onAskDetails);
+  rerender(keyboardActive, req, onAskDetails, disabled);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -1771,5 +1774,588 @@ describe('ask-for-details action', () => {
       await pending.promise;
     });
     expect(onAskDetails).not.toHaveBeenCalled();
+  });
+});
+
+describe('managed question contract parity', () => {
+  function ignoreButton(): HTMLButtonElement | null {
+    return (
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('button')).find(
+        (b) => b.textContent === 'Ignore',
+      ) ?? null
+    );
+  }
+
+  function nextButton(): HTMLButtonElement {
+    return Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((b) => b.textContent === 'next')!;
+  }
+
+  const managedOnlyOptions: PermissionRequest['options'] = [
+    { id: 'submit', label: 'Submit', kind: 'allow_once' },
+  ];
+
+  it('hides the Ignore button and ignores Escape when no reject option exists', () => {
+    render(undefined, {
+      ...request,
+      options: managedOnlyOptions,
+    });
+    expect(ignoreButton()).toBeNull();
+    const ev = pressKey(optionButtons()[0]!, 'Escape', { cancelable: true });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('leaves optional single-select unselected, supports click-to-clear, arrow focus without commit, and omits unanswered optional entries from structured answers', () => {
+    const req: PermissionRequest = {
+      id: 'req-opt',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Optional single choice',
+            header: 'q1',
+            required: false,
+            allowText: true,
+            options: [
+              { id: 'a', label: 'Alpha', description: '' },
+              { id: 'b', label: 'Beta', description: '' },
+            ],
+          },
+          {
+            id: 'q2',
+            question: 'Required strict choice',
+            header: 'q2',
+            required: true,
+            allowText: false,
+            options: [
+              { id: 'x', label: 'X', description: '' },
+              { id: 'y', label: 'Y', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    // Optional Q1 must NOT auto-select option 0.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    // Required Q2 is not yet answered, so submit stays disabled.
+    expect(submitButton()!.disabled).toBe(true);
+
+    // ArrowDown moves roving focus only — does NOT fabricate a selection.
+    act(() => optionButtons()[0]!.focus());
+    pressKey(optionButtons()[0]!, 'ArrowDown', { cancelable: true });
+    expect(document.activeElement).toBe(optionButtons()[1]);
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+
+    // Click selects and a second click clears the optional single-select.
+    act(() => optionButtons()[1]!.click());
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
+    act(() => optionButtons()[1]!.click());
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+
+    // Visit Q2 (required, allowText: false): auto-selects X, hides custom row.
+    act(() => nextButton().click());
+    expect(optionButtons()).toHaveLength(2);
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(submitButton()!.disabled).toBe(false);
+
+    // Submit with Q1 skipped: structured answers omit unanswered optional Q1.
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-opt',
+      'submit',
+      { '0': '', '1': 'X' },
+      [{ questionId: 'q2', value: 'X', optionIds: ['x'] }],
+    );
+  });
+
+  it('commits focused option on Enter for optional single-select without stale-state lag on the final question', () => {
+    const req: PermissionRequest = {
+      id: 'req-opt-enter',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Optional single',
+            header: 'q1',
+            required: false,
+            allowText: false,
+            options: [
+              { id: 'a', label: 'Alpha', description: '' },
+              { id: 'b', label: 'Beta', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    expect(submitButton()!.disabled).toBe(false);
+    act(() => optionButtons()[0]!.focus());
+    pressKey(optionButtons()[0]!, 'ArrowDown', { cancelable: true });
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    pressKey(optionButtons()[1]!, 'Enter', { cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-opt-enter',
+      'submit',
+      { '0': 'Beta' },
+      [{ questionId: 'q1', value: 'Beta', optionIds: ['b'] }],
+    );
+  });
+
+  it('enforces allowText: false across rendering, Arrow/End wrapping, and digit shortcuts', () => {
+    const req: PermissionRequest = {
+      id: 'req-no-text',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'strict',
+            question: 'Choose strictly',
+            header: 'strict',
+            required: true,
+            allowText: false,
+            options: [
+              { id: 'one', label: 'One', description: '' },
+              { id: 'two', label: 'Two', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    render(true, req);
+    const opts = optionButtons();
+    expect(opts).toHaveLength(2);
+    expect(container!.querySelector('input')).toBeNull();
+
+    // End lands on the last real option (index 1), not a non-existent custom row.
+    pressKey(opts[0]!, 'End', { cancelable: true });
+    expect(document.activeElement).toBe(opts[1]);
+    // ArrowDown wraps back to index 0.
+    pressKey(opts[1]!, 'ArrowDown', { cancelable: true });
+    expect(document.activeElement).toBe(opts[0]);
+    // Digit '3' is out of bounds and does not open an input.
+    const ev = pressKey(opts[0]!, '3', { cancelable: true });
+    expect(ev.defaultPrevented).toBe(false);
+    expect(container!.querySelector('input')).toBeNull();
+  });
+
+  it('handles empty-option questions safely for both allowText: true (text-only) and allowText: false', () => {
+    const textOnlyReq: PermissionRequest = {
+      id: 'req-text-only',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'free',
+            question: 'Write a note',
+            header: 'free',
+            required: true,
+            allowText: true,
+            maxTextLength: 8192,
+            options: [],
+          },
+        ],
+      },
+    };
+    render(true, textOnlyReq);
+    expect(optionButtons()).toHaveLength(1);
+    expect(document.activeElement).toBe(optionButtons()[0]);
+    expect(submitButton()!.disabled).toBe(true);
+
+    act(() => optionButtons()[0]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    expect(input).not.toBeNull();
+    expect(input.maxLength).toBe(8192);
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Only text');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(submitButton()!.disabled).toBe(false);
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-text-only',
+      'submit',
+      { '0': 'Only text' },
+      [{ questionId: 'free', value: 'Only text', text: 'Only text' }],
+    );
+
+    // Defensive empty question (options: [] and allowText: false): no NaN crash.
+    onConfirm.mockClear();
+    rerender(true, {
+      id: 'req-empty-strict',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'empty',
+            question: 'No choices',
+            header: 'empty',
+            required: false,
+            allowText: false,
+            options: [],
+          },
+        ],
+      },
+    });
+    expect(optionButtons()).toHaveLength(0);
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    expect(() => {
+      pressKey(panel, 'ArrowDown', { cancelable: true });
+      pressKey(panel, 'End', { cancelable: true });
+    }).not.toThrow();
+  });
+
+  it('disables answering and keyboard shortcuts when disabled is true while keeping question navigation inspectable', () => {
+    render(true, multipleQuestionsRequest, undefined, true);
+    expect(submitButton()!.disabled).toBe(true);
+    expect(ignoreButton()!.disabled).toBe(true);
+    for (const button of optionButtons()) {
+      expect(button.disabled).toBe(true);
+    }
+
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    pressKey(panel, 'Enter', { ctrlKey: true, cancelable: true });
+    pressKey(panel, 'Escape', { cancelable: true });
+    pressKey(optionButtons()[0]!, '2', { cancelable: true });
+    pressKey(optionButtons()[0]!, 'Enter', { cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Navigating to Q2 stays available so a read-only viewer can inspect all questions.
+    expect(nextButton().disabled).toBe(false);
+    act(() => nextButton().click());
+    expect(container!.textContent).toContain('Pick a size');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('hydrates initialDraft without auto-selecting option 0 over custom text and emits onDraftChange only after user edits', () => {
+    const req: PermissionRequest = {
+      id: 'req-draft',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Choose the library',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [
+              { id: 'q1o1', label: 'Same, label', description: 'First' },
+              { id: 'q1o2', label: 'Same, label', description: 'Second' },
+            ],
+          },
+          {
+            id: 'q2',
+            question: 'Choose features',
+            header: 'q2',
+            required: true,
+            multiSelect: true,
+            allowText: true,
+            options: [
+              { id: 'q2o1', label: 'Read, write', description: '' },
+              { id: 'q2o2', label: 'Search', description: '' },
+            ],
+          },
+        ],
+      },
+    };
+    const drafts: AskUserQuestionDraft[] = [];
+    const initialDraft: AskUserQuestionDraft = {
+      q1: { optionIds: [], text: '  A different library  ' },
+      q2: { optionIds: ['q2o2', 'unknown-id', 'q2o1'], text: 'also: extra' },
+    };
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderWithDraft = (inlineDraft?: AskUserQuestionDraft) => {
+      act(() =>
+        root!.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <AskUserQuestion
+                request={req}
+                onConfirm={onConfirm}
+                onError={onError}
+                keyboardActive={false}
+                initialDraft={inlineDraft}
+                onDraftChange={(next) => drafts.push(next)}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        ),
+      );
+    };
+    renderWithDraft(initialDraft);
+    // Passive mount must NOT emit onDraftChange (even with inline callback).
+    expect(drafts).toEqual([]);
+    // Hydrated custom text suppresses auto-select of option 0 on required single-select.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[2]!.getAttribute('aria-checked')).toBe('true');
+    expect(optionButtons()[2]!.textContent).toBe('  A different library  ');
+    // Both questions are already answered by the hydrated draft -> Submit enabled.
+    expect(submitButton()!.disabled).toBe(false);
+
+    // Inline callback rerender with no user edits must stay silent.
+    renderWithDraft(initialDraft);
+    expect(drafts).toEqual([]);
+
+    // User selects option 1 on Q1 -> clears custom text and emits updated draft.
+    act(() => optionButtons()[1]!.click());
+    expect(drafts.at(-1)).toEqual({
+      q1: { optionIds: ['q1o2'], text: '' },
+      q2: { optionIds: ['q2o1', 'q2o2'], text: 'also: extra' },
+    });
+
+    // Submitting emits exact restored + edited structured answers.
+    act(() => submitButton()!.click());
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-draft',
+      'submit',
+      { '0': 'Same, label', '1': 'Search, Read, write, also: extra' },
+      [
+        { questionId: 'q1', value: 'Same, label', optionIds: ['q1o2'] },
+        {
+          questionId: 'q2',
+          value: 'Search, Read, write, also: extra',
+          optionIds: ['q2o2', 'q2o1'],
+          text: 'also: extra',
+        },
+      ],
+    );
+  });
+
+  it('blocks only submission when submitDisabled is true while keeping options and custom input editable', () => {
+    const req: PermissionRequest = {
+      id: 'req-submit-blocked',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Write a note',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [{ id: 'a', label: 'Alpha', description: '' }],
+          },
+        ],
+      },
+    };
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <AskUserQuestion
+            request={req}
+            onConfirm={onConfirm}
+            onError={onError}
+            submitDisabled
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(submitButton()!.disabled).toBe(true);
+    // Options and custom row remain editable so user can shorten over-limit text.
+    expect(optionButtons()[0]!.disabled).toBe(false);
+    expect(optionButtons()[1]!.disabled).toBe(false);
+
+    // Ctrl+Enter and Enter on final question must not submit while submitDisabled.
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    pressKey(panel, 'Enter', { ctrlKey: true, cancelable: true });
+    pressKey(optionButtons()[0]!, 'Enter', { cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Opening and editing the custom input still works while submitDisabled.
+    act(() => optionButtons()[1]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    expect(input).not.toBeNull();
+    expect(input.disabled).toBe(false);
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Shortened');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(input.value).toBe('Shortened');
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('preserves multi-line custom answers across draft hydration, editing, Shift+Enter, and in-place request updates', () => {
+    const req1: PermissionRequest = {
+      id: 'req-ml-1',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q1',
+            question: 'Explain details',
+            header: 'q1',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            multilineText: true,
+            options: [{ id: 'a', label: 'Alpha', description: '' }],
+          },
+        ],
+      },
+    };
+    const req2: PermissionRequest = {
+      id: 'req-ml-2',
+      content: [],
+      options: managedOnlyOptions,
+      rawInput: {
+        questions: [
+          {
+            id: 'q2',
+            question: 'Second request',
+            header: 'q2',
+            required: true,
+            multiSelect: false,
+            allowText: true,
+            options: [{ id: 'b', label: 'Beta', description: '' }],
+          },
+        ],
+      },
+    };
+    const drafts: AskUserQuestionDraft[] = [];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderReq = (
+      req: PermissionRequest,
+      draft?: AskUserQuestionDraft,
+    ) => {
+      act(() =>
+        root!.render(
+          <StrictMode>
+            <I18nProvider language="en">
+              <AskUserQuestion
+                request={req}
+                onConfirm={onConfirm}
+                onError={onError}
+                keyboardActive={false}
+                initialDraft={draft}
+                onDraftChange={(next) => drafts.push(next)}
+              />
+            </I18nProvider>
+          </StrictMode>,
+        ),
+      );
+    };
+
+    renderReq(req1, { q1: { optionIds: [], text: 'line1\nline2' } });
+    // Opening the restored draft uses a textarea and preserves the newline.
+    act(() => optionButtons()[1]!.click());
+    const textarea = container!.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(textarea).not.toBeNull();
+    expect(textarea.value).toBe('line1\nline2');
+    // Shift+Enter does NOT submit the form.
+    pressKey(textarea, 'Enter', { shiftKey: true, cancelable: true });
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Editing preserves existing and new line breaks in onDraftChange.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea, 'line1\nline2\nline3');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(drafts.at(-1)).toEqual({
+      q1: { optionIds: [], text: 'line1\nline2\nline3' },
+    });
+
+    // Rerendering the SAME mounted instance with a new request.id hydrates the new initialDraft
+    // (exercises the reset useEffect path) and still uses textarea when the draft has a newline
+    // even if multilineText is omitted.
+    renderReq(req2, { q2: { optionIds: [], text: 'next1\nnext2' } });
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.textContent).toBe('next1\nnext2');
+    act(() => optionButtons()[1]!.click());
+    const textarea2 =
+      container!.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(textarea2).not.toBeNull();
+    expect(textarea2.value).toBe('next1\nnext2');
+    // Deleting the newline while editing must NOT unmount the textarea mid-edit.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea2, 'single-line-now');
+      textarea2.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.querySelector('textarea')).toBe(textarea2);
+    // Restore multi-line text and submit with bare Enter.
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea2, 'next1\nnext2');
+      textarea2.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    pressKey(textarea2, 'Enter', { cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-ml-2',
+      'submit',
+      { '0': 'next1\nnext2' },
+      [{ questionId: 'q2', value: 'next1\nnext2', text: 'next1\nnext2' }],
+    );
+
+    // Single-line daemon questions (no multilineText, no newline) keep <input>
+    // and preserve Shift+Enter submission parity.
+    onConfirm.mockClear();
+    renderReq(
+      {
+        ...req2,
+        id: 'req-single-line-shift-enter',
+      },
+      undefined,
+    );
+    act(() => optionButtons()[1]!.click());
+    const singleInput = container!.querySelector<HTMLInputElement>('input')!;
+    expect(singleInput).not.toBeNull();
+    expect(container!.querySelector('textarea')).toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(singleInput, 'single line answer');
+      singleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    pressKey(singleInput, 'Enter', { shiftKey: true, cancelable: true });
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+      'req-single-line-shift-enter',
+      'submit',
+      { '0': 'single line answer' },
+      [
+        {
+          questionId: 'q2',
+          value: 'single line answer',
+          text: 'single line answer',
+        },
+      ],
+    );
   });
 });

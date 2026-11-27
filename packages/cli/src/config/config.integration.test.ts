@@ -12,9 +12,15 @@ import type {
   ConfigParameters,
   ContentGeneratorConfig,
 } from '@qwen-code/qwen-code-core';
-import { Config } from '@qwen-code/qwen-code-core';
+import {
+  Config,
+  deriveWorktreeConfig,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
+import { loadCliConfig, type CliArgs } from './config.js';
+import { SETTINGS_VERSION, SETTINGS_VERSION_KEY } from './settings.js';
 export const server = setupServer();
 
 // TODO(richieforeman): Consider moving this to test setup globally.
@@ -66,6 +72,43 @@ describe('Configuration Integration Tests', () => {
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true });
     }
+  });
+
+  it('persists project permissions in the active workspace and preserves rule placeholders', async () => {
+    const startupDir = path.join(tempDir, 'startup');
+    const activeDir = path.join(tempDir, 'active');
+    const startupSettings = new Storage(startupDir).getWorkspaceSettingsPath();
+    const activeSettings = new Storage(activeDir).getWorkspaceSettingsPath();
+    const existingRule = 'Read(${QWEN_TEST_RULE_PATH})';
+    const contents = JSON.stringify({
+      [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      permissions: { allow: [existingRule] },
+    });
+
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(tempDir, 'system.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(tempDir, 'defaults.json'),
+    );
+    vi.stubEnv('QWEN_TEST_RULE_PATH', './fixtures/**');
+    for (const file of [startupSettings, activeSettings]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, contents);
+    }
+
+    const config = await loadCliConfig({}, {} as CliArgs, startupDir);
+    const activeConfig = deriveWorktreeConfig(config, activeDir);
+    const persist = activeConfig.getOnPersistPermissionRule()!;
+    await persist('project', 'allow', 'Read(./fixtures/**)');
+    await persist('project', 'allow', 'Read(./README.md)');
+
+    expect(fs.readFileSync(startupSettings, 'utf8')).toBe(contents);
+    expect(JSON.parse(fs.readFileSync(activeSettings, 'utf8'))).toMatchObject({
+      permissions: { allow: [existingRule, 'Read(./README.md)'] },
+    });
   });
 
   describe('File Filtering Configuration', () => {

@@ -6,7 +6,9 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
+import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
+import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -20,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.beans.BeanUtils;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -116,6 +119,60 @@ class QwenHostedMcpManagementAttachmentTest {
         assertThat(fixture.connector.attachedSessions()).hasSize(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void firstTurnOnAnotherControlPlaneReusesTheResidentSession(boolean lostCreateReply) throws ReflectiveOperationException {
+        var manager = new Fixture(null);
+        manager.connector.mcpManagement("tenant", SESSION);
+        verify(manager.client).createSession(any());
+        assertThat(manager.connector.attachedSessions()).isEmpty();
+
+        var dispatcher = new Fixture(null);
+        var resident = BeanUtils.instantiateClass(DaemonHttpException.class.getDeclaredConstructor(
+                String.class, int.class, String.class), "Session", 409, "{\"code\":\"hosted_session_already_attached\"}");
+        when(dispatcher.client.createSession(any())).thenThrow(lostCreateReply
+                ? BeanUtils.instantiateClass(SessionCreationOutcomeUnknownException.class.getDeclaredConstructor(
+                        Throwable.class), new IllegalStateException("lost response")) : resident);
+        when(dispatcher.client.loadSession(any())).thenAnswer(call -> {
+            LoadHarnessSession load = call.getArgument(0);
+            Map<String, Object> request = ReflectionTestUtils.invokeMethod(load, "toJson");
+            if (!Boolean.TRUE.equals(request.get("passiveManagedRuntimeRecovery"))) {
+                throw resident;
+            }
+            assertThat(request).doesNotContainKeys("driveRuntimeRecovery", "mcpManagementOnly");
+            return dispatcher.ref;
+        });
+        when(dispatcher.client.submitTurn(any())).thenReturn(mock(PromptReceipt.class));
+
+        dispatcher.connector.createOrLoad("tenant", SESSION, false);
+        List<Map<String, Object>> input = List.of(Map.of("type", "text", "text", "first turn"));
+        dispatcher.connector.submit("tenant", SESSION, PROMPT, input, SubmitHarnessTurn.computePayloadDigest(input));
+
+        verify(dispatcher.client).submitTurn(any());
+        verify(dispatcher.client, never()).loadMcpManagementSession(any());
+        assertThat(dispatcher.connector.attachedSessions()).hasSize(1);
+    }
+
+    @Test
+    void runtimeSkillsUseTheResidentManagementAttachmentOnAColdControlPlane() {
+        var fixture = new Fixture(BOOT);
+        var snapshot = Map.<String, Object>of("operationId", OPERATION);
+        when(fixture.client.runtimeSkillCandidates(fixture.ref)).thenReturn(Map.of("candidates", List.of()));
+        when(fixture.client.runtimeSkillSnapshot(fixture.ref, snapshot)).thenReturn(Map.of("preparationId", "preparation"));
+        when(fixture.client.runtimeSkillArchive(fixture.ref, OPERATION, "preparation", "binding", "1", 0))
+                .thenReturn(Map.of("eof", true));
+
+        assertThat(fixture.connector.runtimeSkillCandidates("tenant", SESSION)).containsKey("candidates");
+        assertThat(fixture.connector.runtimeSkillSnapshot("tenant", SESSION, snapshot)).containsEntry("preparationId", "preparation");
+        assertThat(fixture.connector.runtimeSkillArchive("tenant", SESSION, Map.of("operationId", OPERATION,
+                "preparationId", "preparation", "owner", Map.of("bindingId", "binding", "generation", "1"),
+                "offset", 0))).containsEntry("eof", true);
+        verify(fixture.client).loadMcpManagementSession(any());
+        verify(fixture.client, never()).loadSession(any());
+        verify(fixture.client, never()).createSession(any());
+        assertThat(fixture.connector.attachedSessions()).isEmpty();
+    }
+
     @Test
     void closingASessionEvictsItsManagementOnlyReference() {
         var fixture = new Fixture(BOOT);
@@ -194,11 +251,11 @@ class QwenHostedMcpManagementAttachmentTest {
 
     private static final class Fixture {
         private final HostedHarnessClient client = mock(HostedHarnessClient.class);
+        private final HarnessSessionRef ref = mock(HarnessSessionRef.class);
         private final QwenHostedHarnessConnector connector;
 
         private Fixture(String priorBoot) {
             var capabilities = mock(HostedHarnessCapabilities.class);
-            var ref = mock(HarnessSessionRef.class);
             when(client.capabilities()).thenReturn(capabilities);
             when(capabilities.getBootId()).thenReturn(BOOT);
             when(capabilities.getFeatures()).thenReturn(List.of("session-mcp-management/1", "targeted-cancel/1"));

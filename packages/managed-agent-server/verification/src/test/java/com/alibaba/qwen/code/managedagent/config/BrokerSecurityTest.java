@@ -67,6 +67,23 @@ class BrokerSecurityTest {
     }
 
     @Test
+    void runtimeBrokerRequiresAnInternalPortOnANonLoopbackPublicListener() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setEnabled(true);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatThrownBy(() -> security(properties, "10.0.0.8"))
+                .hasMessageContaining("internal-server.port");
+        properties.getInternalServer().setPort(8081);
+        assertThatCode(() -> security(properties, "10.0.0.8"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void refusesAContextPathThatWouldBypassThePathFilters()
             throws Exception {
         ServerProperties server = new ServerProperties();

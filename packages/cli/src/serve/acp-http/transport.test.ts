@@ -39,6 +39,7 @@ import {
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -649,6 +650,7 @@ class FakeBridge {
         taskId: string;
         kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2];
         context: Parameters<HttpAcpBridge['cancelSessionTask']>[3];
+        source: Parameters<HttpAcpBridge['cancelSessionTask']>[4];
       }
     | undefined;
   async cancelSessionTask(
@@ -656,8 +658,9 @@ class FakeBridge {
     taskId: string,
     kind: Parameters<HttpAcpBridge['cancelSessionTask']>[2],
     context: Parameters<HttpAcpBridge['cancelSessionTask']>[3],
+    source?: Parameters<HttpAcpBridge['cancelSessionTask']>[4],
   ) {
-    this.lastCancelledTask = { sessionId, taskId, kind, context };
+    this.lastCancelledTask = { sessionId, taskId, kind, context, source };
     return { cancelled: true };
   }
   lastWorkflowAction:
@@ -2054,6 +2057,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       limit: 10,
       scope: 'total',
       retryable: true,
+    });
+  });
+
+  it('maps load admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SystemOverloadedError('event_loop_lag', 0.4, 1500);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          httpStatus: number;
+          retryable: boolean;
+          reason: string;
+          loadRatio: number;
+          eventLoopLagP99Ms: number;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'system_overloaded',
+      httpStatus: 503,
+      retryable: true,
+      reason: 'event_loop_lag',
+      loadRatio: 0.4,
+      eventLoopLagP99Ms: 1500,
     });
   });
 
@@ -5623,6 +5667,99 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await resumed.body?.cancel();
   });
 
+  it('session/resume forwards approval mode and the restored session identity', async () => {
+    const originalResume = bridge.resumeSession.bind(bridge);
+    const resume = vi
+      .spyOn(bridge, 'resumeSession')
+      .mockImplementation(async (req) => ({
+        ...(await originalResume(req)),
+        sourceType: 'recorded-source',
+        sourceId: 'recorded-owner-source',
+        sourcePersisted: false,
+        parentSessionPersisted: true,
+      }));
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/resume',
+      params: { sessionId: 'resumed-1', approvalMode: 'yolo' },
+    });
+    const [frame] = (await got) as Array<{
+      result: Record<string, unknown>;
+    }>;
+    expect(resume).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'resumed-1',
+        approvalMode: 'yolo',
+      }),
+    );
+    expect(frame.result).toMatchObject({
+      sessionId: 'resumed-1',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: true,
+      clientId: 'client-resume',
+      sourceType: 'recorded-source',
+      sourceId: 'recorded-owner-source',
+      sourcePersisted: false,
+      parentSessionPersisted: true,
+      resumed: true,
+    });
+  });
+
+  it('session/load forwards approval mode when restoring a session', async () => {
+    const load = vi.spyOn(bridge, 'loadSession');
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1', approvalMode: 'yolo' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: Record<string, unknown>;
+    }>;
+    expect(frame.id).toBe(20);
+    expect(load).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'loaded-1',
+        approvalMode: 'yolo',
+      }),
+    );
+  });
+
+  it.each(['session/load', 'session/resume'])(
+    '%s rejects an invalid approval mode without restoring',
+    async (method) => {
+      const load = vi.spyOn(bridge, 'loadSession');
+      const resume = vi.spyOn(bridge, 'resumeSession');
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 20,
+        method,
+        params: {
+          sessionId: method === 'session/load' ? 'loaded-1' : 'resumed-1',
+          approvalMode: 'bypass-all-checks',
+        },
+      });
+      const [frame] = (await got) as Array<{
+        error: { code: number; message: string };
+      }>;
+      expect(frame.error).toMatchObject({ code: -32602 });
+      expect(frame.error.message).toContain('invalid approvalMode');
+      expect(load).not.toHaveBeenCalled();
+      expect(resume).not.toHaveBeenCalled();
+    },
+  );
+
   it('session/resume owns the session + replies state', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -6357,7 +6494,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 216,
           method,
-          params: { sessionId },
+          params: { sessionId, approvalMode: 'yolo' },
         });
         await waitUntil(() => frames.length > 0);
         expect(frames).toContainEqual(
@@ -6369,7 +6506,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(restoreLegacyForCompatibility).toHaveBeenCalledWith(
           method === 'session/load' ? 'load' : 'resume',
           sessionId,
-          { clientId: expect.any(String) },
+          { clientId: expect.any(String), approvalMode: 'yolo' },
         );
         expect(bridge.loadRequests).toEqual([]);
         expect(bridge.resumeRequests).toEqual([]);
@@ -7688,6 +7825,108 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frames).toHaveLength(0);
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/new forwards legacy model and approval mode, returning the created identity', async () => {
+    const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 429,
+      method: 'session/new',
+      params: {
+        modelServiceId: 'selected-model(openai)',
+        approvalMode: 'yolo',
+      },
+    });
+    const [frame] = (await got) as Array<{ result: Record<string, unknown> }>;
+    expect(frame.result).toMatchObject({
+      sessionId: 'sess-1',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: false,
+      clientId: 'client-1',
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelServiceId: 'selected-model(openai)',
+        approvalMode: 'yolo',
+        sessionScope: 'thread',
+      }),
+    );
+  });
+
+  it('session/new preserves the legacy model application failure result', async () => {
+    const originalSpawn = bridge.spawnOrAttach.bind(bridge);
+    const spawn = vi
+      .spyOn(bridge, 'spawnOrAttach')
+      .mockImplementation(async (req) => ({
+        ...(await originalSpawn(req)),
+        modelApplied: false,
+      }));
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 429,
+      method: 'session/new',
+      params: { modelServiceId: 'selected-model(openai)' },
+    });
+    const [frame] = (await got) as Array<{
+      result: Record<string, unknown>;
+    }>;
+    expect(frame.result).toMatchObject({
+      sessionId: 'sess-1',
+      modelApplied: false,
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelServiceId: 'selected-model(openai)',
+      }),
+    );
+  });
+
+  it.each([42, '', ' ', 'x'.repeat(257), 'bad\nmodel'])(
+    'session/new rejects an invalid legacy model selection (%s) without spawning',
+    async (modelServiceId) => {
+      const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 429,
+        method: 'session/new',
+        params: { modelServiceId },
+      });
+      const [frame] = (await got) as Array<{
+        error: { code: number; message: string };
+      }>;
+      expect(frame.error).toMatchObject({ code: -32602 });
+      expect(frame.error.message).toContain('invalid modelServiceId');
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('session/new rejects an invalid approval mode without spawning', async () => {
+    const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 429,
+      method: 'session/new',
+      params: { approvalMode: 'bypass-all-checks' },
+    });
+    const [frame] = (await got) as Array<{
+      error: { code: number; message: string };
+    }>;
+    expect(frame.error).toMatchObject({ code: -32602 });
+    expect(frame.error.message).toContain('invalid approvalMode');
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('session/new forwards startup selection and returns its actual confirmation', async () => {
@@ -10117,6 +10356,142 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         kind: 'workflow',
         context: { clientId: 'client-1', fromLoopback: true },
       });
+    });
+
+    it('_qwen/session/tasks/cancel forwards cron cancellation and trusted client context', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 68,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'cron-1',
+          kind: 'cron',
+          clientId: 'forged-client',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+      expect(bridge.lastCancelledTask).toEqual({
+        sessionId: 'sess-1',
+        taskId: 'cron-1',
+        kind: 'cron',
+        context: { clientId: 'client-1', fromLoopback: true },
+      });
+    });
+
+    it.each(['wakeup', 'cron'] as const)(
+      '_qwen/session/tasks/cancel forwards an explicit %s source',
+      async (source) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 69,
+          method: '_qwen/session/tasks/cancel',
+          params: {
+            sessionId: 'sess-1',
+            taskId: 'shared-cron',
+            kind: 'cron',
+            source,
+            clientId: 'forged-client',
+          },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+        expect(bridge.lastCancelledTask).toEqual({
+          sessionId: 'sess-1',
+          taskId: 'shared-cron',
+          kind: 'cron',
+          context: { clientId: 'client-1', fromLoopback: true },
+          source,
+        });
+      },
+    );
+
+    it('_qwen/session/tasks/cancel rejects an unknown cron source without executing the bridge', async () => {
+      const cancel = vi.spyOn(bridge, 'cancelSessionTask');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 71,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'shared-cron',
+          kind: 'cron',
+          source: 'bogus',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+        },
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      cancel.mockRestore();
+    });
+
+    it('_qwen/session/tasks/cancel rejects non-cron invalid source without executing the bridge', async () => {
+      const cancel = vi.spyOn(bridge, 'cancelSessionTask');
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: '_qwen/session/tasks/cancel',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'task-1',
+          kind: 'agent',
+          source: 'wakeup',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`source` is valid only for kind "cron"',
+        },
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      cancel.mockRestore();
     });
 
     it('_qwen/session/tasks/workflow_action forwards the action result and trusted client context', async () => {

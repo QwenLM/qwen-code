@@ -14,16 +14,23 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -92,7 +99,7 @@ final class AgentMessageProjection {
         long covered = ((Number) progress.get("covered_sequence")).longValue();
         int projection = ((Number) progress.get("projection_version")).intValue();
         if (covered < ((Number) progress.get("replay_floor_sequence")).longValue()
-                || (!backward && org.apache.commons.lang3.StringUtils.isBlank(cursor)
+                || (!backward && StringUtils.isBlank(cursor)
                 && covered < ((Number) progress.get("last_sequence")).longValue())) {
             throw new ManagedAgentException(503, "message_projection_pending",
                     "Retry after pending messages have been projected.");
@@ -100,10 +107,10 @@ final class AgentMessageProjection {
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         MessagePosition position = new MessagePosition(1, scope, backward, projection, covered,
                 backward ? covered + 1 : -1, "");
-        if (org.apache.commons.lang3.StringUtils.isNotBlank(cursor)) {
+        if (StringUtils.isNotBlank(cursor)) {
             position = messagePosition(cursor, scope, backward, covered, projection);
         }
-        boolean numericBoundary = afterSequence > 0 && org.apache.commons.lang3.StringUtils.isBlank(cursor);
+        boolean numericBoundary = afterSequence > 0 && StringUtils.isBlank(cursor);
         List<MessageSize> candidates = MessagePageCandidates.find(jdbc, tenantId, sessionId,
                 position, numericBoundary, afterSequence, limit);
         long bytes = 0;
@@ -180,7 +187,7 @@ final class AgentMessageProjection {
                 throw new IllegalArgumentException();
             }
             MessagePosition position = objectMapper.readValue(
-                    java.util.Base64.getUrlDecoder().decode(cursor), MessagePosition.class);
+                    Base64.getUrlDecoder().decode(cursor), MessagePosition.class);
             if (position.version() != 1 || !scope.equals(position.scope()) || position.backward() != backward
                     || position.projection() < 1 || position.through() < 0 || position.sequence() < 0
                     || position.sequence() > position.through() || position.item() == null
@@ -195,7 +202,7 @@ final class AgentMessageProjection {
                 throw new IllegalArgumentException();
             }
             return position;
-        } catch (java.io.IOException | IllegalArgumentException invalid) {
+        } catch (IOException | IllegalArgumentException invalid) {
             throw new ManagedAgentException(400, "invalid_message_cursor",
                     "The message cursor is invalid for this Session and direction.");
         }
@@ -203,9 +210,9 @@ final class AgentMessageProjection {
 
     String messageCursor(MessagePosition position) {
         try {
-            return java.util.Base64.getUrlEncoder().withoutPadding()
+            return Base64.getUrlEncoder().withoutPadding()
                     .encodeToString(objectMapper.writeValueAsBytes(position));
-        } catch (java.io.IOException failure) {
+        } catch (IOException failure) {
             throw new IllegalStateException("Message cursor serialization failed.", failure);
         }
     }
@@ -268,7 +275,7 @@ final class AgentMessageProjection {
         return jdbc.query(
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = ''"
-                    + " AND s.covered_sequence > s.replay_floor_sequence"
+                    + " AND s.is_replay_floor_pending = TRUE"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
@@ -443,7 +450,7 @@ final class AgentMessageProjection {
                 "SELECT item_id, parts_json, body_resource_ref FROM ma_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND turn_id = ? AND item_role = 'assistant' AND"
                         + " item_type = 'message' FOR UPDATE",
-                (org.springframework.jdbc.core.RowCallbackHandler)
+                (RowCallbackHandler)
                         row -> {
                             var retained =
                                     new ArrayList<>(
@@ -489,8 +496,8 @@ final class AgentMessageProjection {
             var entry = iterator.next();
             List<ItemPartRecord> retained = entry.getValue();
             if (retained.isEmpty()) {
-                String ownerRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                String ownerRef = ManagedIdentityRefs.ref(
+                        ManagedIdentityRefs.OWNER_REF_BYTES,
                         tenantId, sessionId, entry.getKey());
                 ManagedProjectionResourceCollector.release(jdbc, tenantId, sessionId, "MESSAGE", ownerRef);
                 jdbc.update(
@@ -761,9 +768,9 @@ final class AgentMessageProjection {
         for (var entry : projectedParts.entrySet()) {
             String item = entry.getKey();
             byte[] bytes =
-                    storeRows.writeJson(entry.getValue()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            String ownerRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                    storeRows.writeJson(entry.getValue()).getBytes(StandardCharsets.UTF_8);
+            String ownerRef = ManagedIdentityRefs.ref(
+                    ManagedIdentityRefs.OWNER_REF_BYTES,
                     tenantId, sessionId, item);
             Map<String, Object> previous =
                     jdbc.queryForMap(
@@ -790,7 +797,7 @@ final class AgentMessageProjection {
                 String ownerHash = ManagedSchemaKeys.key(
                         ManagedSessionStore.sessionScopeKey(tenantId, sessionId), item);
                 String id = "message:" + ownerHash + ":" + revision + ":" + digest;
-                resource = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.resourceRef(tenantId, sessionId, id);
+                resource = ManagedIdentityRefs.resourceRef(tenantId, sessionId, id);
                 try {
                     jdbc.update(
                             "INSERT INTO ma_resource (tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
@@ -813,7 +820,7 @@ final class AgentMessageProjection {
                                                     && row.getInt("schema_version") == 1
                                                     && row.getLong("byte_length") == bytes.length
                                                     && digest.equals(row.getString("sha256"))
-                                                    && java.util.Arrays.equals(
+                                                    && Arrays.equals(
                                                             bytes, row.getBytes("inline_bytes"))
                                                     && "MYSQL_INLINE"
                                                             .equals(row.getString("storage_kind"))
@@ -855,7 +862,7 @@ final class AgentMessageProjection {
                             "UPDATE ma_message SET parts_json = ?, body_resource_ref = ?"
                                     + " WHERE tenant_id = ? AND session_id = ? AND item_id = ?",
                             resource == null
-                                    ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+                                    ? new String(bytes, StandardCharsets.UTF_8)
                                     : "[]",
                             resource == null ? null : ManagedSchemaKeys.identity(resource),
                             tenantId,
@@ -883,8 +890,8 @@ final class AgentMessageProjection {
         if (resourceRef == null) {
             return readParts(value);
         }
-        String resourceId = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(
-                resourceRef.getBytes(java.nio.charset.StandardCharsets.US_ASCII)).get(2);
+        String resourceId = ManagedIdentityRef.decode(
+                resourceRef.getBytes(StandardCharsets.US_ASCII)).get(2);
         List<byte[]> rows =
                 jdbc.query(
                         "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE"
@@ -908,13 +915,13 @@ final class AgentMessageProjection {
         if (rows.size() != 1) {
             throw new IllegalStateException("Message body resource is unavailable.");
         }
-        return readParts(new String(rows.getFirst(), java.nio.charset.StandardCharsets.UTF_8));
+        return readParts(new String(rows.getFirst(), StandardCharsets.UTF_8));
     }
 
     List<ItemPartRecord> readParts(String value) {
         try {
             return value == null ? List.of() : objectMapper.readValue(value, PARTS_TYPE);
-        } catch (java.io.IOException failure) {
+        } catch (IOException failure) {
             throw new IllegalStateException("Stored message parts are invalid.", failure);
         }
     }

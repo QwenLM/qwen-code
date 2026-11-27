@@ -74,7 +74,7 @@ export function collectToolCallIdsFromHistory(
 
 /**
  * Identity of a tool call for duplicate provider-id replay detection: the
- * same canonical (name, args) key the loop guards use, so "replay" means
+ * canonical (name, args) key of getToolCallRepeatKey, so "replay" means
  * the exact call the provider already saw answered — not merely a reused
  * id. Providers whose ids are only unique within a single response (e.g.
  * `{name}_{index}` schemes that restart at 0) legitimately reuse ids for

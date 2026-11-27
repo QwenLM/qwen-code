@@ -61,6 +61,25 @@ function mount(
 }
 
 describe('ChatContextHeader', () => {
+  it('uses the correct Russian singular label for one scheduled task', () => {
+    mount(
+      {
+        scheduledTaskCount: 1,
+        scheduledTaskActiveCount: 1,
+        scheduledTaskNextRunAt: Date.now() + 60_000,
+        onOpenScheduledTasks: vi.fn(),
+      },
+      'ru',
+    );
+    const button = container?.querySelector(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(button).not.toBeNull();
+    expect(button?.getAttribute('aria-label') ?? '').toContain(
+      'Задача по расписанию (1)',
+    );
+  });
+
   it('renders custom content inside the persistent action shell', () => {
     const view = mount({ content: <span>Custom header</span> });
 
@@ -371,5 +390,62 @@ describe('ChatContextHeader', () => {
       'Toggle right panel',
       'Artifacts (2)',
     ]);
+  });
+
+  it('shows the scheduled tasks entry with countdown or count and opens on click', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-01T08:00:00Z'));
+    const onOpenScheduledTasks = vi.fn();
+
+    const single = mount({
+      scheduledTaskCount: 1,
+      scheduledTaskActiveCount: 1,
+      scheduledTaskNextRunAt: Date.parse('2026-06-01T08:05:00Z'),
+      onOpenScheduledTasks,
+    });
+    const singleButton = single.querySelector<HTMLButtonElement>(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(singleButton).not.toBeNull();
+    expect(singleButton?.getAttribute('data-active')).toBe('true');
+    expect(singleButton?.textContent).toBe('5m');
+    expect(singleButton?.getAttribute('aria-label')).toContain('Next in 5m');
+    expect(singleButton?.getAttribute('title')).toContain('Next in 5m');
+    act(() => singleButton?.click());
+    expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+
+    const paused = mount({
+      scheduledTaskCount: 2,
+      scheduledTaskActiveCount: 0,
+      scheduledTaskNextRunAt: null,
+      onOpenScheduledTasks,
+    });
+    const pausedButton = paused.querySelector<HTMLButtonElement>(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(pausedButton?.getAttribute('data-active')).toBe('false');
+    expect(pausedButton?.textContent).toBe('2');
+
+    const due = mount({
+      scheduledTaskCount: 1,
+      scheduledTaskActiveCount: 1,
+      scheduledTaskNextRunAt: Date.parse('2026-06-01T08:00:00Z'),
+      onOpenScheduledTasks,
+    });
+    const dueEntry = due.querySelector(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(dueEntry?.getAttribute('aria-label')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).not.toContain('Next in Due now');
+
+    const empty = mount({
+      scheduledTaskCount: 0,
+      scheduledTaskActiveCount: 0,
+      onOpenScheduledTasks,
+    });
+    expect(
+      empty.querySelector('[data-web-shell-scheduled-tasks-entry]'),
+    ).toBeNull();
   });
 });

@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -248,7 +247,7 @@ class UnknownExecutionObservationTest {
         private final ToolExecutionRepository executions;
         private final RuntimeBindingRepository bindings;
         private final RuntimeBrokerService service;
-        private final RuntimeBrokerHttpServer server;
+        private final RuntimeBrokerHttpControllerTestFixture server;
 
         private Fixture() throws Exception {
             var source = new JdbcDataSource();
@@ -266,13 +265,12 @@ class UnknownExecutionObservationTest {
                     new JdbcRuntimeSessionRepository(source),
                     executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
-            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
-                    "secret", service);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
             server.start();
         }
 
         private URI uri(String path) {
-            return server.getBaseUri().resolve(RuntimeBrokerHttpServer.ROUTE_PREFIX + path);
+            return server.getBaseUri().resolve(RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + path);
         }
 
         private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
@@ -284,7 +282,7 @@ class UnknownExecutionObservationTest {
         }
 
         @Override
-        public void close() {
+        public void close() throws Exception {
             server.close();
             client.close();
         }

@@ -29,12 +29,22 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   readSync,
   realpathSync,
   statSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  resolve,
+  sep,
+} from 'node:path';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -102,10 +112,19 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
   - boundary.json declares where the untrusted PR code ran: mode container
     with a non-empty detail, backed by the boundary-gate.json record a passing
-    --require-isolation --artifact-dir gate run wrote, or mode waived with the
-    approving maintainer (by), a permalink to the approval comment (approval)
-    and the reason; a round without the declaration is refused. When the
-    snapshot carries repo and pr, the approval permalink must cite that PR.
+    --require-isolation --artifact-dir gate run wrote, or a VM/waived
+    executionApproval written by prepare. Local-trust records carry source,
+    basis, authenticated by/permission, head and round without a public URL;
+    comment approvals carry the validated permalink and comment metadata.
+    Both must deeply equal the host-held --context executionApproval, bind
+    its bytes with --context-sha256, and match the trusted head; prepare has
+    already registered comment approvals to an in-flight head and round.
+    Host/VM publication requires a valid owner/repo slug and positive pr or
+    number in that snapshot; the artifact name/context cannot fill either.
+    The approval permalink must cite that PR. This host-coordinate binding
+    also requires a real artifact directory, not a symlink or other
+    non-directory; pass the resolved path. A shape-only waiver or a PR-side
+    record alone is refused.
     The CI publish job's own ci-lane record is honored only under
     --publish-lane, the flag the publish job passes (an argv claim, not an
     authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
@@ -185,16 +204,23 @@ export function isFilesystemRoot(root) {
   return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
 }
 
+const CASE_INSENSITIVE_FS =
+  process.platform === 'darwin' || process.platform === 'win32';
+const normalizeFsPath = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
+const realPath = (p) => realpathSync.native(p);
+
 // Root-aware containment. A filesystem root contains every path, so it must
 // fail closed rather than compare against '//' — no real path starts with
 // '//', which silently disabled the refusal for a round dir directly under a
 // root-level tmp/ (R17-1). Both the --context refusal and the --context-root
 // containment test use this so the two stay consistent.
 function withinRoot(root, p) {
+  if (isFilesystemRoot(root)) return true;
+  const normRoot = normalizeFsPath(root);
+  const normP = normalizeFsPath(p);
   return (
-    isFilesystemRoot(root) ||
-    p === root ||
-    p.startsWith(root.endsWith(sep) ? root : root + sep)
+    normP === normRoot ||
+    normP.startsWith(normRoot.endsWith(sep) ? normRoot : normRoot + sep)
   );
 }
 
@@ -318,7 +344,7 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     const observed = Array.isArray(gate.observed) ? gate.observed : [];
     if (observed.length === 0) {
       return [
-        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary — an attested VM uses mode:"vm" with the maintainer\'s approval',
+        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary; for host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration',
       ];
     }
     if (gate.credentialFree !== true) {
@@ -499,12 +525,12 @@ export function containerNonceErrors(boundaryText, gateText, roundDir) {
     if (found) return [];
     if (bounded) {
       return [
-        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
       ];
     }
   }
   return [
-    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
   ];
 }
 
@@ -922,7 +948,7 @@ export function checkBoundary(
   if (text === null || text === undefined || text.trim() === '') {
     return {
       errors: [
-        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"approval":…,"reason":…} for a host round the maintainer explicitly approved',
+        'boundary.json is missing: every round declares where the untrusted PR code ran — for a container, write {"mode":"container","detail":…} only after the isolation gate passes; for host/VM execution, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments before the battery instead of hand-writing a declaration',
       ],
     };
   }
@@ -960,6 +986,16 @@ export function checkBoundary(
   if (parsed.mode === 'container') {
     const gateErrors = gateRecordErrors(gateText, { publishLane });
     if (gateErrors.length > 0) return { errors: gateErrors };
+    if (
+      parsed.executionClass !== undefined &&
+      parsed.executionClass !== 'trusted-shared-kernel'
+    ) {
+      return {
+        errors: [
+          `boundary.json mode container cannot declare executionClass=${JSON.stringify(parsed.executionClass)} (must be "trusted-shared-kernel")`,
+        ],
+      };
+    }
     if (executionRecord) {
       if (executionRecord.executionClass !== 'trusted-shared-kernel') {
         return {
@@ -1039,10 +1075,10 @@ export function checkBoundary(
   // A waived host round and an attested VM both run outside an observed
   // container boundary, so both need the maintainer's recorded approval.
   // The VM additionally records what the operator attested (nothing mounted).
-  if (parsed.mode === 'waived' && executionRecord) {
+  if ((parsed.mode === 'waived' || parsed.mode === 'vm') && executionRecord) {
     return {
       errors: [
-        'boundary.json mode waived contradicts a host --execution-record',
+        `boundary.json mode ${parsed.mode} contradicts a host --execution-record`,
       ],
     };
   }
@@ -1075,7 +1111,10 @@ export function checkBoundary(
       ],
     };
   }
-  if (approvalMode) {
+  // A local trusted-head declaration has no public comment permalink. Its
+  // host-held executionApproval record is mandatory at the CLI check below;
+  // this pure shape check does not admit that record on its own.
+  if (approvalMode && parsed.source !== 'local-trust') {
     const match = APPROVAL_PERMALINK.exec(parsed.approval ?? '');
     if (!match) {
       return {
@@ -1102,6 +1141,143 @@ export function checkBoundary(
   // `by` is a recorded claim, not an identity the checker can verify; the
   // approval permalink and the maintainer's review are the enforcement there.
   return { errors: [] };
+}
+
+/** Validates a VM/host declaration against prepare's host-held approval. */
+export function executionApprovalErrors(
+  boundaryText,
+  snapshot,
+  {
+    contextProvided = false,
+    contextDigestVerified = false,
+    boundaryUnreadable = false,
+  } = {},
+) {
+  const hasSnapshotApproval =
+    snapshot?.executionApproval &&
+    typeof snapshot.executionApproval === 'object' &&
+    !Array.isArray(snapshot.executionApproval);
+  if (
+    hasSnapshotApproval &&
+    !boundaryUnreadable &&
+    (!boundaryText || !boundaryText.trim())
+  ) {
+    return [
+      `host --context carries a preflight executionApproval for mode ${JSON.stringify(snapshot.executionApproval.mode)}, but artifact boundary.json is missing or empty`,
+    ];
+  }
+  let declared;
+  try {
+    declared = JSON.parse(boundaryText ?? '');
+  } catch {
+    return [];
+  }
+  if (
+    hasSnapshotApproval &&
+    (declared?.mode === 'container' ||
+      declared?.mode === 'microvm' ||
+      (declared?.mode === 'vm' && declared?.backend === 'provider-vm'))
+  ) {
+    const modeLabel =
+      declared.mode === 'vm' ? 'vm (provider-vm)' : declared.mode;
+    return [
+      `host --context carries a preflight executionApproval for mode ${JSON.stringify(snapshot.executionApproval.mode)}, which contradicts boundary.json mode ${modeLabel}; re-run prepare for the actual execution mode instead of rewriting boundary.json`,
+    ];
+  }
+  if (
+    !declared ||
+    !['vm', 'waived'].includes(declared.mode) ||
+    (declared.mode === 'vm' && declared.backend === 'provider-vm')
+  ) {
+    return [];
+  }
+  if (!contextProvided) {
+    return [
+      `boundary.json mode ${declared.mode} needs the host-held --context snapshot containing prepare's executionApproval`,
+    ];
+  }
+  if (!contextDigestVerified) {
+    return [
+      `boundary.json mode ${declared.mode} needs --context-sha256 matching the host snapshot's bytes so its executionApproval predates publication`,
+    ];
+  }
+  const approval = snapshot?.executionApproval;
+  if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
+    return [
+      'the trusted --context snapshot has no executionApproval object; prepare must approve this VM/host execution before artifacts are created',
+    ];
+  }
+  const stringFields = [
+    'mode',
+    'source',
+    'by',
+    'basis',
+    'permission',
+    'head',
+    'reason',
+  ];
+  if (
+    stringFields.some(
+      (field) => typeof approval[field] !== 'string' || !approval[field],
+    ) ||
+    !Number.isSafeInteger(approval.round) ||
+    approval.round <= 0 ||
+    !['vm', 'waived'].includes(approval.mode) ||
+    !/^[0-9a-f]{40}$/.test(approval.head) ||
+    !['admin', 'maintain', 'write'].includes(approval.permission) ||
+    (approval.mode === 'vm' &&
+      (typeof approval.attestation !== 'string' || !approval.attestation))
+  ) {
+    return [
+      'executionApproval must carry non-empty mode/source/by/basis/permission/head/reason, a valid round and permission, and VM attestation',
+    ];
+  }
+  if (approval.source === 'local-trust') {
+    const eligible =
+      (approval.basis === 'own-pr' &&
+        snapshot?.author?.login === approval.by) ||
+      (approval.basis === 'same-repository' &&
+        snapshot?.isCrossRepository === false);
+    if (!eligible) {
+      return [
+        'local-trust executionApproval does not match this snapshot: own-pr requires by == author.login; same-repository requires isCrossRepository == false',
+      ];
+    }
+  } else if (approval.source === 'comment') {
+    if (
+      approval.basis !== 'maintainer-comment' ||
+      !APPROVAL_PERMALINK.test(approval.approval ?? '') ||
+      !Number.isSafeInteger(approval.comment?.id) ||
+      approval.comment.id <= 0 ||
+      !/^[0-9a-f]{64}$/.test(approval.comment?.bodySha256 ?? '') ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        approval.registrationNonce ?? '',
+      )
+    ) {
+      return [
+        'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id, 64-hex comment.bodySha256 and its registrationNonce',
+      ];
+    }
+  } else {
+    return [
+      'executionApproval source must be local-trust or comment, with its matching basis',
+    ];
+  }
+  const errors = [];
+  if (
+    approval.mode !== declared.mode ||
+    approval.head !== snapshot?.headRefOid
+  ) {
+    errors.push(
+      'executionApproval mode/head does not match the declaration and trusted headRefOid; a moved head needs a fresh approval',
+    );
+  }
+  if (!isDeepStrictEqual(approval, declared)) {
+    errors.push(
+      'boundary.json differs from the host-held executionApproval; restore the declaration prepare wrote instead of editing the PR-side copy',
+    );
+  }
+  return errors;
 }
 
 // GitHub renders CRLF and LF identically, so a Windows-authored artifact
@@ -1509,6 +1685,18 @@ export function checkArtifacts({
     });
     errors.push(...execCheck.errors);
     executionRecord = execCheck.record;
+    if (
+      executionRecord &&
+      trustClassification &&
+      typeof trustClassification === 'object' &&
+      typeof trustClassification.prTrust === 'string' &&
+      trustClassification.prTrust &&
+      executionRecord.prTrust !== trustClassification.prTrust
+    ) {
+      errors.push(
+        `execution-record.json prTrust (${JSON.stringify(executionRecord.prTrust)}) does not match host trustClassification.prTrust (${JSON.stringify(trustClassification.prTrust)})`,
+      );
+    }
   }
 
   if (
@@ -1534,7 +1722,7 @@ export function checkArtifacts({
     files.boundary.trim() === '';
   if (unreadableKeys.has('boundary')) {
     // The declaration itself is unreadable; already reported.
-  } else if (publisherOwnsBoundary && boundaryAbsent) {
+  } else if (publisherOwnsBoundary && boundaryAbsent && !executionRecord) {
     warnings.push(
       'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job (CI lane) or the host check step (container recipe) writes the declaration before the verdict is trusted',
     );
@@ -1772,15 +1960,207 @@ function main(argv) {
     process.stderr.write(`verify-pr check: ${dir} does not exist\n`);
     return 1;
   }
+  const PATH_SEP_RE = process.platform === 'win32' ? /[\\/]+/ : /\/+/;
+  const TRAILING_PATH_SEP_RE =
+    process.platform === 'win32' ? /[\\/]+$/ : /\/+$/;
+  const ENDS_WITH_PATH_SEP_RE = process.platform === 'win32' ? /[\\/]$/ : /\/$/;
+  const dirTrimmed =
+    process.platform === 'win32' && /^[A-Za-z]:[\\/]+$/.test(dir)
+      ? `${dir.slice(0, 2)}${sep}`
+      : dir.length > 1 && !isFilesystemRoot(dir)
+        ? dir.replace(TRAILING_PATH_SEP_RE, '') || dir
+        : dir;
+  let canonicalDir;
+  try {
+    canonicalDir = realPath(dirTrimmed);
+  } catch (error) {
+    process.stderr.write(
+      `verify-pr check: could not resolve artifact directory ${dir}: ${error.message}\n`,
+    );
+    return 1;
+  }
+  const dirPrNumber = /^pr(\d+)-verify-/i.exec(basename(canonicalDir))?.[1];
+
+  // Walk the raw OS path once without lexically collapsing symlink/.. so we
+  // observe: (1) whether any symlink along the path resolved directly to
+  // canonicalDir (blocking <symlink>, <symlink>/., <symlink>/evidence/..), and
+  // (2) every traversed "tmp" container (case-insensitive on darwin/win32)
+  // whose subtree encloses canonicalDir or whose direct symlink child targets
+  // canonicalDir.
+  const inspectArtifactPath = () => {
+    try {
+      const roots = new Set([canonicalDir]);
+      const canonicalParent = dirname(canonicalDir);
+      const normCanonicalDir = normalizeFsPath(canonicalDir);
+      const normCanonicalParent = normalizeFsPath(canonicalParent);
+      const isTmpName = (p) => normalizeFsPath(basename(p)) === 'tmp';
+      const isSystemTmpDir = (p) => {
+        const norm = normalizeFsPath(p);
+        if (
+          norm === '/tmp' ||
+          norm === '/private/tmp' ||
+          norm === '/var/tmp' ||
+          norm === '/private/var/tmp'
+        ) {
+          return true;
+        }
+        return isTmpName(p) && isFilesystemRoot(dirname(p));
+      };
+      let leafSymlink = false;
+      let sawVerifyRoundSegment = Boolean(dirPrNumber);
+
+      const splitSegments = (p) => {
+        const parsed = parse(p);
+        const rest = p.slice(parsed.root.length);
+        return {
+          root: parsed.root,
+          parts: rest.split(PATH_SEP_RE).filter((part) => part !== ''),
+        };
+      };
+      const rawSpec = isAbsolute(dirTrimmed)
+        ? splitSegments(dirTrimmed)
+        : (() => {
+            const cwdSpec = splitSegments(process.cwd());
+            const relParts = dirTrimmed
+              .split(PATH_SEP_RE)
+              .filter((part) => part !== '');
+            return {
+              root: cwdSpec.root,
+              parts: [...cwdSpec.parts, ...relParts],
+            };
+          })();
+
+      const queue = [...rawSpec.parts];
+      let cur = rawSpec.root;
+      let linkHops = 0;
+      const anchorPaths = [];
+      const matchesDirectSystemTmp = (resolved) => {
+        const norm = normalizeFsPath(resolved);
+        return norm === normCanonicalParent || norm === normCanonicalDir;
+      };
+      const encloseInnermostTmp = (startPath) => {
+        let probe = startPath;
+        while (probe && !isFilesystemRoot(probe)) {
+          if (isTmpName(probe)) {
+            let cloneReal;
+            try {
+              cloneReal = realPath(dirname(probe));
+            } catch {
+              return;
+            }
+            // Skip a "tmp" subdirectory that lives inside canonicalDir itself
+            // (e.g. <round>/tmp/..), and continue climbing to the enclosing
+            // clone's tmp container.
+            if (withinRoot(canonicalDir, cloneReal)) {
+              const next = dirname(probe);
+              if (next === probe) break;
+              probe = next;
+              continue;
+            }
+            if (isSystemTmpDir(probe)) {
+              let sysReal;
+              try {
+                sysReal = realPath(probe);
+              } catch {
+                return;
+              }
+              if (matchesDirectSystemTmp(sysReal)) {
+                roots.add(parse(sysReal).root);
+                roots.add(sysReal);
+              }
+              return;
+            }
+            // Non-system "tmp" container (e.g. <clone>/tmp): always enclose its
+            // parent clone root (<clone>), even if <clone>/tmp is a symlink to
+            // /tmp, /var/tmp, or inside canonicalDir.
+            roots.add(cloneReal);
+            try {
+              const tmpReal = realPath(probe);
+              if (!isSystemTmpDir(tmpReal)) {
+                roots.add(tmpReal);
+              } else if (matchesDirectSystemTmp(tmpReal)) {
+                roots.add(parse(tmpReal).root);
+                roots.add(tmpReal);
+              }
+            } catch {
+              // Unresolvable symlink target still keeps cloneReal enclosed.
+            }
+            return;
+          }
+          const next = dirname(probe);
+          if (next === probe) break;
+          probe = next;
+        }
+      };
+
+      while (queue.length > 0) {
+        const part = queue.shift();
+        if (part === '.') continue;
+        if (part === '..') {
+          if (isTmpName(cur)) anchorPaths.push(cur);
+          cur = dirname(cur);
+        } else {
+          cur = ENDS_WITH_PATH_SEP_RE.test(cur)
+            ? `${cur}${part}`
+            : `${cur}${sep}${part}`;
+        }
+        if (/^pr(\d+)-verify-/i.test(basename(cur))) {
+          sawVerifyRoundSegment = true;
+        }
+        const st = lstatSync(cur);
+        if (st.isSymbolicLink()) {
+          linkHops += 1;
+          if (linkHops > 40) {
+            return {
+              error: `could not resolve artifact directory ${dir}: too many symlink hops`,
+            };
+          }
+          // Anchor the current path domain at the symlink itself before
+          // crossing it; looking up the innermost tmp ancestor from `cur`
+          // avoids dead-end decoy/tmp/.. pollution.
+          anchorPaths.push(cur);
+          try {
+            const linkTargetReal = realPath(cur);
+            if (withinRoot(canonicalDir, linkTargetReal)) {
+              leafSymlink = true;
+            }
+          } catch {
+            // Broken intermediate link will fail below when traversed.
+          }
+          const target = readlinkSync(cur);
+          if (isAbsolute(target)) {
+            const targetSpec = splitSegments(target);
+            cur = targetSpec.root;
+            queue.unshift(...targetSpec.parts);
+          } else {
+            cur = dirname(cur);
+            const relTarget = target.split(PATH_SEP_RE).filter((p) => p !== '');
+            queue.unshift(...relTarget);
+          }
+        }
+      }
+
+      if (sawVerifyRoundSegment) {
+        encloseInnermostTmp(canonicalDir);
+        for (const anchor of anchorPaths) {
+          encloseInnermostTmp(anchor);
+        }
+      }
+      return { roots: [...roots], leafSymlink };
+    } catch (error) {
+      return {
+        error: `could not resolve artifact directory ${dir}: ${error.message}`,
+      };
+    }
+  };
+  const pathInfo = inspectArtifactPath();
   // A --context-root must resolve to a directory containing the artifact
   // dir; a root no path can be inside would disable the refusal entirely
   // (R15 R14-1). Validate it whenever supplied, not only with --context.
   if (contextRoot) {
     let realRoot;
-    let realDir;
     try {
-      realRoot = realpathSync(contextRoot);
-      realDir = realpathSync(dir);
+      realRoot = realPath(contextRoot);
     } catch {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} must resolve to a directory\n\n${HELP}`,
@@ -1797,7 +2177,7 @@ function main(argv) {
       );
       return 2;
     }
-    if (!withinRoot(realRoot, realDir)) {
+    if (!withinRoot(realRoot, canonicalDir)) {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
       );
@@ -1805,14 +2185,17 @@ function main(argv) {
     }
   }
 
+  // Read every artifact from canonicalDir (OS-resolved realpath) rather than
+  // lexically-collapsed path.join(dir, ...) so symlink/.. paths never split
+  // trust-root derivation from artifact reads.
   const files = {
-    report: readIfExists(join(dir, 'report.md')),
-    verdict: readIfExists(join(dir, 'verdict.txt')),
-    assertions: readIfExists(join(dir, 'assertions.json')),
-    mutations: readIfExists(join(dir, 'mutations.json')),
-    comment: readIfExists(join(dir, 'comment.md')),
-    boundary: readIfExists(join(dir, 'boundary.json')),
-    boundaryGate: readIfExists(join(dir, 'boundary-gate.json')),
+    report: readIfExists(join(canonicalDir, 'report.md')),
+    verdict: readIfExists(join(canonicalDir, 'verdict.txt')),
+    assertions: readIfExists(join(canonicalDir, 'assertions.json')),
+    mutations: readIfExists(join(canonicalDir, 'mutations.json')),
+    comment: readIfExists(join(canonicalDir, 'comment.md')),
+    boundary: readIfExists(join(canonicalDir, 'boundary.json')),
+    boundaryGate: readIfExists(join(canonicalDir, 'boundary-gate.json')),
   };
   // An unreadable artifact is a refusal, not an absent one: a damaged
   // mutations.json must not silently drop its coverage check.
@@ -1839,7 +2222,7 @@ function main(argv) {
       files[key] = null;
     }
   }
-  const evidenceDir = join(dir, 'evidence');
+  const evidenceDir = join(canonicalDir, 'evidence');
   let evidence = [];
   let evidenceUnreadable = false;
   if (existsSync(evidenceDir)) {
@@ -1870,9 +2253,11 @@ function main(argv) {
   // the artifact directory is writable by the PR code the round executed,
   // so its own context.json must not supply the coordinates that judge its
   // waiver. Without a trusted snapshot only the URL shape is checkable.
-  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
   const coordinatesFrom = (snapshot) => {
-    const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
+    const repoMatch =
+      typeof snapshot?.repo === 'string'
+        ? /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot.repo)
+        : null;
     const pr =
       Number.isInteger(snapshot?.pr) && snapshot.pr > 0 ? snapshot.pr : null;
     // The number must come from the trusted snapshot, never the artifact
@@ -1888,7 +2273,22 @@ function main(argv) {
       ? { owner: repoMatch[1], repo: repoMatch[2], number }
       : null;
   };
+  const deriveTrustRoots = () => {
+    if (contextRoot) {
+      try {
+        return { roots: [realPath(contextRoot)] };
+      } catch (error) {
+        return {
+          error: `could not resolve --context-root ${contextRoot}: ${error.message}`,
+        };
+      }
+    }
+    if (pathInfo.error) return { error: pathInfo.error };
+    return { roots: pathInfo.roots };
+  };
   let coordinates = null;
+  let trustedSnapshot = null;
+  let contextDigestVerified = false;
   let expectedBase = null;
   let hostContextSha256 = null;
   let requiredExecutionClass = null;
@@ -1903,7 +2303,7 @@ function main(argv) {
     // being followed (R12-1).
     let realContext;
     try {
-      realContext = realpathSync(contextPath);
+      realContext = realPath(contextPath);
     } catch {
       realContext = resolve(contextPath);
     }
@@ -1924,17 +2324,16 @@ function main(argv) {
     // --context-root was validated above (contains the artifact dir). The
     // fallback root is the clone root for a pr<n>-verify-<ts> dir under tmp/
     // (the tmp container's parent), or the dir itself for a plain fixture.
-    let trustRoot;
-    if (contextRoot) {
-      trustRoot = realpathSync(contextRoot);
-    } else {
-      const container = dirname(resolve(dir));
-      trustRoot =
-        dirPrNumber && basename(container) === 'tmp'
-          ? realpathSync(dirname(container))
-          : realpathSync(dir);
+    const derivedRoots = deriveTrustRoots();
+    if (derivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${derivedRoots.error}\n`);
+      return 1;
     }
-    const insideByPath = withinRoot(trustRoot, realContext);
+    const matchedRoot =
+      derivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      derivedRoots.roots.find((root) => withinRoot(root, realContext)) ??
+      null;
+    const insideByPath = matchedRoot !== null;
     // A hard link gives a PR-writable file a second name outside the trust
     // root; realpath cannot see the source name, but a freshly written host
     // copy has exactly one link, so a link count above one means the context
@@ -1962,14 +2361,14 @@ function main(argv) {
       let reason;
       if (contextIsAlias) {
         reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
-      } else if (isFilesystemRoot(trustRoot)) {
+      } else if (isFilesystemRoot(matchedRoot)) {
         // Only the derived root reaches here: an explicit filesystem-root
         // --context-root is already a usage error at the containment gate
         // (R2-2). The artifact dir sits directly under root-level tmp/ and no
         // PR clone can contain it, so the remedy is to move it, not to pass
         // --context-root (which would only trade this refusal for a containment
         // error, R1-4).
-        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${matchedRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
       } else {
         reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
       }
@@ -1997,6 +2396,7 @@ function main(argv) {
         );
         return 1;
       }
+      contextDigestVerified = true;
     } else {
       // Disclose that provenance was never bound, rather than letting a clean
       // path/link check read as proof the host wrote the snapshot (deferred).
@@ -2015,6 +2415,7 @@ function main(argv) {
           expectedHead = snapshot.headRefOid;
           snapshotPath = contextPath;
         }
+        trustedSnapshot = snapshot;
         coordinates = coordinatesFrom(snapshot);
         const tc = snapshot?.trustClassification;
         if (tc !== undefined) {
@@ -2042,11 +2443,11 @@ function main(argv) {
     // The eighth read from the PR-writable directory gets the same lstat
     // guard as the other seven: a planted FIFO at context.json must refuse
     // with a warning, not block open(2) forever (R11-3).
-    snapshotPath = join(dir, 'context.json');
+    snapshotPath = join(canonicalDir, 'context.json');
     let snapshotText = readIfExists(snapshotPath);
     if (snapshotText === null && dirPrNumber) {
       snapshotPath = join(
-        dirname(resolve(dir)),
+        dirname(canonicalDir),
         'verify-context',
         `pr${dirPrNumber}.json`,
       );
@@ -2075,21 +2476,20 @@ function main(argv) {
   if (executionRecordPath) {
     let realExecRecord;
     try {
-      realExecRecord = realpathSync(executionRecordPath);
+      realExecRecord = realPath(executionRecordPath);
     } catch {
       realExecRecord = resolve(executionRecordPath);
     }
-    let execTrustRoot;
-    if (contextRoot) {
-      execTrustRoot = realpathSync(contextRoot);
-    } else {
-      const container = dirname(resolve(dir));
-      execTrustRoot =
-        dirPrNumber && basename(container) === 'tmp'
-          ? realpathSync(dirname(container))
-          : realpathSync(dir);
+    const execDerivedRoots = deriveTrustRoots();
+    if (execDerivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${execDerivedRoots.error}\n`);
+      return 1;
     }
-    const execInsideByPath = withinRoot(execTrustRoot, realExecRecord);
+    const execMatchedRoot =
+      execDerivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      execDerivedRoots.roots.find((root) => withinRoot(root, realExecRecord)) ??
+      null;
+    const execInsideByPath = execMatchedRoot !== null;
     let execIsAlias = false;
     let execLinks = 0;
     if (!execInsideByPath) {
@@ -2107,8 +2507,8 @@ function main(argv) {
       let reason;
       if (execIsAlias) {
         reason = `--execution-record ${executionRecordPath} is a hard link (${execLinks} names); copy it into launcher-owned storage instead of linking it`;
-      } else if (isFilesystemRoot(execTrustRoot)) {
-        reason = `--execution-record ${executionRecordPath} cannot be trusted under root-level trust root '${execTrustRoot}'`;
+      } else if (isFilesystemRoot(execMatchedRoot)) {
+        reason = `--execution-record ${executionRecordPath} cannot be trusted under root-level trust root '${execMatchedRoot}'`;
       } else {
         reason = `--execution-record must not point inside the PR-writable worktree (${executionRecordPath}): pass a host-held launcher record outside the artifact tree`;
       }
@@ -2140,7 +2540,7 @@ function main(argv) {
 
   // Refuse a guest-planted execution-record.json inside the PR-writable artifact dir (D5/D9).
   // Only ENOENT confirms absence; EACCES/ENOTDIR must fail closed.
-  const plantedExecRecordPath = join(dir, 'execution-record.json');
+  const plantedExecRecordPath = join(canonicalDir, 'execution-record.json');
   try {
     lstatSync(plantedExecRecordPath);
     unreadableErrors.push(
@@ -2174,6 +2574,90 @@ function main(argv) {
     requiredExecutionClass,
     trustClassification,
   });
+  let executionMode = null;
+  try {
+    const parsedBoundary = JSON.parse(files.boundary ?? '');
+    if (
+      parsedBoundary?.mode === 'waived' ||
+      (parsedBoundary?.mode === 'vm' &&
+        parsedBoundary?.backend !== 'provider-vm')
+    ) {
+      executionMode = parsedBoundary.mode;
+    }
+  } catch {
+    // The artifact-shape check reports malformed declarations.
+  }
+  if (contextPath && executionMode && !coordinates) {
+    result.errors.push(
+      `boundary.json mode ${executionMode} needs trusted repo and positive PR coordinates in --context (a valid owner/repo slug and pr/number); neither the artifact basename nor artifact context.json can supply missing identity`,
+    );
+  }
+  if (contextPath && coordinates) {
+    const preflightBound = trustedSnapshot?.executionApproval !== undefined;
+    if (preflightBound) {
+      const artifactContextText = readIfExists(
+        join(canonicalDir, 'context.json'),
+      );
+      let artifactCoordinates = null;
+      if (artifactContextText !== null && artifactContextText !== UNREADABLE) {
+        try {
+          const artifactSnapshot = JSON.parse(artifactContextText);
+          artifactCoordinates = coordinatesFrom({
+            repo: artifactSnapshot?.repo,
+            pr: artifactSnapshot?.pr,
+          });
+        } catch {
+          // An unusable artifact-only context supplies no trusted coordinates.
+        }
+      }
+      if (!artifactCoordinates) {
+        result.errors.push(
+          'artifact context.json must provide the same repo and PR coordinates as the host-held execution approval; a missing, unreadable, malformed, or coordinate-free artifact context cannot witness the PR round',
+        );
+      } else if (
+        artifactCoordinates.owner.toLowerCase() !==
+          coordinates.owner.toLowerCase() ||
+        artifactCoordinates.repo.toLowerCase() !==
+          coordinates.repo.toLowerCase() ||
+        artifactCoordinates.number !== coordinates.number
+      ) {
+        result.errors.push(
+          `artifact context.json identifies another repository or PR (${artifactCoordinates.owner}/${artifactCoordinates.repo}#${artifactCoordinates.number}), which conflicts with the trusted host snapshot for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; the artifact context is only a consistency witness, not an independent source of approval`,
+        );
+      }
+    }
+    let realArtifactDirectory = false;
+    try {
+      const rootStat = lstatSync(dirTrimmed);
+      realArtifactDirectory =
+        !pathInfo.error &&
+        !pathInfo.leafSymlink &&
+        rootStat.isDirectory() &&
+        !rootStat.isSymbolicLink();
+    } catch {
+      // The real-directory refusal below also covers an unreadable root.
+    }
+    if (!realArtifactDirectory) {
+      result.errors.push(
+        `artifact directory ${dir} must be a real directory, not a symbolic link or other non-directory, when --context supplies trusted PR coordinates; pass the resolved artifact directory path`,
+      );
+    } else if (preflightBound && !dirPrNumber) {
+      result.errors.push(
+        `artifact directory ${basename(canonicalDir)} does not name a PR in prepare's pr<N>-verify-* form; a host-held execution approval cannot be assigned to an unrelated round directory`,
+      );
+    } else if (dirPrNumber && Number(dirPrNumber) !== coordinates.number) {
+      result.errors.push(
+        `artifact directory ${basename(canonicalDir)} names PR ${dirPrNumber}, but the trusted host snapshot is for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; a host-held approval cannot be replayed into another PR's round directory`,
+      );
+    }
+  }
+  result.errors.push(
+    ...executionApprovalErrors(files.boundary, trustedSnapshot, {
+      contextProvided: !!contextPath,
+      contextDigestVerified,
+      boundaryUnreadable: unreadableKeys.has('boundary'),
+    }),
+  );
   // The container nonce corroboration (R16-1) needs the round dir to scan the
   // battery's logs, so it lives here rather than in checkArtifacts. It runs
   // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors
@@ -2183,7 +2667,7 @@ function main(argv) {
   // publisherOwnsBoundary still governs the absent-declaration tolerance in
   // checkArtifacts; it does not exempt the nonce binding.
   result.errors.push(
-    ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+    ...containerNonceErrors(files.boundary, files.boundaryGate, canonicalDir),
   );
   result.errors.unshift(...unreadableErrors);
   if (executionRecordWarning) result.warnings.unshift(executionRecordWarning);

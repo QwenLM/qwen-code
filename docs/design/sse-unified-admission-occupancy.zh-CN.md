@@ -267,7 +267,11 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   socket——并释放其槽位（槽位释放由主 listener 的 shutdown 测试与配对
   listener 的 disable 测试钉住；local-control 服务级测试钉住 `disable()`
   在不回应 close 的已升级对端上 settle；remote-access listener 共享同一
-  跟踪销毁释放路径）。
+  跟踪销毁释放路径；embed 已在 closing 的 force-close 路径以不回应 close
+  的已升级对端钉住）。daemon drain 对配对 teardown 采用 fire-and-forget：
+  两个服务的 close() 均销毁跟踪幸存者，故即使面对不回应 close 的配对对端
+  dispose 也会 promptly settle；进程退出是任何活过 drain 的 socket 的最终
+  兜底。
 
 ## 受影响文件
 
