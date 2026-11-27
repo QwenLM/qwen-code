@@ -816,7 +816,6 @@ export default {
   'Screen Reader Mode': '屏幕閱讀器模式',
   'Max Session Turns': '最大會話輪次',
   'Skip Next Speaker Check': '跳過下一個說話者檢查',
-  'Skip Loop Detection': '跳過循環檢測',
   'Skip Startup Context': '跳過啟動上下文',
   'Enable OpenAI Logging': '啟用 OpenAI 日誌',
   'OpenAI Logging Directory': 'OpenAI 日誌目錄',
@@ -2138,6 +2137,8 @@ export default {
     '運行 /context detail 查看詳細分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '顯示上下文窗口使用情況分解。輸入 "/context detail" 查看詳細分解。',
+  'Save the context window for the current model.':
+    '儲存目前模型的上下文窗口。',
   'body loaded': '內容已加載',
   memory: '記憶',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -2681,6 +2682,8 @@ export default {
     'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
   'Recommended models · provider list unavailable, showing built-ins':
     '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Could not list models. Enter model IDs manually.':
+    '無法取得模型清單，請手動輸入模型 ID。',
   'Sign out': '登出',
   'Signed in as {{email}}': '已登入 {{email}}',
   'Signed in successfully · {{email}}': '登入成功 · {{email}}',

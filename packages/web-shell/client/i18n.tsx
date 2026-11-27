@@ -19,6 +19,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_EN } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -2643,6 +2644,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.openWorkspaceTerminalFailed': 'Failed to open a terminal',
   'sidebar.openWorkspaceTerminalOpened': 'Opened a terminal at the workspace',
   'sidebar.manageWorkspace': 'Manage',
+  'sidebar.trustWorkspace': 'Trust workspace',
+  'sidebar.trustingWorkspace': 'Trusting…',
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
@@ -2679,6 +2682,13 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Manage ${v?.facet ?? ''} for ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Loading hooks…',
+  'workspaceHooks.empty': 'No hooks configured for this workspace.',
+  'workspaceHooks.enabled': 'Enabled',
+  'workspaceHooks.disabled': 'Disabled',
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -4695,6 +4705,11 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sessionsOverview.popupBlocked':
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
+  'sessionsOverview.restoreWorktree': 'Restore snapshot',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Snapshot is unavailable for this workspace',
+  'sessionsOverview.restoringWorktree': 'Restoring…',
+  'sessionsOverview.restoreWorktreeFailed': 'Snapshot restore failed',
   'sessionsOverview.selectAll': 'Select all',
   'sessionsOverview.titleColumn': 'Title',
   'sessionsOverview.actions': 'Actions',
@@ -5427,6 +5442,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
+  ...ARCHIVED_SESSIONS_MESSAGES_EN,
 };
 
 /**

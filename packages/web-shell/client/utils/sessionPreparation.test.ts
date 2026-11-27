@@ -816,6 +816,30 @@ describe('createAndAttachSessionForPrompt', () => {
       expect(client.setModel).not.toHaveBeenCalled();
     });
 
+    it('keeps the startup effort when standalone creation is detached', async () => {
+      const client = createDetachedClient();
+      const actions = createUnboundActions(client);
+      const modelId = 'qwen3.8-max(USE_OPENAI)';
+
+      const result = await prepareSession({
+        sessionActions: actions,
+        modelId,
+        reasoningEffort: 'none',
+        supportsSessionStartupConfig: true,
+        sessionContext: { kind: 'standalone' },
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startupConfig: { modelServiceId: modelId, reasoningEffort: 'none' },
+        }),
+      );
+      expect(result.detachedSession).toBe(client);
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
     it('applies Plan and reasoning through the created client', async () => {
       const client = createDetachedClient();
       const setApprovalMode = vi.fn(async () => ({ mode: 'plan' }));

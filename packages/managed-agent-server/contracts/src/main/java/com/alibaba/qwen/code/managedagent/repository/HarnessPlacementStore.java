@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.repository;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public interface HarnessPlacementStore {
     public static final String RELEASE_DOMAIN = "hosted_harness_release";
@@ -14,6 +16,9 @@ public interface HarnessPlacementStore {
     public Placement get(String tenant, String session);
 
     public boolean hasUnreleasedOwnership(String instance, String boot);
+
+    /** Finds expired clean suspensions whose owners are not protected from background reclamation. */
+    public List<Placement> findExpiredSuspensions(Set<String> excludedInstanceIds, int limit);
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId);
 

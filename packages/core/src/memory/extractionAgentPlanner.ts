@@ -22,6 +22,7 @@ import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from './paths.js';
 import { AUTO_MEMORY_TYPES, type AutoMemoryType } from './types.js';
 import {
@@ -147,7 +148,10 @@ function truncate(text: string, maxChars: number): string {
   return `${normalized.slice(0, maxChars).trimEnd()}…`;
 }
 
-async function buildExistingMemoryContext(projectRoot: string): Promise<{
+async function buildExistingMemoryContext(
+  projectRoot: string,
+  owner?: ProjectMemoryOwner,
+): Promise<{
   topicSummaries: string;
   keywordVocabularySnapshot: string;
 }> {
@@ -159,7 +163,7 @@ async function buildExistingMemoryContext(projectRoot: string): Promise<{
   // must not deny the extraction agent its view of existing project-level
   // memories (which it uses to avoid creating duplicates).
   const [projectDocs, userDocs] = await Promise.all([
-    scanAutoMemoryTopicDocuments(projectRoot),
+    scanAutoMemoryTopicDocuments(projectRoot, owner),
     scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
       debugLogger.warn(
         `User-level auto-memory scan failed; extraction agent will see project-level summaries only: ${error instanceof Error ? error.message : String(error)}`,
@@ -247,7 +251,7 @@ function buildTaskPrompt(
  */
 function touchedTopicsFromFilePaths(
   filePaths: string[],
-  projectRoot: string,
+  projectMemoryRoot: string,
   writesOnly = false,
 ): {
   topics: AutoMemoryType[];
@@ -265,7 +269,7 @@ function touchedTopicsFromFilePaths(
     }
   };
   const roots = [
-    { scope: 'project', path: getAutoMemoryRoot(projectRoot) },
+    { scope: 'project', path: projectMemoryRoot },
     { scope: 'user', path: getUserAutoMemoryRoot() },
   ].map(({ scope, path }) => ({
     scope,
@@ -399,6 +403,7 @@ export async function runAutoMemoryExtractionByAgent(
   projectRoot: string,
   skippedHistory: Content[] = [],
   abortSignal?: AbortSignal,
+  owner = config.getProjectMemoryOwner?.(),
 ): Promise<AutoMemoryExtractionExecutionResult> {
   abortSignal?.throwIfAborted();
   const cacheSafe = getCacheSafeParams(config.getSessionId());
@@ -421,21 +426,26 @@ export async function runAutoMemoryExtractionByAgent(
   ]);
 
   const { topicSummaries, keywordVocabularySnapshot } =
-    await buildExistingMemoryContext(projectRoot);
-  const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
+    await buildExistingMemoryContext(projectRoot, owner);
+  const projectMemoryRoot = getAutoMemoryRoot(projectRoot, owner);
   const userMemoryRoot = getUserAutoMemoryRoot();
-  const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
-    protectPinnedMemory: true,
-    protectMemoryIndexes: true,
-    // Same read confinement the two sibling memory agents pass for this
-    // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
-    // prompt already forbids inspecting repository code; without this the
-    // prompt would be the only thing standing between the inherited (untrusted)
-    // history and read_file/grep_search over the whole filesystem. Reads inside
-    // both managed memory roots stay allowed, and `buildExistingMemoryContext`
-    // above runs in the parent, so this does not narrow the parent's own scan.
-    restrictReadsToMemoryPaths: true,
-  });
+  const scopedConfig = createMemoryScopedAgentConfig(
+    config,
+    projectRoot,
+    {
+      protectPinnedMemory: true,
+      protectMemoryIndexes: true,
+      // Same read confinement the two sibling memory agents pass for this
+      // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
+      // prompt already forbids inspecting repository code; without this the
+      // prompt would be the only thing standing between the inherited (untrusted)
+      // history and read_file/grep_search over the whole filesystem. Reads inside
+      // both managed memory roots stay allowed, and `buildExistingMemoryContext`
+      // above runs in the parent, so this does not narrow the parent's own scan.
+      restrictReadsToMemoryPaths: true,
+    },
+    owner,
+  );
 
   const result = await runForkedAgent({
     name: 'managed-auto-memory-extractor',
@@ -473,10 +483,14 @@ export async function runAutoMemoryExtractionByAgent(
   }
 
   const { topics, touchedProjectScope, touchedUserScope } =
-    touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot, true);
+    touchedTopicsFromFilePaths(
+      result.filesWritten ?? [],
+      projectMemoryRoot,
+      true,
+    );
   const accessed = touchedTopicsFromFilePaths(
     [...(result.filesRead ?? []), ...(result.filesWritten ?? [])],
-    projectRoot,
+    projectMemoryRoot,
   );
   const extractorEngaged =
     accessed.touchedProjectScope || accessed.touchedUserScope;
@@ -498,7 +512,8 @@ export async function runAutoMemoryExtractionByAgent(
     hasToolActivity:
       extractorEngaged ||
       result.filesTouched.some(
-        (filePath) => !isManagedMemoryIndexPath(filePath, projectRoot),
+        (filePath) =>
+          !isManagedMemoryIndexPath(filePath, projectRoot, {}, owner),
       ),
     extractorEngaged,
     systemMessage:

@@ -1203,7 +1203,6 @@ describe('managed auto-memory prompt helpers', () => {
       );
 
       for (const rule of [
-        'Saving a memory is a two-step process:',
         'You MUST access memory when the user explicitly asks',
         'Keep one independently retrievable fact or rule per file.',
         'Keep the name, description, type, category, keywords, and usage_scenarios fields',
@@ -1214,19 +1213,19 @@ describe('managed auto-memory prompt helpers', () => {
       }
       if (tier === 'multi') {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`',
+          'Write the memory to its own file inside the directory chosen by its `<scope>`',
         );
         expect(prompt).toContain(
-          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory',
+          'The runtime rebuilds the PROJECT and TEAM indexes from topic files.',
         );
         expect(prompt).toContain('in any of your memory directories');
         expect(prompt).toContain('— never save them to TEAM');
       } else {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file under the matching type subdirectory',
+          'Write the memory to its own file under the matching type subdirectory',
         );
         expect(prompt).toContain(
-          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path)`,
+          'The runtime rebuilds the index from these files.',
         );
       }
     },
@@ -1246,6 +1245,38 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).not.toContain('</system-reminder> early');
     expect(result).toContain('<\\/system-reminder>');
   });
+
+  it.each([
+    [64_000, 100, 12_500, false],
+    [127_999, 100, 12_500, false],
+    [128_000, 200, 25_000, true],
+    [undefined, 200, 25_000, true],
+  ] as const)(
+    'bounds the loaded project index for a %s-token model',
+    (window, maxLines, maxChars, includesLaterTopic) => {
+      const memoryDir = '/tmp/project-memory';
+      const index = Array.from(
+        { length: 160 },
+        (_, i) => `- [Topic ${i}](memory-${i}.md) — ${'中'.repeat(105)}`,
+      ).join('\n');
+      const catalog = buildAutoMemoryIndexContext(
+        memoryDir,
+        index + INDEX_TRUNCATION_NOTICE,
+        undefined,
+        undefined,
+        window,
+      );
+      const projectIndex = catalog
+        .split(`## ${memoryDir}/MEMORY.md\n\n`)[1]!
+        .split('</system-reminder>')[0]!
+        .trim();
+      expect(projectIndex.split('\n').length).toBeLessThanOrEqual(maxLines);
+      expect(projectIndex.length).toBeLessThanOrEqual(maxChars);
+      expect(projectIndex).toContain('memory-0.md');
+      expect(projectIndex.includes('memory-140.md')).toBe(includesLaterTopic);
+      expect(projectIndex).toContain(INDEX_TRUNCATION_WARNING);
+    },
+  );
 });
 
 describe("the main session's resident auto-memory policy", () => {
@@ -1265,8 +1296,8 @@ describe("the main session's resident auto-memory policy", () => {
       'remember or update a memory, save the change now',
     ],
     [
-      'forget and its index update',
-      'find and remove the matching entry and its private index pointer',
+      'forget and the user index update',
+      'Remove its index pointer separately for USER memory.',
     ],
     [
       'the user type and its scope',
@@ -1293,7 +1324,7 @@ describe("the main session's resident auto-memory policy", () => {
       'no body or frontmatter in the index',
       'Use only pointers under ~150 characters, without frontmatter',
     ],
-    ['the index line limit', 'Lines after 200 are truncated'],
+    ['the generated project index', 'The runtime generates the PROJECT index'],
     ['deduplication', 'Check the current catalog for duplicates first'],
     ['when to read memory', 'asks to check, recall, or remember'],
     [

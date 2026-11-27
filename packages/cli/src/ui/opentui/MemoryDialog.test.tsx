@@ -95,8 +95,6 @@ vi.mock('@qwen-code/qwen-code-core/utils/memory-constants.js', () => ({
   getAllMemoryFilenames: () => ['FIRST.md', 'SECOND.md'],
 }));
 vi.mock('@qwen-code/qwen-code-core/memory/paths.js', () => ({
-  getAutoMemoryRoot: (project: string) => '/managed' + project,
-  getAutoMemoryProjectStateDir: (project: string) => '/state' + project,
   getUserAutoMemoryRoot: () => '/managed/user',
   AUTO_MEMORY_INDEX_FILENAME: 'MEMORY.md',
 }));
@@ -180,6 +178,7 @@ function fixture() {
     getSessionId: () => live.session,
     getWorkingDir: () => live.cwd,
     getProjectRoot: () => live.project,
+    getProjectAutoMemoryRoot: () => '/managed' + live.project,
     getBareMode: () => live.bare,
     isSafeMode: () => live.safe,
     isManagedMemoryAvailable: () => live.managed,
@@ -341,7 +340,7 @@ describe('Native Memory', () => {
     const f = fixture();
     f.live.managed = true;
     const view = await open(f);
-    expect(state.read).toHaveBeenCalledWith('/state/project/meta.json', 'utf8');
+    expect(state.read).toHaveBeenCalledWith('/managed/meta.json', 'utf8');
     expect(state.relative).toHaveBeenCalledWith(
       Date.parse('2020-01-01T00:00:00.000Z'),
     );

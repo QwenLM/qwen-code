@@ -68,6 +68,8 @@ export default {
   Retry: '重试',
   'Connecting…': '正在连接…',
   'Loading models from provider…': '正在加载服务商模型…',
+  'Could not list models. Enter model IDs manually.':
+    '无法获取模型列表，请手动填写模型 ID。',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
   'Generated UI': 'Generated UI 生成式界面',
@@ -854,7 +856,6 @@ export default {
   'Screen Reader Mode': '屏幕阅读器模式',
   'Max Session Turns': '最大会话轮次',
   'Skip Next Speaker Check': '跳过下一个说话者检查',
-  'Skip Loop Detection': '跳过循环检测',
   'Skip Startup Context': '跳过启动上下文',
   'Enable OpenAI Logging': '启用 OpenAI 日志',
   'OpenAI Logging Directory': 'OpenAI 日志目录',
@@ -2114,6 +2115,8 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
+  'Save the context window for the current model.':
+    '保存当前模型的上下文窗口。',
 
   // ============================================================================
   // Exit Screen / Stats

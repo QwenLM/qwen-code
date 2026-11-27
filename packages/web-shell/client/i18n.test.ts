@@ -22,6 +22,7 @@ import * as ruPart4Stub from './i18n-ru-part4.transcript-stub';
 import * as ruPart5Stub from './i18n-ru-part5.transcript-stub';
 import * as ruPart6Stub from './i18n-ru-part6.transcript-stub';
 import * as ruRemainderStub from './i18n-ru-remainder.transcript-stub';
+import * as archivedSessionsStub from './components/sidebar/archived-sessions-messages.transcript-stub';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -158,6 +159,34 @@ const OUTBOUND_CHANNEL_KEYS = [
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
+  it.each([
+    ['sessionsOverview.restoreWorktree', 'Восстановить снимок'],
+    [
+      'sessionsOverview.restoreWorktreeUnavailable',
+      'Снимок недоступен для этого рабочего пространства',
+    ],
+    ['sessionsOverview.restoringWorktree', 'Восстановление…'],
+    [
+      'sessionsOverview.restoreWorktreeFailed',
+      'Не удалось восстановить снимок',
+    ],
+  ] as const)(
+    'provides the Russian %s entry through the locale resolver',
+    (key, expected) => {
+      expect(getTranslator('ru')(key)).toBe(expected);
+      expect(RU_PART6[key]).toBe(expected);
+    },
+  );
+
+  it('provides the traditional Chinese retention setting', () => {
+    expect(getTranslator('zh-TW')('settings.label.worktree.maxRetained')).toBe(
+      '保留的會話 Worktree 上限',
+    );
+    expect(
+      getTranslator('zh-TW')('settings.description.worktree.maxRetained'),
+    ).toContain('設為 0 只關閉自動清掃，不禁止明確復原快照');
+  });
+
   it('labels the incremental session expansion with its count in both locales', () => {
     expect(getTranslator('en')('sidebar.showMoreSessions', { count: 10 })).toBe(
       'Show 10 more',
@@ -891,6 +920,33 @@ describe('web-shell ru locale', () => {
     expect(t('goal.blocked')).not.toBe(en('goal.blocked'));
   });
 
+  it.each([
+    ['ui.disableWorkflowKeywordTrigger', ['workflow', 'ultracode', 'SDK']],
+    ['privacy.usageStatisticsEnabled', ['обновление каталога models.dev']],
+    [
+      'policy.permissionStrategy',
+      ['анонимен', 'X-Qwen-Client-Id', 'outcome:"cancelled"'],
+    ],
+    [
+      'experimental.sessionWorkflow',
+      ['По умолчанию выключено', 'подтверждения'],
+    ],
+    [
+      'experimental.emitToolUseSummaries',
+      ['интерактивном CLI', 'QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0'],
+    ],
+    [
+      'tools.toolSearch.threshold',
+      ['tools.eager', 'CodeModeOnly', 'tools.visible'],
+    ],
+  ])('preserves settings schema details in Russian for %s', (key, details) => {
+    const t = getTranslator('ru');
+    const description = t(`settings.description.${key}`);
+    for (const detail of details) {
+      expect(description).toContain(detail);
+    }
+  });
+
   it('renders chrome from the ru catalog, not from EN', () => {
     const t = getTranslator('ru');
     const en = getTranslator('en');
@@ -1105,6 +1161,48 @@ describe('touch follow-up catalog parity', () => {
         const translated = getTranslator(language)(key);
         expect(translated).not.toBe(key);
         expect(translated).not.toBe(en);
+      }
+    }
+  });
+});
+
+const ARCHIVED_PANEL_KEYS = [
+  'sidebar.archivedSearchPlaceholder',
+  'sidebar.clearSearch',
+  'sidebar.archiveFilterAndSort',
+  'sidebar.archiveType',
+  'sidebar.archiveTypeAll',
+  'sidebar.archiveTypeLocal',
+  'sidebar.archiveTypeCloud',
+  'sidebar.sortUpdated',
+  'sidebar.sortCreated',
+  'sidebar.sortAlphabetical',
+  'sidebar.allWorkspaces',
+  'sidebar.archivedCount',
+  'sidebar.archivedCountMore',
+  'sidebar.archivedLoadMore',
+  'sidebar.archivedFilteredEmpty',
+  'sidebar.archivedWorkspaceEmpty',
+  'sidebar.clearFilters',
+  'sidebar.showAllWorkspaces',
+  'sidebar.archivedPaginationHint',
+] as const;
+
+describe('archived conversations catalog parity', () => {
+  it('carries every archived conversations key in every shipped catalog and keeps transcript stub empty', () => {
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_EN).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_ZH).toEqual({});
+    expect(archivedSessionsStub.ARCHIVED_SESSIONS_MESSAGES_RU).toEqual({});
+    for (const key of ARCHIVED_PANEL_KEYS) {
+      const en = getTranslator('en')(key, { count: 2 });
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key, { count: 2 });
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+        if (language === 'zh-TW') {
+          expect(`${key}: ${translated}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+        }
       }
     }
   });

@@ -5,6 +5,7 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { ProjectMemoryOwner } from './paths.js';
 import {
   AUTO_MEMORY_SCOPES,
   AUTO_MEMORY_TREE_CATEGORIES,
@@ -162,6 +163,7 @@ export type SearchMemoryToolResult =
 
 export interface ExecuteSearchMemoryOptions {
   projectRoot: string;
+  projectMemoryOwner?: ProjectMemoryOwner;
   abortSignal?: AbortSignal;
   teamMemoryEnabled?: boolean;
   trustedProject?: boolean;
@@ -468,6 +470,7 @@ async function getSnapshot(
         : undefined),
     teamMemoryEnabled: options.teamMemoryEnabled,
     trustedProject: options.trustedProject,
+    projectMemoryOwner: options.projectMemoryOwner,
     // Recall scans the corpus uncapped, so every ref the model can see in a
     // tree or search result must resolve here. The file cap slices results
     // after the full read, so dropping it adds no I/O — it only stops
@@ -761,6 +764,7 @@ function selectBodyWindowOffset(
 
 async function readContentResult(
   doc: ScannedAutoMemoryDocument,
+  owner: ProjectMemoryOwner | undefined,
   bodyPresentVersions: Map<string, number>,
   bodyCoverage: Map<string, MemoryBodyCoverage>,
   exhaustedBodyRefs: Set<string>,
@@ -769,7 +773,7 @@ async function readContentResult(
   maxChars = FETCH_BODY_WINDOW_CHARS,
   maxTotalChars = FETCH_TOTAL_BODY_CHARS,
 ): Promise<(MemoryBodyResult & { title: string }) | null> {
-  const freshDoc = await rereadAutoMemoryDocument(doc);
+  const freshDoc = await rereadAutoMemoryDocument(doc, owner);
   if (!freshDoc) return null;
   const ref = memoryRef(freshDoc);
   if (bodyPresentVersions.get(ref) === freshDoc.mtimeMs) {
@@ -987,6 +991,7 @@ export async function executeSearchMemory(
       }
       const result = await readContentResult(
         doc,
+        options.projectMemoryOwner,
         bodyPresentVersions,
         bodyCoverage,
         exhaustedBodyRefs,
@@ -1071,6 +1076,7 @@ export async function executeSearchMemory(
       const window = selectBodyWindowOffset(item.doc.body, keywords);
       const result = await readContentResult(
         item.doc,
+        options.projectMemoryOwner,
         bodyPresentVersions,
         bodyCoverage,
         exhaustedBodyRefs,

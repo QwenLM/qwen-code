@@ -77,9 +77,10 @@ as `node`, with GitHub and Actions credentials stripped.
 ### Toolchain
 
 `Install Java toolchain` runs as root, after `Install verify runner tools`
-and before `Checkout PR merge ref`. It downloads a pinned Temurin 21 x64
-tarball (sha256) and Maven 3.9.11 from `repo.maven.apache.org` (sha512, the
-same `MAVEN_VERSION` and `MAVEN_SHA512` as `sdk-java.yml`). Both archives
+and before `Checkout PR merge ref`. It downloads the pinned Temurin 21 tarball matching the runner architecture
+(x64 or aarch64; sha256 is pinned per architecture) and Maven 3.9.11 from
+`repo.maven.apache.org` (sha512, the same `MAVEN_VERSION` and
+`MAVEN_SHA512` as `sdk-java.yml`). Both archives
 are unpacked to `/opt/verify-java/{jdk,maven}`, mode `a+rX`, owned by root.
 `/opt/verify-java/ready` is written only after both checksums and
 `java -version` / `mvn -version` succeed. `JAVA_HOME` and `PATH` are

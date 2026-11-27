@@ -1140,7 +1140,6 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       'QWEN_REVIEW_PROVIDER_VM_DRIVER',
       'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
       'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
-      'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }
@@ -1347,48 +1346,6 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       backend: 'direct',
       escalationReasons: [],
     });
-  });
-
-  it('discloses the external content-allowlist downgrade in the boundary only when opted in', () => {
-    const trustContext = {
-      isLocal: false,
-      isCrossRepository: true,
-      authorAssociation: 'NONE',
-      changedFiles: [{ path: 'docs/guide.md' }],
-    };
-    const optedIn = describeExecutionBoundary({
-      policy: 'tiered',
-      backend: 'container',
-      trustContext,
-      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
-      fileSourced: () => false,
-    });
-    expect(optedIn).toEqual({
-      policy: 'tiered',
-      prTrust: 'external',
-      executionClass: 'trusted-shared-kernel',
-      backend: 'container',
-      escalationReasons: [],
-      downgradeReasons: ['external-content-allowlist'],
-    });
-    const optedOut = describeExecutionBoundary({
-      policy: 'tiered',
-      verdict: { kind: 'refused', reason: 'no hardware backend' },
-      trustContext,
-      env: {},
-      fileSourced: () => false,
-    });
-    expect(optedOut.executionClass).toBe('hardware-isolated');
-    expect(optedOut.downgradeReasons).toBeUndefined();
-    const repoSourced = describeExecutionBoundary({
-      policy: 'tiered',
-      verdict: { kind: 'refused', reason: 'no hardware backend' },
-      trustContext,
-      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
-      fileSourced: (k) => k === 'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
-    });
-    expect(repoSourced.executionClass).toBe('hardware-isolated');
-    expect(repoSourced.downgradeReasons).toBeUndefined();
   });
 
   it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {
