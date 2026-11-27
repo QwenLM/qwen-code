@@ -844,6 +844,337 @@ describe('SessionCatalogStore', () => {
     );
   });
 
+  it('removes a session only from pages matching the archive-state filter', async () => {
+    const activeQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active' },
+    };
+    const archivedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'archived' },
+    };
+    legacy.mockImplementation(
+      async (
+        _cwd: string,
+        options: { archiveState?: string } | undefined,
+      ): Promise<DaemonSessionListPage> =>
+        options?.archiveState === 'archived'
+          ? {
+              sessions: [
+                { sessionId: 'archived-only', workspaceCwd: '/w' },
+                { sessionId: 'drop', workspaceCwd: '/w' },
+              ],
+              nextCursor: undefined,
+            }
+          : {
+              sessions: [
+                { sessionId: 'keep', workspaceCwd: '/w' },
+                { sessionId: 'drop', workspaceCwd: '/w' },
+              ],
+              nextCursor: 'next',
+            },
+    );
+    await store.loadOnce(activeQuery, { fresh: true });
+    await store.loadOnce(archivedQuery, { fresh: true });
+
+    store.removeSession('/w', 'drop', { archiveStates: ['active'] });
+
+    const active = store.getSnapshot(activeQuery).page;
+    expect(active?.sessions.map((session) => session.sessionId)).toEqual([
+      'keep',
+    ]);
+    expect(active?.nextCursor).toBe('next');
+    expect(
+      store
+        .getSnapshot(archivedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['archived-only', 'drop']);
+  });
+
+  it('seeds a session into destination pages without touching pinned pages', async () => {
+    const listQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'all' },
+    };
+    const archivedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'archived', view: 'organized', group: 'all' },
+    };
+    const pinnedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'pinned' },
+    };
+    legacy.mockImplementation(
+      async (
+        _cwd: string,
+        options: { archiveState?: string; group?: string } | undefined,
+      ): Promise<DaemonSessionListPage> => ({
+        sessions: [
+          {
+            sessionId:
+              options?.group === 'pinned'
+                ? 'already-pinned'
+                : options?.archiveState === 'archived'
+                  ? 'old'
+                  : 'live',
+            workspaceCwd: '/w',
+            ...(options?.group === 'pinned' ? { isPinned: true } : {}),
+          },
+        ],
+        nextCursor: undefined,
+      }),
+    );
+    await store.loadOnce(listQuery, { fresh: true });
+    await store.loadOnce(archivedQuery, { fresh: true });
+    await store.loadOnce(pinnedQuery, { fresh: true });
+
+    store.addSession(
+      '/w',
+      { sessionId: 'restored', workspaceCwd: '/w', isArchived: false },
+      { archiveStates: ['active'] },
+    );
+
+    expect(
+      store
+        .getSnapshot(listQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['live', 'restored']);
+    expect(
+      store
+        .getSnapshot(archivedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['old']);
+    // A non-pinned row never belongs to the pinned section.
+    expect(
+      store
+        .getSnapshot(pinnedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['already-pinned']);
+
+    // A second seed must not duplicate the row.
+    store.addSession(
+      '/w',
+      { sessionId: 'restored', workspaceCwd: '/w', isArchived: false },
+      { archiveStates: ['active'] },
+    );
+    expect(
+      store
+        .getSnapshot(listQuery)
+        .page?.sessions.filter((session) => session.sessionId === 'restored'),
+    ).toHaveLength(1);
+  });
+
+  it('reseeds a restored pinned session into pinned pages', async () => {
+    const listQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'all' },
+    };
+    const pinnedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'pinned' },
+    };
+    const archivedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'archived', view: 'organized', group: 'all' },
+    };
+    legacy.mockImplementation(
+      async (
+        _cwd: string,
+        options: { archiveState?: string; group?: string } | undefined,
+      ): Promise<DaemonSessionListPage> => ({
+        sessions: [
+          {
+            sessionId: options?.group === 'pinned' ? 'other-pin' : 'live',
+            workspaceCwd: '/w',
+            ...(options?.group === 'pinned' ? { isPinned: true } : {}),
+          },
+        ],
+        nextCursor: undefined,
+      }),
+    );
+    await store.loadOnce(listQuery, { fresh: true });
+    await store.loadOnce(pinnedQuery, { fresh: true });
+    await store.loadOnce(archivedQuery, { fresh: true });
+
+    // Pin survives the archive move on the daemon side, so the restored
+    // row carries isPinned and must reappear in the pinned section too —
+    // otherwise it is absent from every section until the refetch lands.
+    store.removeSession('/w', 'pinned-back', { archiveStates: ['archived'] });
+    store.addSession(
+      '/w',
+      {
+        sessionId: 'pinned-back',
+        workspaceCwd: '/w',
+        isArchived: false,
+        isPinned: true,
+        pinnedAt: '2026-01-02T03:04:05.000Z',
+      },
+      { archiveStates: ['active'] },
+    );
+
+    expect(
+      store
+        .getSnapshot(listQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['live', 'pinned-back']);
+    expect(
+      store
+        .getSnapshot(pinnedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['other-pin', 'pinned-back']);
+    expect(
+      store
+        .getSnapshot(archivedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['live']);
+  });
+
+  it('includes qwen-live and legacy history in default pages without seeding live-only pages', async () => {
+    const defaultQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { sourceType: 'default' },
+    };
+    const liveQuery: SessionCatalogQuery = {
+      routeKind: 'qualified',
+      workspaceCwd: '/w',
+      options: { liveOnly: true },
+    };
+    legacy.mockResolvedValue({ sessions: [] });
+    qualified.mockResolvedValue({
+      sessions: [{ sessionId: 'currently-live', workspaceCwd: '/w' }],
+    });
+    await store.loadOnce(defaultQuery, { fresh: true });
+    await store.loadOnce(liveQuery, { fresh: true });
+
+    store.addSession(
+      '/w',
+      {
+        sessionId: 'restored-live-source',
+        workspaceCwd: '/w',
+        sourceType: 'qwen-live',
+      },
+      { archiveStates: ['active'] },
+    );
+    store.addSession(
+      '/w',
+      { sessionId: 'restored-legacy', workspaceCwd: '/w' },
+      { archiveStates: ['active'] },
+    );
+
+    expect(
+      store
+        .getSnapshot(defaultQuery)
+        .page?.sessions.map(({ sessionId }) => sessionId),
+    ).toEqual(['restored-live-source', 'restored-legacy']);
+    expect(
+      store
+        .getSnapshot(liveQuery)
+        .page?.sessions.map(({ sessionId }) => sessionId),
+    ).toEqual(['currently-live']);
+  });
+
+  it('seeds a source row only into pages of the same source type', async () => {
+    const defaultQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: {
+        archiveState: 'active',
+        view: 'organized',
+        group: 'all',
+        sourceType: 'default',
+      },
+    };
+    const channelQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: {
+        archiveState: 'active',
+        view: 'organized',
+        group: 'all',
+        sourceType: 'channel',
+      },
+    };
+    const unscopedQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: { archiveState: 'active', view: 'organized', group: 'all' },
+    };
+    legacy.mockImplementation(async () => ({
+      sessions: [],
+      nextCursor: undefined,
+    }));
+    await store.loadOnce(defaultQuery, { fresh: true });
+    await store.loadOnce(channelQuery, { fresh: true });
+    await store.loadOnce(unscopedQuery, { fresh: true });
+
+    store.addSession('/w', {
+      sessionId: 'channel-row',
+      workspaceCwd: '/w',
+      isArchived: false,
+      sourceType: 'channel',
+    });
+
+    // A channel row never belongs to sourceType: 'default' pages.
+    expect(
+      store
+        .getSnapshot(defaultQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual([]);
+    expect(
+      store
+        .getSnapshot(channelQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['channel-row']);
+    // Unfiltered pages keep accepting every source.
+    expect(
+      store
+        .getSnapshot(unscopedQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual(['channel-row']);
+  });
+
+  it('does not seed a side task into pages of a different source', async () => {
+    const sourceQuery: SessionCatalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: '/w',
+      options: {
+        archiveState: 'active',
+        view: 'organized',
+        group: 'all',
+        sourceType: 'side-task',
+        sourceId: 'source',
+      },
+    };
+    legacy.mockImplementation(async () => ({
+      sessions: [],
+      nextCursor: undefined,
+    }));
+    await store.loadOnce(sourceQuery, { fresh: true });
+
+    store.addSession('/w', {
+      sessionId: 'side-task',
+      workspaceCwd: '/w',
+      isArchived: false,
+      sourceType: 'side-task',
+      sourceId: 'other-source',
+    });
+
+    expect(
+      store
+        .getSnapshot(sourceQuery)
+        .page?.sessions.map((session) => session.sessionId),
+    ).toEqual([]);
+  });
+
   describe('applySessionPinToggle', () => {
     const pinnedView = (workspaceCwd: string): SessionCatalogQuery => ({
       routeKind: 'legacy',

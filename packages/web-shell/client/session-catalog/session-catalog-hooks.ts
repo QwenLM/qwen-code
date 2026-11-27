@@ -444,6 +444,24 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd, { interactive: true }),
         );
       },
+      removeSession(
+        workspaceCwd: string,
+        sessionId: string,
+        options: {
+          archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+        } = {},
+      ) {
+        update(() => store.removeSession(workspaceCwd, sessionId, options));
+      },
+      addSession(
+        workspaceCwd: string,
+        session: DaemonSessionSummary,
+        options: {
+          archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+        } = {},
+      ) {
+        update(() => store.addSession(workspaceCwd, session, options));
+      },
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);

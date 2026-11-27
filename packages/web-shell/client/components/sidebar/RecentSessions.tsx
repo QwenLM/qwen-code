@@ -1,4 +1,13 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from 'react';
 import { ChevronDownIcon, ChevronRightIcon, SquarePenIcon } from 'lucide-react';
 import type {
   DaemonClient,
@@ -80,6 +89,11 @@ async function readRecentPage(
   return sortRecentSessions(entries, sortBy);
 }
 
+type ArchiveChange = (
+  workspaceCwd: string,
+  session?: DaemonSessionSummary,
+) => void;
+
 interface RecentSessionsProps {
   sortBy?: 'updatedAt' | 'lastUserPromptAt';
   client: DaemonClient;
@@ -89,6 +103,7 @@ interface RecentSessionsProps {
   organizationEnabled: boolean;
   currentSessionId?: string;
   refreshKey: number;
+  archiveChangeRef?: Ref<ArchiveChange>;
   refreshPaused?: boolean;
   onNewSession: () => void;
   newSessionDisabled: boolean;
@@ -105,6 +120,7 @@ export function RecentSessions({
   organizationEnabled,
   currentSessionId,
   refreshKey,
+  archiveChangeRef,
   refreshPaused = false,
   renderSession,
   onVisibleRowsChange,
@@ -118,16 +134,24 @@ export function RecentSessions({
   const [visibleCount, setVisibleCount] = useState(
     SIDEBAR_SESSION_PREVIEW_LIMIT,
   );
-  const [entries, setEntries] = useState<RecentSessionEntry[]>([]);
+  const [catalogs, setCatalogs] = useState(
+    () =>
+      new Map<
+        string | undefined,
+        { entries: RecentSessionEntry[]; failed: boolean }
+      >(),
+  );
   const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
+  const refreshWorkspace = useRef<((workspaceCwd: string) => void) | null>(
+    null,
+  );
   const [retry, setRetry] = useState(0);
   const workspaceKey = JSON.stringify(
     workspaces.filter((ws) => ws.trusted).map((ws) => ws.cwd),
   );
 
   useEffect(() => {
-    setEntries([]);
+    setCatalogs(new Map());
     setLoading(true);
     setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [
@@ -147,50 +171,48 @@ export function RecentSessions({
     if (!expanded || refreshPaused) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      const cwds: string[] = JSON.parse(workspaceKey);
-      const requests = cwds.map((cwd) =>
-        readRecentPage(
-          (cursor) =>
-            client.listWorkspaceSessionsPage(cwd, {
-              archiveState: 'active',
-              ...(sortBy !== undefined ? { sortBy } : {}),
-              ...(organizationEnabled
-                ? { view: 'organized' as const, group: 'all' }
-                : {}),
-              pageSize: 50,
-              cursor,
-              ...(sourceMetadataEnabled ? { sourceType: 'default' } : {}),
-            }),
-          cwd,
-          sortBy,
-        ),
-      );
-      if (includeStandalone)
-        requests.push(
-          readRecentPage(
-            (cursor) =>
-              client.listStandaloneSessionsPage({
-                archiveState: 'active',
-                ...(sortBy !== undefined ? { sortBy } : {}),
-                pageSize: 50,
+    const cwds: Array<string | undefined> = JSON.parse(workspaceKey);
+    if (includeStandalone) cwds.push(undefined);
+    const requests = new Map<string | undefined, symbol>();
+
+    const loadScope = async (workspaceCwd: string | undefined) => {
+      const request = Symbol();
+      requests.set(workspaceCwd, request);
+      const options = {
+        archiveState: 'active',
+        ...(sortBy !== undefined ? { sortBy } : {}),
+        pageSize: 50,
+      } as const;
+      const entries = await readRecentPage(
+        (cursor) =>
+          workspaceCwd === undefined
+            ? client.listStandaloneSessionsPage({ ...options, cursor })
+            : client.listWorkspaceSessionsPage(workspaceCwd, {
+                ...options,
+                ...(organizationEnabled
+                  ? { view: 'organized', group: 'all' }
+                  : {}),
                 cursor,
+                ...(sourceMetadataEnabled ? { sourceType: 'default' } : {}),
               }),
-            undefined,
-            sortBy,
-          ),
-        );
-      const results = await Promise.allSettled(requests);
-      if (disposed) return;
-      setEntries(
-        sortRecentSessions(
-          results.flatMap((result) =>
-            result.status === 'fulfilled' ? result.value : [],
-          ),
-          sortBy,
-        ),
+        workspaceCwd,
+        sortBy,
+      ).catch(() => undefined);
+      if (disposed || requests.get(workspaceCwd) !== request) return;
+      setCatalogs((current) =>
+        new Map(current).set(workspaceCwd, {
+          entries: entries ?? current.get(workspaceCwd)?.entries ?? [],
+          failed: entries === undefined,
+        }),
       );
-      setFailed(results.some((result) => result.status === 'rejected'));
+    };
+
+    refreshWorkspace.current = (workspaceCwd) => {
+      if (cwds.includes(workspaceCwd)) void loadScope(workspaceCwd);
+    };
+    const load = async () => {
+      await Promise.all(cwds.map(loadScope));
+      if (disposed) return;
       setLoading(false);
       timer = setTimeout(() => {
         void load();
@@ -199,6 +221,7 @@ export function RecentSessions({
     void load();
     return () => {
       disposed = true;
+      refreshWorkspace.current = null;
       clearTimeout(timer);
     };
   }, [
@@ -215,6 +238,37 @@ export function RecentSessions({
     retry,
   ]);
 
+  useImperativeHandle(
+    archiveChangeRef,
+    () => (workspaceCwd, session) => {
+      if (session) {
+        setCatalogs((current) => {
+          const catalog = current.get(workspaceCwd);
+          if (!catalog) return current;
+          const entries = catalog.entries.filter(
+            (entry) => entry.session.sessionId !== session.sessionId,
+          );
+          if (!session.isArchived) entries.push({ session, workspaceCwd });
+          return new Map(current).set(workspaceCwd, {
+            ...catalog,
+            entries: sortRecentSessions(entries, sortBy),
+          });
+        });
+      }
+      refreshWorkspace.current?.(workspaceCwd);
+    },
+    [sortBy],
+  );
+
+  const entries = useMemo(
+    () =>
+      sortRecentSessions(
+        [...catalogs.values()].flatMap(({ entries }) => entries),
+        sortBy,
+      ),
+    [catalogs, sortBy],
+  );
+  const failed = [...catalogs.values()].some((catalog) => catalog.failed);
   const workspaceCwds = new Set(JSON.parse(workspaceKey) as string[]);
   const scopedEntries = entries.filter((entry) =>
     entry.workspaceCwd === undefined

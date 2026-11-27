@@ -1,12 +1,8 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from 'react';
+import { act, createRef, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  DaemonClient,
-  DaemonSessionSummary,
-  DaemonWorkspaceCapability,
-} from '@qwen-code/sdk/daemon';
+import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   RecentSessions,
   sortRecentSessions,
@@ -41,10 +37,12 @@ async function render(
   refreshPaused = false,
   renderSessionOverride?: (entry: RecentSessionEntry) => ReactNode,
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
-  scope?: {
-    workspaces: DaemonWorkspaceCapability[];
-    includeStandalone: boolean;
-  },
+  scope?: Partial<
+    Pick<
+      ComponentProps<typeof RecentSessions>,
+      'workspaces' | 'includeStandalone' | 'archiveChangeRef'
+    >
+  >,
 ) {
   const client = (stableClient ??= {
     listWorkspaceSessionsPage,
@@ -73,6 +71,7 @@ async function render(
         organizationEnabled
         currentSessionId={currentSessionId}
         refreshKey={0}
+        archiveChangeRef={scope?.archiveChangeRef}
         refreshPaused={refreshPaused}
         sortBy={sortBy}
         renderSession={
@@ -153,10 +152,78 @@ describe('recent sessions', () => {
       view: 'organized',
       group: 'all',
     });
+    expect(listStandaloneSessionsPage).toHaveBeenCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+      cursor: undefined,
+    });
     await click(buttons()[0]);
     expect(onOpen.mock.lastCall?.[0].workspaceCwd).toBe('/other');
     await click(buttons()[1]);
     expect(onOpen.mock.lastCall?.[0].workspaceCwd).toBeUndefined();
+  });
+
+  it('moves confirmed archive rows immediately and reconciles only their workspace', async () => {
+    const archiveChangeRef =
+      createRef<(cwd: string, row?: DaemonSessionSummary) => void>();
+    const row = session('shared-id', '2026-10-20T12:00:00Z');
+    listWorkspaceSessionsPage.mockResolvedValue({ sessions: [row] });
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [session('standalone', '2026-10-20T11:00:00Z')],
+    });
+    await render('standalone', false, undefined, undefined, {
+      archiveChangeRef,
+    });
+    expect(buttons().map((button) => button.title)).toContain(
+      'shared-id · project',
+    );
+    listWorkspaceSessionsPage.mockClear();
+    listStandaloneSessionsPage.mockClear();
+
+    let resolveArchived!: (page: { sessions: DaemonSessionSummary[] }) => void;
+    listWorkspaceSessionsPage.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveArchived = resolve;
+      }),
+    );
+    await act(async () =>
+      archiveChangeRef.current?.('/project', { ...row, isArchived: true }),
+    );
+    expect(buttons().map((button) => button.title)).toEqual([
+      'shared-id · other',
+      'standalone · sidebar.noWorkspace',
+    ]);
+
+    let resolveRestored!: (page: { sessions: DaemonSessionSummary[] }) => void;
+    listWorkspaceSessionsPage.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRestored = resolve;
+      }),
+    );
+    await act(async () =>
+      archiveChangeRef.current?.('/project', { ...row, isArchived: false }),
+    );
+    expect(buttons().map((button) => button.title)).toContain(
+      'shared-id · project',
+    );
+    expect(listWorkspaceSessionsPage.mock.calls.map(([cwd]) => cwd)).toEqual([
+      '/project',
+      '/project',
+    ]);
+    expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+
+    await act(async () => resolveArchived({ sessions: [] }));
+    expect(buttons().map((button) => button.title)).toContain(
+      'shared-id · project',
+    );
+    await act(async () =>
+      resolveRestored({
+        sessions: [{ ...row, displayName: 'Restored' }],
+      }),
+    );
+    expect(buttons().map((button) => button.title)).toContain(
+      'Restored · project',
+    );
   });
 
   it('continues past pages containing only excluded sessions and deduplicates', async () => {

@@ -97,6 +97,8 @@ const invalidateSessionCatalog = vi.fn();
 const refreshWorkspaceSessionCatalog = vi.fn();
 const renameSessionCatalog = vi.fn();
 const useSessionCatalogPollingSpy = vi.fn();
+const removeSessionCatalog = vi.fn();
+const addSessionCatalog = vi.fn();
 const listStandaloneSessionsPage = vi.fn().mockResolvedValue({ sessions: [] });
 const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({ sessions: [] });
 const catalogListeners = new Set<(workspaceCwd: string) => void>();
@@ -120,6 +122,20 @@ const sessionCatalogController = {
   // These tests render pages straight from listWorkspaceSessions, so the
   // store-owned pin toggle has no loaded catalog pages to patch.
   toggleSessionPinned: vi.fn(),
+  removeSession: (
+    workspaceCwd: string,
+    sessionId: string,
+    options?: { archiveStates?: string[] },
+  ) => {
+    removeSessionCatalog(workspaceCwd, sessionId, options);
+  },
+  addSession: (
+    workspaceCwd: string,
+    session: DaemonSessionSummary,
+    options?: { archiveStates?: string[] },
+  ) => {
+    addSessionCatalog(workspaceCwd, session, options);
+  },
 };
 
 const workspace = {
@@ -823,6 +839,10 @@ beforeEach(() => {
   });
   updateSessionOrganization.mockReset();
   updateSessionOrganization.mockResolvedValue({});
+  // A group test replaces this property with a local spy (Object.assign),
+  // and vi.restoreAllMocks later strips that spy's implementation — point
+  // the shared actions object back at the module-level spy every run.
+  Object.assign(workspaceActions, { updateSessionOrganization });
   updateSessionMetadata.mockReset();
   updateSessionMetadata.mockResolvedValue({});
   exportSession.mockReset();
@@ -857,6 +877,8 @@ beforeEach(() => {
   invalidateSessionCatalog.mockReset();
   refreshWorkspaceSessionCatalog.mockReset();
   renameSessionCatalog.mockReset();
+  removeSessionCatalog.mockReset();
+  addSessionCatalog.mockReset();
   refreshSessionCatalogQueries.mockReset();
   useSessionCatalogPollingSpy.mockReset();
   active.reload.mockReset();
@@ -1163,10 +1185,13 @@ describe('WebShellSidebar workspace removal', () => {
         pageSize?: number;
       }) => {
         if (options?.group === 'pinned') {
+          // The daemon's pinned-group filter only returns sessions with
+          // isPinned === true, so the mock must carry the flag too.
           return [
             {
               sessionId: 'secondary-pinned',
               displayName: 'Secondary pinned',
+              isPinned: true,
             },
           ];
         }
@@ -1716,10 +1741,9 @@ describe('WebShellSidebar workspace removal', () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive']);
-    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
-      '/tmp/other',
-    );
+    expect(refreshWorkspaceSessionCatalog.mock.calls).toEqual([['/tmp/other']]);
     refreshWorkspaceSessionCatalog.mockClear();
+    invalidateSessionCatalog.mockClear();
 
     await selectSessionMenuItem('Locked color', 'Group');
     const blue = Array.from(
@@ -7680,6 +7704,273 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
       ),
     ).toHaveLength(1);
     expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
+  });
+});
+
+describe('WebShellSidebar session organization write-through', () => {
+  function enableOrganization(): void {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: [],
+    });
+  }
+
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function restoreFromSettings(label: string): Promise<void> {
+    await openArchiveSettings();
+    const restore = inlineSessionAction(label, 'Restore');
+    expect(restore).toBeDefined();
+    await act(async () => click(restore!));
+  }
+
+  it('drops a primary row as soon as its archive RPC lands', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    active.sessions.push({
+      sessionId: 'primary-archive',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary archive',
+    });
+    active.archiveSession.mockResolvedValue(true);
+
+    renderSidebar({ onError });
+    await settle();
+
+    const archive = await openSessionMenuItem('Primary archive', 'Archive');
+    await act(async () => {
+      click(archive);
+      await active.archiveSession.mock.results.at(-1)?.value;
+      await Promise.resolve();
+    });
+
+    expect(active.archiveSession).toHaveBeenCalledWith('primary-archive');
+    expect(removeSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/project',
+      'primary-archive',
+      { archiveStates: ['active'] },
+    );
+    expect(addSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/project',
+      {
+        sessionId: 'primary-archive',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Primary archive',
+        isArchived: true,
+      },
+      { archiveStates: ['archived'] },
+    );
+    // Primary scope relies on the catalog hook's own invalidation.
+    expect(invalidateSessionCatalog).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('seeds a restored primary row back into active pages', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    archived.sessions.push({
+      sessionId: 'primary-restore',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary restore',
+      isArchived: true,
+    });
+    archived.unarchiveSession.mockResolvedValue(true);
+
+    renderSidebar({ onError });
+    await restoreFromSettings('Primary restore');
+
+    expect(archived.unarchiveSession).toHaveBeenCalledWith('primary-restore');
+    expect(removeSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/project',
+      'primary-restore',
+      { archiveStates: ['archived'] },
+    );
+    expect(addSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/project',
+      {
+        sessionId: 'primary-restore',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Primary restore',
+        isArchived: false,
+      },
+      { archiveStates: ['active'] },
+    );
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports a primary archive not-found instead of a silent no-op', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    active.sessions.push({
+      sessionId: 'primary-gone',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary gone',
+    });
+    active.archiveSession.mockResolvedValue(false);
+
+    renderSidebar({ onError });
+    await settle();
+
+    const archive = await openSessionMenuItem('Primary gone', 'Archive');
+    await act(async () => {
+      click(archive);
+      await active.archiveSession.mock.results.at(-1)?.value;
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('primary-gone'),
+      }),
+      'Failed to archive session',
+    );
+    expect(removeSessionCatalog).not.toHaveBeenCalled();
+    expect(addSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('reports a primary restore not-found instead of a silent no-op', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    archived.sessions.push({
+      sessionId: 'primary-restore',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary restore',
+      isArchived: true,
+    });
+    archived.unarchiveSession.mockResolvedValue(false);
+
+    renderSidebar({ onError });
+    await restoreFromSettings('Primary restore');
+
+    expect(archived.unarchiveSession).toHaveBeenCalledWith('primary-restore');
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('primary-restore'),
+      }),
+      'Failed to restore session',
+    );
+    expect(removeSessionCatalog).not.toHaveBeenCalled();
+    expect(addSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('reports a secondary batch archive not-found instead of seeding a phantom row', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    useWorkspaceSessionCatalog((cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState !== 'archived'
+        ? [
+            {
+              sessionId: 'secondary-gone',
+              workspaceCwd: cwd,
+              displayName: 'Secondary gone',
+            },
+          ]
+        : [],
+    );
+    archiveSessionsData.mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      notFound: ['secondary-gone'],
+      errors: [],
+    });
+
+    renderSidebar({ onError });
+    await expandWorkspace('other');
+
+    const archive = await openSessionMenuItem('Secondary gone', 'Archive');
+    await act(async () => {
+      click(archive);
+      await archiveSessionsData.mock.results.at(-1)?.value;
+      await Promise.resolve();
+    });
+
+    expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-gone']);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('secondary-gone'),
+      }),
+      'Failed to archive session',
+    );
+    expect(removeSessionCatalog).not.toHaveBeenCalled();
+    expect(addSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('reports a secondary batch restore not-found instead of materializing a deleted row', async () => {
+    const onError = vi.fn();
+    enableOrganization();
+    useWorkspaceSessionCatalog((cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'archived'
+        ? [
+            {
+              sessionId: 'secondary-back',
+              workspaceCwd: cwd,
+              displayName: 'Secondary back',
+              isArchived: true,
+            },
+          ]
+        : [],
+    );
+    unarchiveSessionsData.mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      notFound: ['secondary-back'],
+      errors: [],
+    });
+
+    renderSidebar({ onError });
+    await restoreFromSettings('Secondary back');
+
+    expect(unarchiveSessionsData).toHaveBeenCalledWith(['secondary-back']);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('secondary-back'),
+      }),
+      'Failed to restore session',
+    );
+    expect(removeSessionCatalog).not.toHaveBeenCalled();
+    expect(addSessionCatalog).not.toHaveBeenCalled();
+  });
+
+  it('orders the pinned section by pin time', async () => {
+    enableOrganization();
+    active.sessions.push(
+      {
+        sessionId: 'pinned-newer',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Pinned newer',
+        isPinned: true,
+        pinnedAt: '2026-02-02T00:00:00.000Z',
+      },
+      {
+        sessionId: 'pinned-older',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Pinned older',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      },
+    );
+
+    renderSidebar();
+    await settle();
+
+    const pinnedList = container.querySelector('[class*="pinnedSessionList"]');
+    expect(pinnedList).not.toBeNull();
+    const labels = Array.from(
+      pinnedList!.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).map((row) => row.textContent ?? '');
+    expect(
+      labels.findIndex((label) => label.includes('Pinned older')),
+    ).toBeLessThan(labels.findIndex((label) => label.includes('Pinned newer')));
   });
 });
 

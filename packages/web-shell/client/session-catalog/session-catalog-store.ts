@@ -4,6 +4,7 @@ import {
 } from '../daemon/availability.js';
 import type {
   DaemonClient,
+  DaemonSessionArchiveState,
   DaemonSessionLiveState,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
@@ -745,6 +746,111 @@ export class SessionCatalogStore {
             }
             return next;
           }),
+        },
+      });
+    }
+  }
+
+  /**
+   * Drop a session from cached pages whose archive state matches — the
+   * write-through companion to an archive/unarchive RPC that already
+   * succeeded on the daemon. The nextCursor is left untouched so load-more
+   * keeps following the server's cursor; a workspace invalidation issued
+   * alongside this call refreshes the authoritative page ordering.
+   */
+  removeSession(
+    workspaceCwd: string,
+    sessionId: string,
+    options: {
+      archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+    } = {},
+  ): void {
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      if (
+        options.archiveStates &&
+        !options.archiveStates.includes(
+          entry.query.options.archiveState ?? 'active',
+        )
+      ) {
+        continue;
+      }
+      if (
+        !entry.snapshot.page.sessions.some(
+          (session) =>
+            session.workspaceCwd === workspaceCwd &&
+            session.sessionId === sessionId,
+        )
+      ) {
+        continue;
+      }
+      const sessions = entry.snapshot.page.sessions.filter(
+        (session) =>
+          !(
+            session.workspaceCwd === workspaceCwd &&
+            session.sessionId === sessionId
+          ),
+      );
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: { ...entry.snapshot.page, sessions },
+      });
+    }
+  }
+
+  // Cached catalog membership follows the daemon's archive and source filters.
+  addSession(
+    workspaceCwd: string,
+    session: DaemonSessionSummary,
+    options: {
+      archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+    } = {},
+  ): void {
+    if (session.workspaceCwd !== workspaceCwd) return;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      const { group, liveOnly, sourceType, sourceId } = entry.query.options;
+      if (liveOnly || (group === 'pinned' && session.isPinned !== true)) {
+        continue;
+      }
+      if (
+        sourceType !== undefined &&
+        sourceType !== session.sourceType &&
+        !(
+          sourceType === 'default' &&
+          (session.sourceType === undefined ||
+            session.sourceType === 'qwen-live')
+        )
+      ) {
+        continue;
+      }
+      if (sourceId !== undefined && sourceId !== session.sourceId) continue;
+      if (
+        options.archiveStates &&
+        !options.archiveStates.includes(
+          entry.query.options.archiveState ?? 'active',
+        )
+      ) {
+        continue;
+      }
+      if (
+        entry.snapshot.page.sessions.some(
+          (candidate) =>
+            candidate.workspaceCwd === workspaceCwd &&
+            candidate.sessionId === session.sessionId,
+        )
+      ) {
+        continue;
+      }
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: {
+          ...entry.snapshot.page,
+          sessions: [...entry.snapshot.page.sessions, session],
         },
       });
     }
