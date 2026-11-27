@@ -12,21 +12,21 @@ The dispatcher's work for one Turn is:
 
 1. Claim the Turn (`AgentTurnExecution.claimTurn`).
 2. Attach, take over or recover the Harness Session, bind the Turn to the Harness boot and submit or continue the prompt. This step also reconciles event epochs (`HarnessCoordinator.runClaimed`).
-3. Record the admission: status `RUNNING`, `harness_event_epoch` and `harness_last_event_id` (`recordAdmission`, `recordRecoveryAdmission`).
+3. Record the admission: status `RUNNING` (unless the Turn is already `CANCELLING`), `harness_event_epoch` and `harness_last_event_id` (`recordAdmission`, `recordRecoveryAdmission`).
 4. Open `GET /session/:id/events` from the Turn's cursor and run `consumeStream` until a terminal event, an Action park or a recovery block.
 
 Step 4 is the only part that needs a Java instance for the whole Turn. `consumeStream` does the following:
 
-| Duty           | Today                                                                                                                                                                                                                                                                        |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Projection     | Each v1 envelope goes through `HarnessEventProjector`. Its source key is `bootId:eventEpoch:sourceId`, and `sourceId` is the journal sequence.                                                                                                                               |
-| Filtering      | Envelopes without an ID, or with another prompt's ID, are skipped.                                                                                                                                                                                                           |
-| Batching       | Text and reasoning deltas are grouped up to 75 ms, 64 events or 64 KiB. The first visible text and every other projected event are recorded at once. A terminal event ends its batch.                                                                                        |
-| Recording      | `recordHarnessEvents` locks Session and Turn and checks `dispatch_owner`, the lease deadline and the event epoch. It then advances the cursor, appends public events and settles a terminal Turn in one transaction.                                                         |
-| Retraction     | `message_retracted` flushes the pending batch, then calls `retractHarnessTurnOutput`, which may be bounded by `sourceBootId` and `sourceEventEpoch`.                                                                                                                         |
-| Action park    | When the stream ends without a terminal event, the dispatcher calls `parkTurnForAction`. The park itself is decided from durable state: a sealed head, a released activation, `wake_seal_revision = journal_revision`, the parked prompt and a requested Action.             |
-| Recovery block | Every 15 s the dispatcher reads Harness status. If no prompt is active, recovery is blocked and no event follows the cursor, it calls `markTurnRecoveryBlocked`. Part of the Harness's `recoveryBlocked` state lives only in memory (MCP recovery, pending Hook operations). |
-| Failure        | A stream error becomes a transient failure. The lease is released, and the next sweep re-drives the Turn through step 2.                                                                                                                                                     |
+| Duty           | Today                                                                                                                                                                                                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Projection     | Each v1 envelope goes through `HarnessEventProjector`. Its source key is `bootId:eventEpoch:sourceId`, and `sourceId` is the journal sequence.                                                                                                                                                                     |
+| Filtering      | Envelopes without an ID, or with another prompt's ID, are skipped.                                                                                                                                                                                                                                                 |
+| Batching       | Text and reasoning deltas are grouped up to 75 ms, 64 events or 64 KiB. The first visible text and every other projected event are recorded at once. A terminal event ends its batch.                                                                                                                              |
+| Recording      | `recordHarnessEvents` locks Session and Turn and checks `dispatch_owner`, the lease deadline and the event epoch. It then advances the cursor, appends public events and settles a terminal Turn in one transaction.                                                                                               |
+| Retraction     | `message_retracted` flushes the pending batch, then calls `retractHarnessTurnOutput`, which may be bounded by `sourceBootId` and `sourceEventEpoch`.                                                                                                                                                               |
+| Action park    | When the stream ends without a terminal event, the dispatcher calls `parkTurnForAction`. The park itself is decided from durable state: a sealed head, a released activation, `wake_seal_revision = journal_revision`, the parked prompt with its deadline, a requested Action, and no unfinished Action response. |
+| Recovery block | Every 15 s the dispatcher reads Harness status. If no prompt is active, recovery is blocked and no event follows the cursor, it calls `markTurnRecoveryBlocked`. Part of the Harness's `recoveryBlocked` state lives only in memory (MCP recovery, pending Hook operations).                                       |
+| Failure        | A stream error becomes a transient failure. The lease is released, and the next sweep re-drives the Turn through step 2 until its retry budget is exhausted.                                                                                                                                                       |
 
 Consequences:
 
@@ -128,19 +128,20 @@ Java decodes each envelope with the rules of the SDK stream decoder, so the proj
    - `parked` requires the cursor to equal the head's committed sequence, then calls `parkTurnForAction` with the Harness owner.
    - `recovery_blocked` requires the same cursor condition, then calls `markTurnRecoveryBlocked` with `HARNESS_RECOVERY_BLOCKED`.
    - Both methods clear `dispatch_owner` under their current predicates. When the cursor is short or a predicate refuses, the reply is `managed_event_ingest_end_refused`, and the Turn later recovers when its lease lapses.
+7. **Reply.** Report the cursor reached. If the request recorded the Turn's terminal event, the reply also carries `terminal: true`.
 
 ### Reply
 
-The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`.
+The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false }`.
 
-| Reply                                                                                  | Harness action                                                                                                    |
-| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Success                                                                                | Continue from `cursor`                                                                                            |
-| `managed_event_ingest_cursor_mismatch`                                                 | Re-read the journal from the returned cursor                                                                      |
-| `managed_event_ingest_not_ready`                                                       | Retry with backoff, for no longer than the lease duration                                                         |
-| `managed_event_ingest_not_owner`, a writer fence refusal or a terminal acknowledgement | Stop pushing for this admission                                                                                   |
-| `managed_event_ingest_end_refused`                                                     | Flush through the committed sequence and retry if the cursor was short; otherwise stop pushing for this admission |
-| Transport failure                                                                      | Resend the same request                                                                                           |
+| Reply                                                                        | Harness action                                                                                                    |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Success with `terminal: false`                                               | Continue from `cursor`                                                                                            |
+| `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                                      |
+| `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                                         |
+| `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                                   |
+| `managed_event_ingest_end_refused`                                           | Flush through the committed sequence and retry if the cursor was short; otherwise stop pushing for this admission |
+| Transport failure                                                            | Resend the same request                                                                                           |
 
 ## 5. Dispatcher changes
 
@@ -160,7 +161,7 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`.
   - It reuses the `eventEnvelope` projection and `streamedDeltaIds` seeding of the events route, and reads `authority.readEvents` from its cursor at the same 250 ms cadence.
   - It starts at the admission's `lastEventId`.
   - It posts through a new `ingestEvents` method on the Session Store client.
-  - It stops on a terminal acknowledgement, `not_owner`, a writer fence refusal, or an acknowledged end marker.
+  - It stops on a reply with `terminal: true`, on `not_owner`, a writer fence refusal, or an acknowledged end marker.
 - **Park.** After the seal is confirmed and before the placement is released (#18404), the pusher flushes through the committed sequence and posts `end: "parked"` with the sealed incarnation. If this fails, the suspension continues, and the lapsed lease leads to today's recovery.
 - **Recovery block.** The condition is the one Java polls today: no active prompt for the Turn, `recoveryBlocked`, and the cursor at the committed sequence. When it holds, the pusher posts `end: "recovery_blocked"`.
 
@@ -179,18 +180,19 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`.
 
 ## 8. Failure and race semantics
 
-| Window                                                  | Required outcome                                                                                                                |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Harness pushes before the admission is recorded         | `not_ready`; retried; accepted after the hand-off                                                                               |
-| Acknowledgement lost after commit                       | The resend is acknowledged without writing, or only its unrecorded tail is recorded                                             |
-| Requests arrive out of order                            | A request that overtakes its predecessor gets `cursor_mismatch`, and the Harness resends from the committed cursor              |
-| Failure part-way through a request                      | The committed prefix stands, and the resent request records only the rest                                                       |
-| Admitting Java instance dies after the hand-off         | No effect; any instance serves the next request                                                                                 |
-| Harness dies or stops pushing                           | The lease lapses within 60 s, and the sweep recovers the Turn as today. Takeover already waits on the 60 s writer lease.        |
-| Cancel during ingest                                    | The CANCELLING lane takes the Turn back, and the Harness's next request gets `not_owner`                                        |
-| Stale Harness after takeover                            | The writer fence refuses it, or the `dispatch_owner` CAS refuses it                                                             |
-| Park marker lost                                        | The lease lapses, and today's recovery handles the sealed, unparked Turn, as when a dispatcher dies between stream end and park |
-| Cursor short of the committed sequence at an end marker | The marker is refused. The Harness flushes and retries, or the lease lapses.                                                    |
+| Window                                                  | Required outcome                                                                                                                                                                                                              |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Harness pushes before the admission is recorded         | `not_ready`; retried; accepted after the hand-off. A Turn already `CANCELLING` when admitted is not handed off, and its pushes get `not_owner`                                                                                |
+| Acknowledgement lost after commit                       | The resend is acknowledged without writing, or only its unrecorded tail is recorded                                                                                                                                           |
+| Requests arrive out of order                            | A request that overtakes its predecessor gets `cursor_mismatch`, and the Harness resends from the committed cursor                                                                                                            |
+| Failure part-way through a request                      | The committed prefix stands, and the resent request records only the rest                                                                                                                                                     |
+| Admitting Java instance dies after the hand-off         | With a Store address that survives the instance, no effect: any instance serves the next request. With the reference chart's loopback Store (§12, risk 6), the Harness is cut off and the Turn recovers when its lease lapses |
+| Harness dies or stops pushing                           | The lease lapses within 60 s, and the sweep recovers the Turn as today. Takeover already waits on the 60 s writer lease.                                                                                                      |
+| Cancel during ingest                                    | The CANCELLING lane takes the Turn back, and the Harness's next request gets `not_owner`                                                                                                                                      |
+| Stale Harness after takeover                            | The writer fence refuses it, or the `dispatch_owner` CAS refuses it                                                                                                                                                           |
+| A heartbeat overlaps a recording                        | Both serialize on the Turn row lock and guard on `dispatch_owner` and the lease deadline, not on `version`, so neither invalidates the other                                                                                  |
+| Park marker lost                                        | The lease lapses, and today's recovery handles the sealed, unparked Turn, as when a dispatcher dies between stream end and park                                                                                               |
+| Cursor short of the committed sequence at an end marker | The marker is refused. The Harness flushes and retries, or the lease lapses.                                                                                                                                                  |
 
 ## 9. Affected files
 
@@ -249,9 +251,9 @@ Run focused Java and TypeScript tests within the module budget. The root build a
 
 ## 12. Risks and open questions
 
-1. **Request rate.** Each running Turn sends about one request per 250 ms tick while it produces events, plus a heartbeat every 20 s. The heartbeat replaces the dispatcher's renewal. Measure against the stream before default-on.
-2. **Two lock families.** Store authentication locks the placement guard, Session root and head. The recording calls keep their Session-root, event-stream, Turn order. Authentication must finish, or keep the same root-first order, before recording starts ([lock simplification](2026-11-02-managed-agent-lock-simplification.md)).
-3. **Sealed-arm marker.** `parked` is the only request accepted from a sealed incarnation. The Harness must post it before the placement release, and implementation must confirm the seal appends no journal event after the final flush.
+1. **Request rate.** Each running Turn sends about one request per 250 ms tick while it produces events, plus a heartbeat every 20 s. The heartbeat replaces the dispatcher's renewal. Measure against the stream before default-on. The pusher starts at the admission cursor; envelopes it resends are ignored under the cursor rules.
+2. **Two lock families.** Store authentication locks the placement guard, Session root and head. The recording calls keep their Session-root, Turn, event-stream order. Authentication must finish, or keep the same root-first order, before recording starts ([lock simplification](2026-11-02-managed-agent-lock-simplification.md)).
+3. **Sealed-arm marker.** `parked` is the only request accepted from a sealed incarnation. The Harness must post it before the placement release, and implementation must confirm the seal appends no journal event after the final flush. If it does, or the marker is refused or lost, the Turn keeps its Harness owner until the lease lapses, and today's recovery then handles the sealed, unparked Turn.
 4. **Scope of ingest.** Recovery admissions and continuations remain on the stream. This includes the continuation of an approved Action. Pull scheduling replaces them, because the Harness that claims the work also delivers its events.
-5. **Clock.** The Turn lease still runs on each Java instance's clock (#14248). Ingest neither fixes nor worsens that.
+5. **Clock.** The Turn lease still runs on Java instance clocks (#14248), and ingest widens the exposure: one instance writes the lease, and whichever instance serves a later request renews and checks it. An instance whose clock runs ahead can refuse a healthy renewal, and the Turn then recovers by lease lapse; one that runs behind can accept a just-expired lease. Bound the skew between instances, or move the lease to database time, before default-on.
 6. **Store address.** The kill-Java scenario needs a Store address that survives one instance. The reference chart serves the Store on loopback inside the Java Pod, so killing that Java instance also cuts its Harness off from the Store.

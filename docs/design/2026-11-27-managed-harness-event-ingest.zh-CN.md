@@ -12,21 +12,21 @@
 
 1. 认领 Turn（`AgentTurnExecution.claimTurn`）。
 2. attach、接管或恢复 Harness Session，把 Turn 绑定到 Harness 的 boot，提交或续跑 prompt。这一步同时对齐 event epoch（`HarnessCoordinator.runClaimed`）。
-3. 记录准入：状态 `RUNNING`、`harness_event_epoch` 和 `harness_last_event_id`（`recordAdmission`、`recordRecoveryAdmission`）。
+3. 记录准入：状态 `RUNNING`（Turn 已是 `CANCELLING` 时保持不变）、`harness_event_epoch` 和 `harness_last_event_id`（`recordAdmission`、`recordRecoveryAdmission`）。
 4. 从 Turn 的游标打开 `GET /session/:id/events`，运行 `consumeStream`，直到终态事件、Action 停靠或 recovery block。
 
 只有第 4 步需要一个 Java 实例在整个 Turn 期间挂着。`consumeStream` 做以下事情：
 
-| 职责           | 现状                                                                                                                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 投影           | 每个 v1 envelope 都经过 `HarnessEventProjector`。来源键是 `bootId:eventEpoch:sourceId`，`sourceId` 就是 journal 序号。                                                                                         |
-| 过滤           | 跳过没有 ID 的 envelope，以及属于其他 prompt 的 envelope。                                                                                                                                                     |
-| 攒批           | 文本和推理增量按 75 毫秒、64 条或 64 KiB 攒批。首个可见文本和其他每个投影事件立即写入。终态事件结束所在批次。                                                                                                  |
-| 写入           | `recordHarnessEvents` 锁 Session 和 Turn，检查 `dispatch_owner`、租约有效期和 event epoch，然后在一个事务中推进游标、追加公开事件，终态时结算 Turn。                                                           |
-| 撤回           | `message_retracted` 先写入待发批次，再调用 `retractHarnessTurnOutput`；撤回可以用 `sourceBootId` 和 `sourceEventEpoch` 限定范围。                                                                              |
-| Action 停靠    | 流结束而没有终态事件时，派发者调用 `parkTurnForAction`。停靠本身由持久状态判定：head 已 seal、activation 已释放、`wake_seal_revision = journal_revision`、prompt 是被停靠的那个、且有一个已请求的 Action。     |
-| recovery block | 派发者每 15 秒读一次 Harness 状态。若没有活跃 prompt、recovery 被阻塞、游标之后也没有事件，就调用 `markTurnRecoveryBlocked`。Harness 的 `recoveryBlocked` 有一部分只在内存里（MCP 恢复、待处理的 Hook 操作）。 |
-| 失败           | 流出错按暂时失败处理：释放租约，下一次扫描从第 2 步重新驱动该 Turn。                                                                                                                                           |
+| 职责           | 现状                                                                                                                                                                                                                                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 投影           | 每个 v1 envelope 都经过 `HarnessEventProjector`。来源键是 `bootId:eventEpoch:sourceId`，`sourceId` 就是 journal 序号。                                                                                                                               |
+| 过滤           | 跳过没有 ID 的 envelope，以及属于其他 prompt 的 envelope。                                                                                                                                                                                           |
+| 攒批           | 文本和推理增量按 75 毫秒、64 条或 64 KiB 攒批。首个可见文本和其他每个投影事件立即写入。终态事件结束所在批次。                                                                                                                                        |
+| 写入           | `recordHarnessEvents` 锁 Session 和 Turn，检查 `dispatch_owner`、租约有效期和 event epoch，然后在一个事务中推进游标、追加公开事件，终态时结算 Turn。                                                                                                 |
+| 撤回           | `message_retracted` 先写入待发批次，再调用 `retractHarnessTurnOutput`；撤回可以用 `sourceBootId` 和 `sourceEventEpoch` 限定范围。                                                                                                                    |
+| Action 停靠    | 流结束而没有终态事件时，派发者调用 `parkTurnForAction`。停靠本身由持久状态判定：head 已 seal、activation 已释放、`wake_seal_revision = journal_revision`、prompt 是被停靠的那个且带有停靠期限、有一个已请求的 Action、没有未完成的 Action 回复操作。 |
+| recovery block | 派发者每 15 秒读一次 Harness 状态。若没有活跃 prompt、recovery 被阻塞、游标之后也没有事件，就调用 `markTurnRecoveryBlocked`。Harness 的 `recoveryBlocked` 有一部分只在内存里（MCP 恢复、待处理的 Hook 操作）。                                       |
+| 失败           | 流出错按暂时失败处理：释放租约，下一次扫描从第 2 步重新驱动该 Turn，直到重试预算用完。                                                                                                                                                               |
 
 后果：
 
@@ -128,19 +128,20 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
    - `parked` 要求游标等于 head 的已提交序号，然后以 Harness owner 调用 `parkTurnForAction`。
    - `recovery_blocked` 要求同样的游标条件，然后以 `HARNESS_RECOVERY_BLOCKED` 调用 `markTurnRecoveryBlocked`。
    - 两个方法都按现有条件清空 `dispatch_owner`。游标未到或条件不满足时，返回 `managed_event_ingest_end_refused`；该 Turn 之后会在租约过期时恢复。
+7. **回复。** 报告到达的游标；如果该请求写入了 Turn 的终态事件，回复还会带上 `terminal: true`。
 
 ### 回复
 
-回复为 `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`。
+回复为 `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false }`。
 
-| 回复                                                          | Harness 的处理                                               |
-| ------------------------------------------------------------- | ------------------------------------------------------------ |
-| 成功                                                          | 从 `cursor` 继续                                             |
-| `managed_event_ingest_cursor_mismatch`                        | 从返回的游标重新读 journal                                   |
-| `managed_event_ingest_not_ready`                              | 退避重试，最长不超过租约时长                                 |
-| `managed_event_ingest_not_owner`、writer 校验被拒、终态已确认 | 停止为这次准入上报                                           |
-| `managed_event_ingest_end_refused`                            | 若是游标未到，补发到已提交序号后重试；否则停止为这次准入上报 |
-| 传输失败                                                      | 原样重发同一请求                                             |
+| 回复                                                                | Harness 的处理                                               |
+| ------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 成功，`terminal: false`                                             | 从 `cursor` 继续                                             |
+| `managed_event_ingest_cursor_mismatch`                              | 从返回的游标重新读 journal                                   |
+| `managed_event_ingest_not_ready`                                    | 退避重试，最长不超过租约时长                                 |
+| `terminal: true`、`managed_event_ingest_not_owner`、writer 校验被拒 | 停止为这次准入上报                                           |
+| `managed_event_ingest_end_refused`                                  | 若是游标未到，补发到已提交序号后重试；否则停止为这次准入上报 |
+| 传输失败                                                            | 原样重发同一请求                                             |
 
 ## 5. 派发者的改动
 
@@ -160,7 +161,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
   - 复用事件路由的 `eventEnvelope` 投影和 `streamedDeltaIds` 初始化，按同样的 250 毫秒节奏从游标调用 `authority.readEvents`。
   - 从准入的 `lastEventId` 开始。
   - 通过 Session Store 客户端新增的 `ingestEvents` 方法发送。
-  - 收到终态确认、`not_owner`、writer 校验拒绝，或结束标记被确认后停止。
+  - 收到 `terminal: true` 的回复、`not_owner`、writer 校验拒绝，或结束标记被确认后停止。
 - **停靠。** 确认 seal 之后、释放 placement 之前（#18404），上报器先补发到已提交序号，再带上已 seal 实例发送 `end: "parked"`。如果失败，挂起照常继续，租约过期后走现有的恢复。
 - **recovery block。** 条件与 Java 现在轮询的相同：该 Turn 没有活跃 prompt、`recoveryBlocked` 为真、游标已到已提交序号。条件满足时，上报器发送 `end: "recovery_blocked"`。
 
@@ -179,18 +180,19 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 
 ## 8. 故障与竞争语义
 
-| 窗口                               | 要求的结果                                                                                    |
-| ---------------------------------- | --------------------------------------------------------------------------------------------- |
-| 准入记录前 Harness 就开始上报      | 返回 `not_ready`，Harness 重试，交接后被接受                                                  |
-| 提交后确认丢失                     | 重发被直接确认、不写入，或只写入其中尚未记录的尾部                                            |
-| 请求乱序到达                       | 越过前一个请求先到达的请求得到 `cursor_mismatch`，Harness 从已提交游标重发                    |
-| 一个请求中途失败                   | 已提交的前缀保留，重发的请求只写入剩余部分                                                    |
-| 交接后准入该 Turn 的 Java 实例死掉 | 没有影响，下一个请求由任一实例处理                                                            |
-| Harness 死掉或停止上报             | 租约在 60 秒内过期，扫描像现在一样恢复该 Turn。接管本来就要等 60 秒的 writer lease。          |
-| 上报期间 cancel                    | CANCELLING 通道收回该 Turn，Harness 的下一个请求得到 `not_owner`                              |
-| 接管后的过期 Harness               | 被 writer 校验拒绝，或被 `dispatch_owner` CAS 拒绝                                            |
-| 停靠标记丢失                       | 租约过期，由现有恢复处理这个已 seal 但未停靠的 Turn，与派发者在流结束后、停靠前死掉的情况相同 |
-| 发送结束标记时游标未到已提交序号   | 标记被拒。Harness 补发后重试，或等租约过期。                                                  |
+| 窗口                               | 要求的结果                                                                                                                                                              |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 准入记录前 Harness 就开始上报      | 返回 `not_ready`，Harness 重试，交接后被接受。准入时 Turn 已是 `CANCELLING` 的不做交接，其上报得到 `not_owner`                                                          |
+| 提交后确认丢失                     | 重发被直接确认、不写入，或只写入其中尚未记录的尾部                                                                                                                      |
+| 请求乱序到达                       | 越过前一个请求先到达的请求得到 `cursor_mismatch`，Harness 从已提交游标重发                                                                                              |
+| 一个请求中途失败                   | 已提交的前缀保留，重发的请求只写入剩余部分                                                                                                                              |
+| 交接后准入该 Turn 的 Java 实例死掉 | 若 Store 地址在该实例死掉后仍可用，则没有影响，下一个请求由任一实例处理。参考 chart 以 loopback 提供 Store（§12 风险 6），Harness 会连不上 Store，Turn 在租约过期后恢复 |
+| Harness 死掉或停止上报             | 租约在 60 秒内过期，扫描像现在一样恢复该 Turn。接管本来就要等 60 秒的 writer lease。                                                                                    |
+| 上报期间 cancel                    | CANCELLING 通道收回该 Turn，Harness 的下一个请求得到 `not_owner`                                                                                                        |
+| 接管后的过期 Harness               | 被 writer 校验拒绝，或被 `dispatch_owner` CAS 拒绝                                                                                                                      |
+| 心跳与一次写入重叠                 | 两者都在 Turn 行锁上串行，校验的是 `dispatch_owner` 和租约有效期而不是 `version`，因此互不使对方失效                                                                    |
+| 停靠标记丢失                       | 租约过期，由现有恢复处理这个已 seal 但未停靠的 Turn，与派发者在流结束后、停靠前死掉的情况相同                                                                           |
+| 发送结束标记时游标未到已提交序号   | 标记被拒。Harness 补发后重试，或等租约过期。                                                                                                                            |
 
 ## 9. 涉及的文件
 
@@ -249,9 +251,9 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 
 ## 12. 风险与开放问题
 
-1. **请求速率。** 每个运行中的 Turn 在产生事件期间约每 250 毫秒一次请求，另加每 20 秒一次心跳。心跳取代了派发者的续租。默认开启前要与拉流对比测量。
-2. **两组锁。** Store 认证会锁 placement guard、Session 根和 head；写入调用保持 Session 根、事件流、Turn 的顺序。认证必须在写入前完成，或者保持同样以 Session 根为先的顺序（[锁简化](2026-11-02-managed-agent-lock-simplification.zh-CN.md)）。
-3. **已 seal 实例的标记。** `parked` 是唯一接受已 seal 实例的请求。Harness 必须在释放 placement 之前发送它；实现时还要确认 seal 不会在最后一次补发之后再追加 journal 事件。
+1. **请求速率。** 每个运行中的 Turn 在产生事件期间约每 250 毫秒一次请求，另加每 20 秒一次心跳。心跳取代了派发者的续租。默认开启前要与拉流对比测量。上报器从准入游标开始；按游标规则，它重发的 envelope 会被忽略。
+2. **两组锁。** Store 认证会锁 placement guard、Session 根和 head；写入调用保持 Session 根、Turn、事件流的顺序。认证必须在写入前完成，或者保持同样以 Session 根为先的顺序（[锁简化](2026-11-02-managed-agent-lock-simplification.zh-CN.md)）。
+3. **已 seal 实例的标记。** `parked` 是唯一接受已 seal 实例的请求。Harness 必须在释放 placement 之前发送它；实现时还要确认 seal 不会在最后一次补发之后再追加 journal 事件。如果确实追加了，或标记被拒、丢失，该 Turn 会一直由 Harness 持有到租约过期，之后由现有恢复处理这个已 seal 但未停靠的 Turn。
 4. **上报的范围。** 恢复准入和续跑仍然拉流，批准 Action 后的续跑也在其中。拉模型调度会取代它们，因为认领工作的 Harness 同时也投递其事件。
-5. **时钟。** Turn 租约仍使用各 Java 实例的时钟（#14248），上报既不修复也不加重这个问题。
+5. **时钟。** Turn 租约仍使用 Java 实例的时钟（#14248），而上报扩大了这一暴露面：租约由一个实例写入，之后由处理请求的任意实例续租和校验。时钟偏快的实例可能拒绝一次正常的续租，Turn 随后因租约过期而恢复；时钟偏慢的实例可能接受一个刚过期的租约。默认开启前，要限定实例间的时钟偏差，或把租约改用数据库时间。
 6. **Store 地址。** 杀掉 Java 的场景需要一个在单个实例死掉后仍可用的 Store 地址。参考 chart 在 Java 所在的 Pod 里以 loopback 提供 Store，所以杀掉那个 Java 实例，也会让同一 Pod 里的 Harness 连不上 Store。
