@@ -2736,6 +2736,23 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
+  it('refuses a non-boolean pre-V2 folderTrustFeature instead of reading it as off', () => {
+    const qwenHome = useTempQwenHome();
+    const ws = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-flat-trust-bad-')),
+    );
+    tempWorkspace = ws;
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ folderTrustFeature: 'true' }),
+    );
+
+    // Reading the string as off would admit every workspace.
+    expect(() => loadServeFastPathSettings(ws)).toThrow(
+      'Serve fast path settings folderTrustFeature must be a boolean.',
+    );
+  });
+
   it('honors a pre-V2 top-level folderTrustFeature before any CLI load', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
