@@ -810,9 +810,20 @@ function relativePosixIfInside(
   return rel.split(path.sep).join('/');
 }
 
+interface InTreeGitDependencies {
+  /** In-tree subtrees, files, or symlinks whose contents must stay archived. */
+  paths: string[];
+  /**
+   * In-tree directory anchors traversed before `..` (e.g. `.qwen/tmp/anchor`
+   * in `route/../refs`): the directory entry itself must survive restore so
+   * kernel path resolution succeeds, without pulling unrelated cache children.
+   */
+  dirAnchors: string[];
+}
+
 type NestedCheckoutDisposition =
   | { kind: 'not-checkout' }
-  | { kind: 'archive'; preserveRelPaths: string[] }
+  | { kind: 'archive'; deps: InTreeGitDependencies }
   | { kind: 'excludable-external' }
   | { kind: 'refuse-external'; reason: string };
 
@@ -836,6 +847,7 @@ async function resolveWorktreeAdminDir(
 interface PathResolutionTrace {
   resolvedPath: string | undefined;
   inTreePaths: string[];
+  inTreeDirAnchors: string[];
   hitsUnarchivableRoot: boolean;
   hitsParentAdminDir: boolean;
   unreadable: boolean;
@@ -843,128 +855,281 @@ interface PathResolutionTrace {
 
 const MAX_SYMLINK_HOPS = 40;
 const MAX_ALTERNATES_DEPTH = 5;
+const MAX_STORE_SCAN_DIRS = 4096;
+
+function splitRawPath(rawPath: string): {
+  root: string | undefined;
+  segments: string[];
+} {
+  const normalizedSep =
+    process.platform === 'win32' ? rawPath.replace(/\\/g, '/') : rawPath;
+  if (path.isAbsolute(rawPath)) {
+    const parsedRoot = path.parse(rawPath).root;
+    const remainder = normalizedSep.slice(parsedRoot.length);
+    return {
+      root: parsedRoot,
+      segments: remainder.split('/').filter((s) => s.length > 0),
+    };
+  }
+  return {
+    root: undefined,
+    segments: normalizedSep.split('/').filter((s) => s.length > 0),
+  };
+}
 
 /**
- * Resolve `inputPath` step-by-step across symlinks, recording every in-tree
- * path (both intermediate/leaf symlinks and resolved targets) that lies inside
- * `worktreePath`, as well as whether resolution touches the unarchivable
- * top-level `.git` root or the parent worktree's own admin dir.
+ * Decode a Git C-quoted path line (as allowed in `objects/info/alternates`
+ * per Git's `quote.c: unquote_c_style`). Returns `undefined` on malformed
+ * quoting, unknown escapes, or non-UTF-8 byte sequences so callers fail closed.
+ */
+function unquoteGitPath(line: string): string | undefined {
+  if (!line.startsWith('"')) return line;
+  if (line.length < 2 || !line.endsWith('"')) return undefined;
+  const bytes: number[] = [];
+  for (let i = 1; i < line.length - 1; i++) {
+    const ch = line[i];
+    if (ch !== '\\') {
+      const codePoint = line.codePointAt(i)!;
+      const chunk = String.fromCodePoint(codePoint);
+      for (const b of Buffer.from(chunk, 'utf8')) bytes.push(b);
+      if (codePoint > 0xffff) i += 1;
+      continue;
+    }
+    i += 1;
+    if (i >= line.length - 1) return undefined;
+    const esc = line[i];
+    if (esc === '"' || esc === '\\') {
+      bytes.push(esc.charCodeAt(0));
+    } else if (esc === 'a') {
+      bytes.push(0x07);
+    } else if (esc === 'b') {
+      bytes.push(0x08);
+    } else if (esc === 'f') {
+      bytes.push(0x0c);
+    } else if (esc === 'n') {
+      bytes.push(0x0a);
+    } else if (esc === 'r') {
+      bytes.push(0x0d);
+    } else if (esc === 't') {
+      bytes.push(0x09);
+    } else if (esc === 'v') {
+      bytes.push(0x0b);
+    } else if (esc >= '0' && esc <= '7') {
+      const oct = line.slice(i, i + 3);
+      if (oct.length !== 3 || !/^[0-7]{3}$/.test(oct)) return undefined;
+      const val = Number.parseInt(oct, 8);
+      if (val > 0xff) return undefined;
+      bytes.push(val);
+      i += 2;
+    } else {
+      return undefined;
+    }
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(bytes));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve `(baseDir, rawTarget)` following POSIX `path_resolution(7)` order:
+ * never collapse `..` lexically before following preceding symlinks (so
+ * `route/../refs` resolves `route` first and then ascends via `..`). Records
+ * every in-tree symlink, resolved target, and in-tree directory anchor stepped
+ * through before `..`, plus whether resolution touches top-level `.git/` or
+ * the parent worktree's own admin dir.
  */
 async function tracePathResolution(
-  inputPath: string,
+  baseDir: string,
+  rawTarget: string,
   realWorktree: string,
   resolvedWorktree: string,
   realParentAdminDir: string | undefined,
   optional: boolean,
 ): Promise<PathResolutionTrace> {
   const inTreePathSet = new Set<string>();
+  const inTreeDirAnchorSet = new Set<string>();
   let hitsUnarchivableRoot = false;
   let hitsParentAdminDir = false;
 
-  const recordCandidate = (candidate: string): void => {
+  const classifyCandidate = (candidate: string): string | undefined => {
     const rel =
       relativePosixIfInside(realWorktree, candidate) ??
       relativePosixIfInside(resolvedWorktree, candidate);
-    if (rel !== undefined) {
-      if (rel === '' || rel === '.git' || rel.startsWith('.git/')) {
-        hitsUnarchivableRoot = true;
-      } else {
-        inTreePathSet.add(rel);
-      }
-    }
     if (
       realParentAdminDir !== undefined &&
       relativePosixIfInside(realParentAdminDir, candidate) !== undefined
     ) {
       hitsParentAdminDir = true;
     }
+    if (rel !== undefined) {
+      if (rel === '' || rel === '.git' || rel.startsWith('.git/')) {
+        hitsUnarchivableRoot = true;
+        return undefined;
+      }
+      return rel;
+    }
+    return undefined;
   };
 
-  let current = path.resolve(inputPath);
+  const recordCandidate = (candidate: string): void => {
+    const rel = classifyCandidate(candidate);
+    if (rel !== undefined) inTreePathSet.add(rel);
+  };
+
+  const recordDirAnchor = (candidate: string): void => {
+    const rel = classifyCandidate(candidate);
+    if (rel !== undefined) inTreeDirAnchorSet.add(rel);
+  };
+
+  const parsedTarget = splitRawPath(rawTarget);
+  const parsedBase = splitRawPath(
+    path.isAbsolute(baseDir) ? baseDir : path.resolve(baseDir),
+  );
+  let currentRoot: string;
+  let built: string;
+  let queue: string[];
+  if (parsedTarget.root !== undefined) {
+    currentRoot = parsedTarget.root;
+    built = parsedTarget.root;
+    queue = [...parsedTarget.segments];
+  } else {
+    currentRoot = parsedBase.root ?? path.parse(path.resolve(baseDir)).root;
+    built = currentRoot;
+    queue = [...parsedBase.segments, ...parsedTarget.segments];
+  }
+  const mustBeDir =
+    rawTarget.endsWith('/') ||
+    (process.platform === 'win32' && rawTarget.endsWith('\\'));
+
   let hops = 0;
+  let lastStat: import('node:fs').Stats | undefined;
 
-  while (true) {
-    const parsed = path.parse(current);
-    const remainder = current.slice(parsed.root.length);
-    const segments = remainder.split(path.sep).filter((s) => s.length > 0);
-    let built = parsed.root;
-    let followedSymlink = false;
-
-    for (let i = 0; i < segments.length; i++) {
-      built = path.join(built, segments[i]);
-      let stat;
-      try {
-        stat = await fs.lstat(built);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        const missing = code === 'ENOENT' || code === 'ENOTDIR';
+  while (queue.length > 0) {
+    const seg = queue.shift()!;
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (lastStat !== undefined && !lastStat.isDirectory()) {
         return {
           resolvedPath: undefined,
           inTreePaths: [...inTreePathSet],
+          inTreeDirAnchors: [...inTreeDirAnchorSet],
           hitsUnarchivableRoot,
           hitsParentAdminDir,
-          unreadable: !(optional && missing),
+          unreadable: !optional,
         };
       }
-      if (stat.isSymbolicLink()) {
-        recordCandidate(built);
-        hops += 1;
-        if (hops > MAX_SYMLINK_HOPS) {
-          return {
-            resolvedPath: undefined,
-            inTreePaths: [...inTreePathSet],
-            hitsUnarchivableRoot,
-            hitsParentAdminDir,
-            unreadable: true,
-          };
-        }
-        let target: string;
-        try {
-          target = await fs.readlink(built);
-        } catch {
-          return {
-            resolvedPath: undefined,
-            inTreePaths: [...inTreePathSet],
-            hitsUnarchivableRoot,
-            hitsParentAdminDir,
-            unreadable: true,
-          };
-        }
-        const nextBase = path.resolve(path.dirname(built), target);
-        const rest = segments.slice(i + 1);
-        current = rest.length > 0 ? path.join(nextBase, ...rest) : nextBase;
-        followedSymlink = true;
-        break;
-      }
+      // Stepping up via `..` requires the anchor directory to exist on disk
+      // after restore so the OS kernel can traverse `<anchor>/..`.
+      recordDirAnchor(built);
+      built = path.dirname(built);
+      lastStat = undefined;
+      continue;
     }
-
-    if (!followedSymlink) {
-      recordCandidate(built);
+    const candidate =
+      built === currentRoot
+        ? `${currentRoot}${seg}`
+        : `${built}${path.sep}${seg}`;
+    let stat: import('node:fs').Stats;
+    try {
+      stat = await fs.lstat(candidate);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const missing = code === 'ENOENT' || code === 'ENOTDIR';
       return {
-        resolvedPath: built,
+        resolvedPath: undefined,
         inTreePaths: [...inTreePathSet],
+        inTreeDirAnchors: [...inTreeDirAnchorSet],
         hitsUnarchivableRoot,
         hitsParentAdminDir,
-        unreadable: false,
+        unreadable: !(optional && missing),
       };
     }
+    if (stat.isSymbolicLink()) {
+      recordCandidate(candidate);
+      hops += 1;
+      if (hops > MAX_SYMLINK_HOPS) {
+        return {
+          resolvedPath: undefined,
+          inTreePaths: [...inTreePathSet],
+          inTreeDirAnchors: [...inTreeDirAnchorSet],
+          hitsUnarchivableRoot,
+          hitsParentAdminDir,
+          unreadable: true,
+        };
+      }
+      let linkTarget: string;
+      try {
+        linkTarget = await fs.readlink(candidate);
+      } catch {
+        return {
+          resolvedPath: undefined,
+          inTreePaths: [...inTreePathSet],
+          inTreeDirAnchors: [...inTreeDirAnchorSet],
+          hitsUnarchivableRoot,
+          hitsParentAdminDir,
+          unreadable: true,
+        };
+      }
+      const parsedLink = splitRawPath(linkTarget);
+      if (parsedLink.root !== undefined) {
+        currentRoot = parsedLink.root;
+        built = parsedLink.root;
+        lastStat = undefined;
+      }
+      queue.unshift(...parsedLink.segments);
+      continue;
+    }
+    if (queue.length > 0 && !stat.isDirectory()) {
+      return {
+        resolvedPath: undefined,
+        inTreePaths: [...inTreePathSet],
+        inTreeDirAnchors: [...inTreeDirAnchorSet],
+        hitsUnarchivableRoot,
+        hitsParentAdminDir,
+        unreadable: !optional,
+      };
+    }
+    built = candidate;
+    lastStat = stat;
   }
+
+  if (mustBeDir && lastStat !== undefined && !lastStat.isDirectory()) {
+    return {
+      resolvedPath: undefined,
+      inTreePaths: [...inTreePathSet],
+      inTreeDirAnchors: [...inTreeDirAnchorSet],
+      hitsUnarchivableRoot,
+      hitsParentAdminDir,
+      unreadable: !optional,
+    };
+  }
+  recordCandidate(built);
+  return {
+    resolvedPath: built,
+    inTreePaths: [...inTreePathSet],
+    inTreeDirAnchors: [...inTreeDirAnchorSet],
+    hitsUnarchivableRoot,
+    hitsParentAdminDir,
+    unreadable: false,
+  };
 }
 
 interface GitStoreDependencyTrace {
-  inTreePaths: string[];
+  deps: InTreeGitDependencies;
   hitsUnarchivableRoot: boolean;
   hitsParentAdminDir: boolean;
   unreadable: boolean;
 }
 
 /**
- * Trace the critical git store entries (`objects/`, `objects/pack`,
- * `objects/info`, `objects/info/alternates`, `refs/`, `reftable/`,
- * `packed-refs`, `HEAD`, `index`, `config`, `logs`) of a repository's git dir
- * and common dir so symlinks or alternates pointing back into ignored paths of
- * `worktreePath` (e.g. `.qwen/tmp/git-objects/` or `dist/`) are discovered and
- * preserved in the snapshot (or refused fail-closed when unarchivable).
+ * Trace the critical git store entries (`objects/`, `refs/`, `reftable/`,
+ * `packed-refs`, `HEAD`, `index`, `config`, `logs`, `objects/info/alternates`)
+ * AND recursively scan directory trees inside the store for symlinked pack
+ * files, loose objects, or ref files so any object or link pointing back into
+ * ignored paths of `worktreePath` (e.g. `.qwen/tmp/` or `dist/`) is discovered
+ * and preserved in the snapshot (or refused fail-closed when unarchivable).
  */
 async function traceGitStoreDependencies(
   realGitDir: string,
@@ -974,15 +1139,61 @@ async function traceGitStoreDependencies(
   realParentAdminDir: string | undefined,
 ): Promise<GitStoreDependencyTrace> {
   const inTreePathSet = new Set<string>();
+  const inTreeDirAnchorSet = new Set<string>();
   let hitsUnarchivableRoot = false;
   let hitsParentAdminDir = false;
   let unreadable = false;
 
   const absorb = (trace: PathResolutionTrace): void => {
     for (const p of trace.inTreePaths) inTreePathSet.add(p);
+    for (const a of trace.inTreeDirAnchors) inTreeDirAnchorSet.add(a);
     if (trace.hitsUnarchivableRoot) hitsUnarchivableRoot = true;
     if (trace.hitsParentAdminDir) hitsParentAdminDir = true;
     if (trace.unreadable) unreadable = true;
+  };
+
+  const scannedDirs = new Set<string>();
+  let scannedDirCount = 0;
+  const scanDirSymlinks = async (dirPath: string): Promise<void> => {
+    if (scannedDirs.has(dirPath)) return;
+    if (scannedDirCount >= MAX_STORE_SCAN_DIRS) {
+      unreadable = true;
+      return;
+    }
+    scannedDirs.add(dirPath);
+    scannedDirCount += 1;
+    let entries: Array<import('node:fs').Dirent>;
+    try {
+      entries = await fs.readdir(dirPath, { withFileTypes: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      unreadable = true;
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        const trace = await tracePathResolution(
+          dirPath,
+          entry.name,
+          realWorktree,
+          resolvedWorktree,
+          realParentAdminDir,
+          false,
+        );
+        absorb(trace);
+        if (trace.resolvedPath !== undefined) {
+          const targetStat = await fs
+            .lstat(trace.resolvedPath)
+            .catch(() => undefined);
+          if (targetStat?.isDirectory()) {
+            await scanDirSymlinks(trace.resolvedPath);
+          }
+        }
+      } else if (entry.isDirectory()) {
+        await scanDirSymlinks(path.join(dirPath, entry.name));
+      }
+    }
   };
 
   const gitDirEntries: Array<[string, boolean]> = [
@@ -991,19 +1202,20 @@ async function traceGitStoreDependencies(
     ['logs', true],
   ];
   for (const [entry, optional] of gitDirEntries) {
-    absorb(
-      await tracePathResolution(
-        path.join(realGitDir, entry),
-        realWorktree,
-        resolvedWorktree,
-        realParentAdminDir,
-        optional,
-      ),
+    const trace = await tracePathResolution(
+      realGitDir,
+      entry,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+      optional,
     );
+    absorb(trace);
   }
 
   const objectsTrace = await tracePathResolution(
-    path.join(realCommonDir, 'objects'),
+    realCommonDir,
+    'objects',
     realWorktree,
     resolvedWorktree,
     realParentAdminDir,
@@ -1011,25 +1223,28 @@ async function traceGitStoreDependencies(
   );
   absorb(objectsTrace);
 
-  const commonDirEntries: Array<[string, boolean]> = [
-    ['refs', true],
-    ['reftable', true],
-    ['packed-refs', true],
-    ['config', true],
+  const commonDirEntries: Array<[string, boolean, boolean]> = [
+    ['refs', true, true],
+    ['reftable', true, true],
+    ['packed-refs', true, false],
+    ['config', true, false],
   ];
   if (realCommonDir !== realGitDir) {
-    commonDirEntries.push(['HEAD', true]);
+    commonDirEntries.push(['HEAD', true, false]);
   }
-  for (const [entry, optional] of commonDirEntries) {
-    absorb(
-      await tracePathResolution(
-        path.join(realCommonDir, entry),
-        realWorktree,
-        resolvedWorktree,
-        realParentAdminDir,
-        optional,
-      ),
+  for (const [entry, optional, scanTree] of commonDirEntries) {
+    const trace = await tracePathResolution(
+      realCommonDir,
+      entry,
+      realWorktree,
+      resolvedWorktree,
+      realParentAdminDir,
+      optional,
     );
+    absorb(trace);
+    if (scanTree && trace.resolvedPath !== undefined) {
+      await scanDirSymlinks(trace.resolvedPath);
+    }
   }
 
   const visitedObjectsDirs = new Set<string>();
@@ -1039,20 +1254,10 @@ async function traceGitStoreDependencies(
   ): Promise<void> => {
     if (visitedObjectsDirs.has(objectsDir)) return;
     visitedObjectsDirs.add(objectsDir);
-    for (const sub of ['pack', 'info']) {
-      absorb(
-        await tracePathResolution(
-          path.join(objectsDir, sub),
-          realWorktree,
-          resolvedWorktree,
-          realParentAdminDir,
-          true,
-        ),
-      );
-    }
-    const alternatesPath = path.join(objectsDir, 'info', 'alternates');
+    await scanDirSymlinks(objectsDir);
     const alternatesTrace = await tracePathResolution(
-      alternatesPath,
+      objectsDir,
+      path.join('info', 'alternates'),
       realWorktree,
       resolvedWorktree,
       realParentAdminDir,
@@ -1074,14 +1279,14 @@ async function traceGitStoreDependencies(
     for (const rawLine of content.split('\n')) {
       const line = rawLine.replace(/\r$/, '');
       if (line.length === 0 || line.startsWith('#')) continue;
-      if (line.startsWith('"')) {
-        // C-quoted alternate path: fail closed rather than misparsing escapes.
+      const unquoted = unquoteGitPath(line);
+      if (unquoted === undefined || unquoted.length === 0) {
         unreadable = true;
         return;
       }
-      const altTarget = path.resolve(objectsDir, line);
       const altTrace = await tracePathResolution(
-        altTarget,
+        objectsDir,
+        unquoted,
         realWorktree,
         resolvedWorktree,
         realParentAdminDir,
@@ -1099,7 +1304,10 @@ async function traceGitStoreDependencies(
   }
 
   return {
-    inTreePaths: [...inTreePathSet],
+    deps: {
+      paths: [...inTreePathSet],
+      dirAnchors: [...inTreeDirAnchorSet],
+    },
     hitsUnarchivableRoot,
     hitsParentAdminDir,
     unreadable,
@@ -1109,8 +1317,9 @@ async function traceGitStoreDependencies(
 interface ResolvedGitFileTargets {
   realGitDir: string;
   realCommonDir: string | undefined;
-  inTreeStorePaths: string[];
+  deps: InTreeGitDependencies;
   insideWorktree: boolean;
+  gitDirInTopLevelDotGit: boolean;
   /**
    * True when `realGitDir` is a linked-worktree admin directory (`commondir`
    * or `gitdir` back-pointer present, or unreadable) that `git worktree prune`
@@ -1139,21 +1348,39 @@ async function resolveGitFileTargets(
     .catch(() => '');
   const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1]?.trim();
   if (!declared) return undefined;
-  const rawGitDir = path.resolve(childPath, declared);
   const gitDirTrace = await tracePathResolution(
-    rawGitDir,
+    childPath,
+    declared,
     realWorktree,
     resolvedWorktree,
     realParentAdminDir,
     true,
   );
   const realGitDir = gitDirTrace.resolvedPath;
-  if (realGitDir === undefined) return undefined;
+  if (realGitDir === undefined) {
+    if (gitDirTrace.unreadable) {
+      return {
+        realGitDir: '',
+        realCommonDir: undefined,
+        deps: {
+          paths: gitDirTrace.inTreePaths,
+          dirAnchors: gitDirTrace.inTreeDirAnchors,
+        },
+        insideWorktree: false,
+        gitDirInTopLevelDotGit: false,
+        isLinkedWorktree: true,
+        hitsUnarchivableRoot: gitDirTrace.hitsUnarchivableRoot,
+        hitsParentAdminDir: gitDirTrace.hitsParentAdminDir,
+        unreadableDependency: true,
+      };
+    }
+    return undefined;
+  }
 
   let commonDirUnreadable = false;
-  const commonDirFilePath = path.join(realGitDir, 'commondir');
   const commonDirFileTrace = await tracePathResolution(
-    commonDirFilePath,
+    realGitDir,
+    'commondir',
     realWorktree,
     resolvedWorktree,
     realParentAdminDir,
@@ -1190,7 +1417,8 @@ async function resolveGitFileTargets(
   let commonDirTargetTrace: PathResolutionTrace | undefined;
   if (hasCommonDir) {
     commonDirTargetTrace = await tracePathResolution(
-      path.resolve(realGitDir, commonDirRaw.trim()),
+      realGitDir,
+      commonDirRaw.trim(),
       realWorktree,
       resolvedWorktree,
       realParentAdminDir,
@@ -1208,11 +1436,19 @@ async function resolveGitFileTargets(
       : undefined;
   const insideWorktree =
     gitDirInside !== undefined || commonDirInside !== undefined;
+  const gitDirInTopLevelDotGit =
+    gitDirInside === '.git' ||
+    (gitDirInside !== undefined && gitDirInside.startsWith('.git/'));
 
   const inTreePathSet = new Set<string>([
     ...gitDirTrace.inTreePaths,
     ...commonDirFileTrace.inTreePaths,
     ...(commonDirTargetTrace?.inTreePaths ?? []),
+  ]);
+  const inTreeDirAnchorSet = new Set<string>([
+    ...gitDirTrace.inTreeDirAnchors,
+    ...commonDirFileTrace.inTreeDirAnchors,
+    ...(commonDirTargetTrace?.inTreeDirAnchors ?? []),
   ]);
   let hitsUnarchivableRoot =
     gitDirTrace.hitsUnarchivableRoot ||
@@ -1235,7 +1471,8 @@ async function resolveGitFileTargets(
       resolvedWorktree,
       realParentAdminDir,
     );
-    for (const p of storeTrace.inTreePaths) inTreePathSet.add(p);
+    for (const p of storeTrace.deps.paths) inTreePathSet.add(p);
+    for (const a of storeTrace.deps.dirAnchors) inTreeDirAnchorSet.add(a);
     if (storeTrace.hitsUnarchivableRoot) hitsUnarchivableRoot = true;
     if (storeTrace.hitsParentAdminDir) hitsParentAdminDir = true;
     if (storeTrace.unreadable) unreadableDependency = true;
@@ -1244,8 +1481,12 @@ async function resolveGitFileTargets(
   return {
     realGitDir,
     realCommonDir,
-    inTreeStorePaths: [...inTreePathSet],
+    deps: {
+      paths: [...inTreePathSet],
+      dirAnchors: [...inTreeDirAnchorSet],
+    },
     insideWorktree,
+    gitDirInTopLevelDotGit,
     isLinkedWorktree,
     hitsUnarchivableRoot,
     hitsParentAdminDir,
@@ -1254,28 +1495,29 @@ async function resolveGitFileTargets(
 }
 
 /**
- * Extract any in-tree paths required to resolve `childPath/.git` and its object
- * store (`gitdir` symlinks, `commondir`, `objects/`, `refs/`, `alternates`,
+ * Extract any in-tree paths and directory anchors required to resolve
+ * `childPath/.git` and its object store (`gitdir` symlinks, `commondir`,
+ * `objects/` including symlinked pack/loose files, `refs/`, `alternates`,
  * etc.) that lie inside `worktreePath` (outside top-level `.git/`). Works for
  * both `.git` files and `.git` directories, and is called during verification
- * even when the archive already carries `childPath/` so stores or symlinks
- * inside ignored dirs (e.g. `dist/inner.git`, `.qwen/tmp/git-objects/`) stay
- * unexcluded and late commits cannot slip past the final pre-removal check.
+ * even when the archive already carries `childPath/` so stores, symlinks, or
+ * anchors inside ignored dirs stay unexcluded during final verification.
  */
 async function resolveInTreeGitStorePaths(
   childPath: string,
   realWorktree: string,
   resolvedWorktree: string,
-): Promise<string[]> {
+): Promise<InTreeGitDependencies> {
+  const empty: InTreeGitDependencies = { paths: [], dirAnchors: [] };
   const marker = await fs
     .lstat(path.join(childPath, '.git'))
     .catch(() => undefined);
-  if (marker === undefined) return [];
+  if (marker === undefined) return empty;
   if (marker.isDirectory()) {
     const realGitDir = await fs
       .realpath(path.join(childPath, '.git'))
       .catch(() => undefined);
-    if (realGitDir === undefined) return [];
+    if (realGitDir === undefined) return empty;
     const storeTrace = await traceGitStoreDependencies(
       realGitDir,
       realGitDir,
@@ -1283,14 +1525,14 @@ async function resolveInTreeGitStorePaths(
       resolvedWorktree,
       undefined,
     );
-    return storeTrace.inTreePaths;
+    return storeTrace.deps;
   }
   const targets = await resolveGitFileTargets(
     childPath,
     realWorktree,
     resolvedWorktree,
   );
-  return targets?.inTreeStorePaths ?? [];
+  return targets?.deps ?? empty;
 }
 
 /**
@@ -1373,19 +1615,20 @@ async function classifyNestedCheckout(
   // repository whose object database lives here — still trace its store
   // dependencies in case `objects/` or `objects/info/alternates` points into
   // an ignored directory inside `worktreePath` (e.g. `.qwen/tmp/` or `dist/`).
+  const emptyDeps: InTreeGitDependencies = { paths: [], dirAnchors: [] };
   if (marker.isDirectory()) {
     const realGitDir = await fs
       .realpath(path.join(childPath, '.git'))
       .catch(() => undefined);
     if (realGitDir === undefined) {
-      return { kind: 'archive', preserveRelPaths: [] };
+      return { kind: 'archive', deps: emptyDeps };
     }
     const looksLikeGitRepo = await fs.lstat(path.join(realGitDir, 'HEAD')).then(
       () => true,
       () => false,
     );
     if (!looksLikeGitRepo) {
-      return { kind: 'archive', preserveRelPaths: [] };
+      return { kind: 'archive', deps: emptyDeps };
     }
     const storeTrace = await traceGitStoreDependencies(
       realGitDir,
@@ -1404,9 +1647,9 @@ async function classifyNestedCheckout(
         reason: `nested checkout ${childRel} depends on git store state that cannot be archived faithfully; refusing to capture a parent that would delete it`,
       };
     }
-    return { kind: 'archive', preserveRelPaths: storeTrace.inTreePaths };
+    return { kind: 'archive', deps: storeTrace.deps };
   }
-  if (!marker.isFile()) return { kind: 'archive', preserveRelPaths: [] };
+  if (!marker.isFile()) return { kind: 'archive', deps: emptyDeps };
   const targets = await resolveGitFileTargets(
     childPath,
     realWorktree,
@@ -1414,7 +1657,7 @@ async function classifyNestedCheckout(
     realParentAdminDir,
   );
   if (targets === undefined) {
-    return { kind: 'archive', preserveRelPaths: [] };
+    return { kind: 'archive', deps: emptyDeps };
   }
   if (targets.hitsParentAdminDir) {
     return {
@@ -1422,30 +1665,43 @@ async function classifyNestedCheckout(
       reason: `nested checkout ${childRel} stores git metadata inside this worktree's admin dir; refusing to capture a parent that would delete it`,
     };
   }
+  if (targets.unreadableDependency) {
+    return {
+      kind: 'refuse-external',
+      reason: `nested checkout ${childRel} depends on unreadable git store state; refusing to capture a parent that would delete it`,
+    };
+  }
   if (targets.insideWorktree) {
-    return { kind: 'archive', preserveRelPaths: targets.inTreeStorePaths };
+    if (targets.hitsUnarchivableRoot && !targets.gitDirInTopLevelDotGit) {
+      return {
+        kind: 'refuse-external',
+        reason: `nested checkout ${childRel} depends on unarchivable top-level .git store state; refusing to capture a parent that would delete it`,
+      };
+    }
+    return { kind: 'archive', deps: targets.deps };
   }
   const { realGitDir, realCommonDir } = targets;
 
-  if (targets.hitsUnarchivableRoot || targets.unreadableDependency) {
+  if (targets.hitsUnarchivableRoot) {
     return {
       kind: 'refuse-external',
-      reason: `nested checkout ${childRel} depends on unreadable or unarchivable git store state; refusing to capture a parent that would delete it`,
+      reason: `nested checkout ${childRel} depends on unarchivable top-level .git store state; refusing to capture a parent that would delete it`,
     };
   }
 
   // A standalone repository using an external `--separate-git-dir` has no
   // linked-worktree admin dir for `git worktree prune` to remove: archiving
-  // the checkout PLUS any in-tree symlinks/object-store targets it depends on
-  // keeps drafts, HEAD, and commit history readable after prune and restore.
+  // the checkout PLUS any in-tree symlinks/object-store targets/anchors it
+  // depends on keeps drafts, HEAD, and commit history readable after restore.
   if (!targets.isLinkedWorktree) {
-    return { kind: 'archive', preserveRelPaths: targets.inTreeStorePaths };
+    return { kind: 'archive', deps: targets.deps };
   }
 
-  if (targets.inTreeStorePaths.length > 0) {
+  if (targets.deps.paths.length > 0 || targets.deps.dirAnchors.length > 0) {
+    const firstDep = targets.deps.paths[0] ?? targets.deps.dirAnchors[0];
     return {
       kind: 'refuse-external',
-      reason: `nested checkout ${childRel} resolves git metadata through paths inside this checkout (${targets.inTreeStorePaths[0]}); refusing to capture a parent that would delete them`,
+      reason: `nested checkout ${childRel} resolves git metadata through paths inside this checkout (${firstDep}); refusing to capture a parent that would delete them`,
     };
   }
 
@@ -1537,6 +1793,16 @@ async function boundedSnapshotExclusions(
     preservedDirs.add(norm);
     addStrictAncestors(preservedAncestors, norm);
   };
+  const preserveAnchor = (rel: string): void => {
+    const norm = normalizeRel(rel).replace(/\/+$/, '');
+    if (norm.length === 0) return;
+    preservedAncestors.add(norm);
+    addStrictAncestors(preservedAncestors, norm);
+  };
+  const applyDeps = (deps: InTreeGitDependencies): void => {
+    for (const p of deps.paths) preserve(p);
+    for (const a of deps.dirAnchors) preserveAnchor(a);
+  };
 
   // Pre-index ignored entries into O(depth)/O(1) sets so `.qwen/tmp/*` with
   // thousands of cache directories never scales quadratically.
@@ -1580,13 +1846,13 @@ async function boundedSnapshotExclusions(
       handledCheckouts.add(checkoutRel);
       if (archived?.directories.has(`${checkoutRel}/`)) {
         preserve(checkoutRel);
-        for (const p of await resolveInTreeGitStorePaths(
-          path.join(worktreePath, checkoutRel),
-          realWorktree,
-          resolvedWorktree,
-        )) {
-          preserve(p);
-        }
+        applyDeps(
+          await resolveInTreeGitStorePaths(
+            path.join(worktreePath, checkoutRel),
+            realWorktree,
+            resolvedWorktree,
+          ),
+        );
         continue;
       }
       const disposition = await classifyNestedCheckout(
@@ -1598,9 +1864,7 @@ async function boundedSnapshotExclusions(
       );
       if (disposition.kind === 'archive') {
         preserve(checkoutRel);
-        for (const p of disposition.preserveRelPaths) {
-          preserve(p);
-        }
+        applyDeps(disposition.deps);
       } else if (disposition.kind === 'refuse-external') {
         if (archived === undefined) {
           throw new Error(`Worktree snapshot: ${disposition.reason}`);
@@ -1632,13 +1896,13 @@ async function boundedSnapshotExclusions(
       const relative = `${childRel}/`;
       handledCheckouts.add(childRel);
       if (archived?.directories.has(relative)) {
-        for (const p of await resolveInTreeGitStorePaths(
-          childPath,
-          realWorktree,
-          resolvedWorktree,
-        )) {
-          preserve(p);
-        }
+        applyDeps(
+          await resolveInTreeGitStorePaths(
+            childPath,
+            realWorktree,
+            resolvedWorktree,
+          ),
+        );
         continue;
       }
       const disposition = await classifyNestedCheckout(
@@ -1655,9 +1919,7 @@ async function boundedSnapshotExclusions(
           throw new Error(`Worktree snapshot: ${disposition.reason}`);
         }
       } else if (disposition.kind === 'archive') {
-        for (const p of disposition.preserveRelPaths) {
-          preserve(p);
-        }
+        applyDeps(disposition.deps);
       }
     }
   }
@@ -1672,13 +1934,13 @@ async function boundedSnapshotExclusions(
     if (handledCheckouts.has(repoRel)) continue;
     const repoPath = path.join(worktreePath, repoRel);
     if (archived?.directories.has(`${repoRel}/`)) {
-      for (const p of await resolveInTreeGitStorePaths(
-        repoPath,
-        realWorktree,
-        resolvedWorktree,
-      )) {
-        preserve(p);
-      }
+      applyDeps(
+        await resolveInTreeGitStorePaths(
+          repoPath,
+          realWorktree,
+          resolvedWorktree,
+        ),
+      );
       continue;
     }
     const disposition = await classifyNestedCheckout(
@@ -1693,9 +1955,7 @@ async function boundedSnapshotExclusions(
         throw new Error(`Worktree snapshot: ${disposition.reason}`);
       }
     } else if (disposition.kind === 'archive') {
-      for (const p of disposition.preserveRelPaths) {
-        preserve(p);
-      }
+      applyDeps(disposition.deps);
     }
   }
 

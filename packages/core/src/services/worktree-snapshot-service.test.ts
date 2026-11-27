@@ -1486,6 +1486,273 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves an individual symlinked .pack file moved from external objects/pack/ into ignored .qwen/tmp/',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extGitDir = path.join(root, 'ext-git-symlinked-pack');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'pack-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2', '--no-verify');
+      await fs.writeFile(path.join(inner, 'draft.md'), 'pack-draft\n');
+
+      git(inner, 'repack', '-ad', '-q');
+      const packDir = path.join(extGitDir, 'objects', 'pack');
+      const packFiles = (await fs.readdir(packDir)).filter((f) =>
+        f.endsWith('.pack'),
+      );
+      expect(packFiles.length).toBeGreaterThan(0);
+      const packName = packFiles[0]!;
+      const movedPack = path.join(worktree, '.qwen', 'tmp', packName);
+      await fs.mkdir(path.dirname(movedPack), { recursive: true });
+      await fs.rename(path.join(packDir, packName), movedPack);
+      await fs.symlink(movedPack, path.join(packDir, packName));
+
+      const blobs = path.join(worktree, '.qwen', 'tmp', 'blobs');
+      await fs.mkdir(blobs, { recursive: true });
+      await fs.writeFile(path.join(blobs, 'scratch.bin'), 'cache\n');
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members).toContain(`.qwen/tmp/${packName}`);
+      expect(members.some((m) => m.startsWith('.qwen/tmp/blobs/'))).toBe(false);
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'vendor'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(await fs.readFile(path.join(inner, 'draft.md'), 'utf8')).toBe(
+        'pack-draft\n',
+      );
+      expect(git(inner, 'cat-file', '-t', 'HEAD^{commit}')).toBe('commit');
+      expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe('pack-v1');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves objects -> route/../refs in POSIX symlink order and restores both the anchor dir and target objects',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+      const extGitDir = path.join(root, 'ext-git-route-dotdot');
+      const inner = path.join(worktree, 'vendor', 'inner');
+      await fs.mkdir(inner, { recursive: true });
+      git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+      git(inner, 'config', 'user.email', 't@e.com');
+      git(inner, 'config', 'user.name', 't');
+      git(inner, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(inner, 'old.txt'), 'route-dotdot-v1\n');
+      git(inner, 'add', '.');
+      git(inner, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(inner, 'old.txt'));
+      git(inner, 'add', '-A');
+      git(inner, 'commit', '-qm', 'c2', '--no-verify');
+      await fs.writeFile(path.join(inner, 'draft.md'), 'route-draft\n');
+
+      // Move objects to `.qwen/tmp/refs`, create `.qwen/tmp/anchor` (with
+      // unrelated cache inside it), link `extGitDir/route -> .qwen/tmp/anchor`,
+      // and link `extGitDir/objects -> route/../refs`.
+      const anchorDir = path.join(worktree, '.qwen', 'tmp', 'anchor');
+      const movedRefsObjects = path.join(worktree, '.qwen', 'tmp', 'refs');
+      await fs.mkdir(anchorDir, { recursive: true });
+      await fs.writeFile(path.join(anchorDir, 'junk.bin'), 'cache-junk\n');
+      await fs.rename(path.join(extGitDir, 'objects'), movedRefsObjects);
+      await fs.symlink(anchorDir, path.join(extGitDir, 'route'));
+      await fs.symlink('route/../refs', path.join(extGitDir, 'objects'));
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members).toContain('.qwen/tmp/anchor/');
+      expect(members).not.toContain('.qwen/tmp/anchor/junk.bin');
+      expect(members.some((m) => m.startsWith('.qwen/tmp/refs/'))).toBe(true);
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'vendor'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(await fs.readFile(path.join(inner, 'draft.md'), 'utf8')).toBe(
+        'route-draft\n',
+      );
+      expect(git(inner, 'cat-file', '-t', 'HEAD^{commit}')).toBe('commit');
+      expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe(
+        'route-dotdot-v1',
+      );
+    },
+  );
+
+  it('parses double-quoted objects/info/alternates paths inside an in-tree --separate-git-dir and preserves target objects', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-tmp', '--no-verify');
+
+    const inner = path.join(worktree, 'vendor', 'inner');
+    const inTreeGitDir = path.join(worktree, 'vendor', 'inner-git');
+    await fs.mkdir(inner, { recursive: true });
+    git(
+      inner,
+      'init',
+      '-q',
+      '-b',
+      'main',
+      `--separate-git-dir=${inTreeGitDir}`,
+    );
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    git(inner, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(inner, 'old.txt'), 'quoted-alt-v1\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'c1', '--no-verify');
+    const firstCommit = git(inner, 'rev-parse', 'HEAD');
+    await fs.rm(path.join(inner, 'old.txt'));
+    git(inner, 'add', '-A');
+    git(inner, 'commit', '-qm', 'c2', '--no-verify');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'quoted-draft\n');
+
+    // Move objects to an ignored directory with a space in its name and point
+    // to it via a Git C-quoted line in `objects/info/alternates`.
+    const altObjects = path.join(worktree, '.qwen', 'tmp', 'git objects');
+    await fs.mkdir(path.dirname(altObjects), { recursive: true });
+    await fs.rename(path.join(inTreeGitDir, 'objects'), altObjects);
+    await fs.mkdir(path.join(inTreeGitDir, 'objects', 'info'), {
+      recursive: true,
+    });
+    const quotedAlt = `"${altObjects.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"\n`;
+    await fs.writeFile(
+      path.join(inTreeGitDir, 'objects', 'info', 'alternates'),
+      quotedAlt,
+    );
+
+    const { snapshotPath, metaPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+    expect(checkoutMatchesCapture).toBe(true);
+
+    const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+    await fs.rm(path.join(worktree, '.qwen'), { recursive: true, force: true });
+    await fs.rm(path.join(worktree, 'vendor'), {
+      recursive: true,
+      force: true,
+    });
+    await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath,
+        meta: savedMeta,
+      }),
+    ).toBe(true);
+    expect(await fs.readFile(path.join(inner, 'draft.md'), 'utf8')).toBe(
+      'quoted-draft\n',
+    );
+    expect(git(inner, 'cat-file', '-t', 'HEAD^{commit}')).toBe('commit');
+    expect(git(inner, 'show', `${firstCommit}:old.txt`)).toBe('quoted-alt-v1');
+  });
+
+  it('refuses capture fail-closed when an in-tree --separate-git-dir has an unreadable or malformed alternates line', async () => {
+    const inner = path.join(worktree, 'vendor', 'inner');
+    const inTreeGitDir = path.join(worktree, 'vendor', 'inner-git');
+    await fs.mkdir(inner, { recursive: true });
+    git(
+      inner,
+      'init',
+      '-q',
+      '-b',
+      'main',
+      `--separate-git-dir=${inTreeGitDir}`,
+    );
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    git(inner, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(inner, 'f.txt'), 'v1\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'c1', '--no-verify');
+
+    await fs.mkdir(path.join(inTreeGitDir, 'objects', 'info'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(inTreeGitDir, 'objects', 'info', 'alternates'),
+      '"unterminated-quoted-alternate\n',
+    );
+
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(
+      /nested checkout vendor\/inner depends on unreadable git store state/,
+    );
+  });
+
   it.each(['.qwen/tmp/*\n', ''])(
     'refuses capture when .qwen/tmp itself is a detached external linked worktree under ignore rule %j',
     async (ignoreRule) => {

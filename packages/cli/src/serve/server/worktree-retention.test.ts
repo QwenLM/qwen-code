@@ -3713,6 +3713,161 @@ describe('worktree retention with real repositories', () => {
     },
   );
 
+  it
+    .skipIf(process.platform === 'win32')
+    .each([
+      'repack-symlinked-pack',
+      'route-dotdot-refs',
+      'quoted-alternates',
+    ] as const)(
+    'retains HEAD and deleted-file history across retention sweep and restore for %s',
+    async (shape) => {
+      const primary = makeRetentionRepo(root, 'primary');
+      fs.writeFileSync(path.join(primary.repo, '.gitignore'), '.qwen/tmp/\n');
+      git(primary.repo, primary.home, 'add', '.gitignore');
+      git(
+        primary.repo,
+        primary.home,
+        'commit',
+        '-qm',
+        'ignore-qwen-tmp',
+        '--no-verify',
+      );
+      primary.head = git(primary.repo, primary.home, 'rev-parse', 'HEAD');
+      configureRetention(primary, 1);
+
+      const oldest = await makeRetainedSession(primary, {
+        slug: `git-obj-${shape}-old`,
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(primary, {
+        slug: `git-obj-${shape}-new`,
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+
+      const inner = path.join(oldest.worktreePath, 'vendor', 'inner');
+      const gitDir =
+        shape === 'quoted-alternates'
+          ? path.join(oldest.worktreePath, 'vendor', 'inner-git')
+          : path.join(root, `ext-git-${shape}`);
+      fs.mkdirSync(inner, { recursive: true });
+      git(
+        inner,
+        primary.home,
+        'init',
+        '-q',
+        '-b',
+        'main',
+        `--separate-git-dir=${gitDir}`,
+      );
+      git(inner, primary.home, 'config', 'user.email', 't@e.com');
+      git(inner, primary.home, 'config', 'user.name', 't');
+      git(inner, primary.home, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(inner, 'old.txt'), `old-${shape}\n`);
+      git(inner, primary.home, 'add', '.');
+      git(inner, primary.home, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(inner, primary.home, 'rev-parse', 'HEAD');
+      fs.rmSync(path.join(inner, 'old.txt'));
+      git(inner, primary.home, 'add', '-A');
+      git(inner, primary.home, 'commit', '-qm', 'c2', '--no-verify');
+      fs.writeFileSync(path.join(inner, 'draft.md'), `draft-${shape}\n`);
+
+      if (shape === 'repack-symlinked-pack') {
+        git(inner, primary.home, 'repack', '-ad', '-q');
+        const packDir = path.join(gitDir, 'objects', 'pack');
+        const packName = fs
+          .readdirSync(packDir)
+          .find((f) => f.endsWith('.pack'))!;
+        const movedPack = path.join(
+          oldest.worktreePath,
+          '.qwen',
+          'tmp',
+          packName,
+        );
+        fs.mkdirSync(path.dirname(movedPack), { recursive: true });
+        fs.renameSync(path.join(packDir, packName), movedPack);
+        fs.symlinkSync(movedPack, path.join(packDir, packName));
+      } else if (shape === 'route-dotdot-refs') {
+        const anchorDir = path.join(
+          oldest.worktreePath,
+          '.qwen',
+          'tmp',
+          'anchor',
+        );
+        const movedRefs = path.join(
+          oldest.worktreePath,
+          '.qwen',
+          'tmp',
+          'refs',
+        );
+        fs.mkdirSync(anchorDir, { recursive: true });
+        fs.renameSync(path.join(gitDir, 'objects'), movedRefs);
+        fs.symlinkSync(anchorDir, path.join(gitDir, 'route'));
+        fs.symlinkSync('route/../refs', path.join(gitDir, 'objects'));
+      } else {
+        const altObjects = path.join(
+          oldest.worktreePath,
+          '.qwen',
+          'tmp',
+          'git-objects',
+        );
+        fs.mkdirSync(path.dirname(altObjects), { recursive: true });
+        fs.renameSync(path.join(gitDir, 'objects'), altObjects);
+        fs.mkdirSync(path.join(gitDir, 'objects', 'info'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(gitDir, 'objects', 'info', 'alternates'),
+          `"${altObjects}"\n`,
+        );
+      }
+
+      const report = await sweep(primary);
+      expect(report.removed).toEqual([oldest.id]);
+      expect(fs.existsSync(oldest.worktreePath)).toBe(false);
+
+      const selected = await selectWorktreeSnapshot({
+        directory: path.dirname(oldest.sidecarPath),
+        sessionId: oldest.id,
+        slug: oldest.sidecar.slug,
+      });
+      expect(selected).toBeDefined();
+      const meta = await readWorktreeSnapshotMeta(selected!.metaPath);
+      git(
+        primary.repo,
+        primary.home,
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        oldest.worktreePath,
+        meta.headCommit,
+      );
+      await restoreWorktreeSnapshot(
+        selected!.snapshotPath,
+        oldest.worktreePath,
+        meta,
+      );
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: oldest.worktreePath,
+          snapshotPath: selected!.snapshotPath,
+          meta,
+        }),
+      ).toBe(true);
+      expect(fs.readFileSync(path.join(inner, 'draft.md'), 'utf8')).toBe(
+        `draft-${shape}\n`,
+      );
+      expect(git(inner, primary.home, 'cat-file', '-t', 'HEAD^{commit}')).toBe(
+        'commit',
+      );
+      expect(git(inner, primary.home, 'show', `${firstCommit}:old.txt`)).toBe(
+        `old-${shape}`,
+      );
+    },
+  );
+
   it.each([false, null, 'off', []] as const)(
     'pauses retention instead of falling back to default when worktree settings is %j',
     async (invalidSection) => {
