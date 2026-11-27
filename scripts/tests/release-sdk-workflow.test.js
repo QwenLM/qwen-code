@@ -71,12 +71,14 @@ describe('TypeScript SDK release workflow', () => {
     // A GITHUB_TOKEN-created release emits no workflow-triggering event, so
     // the SDK release never reached `on: release: published`. With CI_BOT_PAT
     // it does, and `sdk-typescript-*` tags must stay invisible to the CLI
-    // consumers: finalize exits 1 on them, sync-release-to-oss holds its
-    // single concurrency lock to download assets they do not ship, and the DSW
-    // gate job burns a self-hosted runner to no-op. Keep the workflow_dispatch
-    // arm each one needs, and key on the tag prefix like the sibling
-    // workflows; the DSW gate also keeps its own `dsw-eas-*` release-event
-    // smokes, whose tags are outside the `v*` family.
+    // consumers: finalize exits 1 on them, and sync-release-to-oss holds its
+    // single concurrency lock to download assets they do not ship. Keep the
+    // workflow_dispatch arm each one needs, and key on the tag prefix like the
+    // sibling workflows.
+    // The DSW gate excludes the SDK family instead of allowing `v*`: it also
+    // owns its own `dsw-eas-*` release-event smokes, and the `Check release
+    // version` step maps those tags to `should_run=true`. Enumerating allowed
+    // families there would silently delete whatever family is added next.
     // Pin each whole expression, not disjoint substrings: an operator flip
     // (`||` -> `&&`) or a negated startsWith must fail here, the mechanism
     // desktop-oss-workflow.test.js already uses.
@@ -95,7 +97,7 @@ describe('TypeScript SDK release workflow', () => {
       [
         '.github/workflows/dsw-swe-verified-release.yml',
         'release_gate',
-        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v') || startsWith(github.event.release.tag_name, 'dsw-eas-')) }}",
+        "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || !startsWith(github.event.release.tag_name, 'sdk-typescript-')) }}",
       ],
     ];
     for (const [path, job, expected] of guards) {
