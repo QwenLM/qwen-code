@@ -1424,6 +1424,23 @@ describe('EditTool', () => {
       expect(resultContent).toContain('const x = 2;');
     });
 
+    it('should leave a file unchanged when its encoding cannot represent the edit', async () => {
+      const latin1FilePath = path.join(rootDir, 'latin1.py');
+      const original = Buffer.from(
+        '# Résumé des opérations\nx = 1\n',
+        'latin1',
+      );
+      fs.writeFileSync(latin1FilePath, original);
+      seedPriorRead(latin1FilePath);
+      autoEditOnce();
+
+      const result = await run(edit(latin1FilePath, 'x = 1', '# 减法\nx = 1'));
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain('cannot represent "减"');
+      expect(fs.readFileSync(latin1FilePath)).toEqual(original);
+    });
+
     it('should return error if old_string is not found in file', async () => {
       seedFile(filePath, 'Some content.');
       const result = await run(edit(filePath, 'nonexistent', 'replacement'));

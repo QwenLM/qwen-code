@@ -335,6 +335,32 @@ export function prepareTextFileContent(
     // (bom: true), prepend the correct BOM bytes for this encoding so the
     // byte-order mark is preserved on write-back.
     const encoded = iconvLite.encode(normalizedContent, encoding);
+    // iconv-lite writes `?` for a character the encoding cannot represent.
+    // Refuse the write instead of putting different text on disk. A failed
+    // round trip alone is not proof: `¥` in Shift_JIS encodes to bytes that
+    // read back as `\`, so only characters that come back as `?` count.
+    if (iconvLite.decode(encoded, encoding) !== normalizedContent) {
+      const lost = [...new Set(normalizedContent)].filter(
+        (char) =>
+          char !== '?' &&
+          /^\?+$/.test(
+            iconvLite.decode(iconvLite.encode(char, encoding), encoding),
+          ),
+      );
+      if (lost.length > 0) {
+        const listed = lost
+          .slice(0, 5)
+          .map(
+            (char) =>
+              `"${char}" (U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')})`,
+          )
+          .join(', ');
+        const more = lost.length > 5 ? ` and ${lost.length - 5} more` : '';
+        throw new Error(
+          `${encoding} cannot represent ${listed}${more}; ${filePath} was not written.`,
+        );
+      }
+    }
     if (bom) {
       const bomBytes = getBOMBytesForEncoding(encoding);
       return {
