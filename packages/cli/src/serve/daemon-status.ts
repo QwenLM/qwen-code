@@ -55,6 +55,7 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
+import type { LoadAdmissionSnapshot } from './load-admission.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -117,7 +118,8 @@ export interface DaemonStatusIssue {
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
-    | 'daemon_memory_pressure';
+    | 'daemon_memory_pressure'
+    | 'system_overloaded';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -153,6 +155,7 @@ export interface BuildDaemonStatusOptions {
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   /** Returns undefined when no policy was built — direct-embed, or no budget. */
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
   getCommittedAcpChildCount?: () => number;
@@ -416,6 +419,14 @@ interface DaemonStatusRuntime {
    * Absent when no budget resolved.
    */
   memory?: DaemonStatusRuntimeMemory;
+  /**
+   * Load-based fresh-session admission state. `enabled: false` when the
+   * operator passed `--no-load-admission`; `overloaded` is the cached
+   * monitor verdict that refuses new child spawns with 503
+   * `system_overloaded`. Live sessions and the control plane are never
+   * gated by it.
+   */
+  loadAdmission?: LoadAdmissionSnapshot;
   perf?: DaemonPerfSnapshot;
   /**
    * Rolling per-interval activity series backing the Daemon Status charts
@@ -904,8 +915,24 @@ export async function buildDaemonStatusResponse(
       ? input.getChannelWorkerSnapshots?.()
       : undefined;
   const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
+  const loadAdmissionSnapshot = input.getLoadAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
+
+  if (loadAdmissionSnapshot?.overloaded) {
+    issues.push({
+      code: 'system_overloaded',
+      // `warning`, not `error`: same calibration caution as
+      // `daemon_memory_pressure` — the thresholds are new, and the rollup
+      // should not claim a daemon-wide error on their first deployments.
+      severity: 'warning',
+      message:
+        `System overloaded (${loadAdmissionSnapshot.reason}); new sessions ` +
+        'are paused until load subsides ' +
+        `(load ratio ${loadAdmissionSnapshot.loadRatio.toFixed(2)}, ` +
+        `event-loop p99 ${Math.round(loadAdmissionSnapshot.eventLoopLagP99Ms)} ms).`,
+    });
+  }
 
   pushRuntimeIssues(
     issues,
@@ -1170,6 +1197,9 @@ export async function buildDaemonStatusResponse(
             : null,
       },
       ...(runtimeMemory ? { memory: runtimeMemory } : {}),
+      ...(loadAdmissionSnapshot
+        ? { loadAdmission: loadAdmissionSnapshot }
+        : {}),
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),

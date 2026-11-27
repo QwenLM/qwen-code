@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
@@ -61,12 +62,12 @@ public class ManagedMemoryStore implements MemoryRepository {
 
     @Override
     public List<Store> list(String tenant, String actor) {
-        byte[] owner = owner(tenant, actor);
+        String owner = owner(tenant, actor);
         requireEnabled();
         return jdbc.query("SELECT memory_store_id,gmt_create FROM ma_memory_store"
-                        + " WHERE owner_key=? AND tenant_id=? AND owner_actor_key=?",
+                        + " WHERE tenant_id=? AND owner_actor_key=?",
                 (row, index) -> new Store(ManagedSchemaRows.identity(row, "memory_store_id"), row.getLong("gmt_create")),
-                ManagedSchemaKeys.key(tenant, actor), tenant, owner);
+                tenant, owner);
     }
 
     @Override
@@ -78,8 +79,7 @@ public class ManagedMemoryStore implements MemoryRepository {
         Store result = new Store("memstore_" + UUID.randomUUID(), clock.millis());
         try {
             transaction.executeWithoutResult(status -> jdbc.update("INSERT INTO ma_memory_store"
-                            + " (owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?,?)",
-                    ManagedSchemaKeys.key(tenant, actor),
+                            + " (tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create) VALUES (?,?,?,?,?)",
                     tenant, result.id(), owner(tenant, actor), "managed_" + UUID.randomUUID(), result.createdAt()));
             return result;
         } catch (DuplicateKeyException duplicate) {
@@ -98,7 +98,15 @@ public class ManagedMemoryStore implements MemoryRepository {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Memory binding requires the Session creation transaction.");
         }
-        if (!MemoryModels.text(store, 512) || jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_store"
+        // The client names the Store; the VARCHAR(64) column admits only a
+        // bounded, well-formed identity without trailing spaces, never a
+        // PAD SPACE fold of a stored id.
+        try {
+            BrokerValues.requireShortId(store, "memoryStoreId");
+        } catch (IllegalArgumentException invalid) {
+            throw unavailable();
+        }
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_store"
                 + " WHERE tenant_id=? AND memory_store_id=? AND owner_actor_key=?",
                 Integer.class, tenant, store, owner(tenant, actor)) != 1) {
             throw unavailable();
@@ -250,11 +258,13 @@ public class ManagedMemoryStore implements MemoryRepository {
 
     private static boolean write(Query query) { return "remember".equals(query.operation()) || "forget".equals(query.operation()); }
     private static String value(String value) { return value == null ? "" : value; }
-    private static byte[] owner(String tenant, String actor) {
+    private static String owner(String tenant, String actor) {
         if (!MemoryModels.text(actor, 512)) {
             throw new ManagedAgentException(401, "actor_required", "A trusted actor is required.");
         }
-        return ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        // The raw actor column keeps the registry's tenant/actor validation.
+        ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        return actor;
     }
     private static ManagedAgentException unavailable() {
         return new ManagedAgentException(404, "memory_store_not_found", "MemoryStore was not found.");

@@ -37,7 +37,9 @@ import {
   logWorktreeCleanupPreserve,
   preclassifyWorktreeCleanup,
   verifyWorktreeCleanupOwnership,
+  withWorktreeArchiveMove,
 } from './worktree-orphan-cleanup.js';
+import { moveWorktreeSnapshotsWithSession } from './worktree-snapshot-pairs.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -240,6 +242,7 @@ async function runWithDaemonWriterLease<T>(params: {
   ) => Promise<{ value: T; mutationApplied: boolean }>;
   mutationAppliedAfterError: () => Promise<boolean>;
   afterMutationApplied: () => Promise<void>;
+  reconcileValues?: readonly T[];
 }): Promise<LeaseMutationResult<T>> {
   const {
     action,
@@ -248,6 +251,7 @@ async function runWithDaemonWriterLease<T>(params: {
     mutate,
     mutationAppliedAfterError,
     afterMutationApplied,
+    reconcileValues = [],
   } = params;
   let lease;
   try {
@@ -293,7 +297,10 @@ async function runWithDaemonWriterLease<T>(params: {
   }
 
   let maintenanceError: unknown;
-  if (mutationApplied) {
+  if (
+    mutationApplied ||
+    (value !== undefined && reconcileValues.includes(value))
+  ) {
     try {
       await afterMutationApplied();
     } catch (error) {
@@ -399,6 +406,48 @@ function updateScheduledTaskForMaintenance(
   });
 }
 
+async function reconcileSessionArchiveState(params: {
+  service: SessionService;
+  sessionId: string;
+  action: 'archive' | 'unarchive';
+  assertCanMutate?: () => void;
+  isSessionLive?: (sessionId: string) => boolean;
+}): Promise<void> {
+  const { service, sessionId, action, assertCanMutate, isSessionLive } = params;
+  const errors: unknown[] = [];
+  try {
+    assertCanMutate?.();
+    await moveWorktreeSnapshotsWithSession(
+      service,
+      sessionId,
+      action === 'archive' ? 'archived' : 'active',
+      isSessionLive,
+    );
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    assertCanMutate?.();
+    await updateScheduledTaskForMaintenance(
+      service,
+      sessionId,
+      action,
+      assertCanMutate,
+    );
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(
+      errors,
+      `Session ${action} follow-up maintenance failed: ${errors
+        .map(errorMessage)
+        .join('; ')}`,
+    );
+  }
+}
+
 type DeleteOneResult = (
   | {
       kind: 'removed';
@@ -497,20 +546,35 @@ async function deletePersistedSessionWithLease(
   };
 }
 
-function sessionLiveOnBridge(
-  bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
+export function sessionLiveOnBridge(
+  bridge: Partial<
+    Pick<
+      AcpSessionBridge,
+      'getSessionSummary' | 'hasSessionOrPendingRegistration'
+    >
+  >,
   candidate: string,
 ): boolean {
-  if (!bridge.getSessionSummary) return true;
-  try {
-    bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+  if (bridge.hasSessionOrPendingRegistration?.(candidate)) {
     return true;
-  } catch (error) {
-    return !(
-      isSessionNotFoundError(error) &&
-      (error as SessionNotFoundError).code !== 'session_closing'
-    );
   }
+  if (!bridge.getSessionSummary) return true;
+  const normalized = normalizeSessionIdForLookup(candidate);
+  const ids = normalized === candidate ? [candidate] : [normalized, candidate];
+  for (const id of ids) {
+    try {
+      bridge.getSessionSummary(id);
+      return true;
+    } catch (error) {
+      if (
+        !isSessionNotFoundError(error) ||
+        (error as SessionNotFoundError).code === 'session_closing'
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function prepareWorktreeCleanup(
@@ -683,7 +747,9 @@ export async function deleteDaemonSessions(params: {
             }
           };
           try {
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              forDeletion: true,
+            });
           } catch (error) {
             // A 'session_closing' refusal means a bridge-internal
             // auto-close (last-detach, idle reaper) is in flight — the
@@ -957,7 +1023,8 @@ function sanitizeLogLine(message: string): string {
 export async function archiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession'> &
+    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
@@ -1064,15 +1131,18 @@ export async function archiveDaemonSessions(params: {
             mutationAppliedAfterError: async () =>
               (await classifySessionLocation(service, sessionId)) ===
               'archived',
-            afterMutationApplied: async () => {
-              assertCanMutate?.();
-              await updateScheduledTaskForMaintenance(
+            afterMutationApplied: () =>
+              reconcileSessionArchiveState({
                 service,
                 sessionId,
-                'archive',
+                action: 'archive',
                 assertCanMutate,
-              );
-            },
+                isSessionLive:
+                  bridge.getSessionSummary !== undefined
+                    ? (id) => sessionLiveOnBridge(bridge, id)
+                    : undefined,
+              }),
+            reconcileValues: ['alreadyArchived'],
           });
           if (mutation.error !== undefined) {
             return {
@@ -1082,35 +1152,17 @@ export async function archiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
-          let maintenanceError = mutation.maintenanceError;
-          if (mutation.value === 'alreadyArchived') {
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'archive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=archive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError,
+            maintenanceError: mutation.maintenanceError,
           };
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'active', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -1250,15 +1302,14 @@ export async function unarchiveDaemonSessions(params: {
             },
             mutationAppliedAfterError: async () =>
               (await classifySessionLocation(service, sessionId)) === 'active',
-            afterMutationApplied: async () => {
-              assertCanMutate?.();
-              await updateScheduledTaskForMaintenance(
+            afterMutationApplied: () =>
+              reconcileSessionArchiveState({
                 service,
                 sessionId,
-                'unarchive',
+                action: 'unarchive',
                 assertCanMutate,
-              );
-            },
+              }),
+            reconcileValues: ['alreadyActive'],
           });
           if (mutation.error !== undefined) {
             return {
@@ -1268,35 +1319,17 @@ export async function unarchiveDaemonSessions(params: {
               maintenanceError: mutation.maintenanceError,
             };
           }
-          let maintenanceError = mutation.maintenanceError;
-          if (mutation.value === 'alreadyActive') {
-            try {
-              await updateScheduledTaskForMaintenance(
-                service,
-                sessionId,
-                'unarchive',
-                assertCanMutate,
-              );
-            } catch (error) {
-              maintenanceError = error;
-              logSessionArchiveWarning(
-                `scheduled task lifecycle update failed action=unarchive workspace=${safeLogValue(
-                  service.getProjectRoot(),
-                )} session=${safeLogValue(sessionId)} error=${safeLogValue(
-                  errorMessage(error),
-                )}`,
-              );
-            }
-          }
           return {
             kind: mutation.value ?? 'notFound',
             mutationApplied: mutation.mutationApplied,
-            maintenanceError,
+            maintenanceError: mutation.maintenanceError,
           };
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : withWorktreeArchiveMove(service, sessionId, 'archived', () =>
+              coordinator.runExclusiveMany([sessionId], mutateSession),
+            ));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

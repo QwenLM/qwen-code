@@ -240,6 +240,9 @@ async function startDaemon(
       workspace,
       '--no-web',
       '--no-open',
+      // Restart recovery, not host-load admission, is under test here;
+      // keep a shared runner's load out of session creation.
+      '--no-load-admission',
       '--chat-recording',
       '--session-reap-interval-ms',
       '0',

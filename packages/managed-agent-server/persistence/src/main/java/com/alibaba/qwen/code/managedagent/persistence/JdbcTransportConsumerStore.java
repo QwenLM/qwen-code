@@ -121,7 +121,7 @@ public class JdbcTransportConsumerStore
             long sequence) {
         return jdbc.update(
                         "UPDATE ma_event_stream SET wake_covered_sequence = ? WHERE tenant_id = ?"
-                            + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                            + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                             + " AND (wake_covered_sequence IS NULL OR wake_covered_sequence < ?)",
                 sequence, tenantId, sessionId, sequence) == 1;
     }
@@ -136,7 +136,7 @@ public class JdbcTransportConsumerStore
                         "SELECT e.covered_sequence FROM ma_event_stream e JOIN ma_session s ON"
                             + " s.tenant_id = e.tenant_id AND s.session_id = e.session_id WHERE"
                             + " e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION'"
-                            + " AND e.stream_id = X'' AND s.session_kind = 'PUBLIC' AND"
+                            + " AND e.stream_id = '' AND s.session_kind = 'PUBLIC' AND"
                             + " s.retired_at IS NULL",
                 (result, index) -> result.getLong(1), tenantId, sessionId);
         return covered.isEmpty() ? OptionalLong.empty()

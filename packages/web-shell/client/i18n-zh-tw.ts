@@ -268,7 +268,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'managed.discarded': '已丟棄本次請求。草稿已放回輸入框。',
   'managed.newRequired': '請新建任務後傳送訊息。',
   'managed.truncated': '[詳情已截斷]',
-  'managed.question.title': '請回答以下問題',
   'managed.actions.title': '待處理請求',
   'managed.actions.root': '當前會話',
   'managed.actions.child': (v) => `子會話 · ${v?.session}`,
@@ -1732,7 +1731,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.usage.dailyTokensTitle': 'Tokens',
   'daemon.usage.dailyTokensSub': '每日 token 總量',
   'daemon.usage.dailySessionsTitle': '會話',
-  'daemon.usage.dailySessionsSub': '每日活躍會話數',
+  'daemon.usage.dailySessionsSub': '每日結束執行數',
   'delete.cannotCurrent': '當前會話正在執行，無法刪除。',
   'delete.action': '刪除',
   'delete.deleted': '會話已刪除。',
@@ -2481,6 +2480,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.openWorkspaceTerminalFailed': '開啟終端失敗',
   'sidebar.openWorkspaceTerminalOpened': '已在工作區開啟終端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作區',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新載入執行時',
   'sidebar.reloadWorkspaceFailed': '重新載入工作區執行時失敗',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 個工作區`,
@@ -2513,6 +2514,13 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 個 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 個 hook，${v?.untrusted ?? 0} 個未載入（目錄未受信任）。請啟用 security.folderTrust.enabled 並信任該目錄，或在互動式終端中執行 qwen 審查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在載入 hooks…',
+  'workspaceHooks.empty': '此工作區尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已啟用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '強制移除',
   'sidebar.removeWorkspaceTitle': '移除工作區',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2670,11 +2678,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.submittingDisabled': '排隊訊息正在提交中...',
   'queue.summaryEditDisabled': '恢復的佇列摘要無法還原原始附件。',
   'queue.admissionUnknown': '訊息是否送達尚不確定，請先檢查會話再重試。',
-  'queue.restoreUnknown': '恢復本地副本',
-  'queue.discardUnknown': '丟棄本地副本',
-  'queue.continueEditing': '繼續編輯',
-  'queue.continueEditingConfirm':
-    '這條訊息可能已經在執行。只有在接受重複傳送風險時才繼續編輯。',
   'queue.commandBlocked': '當前回合執行時，Slash 命令不能進入排隊。',
   'queue.commandGoalBlocked':
     'Goal 正在佔用會話或狀態仍在載入，暫時無法執行 Slash 命令。',
@@ -2689,7 +2692,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.insertTip': '插入當前回合',
   'queue.insertCommandDisabled': '命令不能插入當前回合',
   'queue.sendNow': '立即傳送',
-  'queue.sendNowTip': '立即傳送排隊的訊息。模型正在回覆或呼叫工具時會打斷它',
+  'queue.sendNowTip':
+    '立即傳送排隊的訊息。可能中斷目前的回覆或工具呼叫。可轉到背景的 shell 命令會繼續執行。',
   'queue.sendNowFailed': '立即傳送排隊訊息失敗',
   'queue.footer': '按 ↑ 編輯最後一條排隊訊息 · Esc 清空佇列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 張圖片）`,
@@ -4205,8 +4209,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'userMessage.showMore': '顯示更多',
   'userMessage.showLess': '收起',
   'userMessage.automatic.title': '自動觸發',
-  'userMessage.sendFailed': '傳送失敗',
-  'userMessage.retrySend': '重新傳送訊息',
+  'userMessage.retrySend': '重發',
+  'userMessage.retryUncertain': '可能未送達，點擊重發',
+  'userMessage.deliveryUncertain': '訊息可能未送達，點擊左側驚嘆號重發',
   'userMessage.edit': '編輯訊息',
   'message.moreActions': '更多操作',
   'messageDelete.commandFailed': '命令執行失敗。',
@@ -4469,6 +4474,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sessionsOverview.popupBlocked':
     '彈出視窗被攔截。請允許本站彈窗，以便在新標籤頁中開啟會話。',
   'sessionsOverview.refresh': '重新整理',
+  'sessionsOverview.restoreWorktree': '復原快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '此工作區沒有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '復原中…',
+  'sessionsOverview.restoreWorktreeFailed': '復原快照失敗',
   'sessionsOverview.selectAll': '全選',
   'sessionsOverview.titleColumn': '標題',
   'sessionsOverview.actions': '操作',
@@ -5802,6 +5812,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.scope.workspace': '工作區',
   'settings.value.on': '開',
   'settings.value.off': '關',
+  'settings.value.unset': '未設定',
   'settings.action.edit': '編輯',
   'settings.action.select': '選擇',
   'settings.action.save': '儲存',
@@ -5859,6 +5870,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.ui.chatWidth': '屏寬',
   'settings.description.ui.chatWidth':
     '純前端的聊天內容寬度設定，儲存在當前瀏覽器中。',
+  'settings.arrowKeyHistory.label': '用上下鍵取回歷史訊息',
+  'settings.arrowKeyHistory.description':
+    '在訊息輸入框中按 ↑ 或 ↓ 可取回歷史訊息。此設定儲存在目前的瀏覽器中。',
+  'settings.arrowKeyHistory.disabledByHost':
+    '宿主應用程式已關閉方向鍵歷史尋回。',
   'settings.option.ui.chatWidth.1000': '常規',
   'settings.option.ui.chatWidth.wide': '超寬',
   'settings.category.General': '通用',
@@ -5899,6 +5915,12 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.placeholder.general.outputLanguage': '自動（跟隨輸入）',
   'settings.option.general.outputLanguage.useCustom': (v) =>
     `使用“${v?.value ?? ''}”`,
+  'settings.label.general.displayLanguage': '語言：顯示翻譯',
+  'settings.description.general.displayLanguage':
+    '在終端和 Web Shell 中把模型的回覆和展開的思考翻譯成該語言顯示。模型照常回答；儲存的對話、模型讀到的內容和複製的文字保持原文。每個翻譯的區塊呼叫一次 fast model，未設定時使用會話模型。無需安裝任何東西，也無需開啟實驗性功能。修改後新會話生效。',
+  'settings.option.general.displayLanguage.off': '關閉',
+  'settings.option.general.displayLanguage.zh-CN': '簡體中文',
+  'settings.option.general.displayLanguage.en': 'English',
   'settings.label.general.preventSystemSleep': '執行時防止系統睡眠',
   'settings.description.general.preventSystemSleep':
     '當 Qwen Code 正在流式生成模型回覆或執行工具時防止系統睡眠。空閒輸入狀態和權限確認狀態不會阻止睡眠。',
@@ -6090,7 +6112,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '讓會話執行在共享的 agent loop 上。未設定時，每個入口使用自己的預設值：headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理執行在共享 loop 上，Hosted Harness 仍使用自己的 loop（在該入口上屬實驗性）。設為 `true` 時它們都執行在共享 loop 上（Hosted Harness 的模型輪執行在它上面，同時保留其 journal 化工具派發），設為 `false` 時它們都用各自的 loop，headless、ACP 會話、兩個 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 環境變數按入口覆蓋此設定：`1` 開啟所有入口，`0` 關閉所有入口，逗號分隔的列表（如 `headless,acp=0`）強制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作為整值識別，不在列表內生效；列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.eventBusAgentLoop': '事件匯流排 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '讓共享 agent loop 執行在事件匯流排架構上（實驗性）。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
+    '讓共享 agent loop 執行在事件匯流排架構上。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。未設定時，headless 會話和 Ink TUI 執行在核心上，其他執行共享 loop 的入口使用過程式路徑。設為 `true` 時使用核心，設為 `false` 時使用過程式路徑，headless 和 Ink TUI 也可切回。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台賬',
   'settings.description.experimental.modelAvailabilityTracking':
     '在會話內跨請求記住模型健康狀態（實驗性）。當某個 fallback 模型在容量錯誤（429/503/529）上耗盡重試後，模型 fallback 鏈在本輪剩餘請求中跳過它，並在下一輪重新探測一次；顯式重試也會重新探測被跳過的模型。primary 模型仍每個請求都會被嘗試。永久配額耗盡仍快速失敗，不視為瞬時容量跳過。關閉時 fallback 鏈行為與之前完全一致。',
@@ -6111,6 +6133,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.omni.enabled': '啟用 Omni 媒體投遞',
   'settings.description.omni.enabled':
     '啟用 omni 媒體管線。用 @ 引用的媒體檔案（影片、圖片、音訊）以及 @https:// URL 提供的媒體會被識別（ffprobe）、以內容定址儲存在 .qwen/omni/objects/ 下，經 DashScope 臨時上傳通道上傳，並以 oss:// URL 投遞，而不是內聯 base64。僅對 DashScope 相容端點生效。也可透過 QWEN_CODE_ENABLE_OMNI=1 啟用。',
+  'settings.label.worktree.maxRetained': '保留的會話 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每個歸屬唯一的管理根保留最近相應數量的合規會話 worktree，預設 15。活躍及置頂會話不佔刪除候選配額。設為 0 只關閉自動清掃，不禁止明確復原快照。歸屬不明、根重疊或設定不可讀時保留；不順帶刪除孤立快照。不影響工具/agent worktree。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 產物',
   'settings.description.agents.arena.preserveArtifacts':
     '啟用後，Arena worktree 和會話狀態檔案會在會話結束或主智慧體退出後保留。',

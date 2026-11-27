@@ -57,10 +57,17 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       );
     const media: Part[] = [];
     let retainedOmniMedia = false;
-    const metadata: Pick<ToolResult, 'modelOverride' | 'terminateTurn'> = {};
+    const metadata: Pick<
+      ToolResult,
+      'modelOverride' | 'terminateTurn' | 'hookStopReason'
+    > = {};
+    const turnEnded = () =>
+      metadata.terminateTurn === true || metadata.hookStopReason !== undefined;
     let skillAttempted = false;
     const skillOutputs: string[] = [];
+    const sessionId = this.config.getSessionId();
     const clearSkillTracking = () => {
+      if (this.config.getSessionId() !== sessionId) return;
       const skill = this.config.getToolRegistry().getTool(ToolNames.SKILL);
       if (
         skill &&
@@ -70,31 +77,42 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         skill.clearLoadedSkills();
       }
     };
+    const clearSkillsOnAbort = () => {
+      if (skillAttempted) clearSkillTracking();
+    };
     const active = new Set<Promise<unknown>>();
     let goalBarrier: Promise<unknown> = Promise.resolve();
     const contextRuntime: ToolCallRuntimeContext = {
       ...runtime,
       dispatch: (name, args, nestedSignal, onResult) => {
+        const isSkill = name === ToolNames.SKILL;
         const predecessors =
           name === ToolNames.UPDATE_GOAL
             ? Promise.allSettled([...active])
             : goalBarrier;
         const task = (async () => {
           await predecessors;
-          if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
+          if (turnEnded()) throw new CodeModeTurnTerminated();
           if (nestedSignal.aborted) throw nestedSignal.reason;
-          if (name === ToolNames.SKILL) skillAttempted = true;
-          const result = await runtime.dispatch(
+          if (isSkill) skillAttempted = true;
+          const pending = runtime.dispatch(
             name,
             args,
             nestedSignal,
             (response) => {
               onResult?.(response);
+              // A hook stop ends the turn whatever the call's outcome.
               if (
-                name === ToolNames.SKILL &&
-                (signal.aborted ||
-                  nestedSignal.aborted ||
-                  response.executionStatus === 'cancelled')
+                response.hookStopReason !== undefined &&
+                metadata.hookStopReason === undefined
+              ) {
+                metadata.hookStopReason = response.hookStopReason;
+              }
+              if (
+                isSkill &&
+                !signal.aborted &&
+                !nestedSignal.aborted &&
+                response.executionStatus === 'cancelled'
               ) {
                 clearSkillTracking();
               }
@@ -131,29 +149,30 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               }
             },
           );
-          if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
-          if (name === ToolNames.SKILL) skillOutputs.push(result.output);
-          if (name === 'capture_screen_context') {
-            const { content: _content, ...textResult } = result;
-            return textResult;
-          }
-          return result;
+          return pending
+            .then((result) => {
+              if (isSkill) skillOutputs.push(result.output);
+              if (name === 'capture_screen_context') {
+                const { content: _content, ...textResult } = result;
+                return textResult;
+              }
+              return result;
+            })
+            .finally(() => {
+              // A rejected tool call can carry the same stop signal.
+              if (turnEnded()) throw new CodeModeTurnTerminated();
+            });
         })();
         active.add(task);
-        const settled = task.then(
-          () => {
-            active.delete(task);
-          },
-          () => {
-            active.delete(task);
-          },
-        );
+        const release = () => active.delete(task);
+        const settled = task.then(release, release);
         if (name === ToolNames.UPDATE_GOAL) goalBarrier = settled;
         return task;
       },
     };
     let result: CodeModeExecutionResult;
     let failure: string | undefined;
+    signal.addEventListener('abort', clearSkillsOnAbort, { once: true });
     try {
       result = await executeCodeMode(
         this.params.source,
@@ -162,13 +181,13 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         signal,
       );
     } catch (error) {
-      if (skillAttempted && (signal.aborted || skillOutputs.length === 0)) {
-        clearSkillTracking();
-      }
       if (signal.aborted) throw error;
+      if (skillAttempted && skillOutputs.length === 0) clearSkillTracking();
       result =
         error instanceof CodeModeExecutionError ? error.result : { output: '' };
       failure = error instanceof Error ? error.message : String(error);
+    } finally {
+      signal.removeEventListener('abort', clearSkillsOnAbort);
     }
     const sections: string[] = [];
     if (result.output) sections.push(result.output);

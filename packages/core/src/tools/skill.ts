@@ -16,6 +16,11 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import { skillRestrictionNames, type SkillConfig } from '../skills/types.js';
 import {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+} from '../skills/turn-skill-snapshot.js';
+import {
   logSkillLaunch,
   recordSkillInvocation,
   SkillLaunchEvent,
@@ -23,6 +28,7 @@ import {
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordAutoSkillUsage } from '../skills/skill-curator.js';
+import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -123,6 +129,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
+  private loadedTurnSkills = new WeakMap<
+    TurnSkillSnapshot,
+    Map<string, symbol>
+  >();
   private loadedSkillContents = new Map<string, string>();
   private loadedSkillContentByName = new Map<
     string,
@@ -209,6 +219,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       const collected = await collectAvailableSkillEntries(
         this.skillManager,
         this.config,
+        { liveOnly: true },
       );
       const discoveredByName = new Map(
         (this.skillManager.getCachedSkills() ?? []).map((skill) => [
@@ -265,6 +276,34 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     }
     if (params.args !== undefined && typeof params.args !== 'string') {
       return 'Parameter "args" must be a string when provided.';
+    }
+
+    const snapshot = getTurnSkillSnapshot();
+    if (snapshot) {
+      const skill = this.findTurnSkill(snapshot, params.skill);
+      if (skill && !skill.disableModelInvocation) {
+        if (!this.config.isSkillEnabled(getSkillSource(skill))) {
+          if (
+            this.getModelInvocableCommands().some(
+              (command) => command.name === params.skill,
+            )
+          )
+            return null;
+          return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+        }
+        if (!this.skillManager.isSkillActive(skill)) {
+          return `Skill "${params.skill}" is gated by path-based activation (paths: frontmatter) and is not yet available. Access a file matching its paths patterns first to activate it.`;
+        }
+        return null;
+      }
+      if (
+        this.getModelInvocableCommands().some(
+          (command) => command.name === params.skill,
+        )
+      ) {
+        return null;
+      }
+      return `Skill "${params.skill}" not found.`;
     }
 
     // Check file-based skills
@@ -355,6 +394,23 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     } else {
       commands = this.modelInvocableCommands;
     }
+    const snapshot = getTurnSkillSnapshot();
+    if (snapshot) {
+      const bundled = this.skillManager.getCachedSkills('bundled') ?? [];
+      const shadowed = new Set(
+        [
+          ...snapshot.skills,
+          ...bundled.filter((skill) => skill.level === 'bundled'),
+        ]
+          .filter(
+            (skill) =>
+              !skill.disableModelInvocation &&
+              this.config.isSkillEnabled(getSkillSource(skill)),
+          )
+          .map((skill) => skill.name),
+      );
+      return commands.filter((command) => !shadowed.has(command.name));
+    }
     const knownSkills = this.skillManager.getCachedSkills() ?? [];
     const shadowedNames = new Set<string>([
       ...this.availableSkills
@@ -368,24 +424,104 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return commands.filter((cmd) => !shadowedNames.has(cmd.name));
   }
 
+  private findTurnSkill(snapshot: TurnSkillSnapshot, name: string) {
+    return (
+      snapshot.skills.find((skill) => skill.name === name) ??
+      this.skillManager
+        .getCachedSkills('bundled')
+        ?.find((skill) => skill.level === 'bundled' && skill.name === name)
+    );
+  }
+
   protected createInvocation(params: SkillParams) {
+    const snapshot = getTurnSkillSnapshot();
+    const turnSkill = snapshot && this.findTurnSkill(snapshot, params.skill);
+    const pinned =
+      snapshot && turnSkill?.level !== 'bundled' ? snapshot : undefined;
     return new SkillToolInvocation(
       this.config,
       this.skillManager,
       params,
       (name: string, content?: string, skill?: SkillConfig) => {
+        const previousName =
+          content === undefined
+            ? undefined
+            : this.loadedSkillContents.get(content);
+        if (content !== undefined) this.loadedSkillContents.set(content, name);
+        const undoTrackedContent = () => {
+          if (
+            content === undefined ||
+            this.loadedSkillContents.get(content) !== name
+          )
+            return;
+          if (previousName === undefined)
+            this.loadedSkillContents.delete(content);
+          else this.loadedSkillContents.set(content, previousName);
+        };
+        const signal = getCurrentToolCallSource()?.signal;
+        // A staged path is meaningful only to this turn. Keep its exact
+        // output for history accounting, but never deduplicate a live call
+        // against a directory that will disappear when this turn settles.
+        if (pinned) {
+          let loaded = this.loadedTurnSkills.get(pinned);
+          if (!loaded) {
+            loaded = new Map();
+            this.loadedTurnSkills.set(pinned, loaded);
+          }
+          const turnLoads = loaded;
+          const token = Symbol();
+          turnLoads.set(name, token);
+          signal?.addEventListener(
+            'abort',
+            () => {
+              if (turnLoads.get(name) !== token) return;
+              turnLoads.delete(name);
+              undoTrackedContent();
+            },
+            { once: true },
+          );
+          return;
+        }
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
-          this.loadedSkillContents.set(content, name);
-          this.loadedSkillContentByName.set(name, {
+          const load = {
             content,
             restrictionNames: skillRestrictionNames(skill ?? { name }),
-          });
+          };
+          this.loadedSkillContentByName.set(name, load);
+          // Only undo the body registered by this cancelled nested call.
+          signal?.addEventListener(
+            'abort',
+            () => {
+              if (this.loadedSkillContentByName.get(name) !== load) return;
+              this.loadedSkillNames.delete(name);
+              this.loadedSkillContentByName.delete(name);
+              undoTrackedContent();
+            },
+            { once: true },
+          );
         }
       },
       this.config.getModelInvocableCommandsExecutor(),
-      (name: string) => this.loadedSkillNames.has(name),
-      (name: string) => this.hiddenSkillNames.has(name),
+      (name: string) => {
+        if (pinned)
+          return this.loadedTurnSkills.get(pinned)?.has(name) ?? false;
+        if (snapshot && turnSkill) {
+          return (
+            this.loadedSkillContentByName.get(name)?.content ===
+            buildSkillLlmContent(
+              path.dirname(turnSkill.filePath),
+              turnSkill.body,
+            )
+          );
+        }
+        return this.loadedSkillNames.has(name);
+      },
+      (name: string) =>
+        snapshot
+          ? turnSkill?.disableModelInvocation === true
+          : this.hiddenSkillNames.has(name),
+      pinned ? () => turnSkill ?? null : undefined,
     );
   }
 
@@ -611,6 +747,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * whose body was evicted never stays stuck behind the dedup guard.
    */
   clearLoadedSkills(): void {
+    this.loadedTurnSkills = new WeakMap();
     this.loadedSkillNames.clear();
     this.loadedSkillContents.clear();
     this.loadedSkillContentByName.clear();
@@ -653,6 +790,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
     private readonly isSkillHidden: (name: string) => boolean = () => false,
+    private readonly getPinnedSkill?: () => SkillConfig | null,
   ) {
     super(params);
   }
@@ -758,9 +896,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   async execute(
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const nestedSignal = getCurrentToolCallSource() ? signal : undefined;
     if (this.isSkillHidden(this.params.skill)) {
       let hiddenCommandFallbackAttempted = false;
       if (this.commandExecutor) {
@@ -823,10 +962,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
     try {
       // Load the skill with runtime config (includes additional files)
-      const skill = await this.skillManager.loadSkillForRuntime(
-        this.params.skill,
-      );
-      if (skill && !this.config.isSkillEnabled(skill)) {
+      const skill = this.getPinnedSkill
+        ? this.getPinnedSkill()
+        : await this.skillManager.loadSkillForRuntime(this.params.skill);
+      nestedSignal?.throwIfAborted();
+      if (skill && !this.config.isSkillEnabled(getSkillSource(skill))) {
         return this.executeDisabledSkill();
       }
 
@@ -925,6 +1065,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         }
         activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
       }
+      nestedSignal?.throwIfAborted();
 
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
@@ -934,7 +1075,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
-        void this.recordAutoSkillUsageBestEffort(skill);
+        if (!this.getPinnedSkill)
+          void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.${activationWarning}`;
         return {
           llmContent: msg,
@@ -946,7 +1088,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent, skill);
 
-      void this.recordAutoSkillUsageBestEffort(skill);
+      if (!this.getPinnedSkill) void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,
         success: true,
@@ -958,6 +1100,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         modelOverride: skill.model,
       };
     } catch (error) {
+      nestedSignal?.throwIfAborted();
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[SkillsTool] Error using skill: ${errorMessage}`);
