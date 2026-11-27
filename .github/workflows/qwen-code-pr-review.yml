@@ -1241,7 +1241,7 @@ jobs:
         if: "steps.context.outputs.should_run == 'true'"
         timeout-minutes: 20
         shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
-        run: .github/scripts/ensure-tiered-review-cli.sh
+        run: '.github/scripts/ensure-tiered-review-cli.sh'
 
       - name: 'Run review'
         id: 'review'
