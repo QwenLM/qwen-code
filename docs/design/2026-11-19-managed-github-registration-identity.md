@@ -1,9 +1,10 @@
 # Managed GitHub ledger registration-identity keying
 
-- **Status:** proposed
+- **Status:** merged — PR #17775, squash `ceb421295f` (2026-11-20). Deferred follow-ups tracked in #17769.
 - **Date:** 2026-11-19
-- **Scope:** `packages/channels/github` (state store + adapter), `channel-base` contract comment, tests
+- **Scope:** `packages/channels/github` (state store + adapter), `channel-base` contract comment, tests, the PR-watch E2E rig
 - **Related:** the WeCom adapter's P1-D/E fix (PR #17441) and the DingTalk keying (PR #17742); the shared `destinationKey` contract in `channel-base`; [Chinese version](2026-11-19-managed-github-registration-identity.zh-CN.md)
+- **Verification at merge:** github suite 1090 green; the CI-pinned PR-watch E2E rig (`npm run test:e2e:managed-pr-watch`) all green, including P3's same-destination crash-replay; rig CI-pinning suite 96 green; `tsc --build` / ESLint / Prettier clean; load-bearing mutation witnesses killed. The episode carry is non-destructive (never evicts the loaded ledger's own counters, floors carried values at the prs baseline, adds only while there is room, logged overflow).
 
 ## Problem
 

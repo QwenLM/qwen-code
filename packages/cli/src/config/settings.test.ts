@@ -790,6 +790,49 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it('warns that the removed loop-detection settings are ignored', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                model: { loopProtection: 'stop', skipLoopDetection: false },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Setting 'model.loopProtection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+        `Warning: Setting 'model.skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
+
+    it('does not point a legacy top-level skipLoopDetection at the removed key', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                skipLoopDetection: false,
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([
+        `Warning: Legacy setting 'skipLoopDetection' was removed (loop detection no longer exists) and will be ignored in ${USER_SETTINGS_PATH}.`,
+      ]);
+    });
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -4380,6 +4423,33 @@ describe('Settings Loading and Merging', () => {
   );
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it.each([undefined, 'off', 'en'])(
+      'ignores workspace display translation when the user value is %s',
+      (displayLanguage) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({ general: { displayLanguage } });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                general: { displayLanguage: 'zh-CN' },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.isTrusted).toBe(true);
+        expect(settings.merged.general?.displayLanguage).toBe(displayLanguage);
+        expect(getSettingsWarnings(settings)).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('general.displayLanguage'),
+          ]),
+        );
+      },
+    );
+
     it.each([undefined, 0, 25])(
       'ignores workspace memory budget zero while preserving user budget %s',
       (budget) => {

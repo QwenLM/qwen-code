@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.settings.SshSettings;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 import lombok.Getter;
 import lombok.Setter;
@@ -8,7 +9,7 @@ import java.util.List;
 
 @Getter
 @Setter
-public class SshRuntimeSettings implements com.alibaba.qwen.code.managedagent.settings.SshSettings {
+public class SshRuntimeSettings implements SshSettings {
     private boolean enabled;
     private List<Node> nodes = List.of();
 
@@ -17,7 +18,7 @@ public class SshRuntimeSettings implements com.alibaba.qwen.code.managedagent.se
     }
 
     public record Access(String tenantId, String actorId)
-            implements com.alibaba.qwen.code.managedagent.settings.SshSettings.Access {}
+            implements SshSettings.Access {}
 
     public record Node(
             String nodeId,
@@ -30,7 +31,7 @@ public class SshRuntimeSettings implements com.alibaba.qwen.code.managedagent.se
             int publicationPort,
             String qwenVersion,
             List<Access> access)
-            implements com.alibaba.qwen.code.managedagent.settings.SshSettings.Node {
+            implements SshSettings.Node {
         public Node {
             allowedRoots = allowedRoots == null ? List.of() : List.copyOf(allowedRoots);
             access = access == null ? List.of() : List.copyOf(access);

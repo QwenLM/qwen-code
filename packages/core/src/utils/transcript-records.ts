@@ -127,6 +127,7 @@ const NON_CONVERSATION_RECORD_SUBTYPES = new Set([
 const KNOWN_RECORD_SUBTYPES = new Set([
   'chat_compression',
   'memory_catalog_snapshot',
+  'permission_context_snapshot',
   'slash_command',
   'ui_telemetry',
   'at_command',
@@ -806,4 +807,20 @@ export function prepareTranscriptRecords(
     gaps: chain.gaps,
     diagnostics,
   };
+}
+
+export function isLifecycleUiTelemetryEvent(uiEvent: unknown): boolean {
+  if (
+    typeof uiEvent !== 'object' ||
+    uiEvent === null ||
+    Array.isArray(uiEvent)
+  ) {
+    return false;
+  }
+  const eventName = (uiEvent as Record<string, unknown>)['event.name'];
+  return (
+    eventName === 'request_lifecycle' ||
+    eventName === 'tool_lifecycle' ||
+    eventName === 'hook_lifecycle'
+  );
 }

@@ -13,7 +13,11 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptCooperativeReadBudgetForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
@@ -72,6 +76,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    resetSessionTranscriptIndexCacheForTest();
     abortHarness.controller = undefined;
     abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
@@ -146,6 +151,10 @@ describe('merged session catalog pagination', () => {
         SessionService.prototype,
         'getArtifactSummaryPathForArchiveState',
       );
+      const goal = vi.spyOn(
+        SessionService.prototype,
+        'getGoalSessionPathForArchiveState',
+      );
 
       const firstPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -156,7 +165,7 @@ describe('merged session catalog pagination', () => {
       expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
         first.sessionId,
       ]);
-      for (const reader of [worktree, pr, artifact]) {
+      for (const reader of [worktree, pr, artifact, goal]) {
         expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
       }
 
@@ -185,9 +194,26 @@ describe('merged session catalog pagination', () => {
       ];
       expect(worktree.mock.calls).toEqual(persistedReads);
       expect(artifact.mock.calls).toEqual(persistedReads);
+      expect(goal.mock.calls).toEqual(persistedReads);
       expect(pr.mock.calls).toEqual([
         ...persistedReads,
         [live.sessionId, 'active'],
+      ]);
+
+      // A later request that reuses the settled projection revalidates the
+      // selected row instead of trusting the cached removal state.
+      const repeatedPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      expect(repeatedPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        [second.sessionId, 'active'],
       ]);
     },
   );
@@ -238,6 +264,30 @@ describe('merged session catalog pagination', () => {
       ).rejects.toThrow();
     },
   );
+
+  it('keeps prompt-time reads O(1) above the legacy 256 MiB limit', async () => {
+    const session = summary(0);
+    await persist(session);
+    const chats = path.join(
+      runtimeBaseDir,
+      'projects',
+      workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-'),
+      'chats',
+    );
+    const file = path.join(chats, `${session.sessionId}.jsonl`);
+    await fs.truncate(file, 257 * 1024 * 1024);
+
+    let scannedLines = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      scannedLines += 1;
+    });
+    const snapshot = await new SessionService(workspaceCwd, {
+      runtimeBaseDir,
+    }).getLastUserPromptAt(session.sessionId);
+
+    expect(snapshot).toBeUndefined();
+    expect(scannedLines).toBe(0);
+  });
 
   it('sorts archived sessions by their archived question time, not activity', async () => {
     const sessions = [summary(0), summary(1), summary(2)];
@@ -1385,43 +1435,51 @@ describe('merged session catalog pagination', () => {
       });
     });
 
-    it('projects the goal sidecar of an archived session', async () => {
-      const session = summary(0);
-      await persist(session, session.createdAt, true);
-      await writeGoalSidecar(session, JSON.stringify(projection), true);
-      const { bridge } = bridgeFor([]);
-
-      const result = await listWorkspaceSessionsForResponse(
-        bridge,
-        workspaceCwd,
-        { archiveState: 'archived' },
-        { runtimeBaseDir },
-      );
-
-      expect(result.sessions[0]?.goal?.status).toBe('paused');
-    });
-
-    it.each(['{not json', '{"v":1}'])(
-      'leaves goal unset for a corrupt or absent sidecar: %s',
-      async (content) => {
-        const corrupt = summary(0);
-        const absent = summary(1);
-        await Promise.all([persist(corrupt), persist(absent)]);
-        await writeGoalSidecar(corrupt, content);
+    it.each([undefined, 'organized'] as const)(
+      'projects the goal sidecar of an archived session (%s)',
+      async (view) => {
+        const session = summary(0);
+        await persist(session, session.createdAt, true);
+        await writeGoalSidecar(session, JSON.stringify(projection), true);
         const { bridge } = bridgeFor([]);
 
         const result = await listWorkspaceSessionsForResponse(
           bridge,
           workspaceCwd,
-          {},
+          { archiveState: 'archived', view },
           { runtimeBaseDir },
         );
 
-        const byId = new Map(
-          result.sessions.map((session) => [session.sessionId, session]),
+        expect(result.sessions[0]?.goal?.status).toBe('paused');
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'leaves goal unset for a corrupt or absent sidecar (%s)',
+      async (view) => {
+        const corrupt = summary(0);
+        const invalid = summary(2);
+        const absent = summary(1);
+        await Promise.all([
+          persist(corrupt),
+          persist(invalid),
+          persist(absent),
+        ]);
+        await writeGoalSidecar(corrupt, '{not json');
+        await writeGoalSidecar(invalid, '{"v":1}');
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { view },
+          { runtimeBaseDir },
         );
-        expect(byId.get(corrupt.sessionId)?.goal).toBeUndefined();
-        expect(byId.get(absent.sessionId)?.goal).toBeUndefined();
+
+        expect(result.sessions).toHaveLength(3);
+        for (const session of result.sessions) {
+          expect(session.goal).toBeUndefined();
+        }
       },
     );
 
@@ -1449,30 +1507,62 @@ describe('merged session catalog pagination', () => {
       expect(result.sessions[0]?.clientCount).toBe(2);
     });
 
-    it('projects the goal sidecar in the organized view', async () => {
-      // The organized view scans persisted summaries through a different
-      // enrich call site than the default list; it must carry the goal too.
-      const session = summary(0);
-      await persist(session);
-      await writeGoalSidecar(session, JSON.stringify(projection));
-      const { bridge } = bridgeFor([]);
+    it.each([undefined, 'organized'] as const)(
+      'preserves persisted and live Goal precedence across deferred pages (%s)',
+      async (view) => {
+        const first = summary(1);
+        const second = summary(0);
+        for (const session of [first, second]) {
+          await persist(session);
+          await writeGoalSidecar(session, JSON.stringify(projection));
+        }
+        const persistedGoal = {
+          status: 'paused',
+          objective: 'ship it',
+          updatedAt: new Date(projection.updatedAt).toISOString(),
+        } as const;
+        const liveGoal = {
+          ...persistedGoal,
+          status: 'active',
+          objective: 'live goal',
+        } as const;
+        const { bridge } = bridgeFor([
+          { ...first, goal: liveGoal },
+          { ...second, clientCount: 2 },
+        ]);
+        const options = { size: 1, view };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
 
-      const result = await listWorkspaceSessionsForResponse(
-        bridge,
-        workspaceCwd,
-        { view: 'organized', group: 'all' },
-        { runtimeBaseDir },
-      );
+        const firstPage = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          readOptions,
+        );
+        expect(firstPage.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: first.sessionId,
+            goal: liveGoal,
+          }),
+        ]);
+        expect(firstPage.nextCursor).toEqual(expect.any(String));
 
-      const row = result.sessions.find(
-        (item) => item.sessionId === session.sessionId,
-      );
-      expect(row?.goal).toEqual({
-        status: 'paused',
-        objective: 'ship it',
-        updatedAt: new Date(1_700_000_000_000).toISOString(),
-      });
-    });
+        const secondPage = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { ...options, cursor: firstPage.nextCursor },
+          readOptions,
+        );
+        expect(secondPage.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: second.sessionId,
+            goal: persistedGoal,
+            clientCount: 2,
+          }),
+        ]);
+        expect(secondPage.nextCursor).toBeUndefined();
+      },
+    );
 
     it('projects the goal sidecar onto search results', async () => {
       const session = summary(0);

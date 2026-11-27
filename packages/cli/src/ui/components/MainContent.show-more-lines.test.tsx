@@ -168,7 +168,6 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     providerUpdateRequest: undefined,
     settingInputRequests: [],
     pluginChoiceRequests: [],
-    loopDetectionConfirmationRequest: null,
     memoryFileCount: 0,
     streamingState: StreamingState.Idle,
     initError: null,

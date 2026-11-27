@@ -24,7 +24,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.ActionResponseCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
@@ -375,7 +374,7 @@ class ManagedActionsTest {
         }
         assertThat(jdbc.update("UPDATE ma_session SET owner_only = TRUE, owner_actor_key = ?"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                "other".getBytes(StandardCharsets.UTF_8), tenant, second)).isEqualTo(1);
+                "other", tenant, second)).isEqualTo(1);
         // At limit 2 the unreadable child is the lookahead row, not a returned Action.
         assertThatThrownBy(() -> service.listPublic(tenant, "owner", root, null, limit, true))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
@@ -401,9 +400,9 @@ class ManagedActionsTest {
         ActionJournal nested = action(tenant, child, 200, 9_007_199_254_740_991L);
         action(tenant, other, 300, 9_007_199_254_740_991L);
         for (String session : List.of(root, child, other)) {
-            assertThat(jdbc.queryForObject("SELECT session_scope_key FROM ma_session"
+            assertThat(jdbc.queryForObject("SELECT session_id FROM ma_session"
                             + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
-                    .isEqualTo(ManagedSessionStore.sessionScopeKey(tenant, session));
+                    .isEqualTo(session);
         }
         assertThat(actions.listWithChildren(tenant, root, null, null, null, 10))
                 .extracting(row -> row.sessionId() + ":" + row.action().id())
@@ -1499,10 +1498,9 @@ class ManagedActionsTest {
         assertThat(jdbc.queryForObject(
                 "SELECT creator_actor_key FROM ma_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                byte[].class, tenant, session))
+                String.class, tenant, session))
                 .as("creator recorded for a WebShell hosted create")
-                .isEqualTo("owner".getBytes(
-                        java.nio.charset.StandardCharsets.UTF_8));
+                .isEqualTo("owner");
     }
 
     private String hostedSession(String tenant, String actor)
@@ -1547,16 +1545,16 @@ class ManagedActionsTest {
                         .path("id")
                         .asText();
         String key = UUID.randomUUID().toString();
-        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_key,tenant_id,scope_kind,scope_key,scope_id,"
+        jdbc.update("INSERT INTO ma_request_receipt (receipt_key,namespace,tenant_id,scope_kind,scope_ref,scope_id,"
                         + "idempotency_key,idempotency_digest,request_digest,actor_id,session_id,state,gmt_create,gmt_modified)"
-                        + " VALUES (?,'SESSION_CREATE_ACTOR',?,?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
+                        + " VALUES (?,'SESSION_CREATE_ACTOR',?,'ACTOR',?,?,?,?,?, ?,?,'COMPLETED',?,?)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("fixture", tenant, key),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), tenant,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("owner"), "owner", key,
+                tenant,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.receiptScopeRef(tenant, "owner"), "owner", key,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(key), "sha256:test",
-                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), session, System.currentTimeMillis(), System.currentTimeMillis());
+                "owner", session, System.currentTimeMillis(), System.currentTimeMillis());
         jdbc.update("UPDATE ma_session SET creator_actor_key=? WHERE tenant_id=? AND session_id=?",
-                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), tenant, session);
+                "owner", tenant, session);
         return session;
     }
 
@@ -1602,7 +1600,7 @@ class ManagedActionsTest {
     }
 
     private static String tenant() {
-        return "actions-" + UUID.randomUUID();
+        return UUID.randomUUID().toString();
     }
 
     private static String response(String option) {

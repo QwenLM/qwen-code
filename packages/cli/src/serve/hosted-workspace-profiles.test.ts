@@ -94,7 +94,6 @@ it('rejects the removed Shell profile', () => {
 it('refuses every closed option the external lanes cannot serve', () => {
   for (const key of [
     'agentDefinition',
-    'sessionSkillsRef',
     'hookCatalog',
     'mcpServers',
     'initialSelection',
@@ -122,6 +121,21 @@ it('refuses every closed option the external lanes cannot serve', () => {
     hasHostedExternalExcludedOptions(
       null,
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(false);
+  // The skill catalog is turn content both external lanes serve, so create must
+  // not close it: refusing the reference here would make the lanes' own skill
+  // declarations unreachable.
+  expect(
+    hasHostedExternalExcludedOptions(
+      { sessionSkillsRef: { id: 'skills-1' } },
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions(
+      { sessionSkillsRef: { id: 'skills-1' } },
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
     ),
   ).toBe(false);
   // memoryStoreId is the lane the profile's own turn guard rejects as

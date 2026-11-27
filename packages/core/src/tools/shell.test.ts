@@ -4184,7 +4184,7 @@ describe('ShellTool', () => {
         });
         await Promise.resolve();
         await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        expect(setPromoteAbortController).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
@@ -5702,7 +5702,10 @@ describe('ShellTool', () => {
         resolveShellExecution({ pid: 12345 });
         await promise;
 
-        expect(setPromoteAc).toHaveBeenCalledTimes(1);
+        expect(setPromoteAc.mock.calls).toEqual([
+          [expect.any(AbortController)],
+          [undefined],
+        ]);
         const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
         expect(passedAc).toBeInstanceOf(AbortController);
 
@@ -5770,6 +5773,54 @@ describe('ShellTool', () => {
         // No `error`: promote is success-shaped (#3831 design question 7 /
         // @tanzhenxin's PR-1 review).
         expect(result.error).toBeUndefined();
+        expect(result.keptWhenCancelled).toBeUndefined();
+      });
+
+      it('reports the registered id and says why when moved for a user message', async () => {
+        const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        const onRegistered = vi.fn((shellId: string) =>
+          expect(shellId).toBe(registeredEntry().shellId),
+        );
+        await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
+        (setPromoteAc.mock.calls[0][0] as AbortController).abort({
+          kind: 'background',
+          forUserMessage: true,
+          onRegistered,
+        });
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 4242,
+        });
+        const result = await promise;
+
+        const { shellId, outputPath } = registeredEntry();
+        expect(onRegistered).toHaveBeenCalledExactlyOnceWith(shellId);
+        expectText(result.llmContent, [
+          `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you.`,
+          `Output snapshot at promote time saved to: ${outputPath}`,
+          `task_stop({ task_id: '${shellId}' })`,
+        ]);
+        // The process keeps running, so a cancelled call keeps this result.
+        expect(result.keptWhenCancelled).toBe(true);
+      });
+
+      it('does not offer promotion for a shell that has no process', async () => {
+        // A PTY capacity refusal resolves the handle without a pid and with a
+        // settled, non-aborted result: there is nothing to move.
+        mockShellExecutionService.mockImplementationOnce(() => ({
+          pid: undefined,
+          result: Promise.resolve(
+            shellResult({ output: '', exitCode: 1, aborted: false }),
+          ),
+        }));
+        const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        await promise;
+
+        expect(setPromoteAc).not.toHaveBeenCalled();
       });
 
       it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
