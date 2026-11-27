@@ -25,6 +25,17 @@ export function isCredentialName(name: string): boolean {
 const CREDENTIAL_VARIABLE_FIELD = /^envKey$|Env$/;
 export const MIN_CREDENTIAL_VALUE_LENGTH = 4;
 
+// Built-in channel fields that carry credentials but do not match the name rule.
+const CHANNEL_CREDENTIAL_FIELDS = new Set([
+  'encodingAESKey',
+  'encryptKey',
+  'webhookUrl',
+]);
+
+export function isChannelCredentialField(key: string): boolean {
+  return CHANNEL_CREDENTIAL_FIELDS.has(key);
+}
+
 function collectStringSettings(
   value: unknown,
   visit: (key: string, value: string) => void,
@@ -50,6 +61,15 @@ export function configuredCredentialVariables(settings: unknown): Set<string> {
   return names;
 }
 
+export function addConfiguredCredentialVariable(
+  names: Set<string>,
+  value: string,
+): void {
+  // Consumers differ on whether they trim the configured variable name.
+  names.add(value.toUpperCase());
+  names.add(value.trim().toUpperCase());
+}
+
 export function credentialFieldReferences(
   settings: Record<string, unknown>,
 ): Set<string> {
@@ -70,6 +90,17 @@ export function credentialFieldReferences(
       }
     }
   }
+  const channels = settings['channels'];
+  if (channels && typeof channels === 'object') {
+    for (const channel of Object.values(channels) as unknown[]) {
+      if (!channel || typeof channel !== 'object') continue;
+      for (const [key, value] of Object.entries(channel)) {
+        if (typeof value === 'string' && isChannelCredentialField(key)) {
+          addReferences(value);
+        }
+      }
+    }
+  }
   return names;
 }
 
@@ -77,11 +108,10 @@ export function credentialNameFilter(
   scopes: unknown[],
   references: Iterable<string>,
 ): (name: string) => boolean {
-  const names = new Set(
-    [...configuredCredentialVariables(scopes), ...references].map((name) =>
-      name.toUpperCase(),
-    ),
-  );
+  const names = new Set(Array.from(references, (name) => name.toUpperCase()));
+  for (const name of configuredCredentialVariables(scopes)) {
+    addConfiguredCredentialVariable(names, name);
+  }
   return (name) => isCredentialName(name) || names.has(name.toUpperCase());
 }
 

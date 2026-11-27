@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { LoadedSettings, SettingsFile } from '../config/settings.js';
+import { credentialFieldReferences } from '../utils/credential-names.js';
 import { modHostReads } from './mod-host-reads.js';
 
 const file = (settings: Record<string, unknown>) =>
@@ -48,6 +49,21 @@ describe('modHostReads', () => {
     expect(reads.env('OPENAI_API_KEY')).toBeUndefined();
     expect(reads.env('GITHUB_TOKEN')).toBeUndefined();
     expect(reads.env('MY_LLM')).toBeUndefined();
+  });
+
+  it('hides the literal and trimmed forms of configured credential names', () => {
+    const apiKeyEnv = '  OMNI_UPLOAD_INPUT  ';
+    const reads = modHostReads(
+      loaded({ user: { omni: { delivery: { upload: { apiKeyEnv } } } } }),
+      {
+        [apiKeyEnv]: 'fixture-literal-name',
+        OMNI_UPLOAD_INPUT: 'fixture-trimmed-name',
+        PUBLIC_LABEL: 'public',
+      },
+    );
+    expect(reads.env(apiKeyEnv)).toBeUndefined();
+    expect(reads.env('OMNI_UPLOAD_INPUT')).toBeUndefined();
+    expect(reads.env('PUBLIC_LABEL')).toBe('public');
   });
 
   it('gives each source and the merge without credentials', () => {
@@ -122,6 +138,40 @@ describe('modHostReads', () => {
         },
       },
     });
+  });
+
+  it('redacts built-in channel credentials and classifies their references', () => {
+    const channels = {
+      callback: {
+        type: 'wecom-callback',
+        encodingAESKey: '$CHANNEL_INPUT',
+        webhookHost: '$CHANNEL_HOST',
+      },
+      feishu: { type: 'feishu', encryptKey: '$FEISHU_INPUT' },
+      webhook: { type: 'feishu-webhook', webhookUrl: '$WEBHOOK_INPUT' },
+    };
+    const pluginConfigs = {
+      fixture: { channels: { docs: { webhookUrl: 'public-url' } } },
+    };
+    const user = { channels, pluginConfigs };
+    expect(credentialFieldReferences(user)).toEqual(
+      new Set(['CHANNEL_INPUT', 'FEISHU_INPUT', 'WEBHOOK_INPUT']),
+    );
+
+    const { merged, layers } = modHostReads(
+      loaded({ user, merged: user }),
+      {},
+    ).settings();
+    const clean = {
+      channels: {
+        callback: { type: 'wecom-callback', webhookHost: '$CHANNEL_HOST' },
+        feishu: { type: 'feishu' },
+        webhook: { type: 'feishu-webhook' },
+      },
+      pluginConfigs,
+    };
+    expect(merged).toEqual(clean);
+    expect(layers).toEqual([{ source: 'user', settings: clean }]);
   });
 
   it('hides a variable that only one source names', () => {

@@ -13,10 +13,11 @@ import {
   getSettingsEnvSubstitutions,
   type LoadedSettings,
 } from '../config/settings.js';
-import { getInstalledSettingsCredentialValues } from '../config/environment.js';
+import { getInstalledSettingsCredentials } from '../config/environment.js';
 import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../config/shared-env-keys.js';
 import {
   credentialNameFilter,
+  isChannelCredentialField,
   MIN_CREDENTIAL_VALUE_LENGTH,
 } from '../utils/credential-names.js';
 
@@ -27,33 +28,44 @@ type Json = Record<string, unknown>;
 function withoutCredentials(
   value: unknown,
   drops: (key: string, value: string) => boolean,
-  level: 'any' | 'servers' | 'server' = 'any',
+  level:
+    | 'root'
+    | 'any'
+    | 'servers'
+    | 'server'
+    | 'channels'
+    | 'channel' = 'root',
 ): unknown {
   if (Array.isArray(value))
     return value
       .filter((item) => typeof item !== 'string' || !drops('', item))
       .map((item) => withoutCredentials(item, drops, level));
   if (!value || typeof value !== 'object') return value;
+  const childLevel =
+    level === 'servers' || level === 'server'
+      ? 'server'
+      : level === 'channels'
+        ? 'channel'
+        : undefined;
   return Object.fromEntries(
-    Object.entries(value).flatMap(([key, item]) =>
-      (typeof item === 'string' && drops(key, item)) ||
-      (level === 'server' && (key === 'env' || key === 'headers'))
-        ? []
-        : [
-            [
-              key,
-              withoutCredentials(
-                item,
-                drops,
-                level === 'servers'
-                  ? 'server'
-                  : level === 'any' && key === 'mcpServers'
-                    ? 'servers'
-                    : level,
-              ),
-            ],
-          ],
-    ),
+    Object.entries(value).flatMap(([key, item]) => {
+      if (
+        (typeof item === 'string' &&
+          (drops(key, item) ||
+            (level === 'channel' && isChannelCredentialField(key)))) ||
+        (level === 'server' && (key === 'env' || key === 'headers'))
+      ) {
+        return [];
+      }
+      const nextLevel =
+        childLevel ??
+        (key === 'mcpServers'
+          ? 'servers'
+          : level === 'root' && key === 'channels'
+            ? 'channels'
+            : 'any');
+      return [[key, withoutCredentials(item, drops, nextLevel)]];
+    }),
   );
 }
 
@@ -75,16 +87,23 @@ export function modHostReads(
       settings.workspace.settings,
       settings.system.settings,
     ];
+    const installed =
+      env === process.env ? getInstalledSettingsCredentials() : undefined;
     const matchesCredential = credentialNameFilter(
       [settings.merged, ...scopes],
-      getSettingsCredentialReferences(scopes),
+      [
+        ...getSettingsCredentialReferences(scopes),
+        ...(installed?.keys() ?? []),
+      ],
     );
     const hidden = (name: string) =>
       matchesCredential(name) ||
       name.toUpperCase() === PRIVATE_RELAUNCH_ENV_PROVENANCE;
     // A resolved value can differ from the environment after startup or reload.
     const secrets = new Set(
-      env === process.env ? getInstalledSettingsCredentialValues() : [],
+      [...(installed?.values() ?? [])].filter(
+        (value) => value.length >= MIN_CREDENTIAL_VALUE_LENGTH,
+      ),
     );
     for (const entries of [
       Object.entries(env),

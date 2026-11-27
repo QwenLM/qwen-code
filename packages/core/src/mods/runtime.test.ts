@@ -3103,6 +3103,32 @@ describe('ModRuntime with the real QuickJS worker', () => {
       ]);
     });
 
+    it('passes unchanged settings layers through hooks after a setting is unset', async () => {
+      const settings = { ui: { theme: 'dark', accent: undefined } };
+      const runtime = await create(
+        [
+          command(`return $.settings.read({ source: 'user' });`),
+          `export function register(on) {
+            on('settings.read', async ($, e, next) => {
+              const { value } = await next(e);
+              return { value: { ...value, observed: true } };
+            });
+          }`,
+        ],
+        {
+          env: reads.env,
+          settings: () => ({
+            layers: [{ source: 'user', settings }],
+            merged: settings,
+          }),
+        },
+      );
+      expect(await go(runtime)).toEqual({
+        ui: { theme: 'dark' },
+        observed: true,
+      });
+    });
+
     it('skips a hook that asks for another variable or other layers', async () => {
       const runtime = await create(
         [

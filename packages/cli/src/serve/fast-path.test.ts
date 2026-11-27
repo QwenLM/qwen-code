@@ -1239,6 +1239,8 @@ describe('serve fast path environment bootstrap', () => {
     'FAST_PATH_PROVIDER_INPUT',
     'FAST_PATH_AUTH_INPUT',
     'FAST_PATH_MCP_INPUT',
+    'FAST_PATH_CHANNEL_INPUT',
+    'FAST_PATH_OMNI_INPUT',
   ])(
     'preserves the credential origin of %s aliases for the ACP environment',
     async (source) => {
@@ -1281,6 +1283,17 @@ describe('serve fast path environment bootstrap', () => {
               mcpServers: {
                 fixture: { headers: { 'X-Auth': '$' + source } },
               },
+            }),
+            ...(source === 'FAST_PATH_CHANNEL_INPUT' && {
+              channels: {
+                callback: {
+                  type: 'wecom-callback',
+                  encodingAESKey: '$' + source,
+                },
+              },
+            }),
+            ...(source === 'FAST_PATH_OMNI_INPUT' && {
+              omni: { delivery: { upload: { apiKeyEnv: ` ${source} ` } } },
             }),
             env: {
               [alias]: '$' + source,

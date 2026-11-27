@@ -440,7 +440,7 @@ describe('relaunch environment provenance', () => {
       new Set(['RUNTIME_SETTINGS']),
     );
     parent.loadEnvironment(settings, workspace);
-    expect(parent.getInstalledSettingsCredentialValues()).toEqual([
+    expect([...parent.getInstalledSettingsCredentials().values()]).toEqual([
       'synthetic-alias',
     ]);
     const provenance =
@@ -452,17 +452,68 @@ describe('relaunch environment provenance', () => {
 
     vi.resetModules();
     const child = await import('./environment.js');
-    expect(child.getInstalledSettingsCredentialValues()).toEqual([
+    expect([...child.getInstalledSettingsCredentials().values()]).toEqual([
       'synthetic-alias',
     ]);
     child.reloadEnvironment(
       testSettings({ env: { RUNTIME_SETTINGS: 'ordinary-label' } }),
       workspace,
     );
-    expect(child.getInstalledSettingsCredentialValues()).toEqual([]);
+    expect(child.getInstalledSettingsCredentials().size).toBe(0);
     child.resetEnvironmentTrackingForTesting();
     parent.resetEnvironmentTrackingForTesting();
   });
+
+  it.each([
+    {
+      source: 'a provider variable name',
+      settings: {
+        modelProviders: {
+          openai: [{ id: 'fixture', envKey: 'RUNTIME_DOTENV' }],
+        },
+      },
+    },
+    {
+      source: 'a credential field reference',
+      settings: { security: { auth: { apiKey: '$RUNTIME_DOTENV' } } },
+    },
+  ])(
+    'protects credentials from $source when a Mod still has older settings',
+    async ({ settings }) => {
+      vi.resetModules();
+      const environment = await import('./environment.js');
+      const { loadSettings } = await import('./settings.js');
+      const { modHostReads } = await import('../services/mod-host-reads.js');
+      const workspace = makeWorkspace();
+      const settingsDir = path.join(os.homedir(), '.qwen');
+      fs.mkdirSync(settingsDir, { recursive: true });
+      const settingsPath = path.join(settingsDir, 'settings.json');
+      const envPath = path.join(workspace, '.env');
+      const reads = modHostReads(
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+      );
+
+      fs.writeFileSync(settingsPath, JSON.stringify(settings));
+      fs.writeFileSync(envPath, 'RUNTIME_DOTENV=abc\nDEMO_VAR=label-abc\n');
+      const next = loadSettings(workspace, { skipLoadEnvironment: true });
+      environment.reloadEnvironment(next.merged, workspace, true);
+
+      expect(
+        environment.getInstalledSettingsCredentials().has('RUNTIME_DOTENV'),
+      ).toBe(true);
+      expect(reads.env('RUNTIME_DOTENV') === undefined).toBe(true);
+      expect(reads.env('DEMO_VAR')).toBe('label-abc');
+
+      fs.writeFileSync(settingsPath, '{}');
+      fs.writeFileSync(envPath, 'RUNTIME_DOTENV=replaced\n');
+      const replaced = loadSettings(workspace, { skipLoadEnvironment: true });
+      environment.reloadEnvironment(replaced.merged, workspace, true);
+      expect(reads.env('RUNTIME_DOTENV')).toBe('replaced');
+      expect(
+        environment.getInstalledSettingsCredentials().has('RUNTIME_DOTENV'),
+      ).toBe(false);
+    },
+  );
 
   it('preserves ancestor-only values and provenance across child reloads', async () => {
     vi.resetModules();

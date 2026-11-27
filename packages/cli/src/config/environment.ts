@@ -32,6 +32,7 @@ import {
   liveCredentialAliases,
   parseRelaunchEnvProvenance,
   recordCredentialAliasWrite,
+  recordSettingsCredentialSources,
   resetCredentialAliasesForTesting,
   restoreCredentialAliases,
   writeRelaunchCredentialAliases,
@@ -95,8 +96,8 @@ const settingsEnvSourcedKeys = new Set<string>();
 const inheritedDotEnvKeys = new Set<string>();
 const inheritedSettingsEnvKeys = new Set<string>();
 
-export function getInstalledSettingsCredentialValues(): string[] {
-  return [...liveCredentialAliases().values()];
+export function getInstalledSettingsCredentials(): ReadonlyMap<string, string> {
+  return liveCredentialAliases();
 }
 
 // Validate inherited metadata before loading files, then preserve it for child CLIs.
@@ -934,6 +935,7 @@ export function loadEnvironment(
     reportRejectedSettingsEnv(settings.env, startDir);
   }
   lastReloadSnapshotSeeded = true;
+  recordSettingsCredentialSources(settings);
   Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
@@ -1091,6 +1093,7 @@ export function reloadEnvironment(
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
+  recordSettingsCredentialSources(settings);
   Object.assign(process.env, getRelaunchEnvProvenance());
 
   return {

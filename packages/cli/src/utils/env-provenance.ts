@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { MIN_CREDENTIAL_VALUE_LENGTH } from './credential-names.js';
+import {
+  credentialNameFilter,
+  isCredentialName,
+  MIN_CREDENTIAL_VALUE_LENGTH,
+} from './credential-names.js';
 
 export const PRIVATE_RELAUNCH_ENV_PROVENANCE =
   'QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE';
@@ -69,6 +73,7 @@ export function writeRelaunchCredentialAliases(
 }
 
 const settingsCredentialAliases = new WeakMap<object, ReadonlySet<string>>();
+const settingsCredentialReferences = new WeakMap<object, readonly string[]>();
 // Keep the credential classification for the value actually installed.
 const installedCredentialAliases = new Map<string, string>();
 
@@ -88,6 +93,26 @@ export function isSettingsCredentialAlias(
   key: string,
 ): boolean {
   return settingsCredentialAliases.get(settings)?.has(key) === true;
+}
+
+export function registerSettingsCredentialReferences(
+  settings: object,
+  names: readonly string[],
+): void {
+  if (names.length) settingsCredentialReferences.set(settings, names);
+}
+
+// The process environment can change before existing sessions update settings.
+export function recordSettingsCredentialSources(settings: object): void {
+  const hidden = credentialNameFilter(
+    [settings],
+    settingsCredentialReferences.get(settings) ?? [],
+  );
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !isCredentialName(key) && hidden(key)) {
+      installedCredentialAliases.set(envKeyIdentity(key), value);
+    }
+  }
 }
 
 export function recordCredentialAliasWrite(
@@ -111,7 +136,7 @@ export function recordCredentialAliasWrite(
 export function restoreCredentialAliases(names: readonly string[]): void {
   for (const key of names) {
     const value = process.env[key];
-    if (value && value.length >= MIN_CREDENTIAL_VALUE_LENGTH)
+    if (value !== undefined)
       installedCredentialAliases.set(envKeyIdentity(key), value);
   }
 }

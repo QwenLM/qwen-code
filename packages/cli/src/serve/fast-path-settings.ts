@@ -43,6 +43,7 @@ import {
   resolveEnvVarsInString,
 } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  addConfiguredCredentialVariable,
   configuredCredentialVariables,
   credentialFieldReferences,
   findCredentialAliases,
@@ -980,7 +981,10 @@ export function loadServeFastPathSettings(
       const credentials = summaryCredentialVariables.get(scope);
       if (!credentials) continue;
       for (const name of credentials.configured) {
-        names.add(resolveEnvVarsInString(name, fallback).toUpperCase());
+        addConfiguredCredentialVariable(
+          names,
+          resolveEnvVarsInString(name, fallback),
+        );
       }
       for (const name of credentials.referenced) names.add(name.toUpperCase());
     }

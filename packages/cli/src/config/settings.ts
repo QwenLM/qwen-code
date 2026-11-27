@@ -45,6 +45,7 @@ import {
   credentialNameFilter,
   findCredentialAliases,
 } from '../utils/credential-names.js';
+import { registerSettingsCredentialReferences } from '../utils/env-provenance.js';
 import {
   deleteNestedPropertySafe,
   setNestedPropertySafe,
@@ -851,6 +852,15 @@ function mergeSettings(
       catalogRefresh: operatorCatalogRefresh,
     } as Settings['model'];
   }
+  registerSettingsCredentialReferences(
+    merged,
+    getSettingsCredentialReferences([
+      systemDefaults,
+      user,
+      ...(isTrusted ? [workspace] : []),
+      system,
+    ]),
+  );
   registerEnvironmentAliases(merged, [systemDefaults, user, workspace, system]);
   return merged;
 }

@@ -811,7 +811,11 @@ async function hostCall(
     : model
       ? modelCompleteCall(value)
       : settings
-        ? { ...(source !== undefined && { source }), layers: settings.layers }
+        ? {
+            ...(source !== undefined && { source }),
+            // Pin the JSON the guest receives, which omits unset properties.
+            layers: JSON.parse(JSON.stringify(settings.layers)) as ModInput[],
+          }
         : value;
   if (!submits) validateInput(method, input, {});
   // No hook hears a prompt the host would not run, or one with no words.
