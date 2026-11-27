@@ -93,7 +93,7 @@ describe('App', () => {
 
   const mockUIActions = {
     refreshStatic: vi.fn(),
-    dismissSettingsCorruptionDialog: vi.fn(),
+    closeSettingsCorruptedDialog: vi.fn(),
   } as unknown as UIActions;
 
   const renderWithProviders = (
@@ -156,7 +156,7 @@ describe('App', () => {
     vi.mocked(writeStderrLine).mockClear();
     vi.mocked(SettingsCorruptedDialog).mockClear();
     const { unmount } = renderWithProviders(
-      mockUIState as UIState,
+      { ...mockUIState, isSettingsCorruptedDialogOpen: true } as UIState,
       {
         ...mockSettings,
         corruptedPath,
@@ -192,35 +192,56 @@ describe('App', () => {
     }
   });
 
-  it('dismisses the corruption dialog through the UI actions on Continue', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'app-recovery-'));
-    const corruptedPath = path.join(root, 'settings.json.corrupted');
-    fs.writeFileSync(corruptedPath, '{broken');
-    vi.mocked(SettingsCorruptedDialog).mockClear();
-    vi.mocked(mockUIActions.dismissSettingsCorruptionDialog).mockClear();
-    const { unmount } = renderWithProviders(
-      mockUIState as UIState,
-      { ...mockSettings, corruptedPath } as LoadedSettings,
-    );
+  it.each([
+    { name: 'the backup is removed', backup: true, unlinkFails: false },
+    { name: 'the backup is already gone', backup: false, unlinkFails: false },
+    { name: 'the backup cannot be removed', backup: true, unlinkFails: true },
+  ])(
+    'closes the corruption dialog on Continue when $name',
+    ({ backup, unlinkFails }) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'app-recovery-'));
+      const corruptedPath = path.join(root, 'settings.json.corrupted');
+      if (backup) fs.writeFileSync(corruptedPath, '{broken');
+      const unlink = unlinkFails
+        ? vi.spyOn(fs, 'unlinkSync').mockImplementation(() => {
+            throw new Error('EACCES');
+          })
+        : undefined;
+      vi.mocked(writeStderrLine).mockClear();
+      vi.mocked(SettingsCorruptedDialog).mockClear();
+      vi.mocked(mockUIActions.closeSettingsCorruptedDialog).mockClear();
+      const { unmount } = renderWithProviders(
+        { ...mockUIState, isSettingsCorruptedDialogOpen: true } as UIState,
+        { ...mockSettings, corruptedPath } as LoadedSettings,
+      );
 
-    try {
-      vi.mocked(SettingsCorruptedDialog).mock.calls[0][0].onContinue();
+      try {
+        vi.mocked(SettingsCorruptedDialog).mock.calls[0][0].onContinue();
 
-      expect(
-        mockUIActions.dismissSettingsCorruptionDialog,
-      ).toHaveBeenCalledOnce();
-      expect(fs.existsSync(corruptedPath)).toBe(false);
-    } finally {
-      unmount();
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
+        expect(
+          mockUIActions.closeSettingsCorruptedDialog,
+        ).toHaveBeenCalledOnce();
+        expect(fs.existsSync(corruptedPath)).toBe(unlinkFails);
+        if (unlinkFails) {
+          expect(writeStderrLine).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(`Could not remove ${corruptedPath}`),
+          );
+        } else {
+          expect(writeStderrLine).not.toHaveBeenCalled();
+        }
+      } finally {
+        unlink?.mockRestore();
+        unmount();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it('renders the layout once the corruption dialog is dismissed', () => {
+  it('renders the layout once the corruption dialog is closed', () => {
     const { lastFrame } = renderWithProviders(
       {
         ...mockUIState,
-        settingsCorruptionDialogDismissed: true,
+        isSettingsCorruptedDialogOpen: false,
       } as UIState,
       {
         ...mockSettings,

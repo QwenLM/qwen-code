@@ -6988,7 +6988,7 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('clears dialogsVisible once the settings corruption dialog is dismissed', () => {
+    it('closes the settings corruption dialog and clears dialogsVisible together', () => {
       const corruptedSettings = {
         ...mockSettings,
         corruptedPath: '/project/.qwen/settings.json.corrupted',
@@ -7002,11 +7002,12 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
+      expect(capturedUIState.isSettingsCorruptedDialogOpen).toBe(true);
       expect(capturedUIState.dialogsVisible).toBe(true);
 
-      act(() => capturedUIActions.dismissSettingsCorruptionDialog());
+      act(() => capturedUIActions.closeSettingsCorruptedDialog());
 
-      expect(capturedUIState.settingsCorruptionDialogDismissed).toBe(true);
+      expect(capturedUIState.isSettingsCorruptedDialogOpen).toBe(false);
       expect(capturedUIState.dialogsVisible).toBe(false);
     });
 

@@ -4420,7 +4420,9 @@ export const AppContainer = (props: AppContainerProps) => {
     settingsCorruptionDialogDismissed,
     setSettingsCorruptionDialogDismissed,
   ] = useState(false);
-  const dismissSettingsCorruptionDialog = useCallback(
+  const isSettingsCorruptedDialogOpen =
+    !!settings.corruptedPath && !settingsCorruptionDialogDismissed;
+  const closeSettingsCorruptedDialog = useCallback(
     () => setSettingsCorruptionDialogDismissed(true),
     [],
   );
@@ -4467,7 +4469,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
-    !!(settings.corruptedPath && !settingsCorruptionDialogDismissed);
+    isSettingsCorruptedDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
   const shouldShowStickyTodos =
@@ -5567,7 +5569,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Feedback dialog
       isFeedbackDialogOpen,
       // Settings corruption dialog
-      settingsCorruptionDialogDismissed,
+      isSettingsCorruptedDialogOpen,
       // Per-task token tracking
       taskStartTokens,
       taskStartStreamingChars,
@@ -5721,7 +5723,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Feedback dialog
       isFeedbackDialogOpen,
       // Settings corruption dialog
-      settingsCorruptionDialogDismissed,
+      isSettingsCorruptedDialogOpen,
       // Per-task token tracking
       taskStartTokens,
       taskStartStreamingChars,
@@ -5832,7 +5834,7 @@ export const AppContainer = (props: AppContainerProps) => {
       temporaryCloseFeedbackDialog,
       submitFeedback,
       // Settings corruption dialog
-      dismissSettingsCorruptionDialog,
+      closeSettingsCorruptedDialog,
       // Rewind selector
       openRewindSelector,
       closeRewindSelector,
@@ -5925,7 +5927,7 @@ export const AppContainer = (props: AppContainerProps) => {
       temporaryCloseFeedbackDialog,
       submitFeedback,
       // Settings corruption dialog
-      dismissSettingsCorruptionDialog,
+      closeSettingsCorruptedDialog,
       // Rewind selector
       openRewindSelector,
       closeRewindSelector,

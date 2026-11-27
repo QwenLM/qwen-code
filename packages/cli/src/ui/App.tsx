@@ -28,7 +28,7 @@ export const App = () => {
   }
 
   // Render corrupted dialog at the top level, before any other UI
-  if (settings.corruptedPath && !uiState.settingsCorruptionDialogDismissed) {
+  if (uiState.isSettingsCorruptedDialogOpen && settings.corruptedPath) {
     return (
       <StreamingContext.Provider value={uiState.streamingState}>
         <Box marginX={2}>
@@ -86,7 +86,7 @@ export const App = () => {
                   );
                 }
               }
-              uiActions.dismissSettingsCorruptionDialog();
+              uiActions.closeSettingsCorruptedDialog();
             }}
           />
         </Box>

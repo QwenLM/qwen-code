@@ -212,7 +212,7 @@ export interface UIState {
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
   // Settings corruption dialog
-  settingsCorruptionDialogDismissed: boolean;
+  isSettingsCorruptedDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
   taskStartStreamingChars: number;
