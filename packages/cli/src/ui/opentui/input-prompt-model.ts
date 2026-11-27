@@ -1036,6 +1036,15 @@ export function normalizePastedText(raw: string): string {
   return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
+/**
+ * Normalizes a paste for a field that renders a single logical line.
+ * Keep this separate from normalizePastedText: the composer and confirmation
+ * dialogs intentionally preserve line breaks.
+ */
+export function normalizeSingleLinePaste(raw: string): string {
+  return normalizePastedText(raw).replace(/[\r\n]+/g, ' ');
+}
+
 /** Whether a normalized paste must collapse into a placeholder. */
 export function isLargePaste(pasted: string): boolean {
   const charCount = [...pasted].length; // Unicode-aware, like the original
