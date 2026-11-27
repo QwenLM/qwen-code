@@ -19,6 +19,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_EN } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -5446,6 +5447,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
+  ...ARCHIVED_SESSIONS_MESSAGES_EN,
 };
 
 /**

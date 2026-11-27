@@ -29,6 +29,7 @@ import {
   GROUP_COLOR_OPTIONS,
   type SessionGroupCatalog,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   isPromptLedgerTerminalRecord,
@@ -867,8 +868,7 @@ async function enrichPromptContinuation(
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
     // The ledger reads are synchronous; yield periodically so a large
-    // catalog scan does not stall the daemon's event loop (the async PR
-    // sidecar enrichment interleaves naturally).
+    // result does not stall the daemon's event loop.
     if (++scanned % 64 === 0) {
       await new Promise<void>((resolve) => setImmediate(resolve));
       signal?.throwIfAborted();
@@ -957,6 +957,15 @@ function toSummary(item: {
   };
 }
 
+function hasActiveSessionWork(session: BridgeSessionSummary): boolean {
+  return (
+    session.hasActivePrompt ||
+    session.activeWorkState === 'active' ||
+    session.hasRunningBackgroundTasks === true ||
+    Boolean(session.backgroundTurn)
+  );
+}
+
 /**
  * Merges a live session's summary onto its persisted counterpart for a session
  * that exists in both. The persisted record owns identity/immutable facts
@@ -1010,12 +1019,7 @@ function mergeLiveSessionSummary(
   // Work in flight supersedes the persisted cut-off evidence: the running
   // turn owns the transcript tail now, so a fresh catalog read of a running
   // session must not carry the continuation hint.
-  if (
-    merged.hasActivePrompt ||
-    merged.activeWorkState === 'active' ||
-    merged.hasRunningBackgroundTasks ||
-    merged.backgroundTurn
-  ) {
+  if (hasActiveSessionWork(merged)) {
     delete merged.needsContinuation;
   }
   // The live entry only knows PR bindings from this daemon lifetime while the
@@ -1197,6 +1201,7 @@ function readPersistedSidecars(
       const readSignal = controller.signal;
       readSignal.throwIfAborted();
       const rows = new Map([[session.sessionId, { ...session }]]);
+      await enrichPromptContinuation(rows, service, archiveState, readSignal);
       await enrichWorktreeSidecars(
         rows,
         service,
@@ -1342,6 +1347,8 @@ async function enrichCatalogPage(
     if (details.goal !== undefined) session.goal = details.goal;
     if (details.detachedBackgroundWork !== undefined)
       session.detachedBackgroundWork = details.detachedBackgroundWork;
+    if (details.needsContinuation !== undefined)
+      session.needsContinuation = details.needsContinuation;
   }
 }
 
@@ -1390,12 +1397,6 @@ async function loadAllPersistedSummaries(
   } while (cursor !== undefined);
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
-  );
-  await enrichPromptContinuation(
-    bySessionId,
-    sessionService,
-    archiveState,
-    signal,
   );
   signal.throwIfAborted();
   return {
@@ -2113,6 +2114,7 @@ export async function listWorkspaceSessionsForResponse(
   readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
   readOptions.signal?.throwIfAborted();
+  const archiveState = options?.archiveState ?? 'active';
   const runtimeBaseDir = new Storage(
     workspaceCwd,
     readOptions.runtimeBaseDir,
@@ -2141,9 +2143,27 @@ export async function listWorkspaceSessionsForResponse(
     await enrichPromptTimes(
       result.sessions,
       new SessionService(workspaceCwd, { runtimeBaseDir }),
-      options?.archiveState ?? 'active',
+      archiveState,
       readOptions,
     );
+  }
+  if (
+    archiveState === 'active' &&
+    readOptions.mergeLive !== false &&
+    !result.liveMergeFailed
+  ) {
+    // A prompt can start and write its admission while the page is enriched.
+    for (const session of result.sessions) {
+      if (!session.needsContinuation) continue;
+      try {
+        const live = bridge.getSessionSummary(session.sessionId);
+        if (live.workspaceCwd === workspaceCwd && hasActiveSessionWork(live)) {
+          delete session.needsContinuation;
+        }
+      } catch (error) {
+        if (!(error instanceof SessionNotFoundError)) throw error;
+      }
+    }
   }
   return result;
 }

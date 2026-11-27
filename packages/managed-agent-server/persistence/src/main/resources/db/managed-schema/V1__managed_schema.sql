@@ -316,6 +316,8 @@ CREATE TABLE ma_event_stream (
     output_ranges_json LONGTEXT COMMENT 'Serialized output ranges referenced by the stream projection.',
     is_projection_pending TINYINT UNSIGNED GENERATED ALWAYS AS (last_sequence > covered_sequence)
         COMMENT 'Generated flag indicating public events not yet covered by projection.',
+    is_replay_floor_pending TINYINT UNSIGNED GENERATED ALWAYS AS (covered_sequence > replay_floor_sequence)
+        COMMENT 'Generated flag indicating replay floor has not advanced to projection coverage.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_event_stream_business_key UNIQUE (tenant_id, session_id, stream_kind, stream_id),
     CONSTRAINT ck_ma_stream_kind CHECK ((CASE stream_kind WHEN 'SESSION' THEN 7 WHEN 'TASK' THEN 4 ELSE -1 END = CHAR_LENGTH(stream_kind))),
@@ -323,10 +325,12 @@ CREATE TABLE ma_event_stream (
     CONSTRAINT ck_ma_stream_wake CHECK (wake_covered_sequence IS NULL OR (stream_kind = 'SESSION' AND wake_covered_sequence >= 0)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_event_stream_id PRIMARY KEY (id),
-    CONSTRAINT ck_ma_event_stream_boolean_values CHECK ((is_projection_pending >= 0 AND is_projection_pending <= 1))
+    CONSTRAINT ck_ma_event_stream_boolean_values CHECK ((is_projection_pending >= 0 AND is_projection_pending <= 1) AND (is_replay_floor_pending >= 0 AND is_replay_floor_pending <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Durable Session or Task event sequence, replay floor, and projection progress.';
 
 CREATE INDEX idx_ma_stream_projection ON ma_event_stream (stream_kind, is_projection_pending, gmt_modified);
+
+CREATE INDEX idx_ma_stream_replay_floor ON ma_event_stream (stream_kind, stream_id, is_replay_floor_pending, gmt_modified);
 
 CREATE TABLE ma_public_event (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
