@@ -130,10 +130,11 @@ jobs:
             exit 1
           fi
           root="$(dirname "${cli}")"
+          pkg="$(dirname "${root}")"
           if [ "${{ matrix.os }}" = 'windows-latest' ]; then
-            nodebin="${root}/node.exe"
+            nodebin="${pkg}/node.exe"
           else
-            nodebin="${root}/bin/node"
+            nodebin="${pkg}/bin/node"
           fi
           if [ ! -x "${nodebin}" ]; then
             echo "::error::archive node runtime missing: ${nodebin}"
