@@ -13,7 +13,7 @@ import {
   carriedOverlayStillHeldBySource,
   computeCarriedIdentities,
   GitWorktreeService,
-  isDisposableIgnoredEntry,
+  isWaivableIgnoredEntry,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
@@ -577,7 +577,7 @@ async function checkoutChangeDigest(
       if (
         i < originalStatusCount &&
         xy === '!!' &&
-        isDisposableIgnoredEntry(rel)
+        (await isWaivableIgnoredEntry(worktreePath, rel))
       ) {
         continue;
       }

@@ -496,6 +496,83 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(worktreeHasWork(worktree)).resolves.toBe(false);
   });
 
+  // R1-1 (fix-induced): the cache containers and `.qwen/worktrees` can hold
+  // checkouts. `.qwen/tmp/review-pr-<n>` is exactly what this repository's own
+  // review tooling creates, and the parent's `git status` collapses either tree
+  // to one `!! .qwen/tmp/`, so a prefix exclusion silently dropped it.
+  it('treats a linked worktree with work inside .qwen/tmp as work, and refuses the capture', async () => {
+    const inner = path.join(worktree, '.qwen', 'tmp', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner', inner, 'HEAD');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'inner-draft\n');
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/*\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-qwen', '--no-verify');
+
+    // Without a snapshot the gate is the only guard, so it must not waive the
+    // container: `requireSnapshot: false` paths would otherwise delete the
+    // parent with the nested work inside it.
+    await expect(worktreeHasWork(worktree)).resolves.toBe(true);
+    // With a snapshot, the capture is the guard: excluding the container would
+    // certify an archive that carries none of it.
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(/nested checkout \.qwen\/tmp\/inner holds work/);
+  });
+
+  it('archives an independent repository inside .qwen/tmp instead of excluding it', async () => {
+    const inner = path.join(worktree, '.qwen', 'tmp', 'inner');
+    await fs.mkdir(inner, { recursive: true });
+    git(inner, 'init', '-q', '-b', 'main');
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    await fs.writeFile(path.join(inner, 'own.md'), 'own-repo\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'own', '--no-verify');
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/*\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-qwen', '--no-verify');
+
+    // Its object database lives only there; the archive drops `.git`, so
+    // excluding the container would delete the repository.
+    const captured = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    const members: string[] = [];
+    await tar.t({
+      file: captured.snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    });
+    expect(members).toContain('.qwen/tmp/inner/own.md');
+  });
+
+  it('still excludes a clean linked worktree inside .qwen/tmp', async () => {
+    const inner = path.join(worktree, '.qwen', 'tmp', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-clean', inner, 'HEAD');
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/*\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-qwen-clean', '--no-verify');
+    // A clean linked worktree has no unique bytes — its branch reconstructs it
+    // — so the multi-GB cache protection still applies to the container.
+    const captured = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(captured.checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: captured.snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    });
+    expect(members.some((m) => m.startsWith('.qwen/tmp/inner/'))).toBe(false);
+  });
+
   it('refuses to capture a checkout whose nested checkout holds work', async () => {
     const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
     git(worktree, 'worktree', 'add', '-q', '-b', 'inner', inner, 'HEAD');
