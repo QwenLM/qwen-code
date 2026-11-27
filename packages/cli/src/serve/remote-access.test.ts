@@ -49,7 +49,7 @@ beforeEach(async () => {
   await new Promise<void>((resolve) => primary.listen(0, '127.0.0.1', resolve));
   const port = (primary.address() as { port: number }).port;
   local = `http://127.0.0.1:${port}`;
-  app.use(hostAllowlist('127.0.0.1', () => port));
+  app.use(hostAllowlist('127.0.0.1'));
   app.use(
     allowOriginCors(new MutableOriginAllowlist(parseAllowOriginPatterns([]))),
   );

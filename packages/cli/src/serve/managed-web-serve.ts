@@ -135,7 +135,7 @@ export async function runManagedWebServe(
   app.disable('x-powered-by');
   let port = options.port;
   installSelfOriginStripMiddleware(app, () => port, options.hostname);
-  app.use(hostAllowlist(options.hostname, () => port));
+  app.use(hostAllowlist(options.hostname));
   installRemoteSelfOriginMiddleware(app, options.hostname, token);
   app.use(
     allowOriginCors(parseAllowOriginPatterns(options.allowOrigins ?? [])),
