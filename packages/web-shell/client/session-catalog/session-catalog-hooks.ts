@@ -428,6 +428,9 @@ export function useSessionCatalogController(client: DaemonClient) {
       }
     };
     return {
+      peekSessionSummary(sessionId: string, workspaceCwd: string | undefined) {
+        return store.peekSessionSummary(sessionId, workspaceCwd);
+      },
       refreshQueries(queries: readonly SessionCatalogQuery[]) {
         for (const query of queries) {
           void store.loadOnce(query, { fresh: true }).catch((error) => {

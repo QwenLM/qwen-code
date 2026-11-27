@@ -115,16 +115,15 @@ export function SessionDetailsTooltip({
         !seenIssueUrls.has(issue.url) &&
         seenIssueUrls.add(issue.url),
     );
-  // A turn in flight hides the row's background dot and the blocked states
-  // outrank it, so this status is where background work still gets named.
-  // Blocked-state precedence is pinned. The unread arm mirrors the row's dot
-  // precedence — the unread dot outranks the running/active-work dots, the
-  // background dot outranks unread — and carries the suffix for the same
-  // hidden-background reason. The background-only arm already names it and
-  // must not repeat it.
-  const backgroundSuffix = session.hasRunningBackgroundTasks
-    ? ` · ${t('background.running')}`
-    : '';
+  // A turn or an input request can hide the background dot.
+  const backgroundStatus =
+    session.hasRunningBackgroundTasks ||
+    session.detachedBackgroundWork === 'running'
+      ? t('background.running')
+      : session.detachedBackgroundWork === 'unknown'
+        ? t('background.detachedUnknown')
+        : undefined;
+  const backgroundSuffix = backgroundStatus ? ` · ${backgroundStatus}` : '';
   const status = session.isWaitingForPermission
     ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
@@ -136,10 +135,11 @@ export function SessionDetailsTooltip({
           : session.hasActivePrompt
             ? `${t('sidebar.running')}${backgroundSuffix}`
             : session.activeWorkState === 'active'
-              ? t('sidebar.activeWork')
+              ? `${t('sidebar.activeWork')}${backgroundSuffix}`
               : session.activeWorkState === 'unknown'
-                ? t('sidebar.activityUnknown')
-                : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
+                ? `${t('sidebar.activityUnknown')}${backgroundSuffix}`
+                : (backgroundStatus ??
+                  `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`);
 
   useEffect(() => {
     return () => {

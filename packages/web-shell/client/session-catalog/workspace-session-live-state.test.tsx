@@ -17,6 +17,7 @@ import {
   getSessionCatalogStore,
   type SessionCatalogQuery,
 } from './session-catalog-store';
+import { sessionBlocksDelete } from './session-live-work';
 import {
   SESSION_LIVE_STATE_ERROR_RETRY_MS,
   SESSION_LIVE_STATE_POLL_MS,
@@ -258,6 +259,71 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests);
     expect(listGroups).not.toHaveBeenCalled();
     expect(container.textContent).toBe('true:true:no-group');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(listSessions).toHaveBeenCalledTimes(initialCatalogRequests);
+  });
+
+  it('discovers and clears detached work on slow catalog refreshes without a version change', async () => {
+    getLiveState.mockResolvedValue({ ...liveState(1), sessions: [] });
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    listSessions.mockResolvedValue({
+      sessions: [
+        { ...sessionPage().sessions[0]!, detachedBackgroundWork: 'running' },
+      ],
+    } satisfies DaemonSessionListPage);
+
+    await act(async () => vi.advanceTimersByTimeAsync(59_999));
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBe('running');
+
+    listSessions.mockResolvedValue(sessionPage());
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(listSessions).toHaveBeenCalledTimes(3);
+    expect(
+      store.getSnapshot(query).page?.sessions[0]?.detachedBackgroundWork,
+    ).toBeUndefined();
+  });
+
+  it('rechecks a restored live row for detached work at an unchanged catalog version', async () => {
+    getLiveState.mockResolvedValue({ ...liveState(1), sessions: [] });
+    listSessions.mockResolvedValueOnce({
+      sessions: [
+        { ...sessionPage().sessions[0]!, detachedBackgroundWork: 'running' },
+      ],
+    } satisfies DaemonSessionListPage);
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    const row = () => store.getSnapshot(query).page!.sessions[0]!;
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), false)).toBe(true);
+
+    const restoredLiveState = liveState(1);
+    restoredLiveState.sessions[0]!.hasRunningBackgroundTasks = false;
+    getLiveState.mockResolvedValue(restoredLiveState);
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS),
+    );
+    expect(row().clientCount).toBe(1);
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), true)).toBe(true);
+
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(59_999 - SESSION_LIVE_STATE_POLL_MS),
+    );
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(sessionBlocksDelete(row(), true)).toBe(true);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(row().clientCount).toBe(1);
+    expect(row().detachedBackgroundWork).toBeUndefined();
+    expect(sessionBlocksDelete(row(), true)).toBe(false);
   });
 
   it('does not rescan the catalog for prompt admission, and rate-limits unusable-watermark completions', async () => {

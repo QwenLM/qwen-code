@@ -12170,6 +12170,7 @@ export function registerSessionRoutes(
                   signal: controller.signal,
                   isSessionRetirementFenced: (id) =>
                     isBridgeSessionRetirementFenced(runtime.bridge, id),
+                  liveRows: runtime.bridge.listWorkspaceSessions(key),
                 },
               ),
             );

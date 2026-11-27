@@ -3387,12 +3387,20 @@ interface SideTaskCatalogState {
 export function canArchiveSideTaskSummary(
   session: Pick<
     DaemonSessionSummary,
-    'activeWorkState' | 'hasActivePrompt' | 'hasRunningBackgroundTasks'
+    | 'activeWorkState'
+    | 'hasActivePrompt'
+    | 'hasRunningBackgroundTasks'
+    | 'detachedBackgroundWork'
   >,
 ): boolean {
   return (
     !session.hasActivePrompt &&
     !session.hasRunningBackgroundTasks &&
+    // A detached-running shell outlives the archive — the sidecar verdict is
+    // observational — so the artifact panel must refuse it the same way the
+    // sidebar's canArchiveSession does. Test `!== 'running'`, not presence:
+    // the documented policy blocks only confirmed `running`, never `unknown`.
+    session.detachedBackgroundWork !== 'running' &&
     (session.activeWorkState === undefined ||
       session.activeWorkState === 'idle')
   );

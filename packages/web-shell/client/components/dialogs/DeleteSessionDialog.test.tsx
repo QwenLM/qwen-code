@@ -415,6 +415,105 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(false);
   });
 
+  it('keeps a detached-running row unselectable', () => {
+    // The sidecar-derived signal (#17819) is exactly the row shape whose
+    // delete looks like harmless cleanup while a process is still running.
+    sessions = [
+      { ...initialSessions[0], detachedBackgroundWork: 'running' as const },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(dangerButton().disabled).toBe(true);
+    // The detached hint names what is protected: deletion would not stop the
+    // detached shell, so the copy differs from the live-running refusal.
+    expect(hint()).toBe(
+      'Detached background work is still running for this session. Wait for it to exit before deleting.',
+    );
+  });
+
+  it('keeps the advisory while a detached-unknown row is selected', () => {
+    sessions = [
+      { ...initialSessions[0], detachedBackgroundWork: 'unknown' as const },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+    expect(hint()).toBe(
+      'This session may still have background tasks running — status unknown.',
+    );
+    clickRow(1);
+    expect(isChecked(rows()[1]!)).toBe(true);
+    expect(hint()).toContain('status unknown');
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('status unknown');
+  });
+
+  it('updates the advisory when a selected row changes detached status', () => {
+    mount();
+    clickRow(0);
+    clickRow(1);
+    expect(hint()).toContain('2');
+
+    sessions = [
+      { ...initialSessions[0], detachedBackgroundWork: 'unknown' as const },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    rerender();
+    expect(hint()).toContain('status unknown');
+    expect(dangerButton().disabled).toBe(false);
+
+    sessions = initialSessions.slice();
+    rerender();
+    expect(hint()).toContain('2');
+    expect(hint()).not.toContain('status unknown');
+  });
+
+  it('keeps errors and delete progress ahead of the detached-unknown advisory', async () => {
+    let settle: (result: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      { ...initialSessions[0], detachedBackgroundWork: 'unknown' as const },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(hint()).toBe('load boom');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toContain('status unknown');
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toBe('Deleting...');
+
+    await act(async () => {
+      settle({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 's0', error: 'locked' }],
+      });
+    });
+    clickRow(0);
+    expect(hint()).toBe('Failed to delete 1 session(s): locked');
+  });
+
   it('names the reason when a refused row is clicked', () => {
     // The danger button is disabled in this state, so the click on the row is
     // the only place the refusal can reach the user.

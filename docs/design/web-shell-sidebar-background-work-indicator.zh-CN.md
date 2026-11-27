@@ -39,10 +39,8 @@
 
 不在本次范围（记为后续，不静默丢弃）：
 
-- 会话已不再 live（被关闭、被回收，或 daemon 重启后）而 detached 后台 shell 仍在
-  跑。shell 注册表是纯内存的，因此客户端根本拿不到
-  `hasRunningBackgroundTasks`。证据：远端某会话的 shell pid 已存活约 26 小时，
-  但它不在 live-state 里，目录行也没有后台字段。跟踪于 #17819。
+- ~~会话已不再 live（被关闭、被回收，或 daemon 重启后）而 detached 后台 shell
+  仍在跑。~~ 已由下文 detached 后台 shell 扩展纳入范围（#17819）。
 - 重新评定 Session Overview 面板卡片的等级。「仅后台」会话在那里仍读作 `idle`，
   从而保持面板的排序与显示状态不变；它的两个破坏性卡片动作另行加闸（见下），
   因为只靠该等级会把它们放出来。
@@ -106,6 +104,47 @@ unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控
 点）。配色：回合在跑或其他活跃工作均为绿色（#18072 将 active-work 从蓝色改为复
 用运行绿色，使蓝色仅保留给完成未读会话），仅后台任务为琥珀色，完成未读为蓝色。
 
+## Detached 后台 shell（#17819）
+
+上文第一条「不在本次范围」后来单独成了一项扩展。所属 CLI 进程死亡的会话可能
+留下 `running` 状态的 shell sidecar —— 注册表只在优雅退出时收口它们，因此硬杀会
+同时孤儿化进程与上报。这种行没有任何内存态信号，而删除它看起来像无害的清理，
+实际上 shell 还在跑（#17819）。
+
+daemon 在构建目录时尽力而为地解析该信号：
+
+- 会话列表探查当前页持久化行的
+  `<projectTempDir>/background-shells/<sessionId>/shell-*.status` sidecar
+  （serve 层的 `detached-work-liveness.ts`）。对于 `running`、`cancelled` 或带进程
+  令牌的 `failed` 记录，Linux PID 命名空间和启动令牌匹配且进程仍存活，才返回运行中。确认退出或
+  同一命名空间内 PID 已归属其他进程时清除该状态。缺少身份的旧文件、不可读或损坏的
+  记录，以及不支持的探查均返回 `unknown`。
+- 结果以 `detachedBackgroundWork` 落在会话摘要上：`'running'`、`'unknown'`，
+  或缺省（无 sidecar，或所有 running 声明均被证伪）。重新打开会话后，列表用
+  live 条目的创建时间排除本次运行期间启动的 shell。旧 shell 还在运行时，
+  `hasRunningBackgroundTasks` 仍可能变化，因此客户端保留 detached 观测，
+  由目录刷新更新该状态。
+- 探查结果缓存 45 秒（含「无信号」结果）。每次请求最多检查 100 个未缓存会话；
+  每个会话最多读取 256 个 shell sidecar（每个 16 KiB），其中最多对 128 个执行
+  进程探测。completed 记录、缺少进程启动标识的 failed 记录以及本次运行期的记录
+  在分类时无需探测，不消耗探测预算；cancelled 或带进程启动标识的 failed 记录仍
+  可能对应存活进程，会执行探测。超出读取上限的历史记录裁决为「未知」，等待保留
+  策略清理。打开的目录包含非 live 行
+  或带 detached 观测的 live 行时，每 60 秒协调刷新一次，即使 live 目录版本没有
+  变化。
+
+客户端对两个等级区别对待，沿用既有 `unknown` 策略：
+
+- `running` 作为第三项并入 `hasLiveWork` 与 `sessionBlocksDelete`。它不是本端
+  运行时的工作，因此在任何行上都会拦删除 —— 这恰是「删除看起来像清理」的行形态
+  —— 同时禁用归档。行内按
+  `data-web-shell-session-background-running="detached"` 渲染琥珀背景标记。
+- `unknown` 渲染空心、灰调、不脉动的圆点
+  （`data-web-shell-session-background-unknown`，tooltip 为
+  `background.detachedUnknown`），不阻断任何操作 —— 它是提示，不是「已知有工作」
+  ，与 `unknown` active-work 等级同理。删除弹窗里该行仍可勾选。选中项包含未知行时，
+  提示区显示 `delete.mayStillBeRunning`，删除进度与错误等状态优先展示。
+
 ## 设计决策与理由
 
 - **不新增图标或徽标。** 行内本来就有忙标记；放宽它的条件并着色，是同时满足两个
@@ -127,6 +166,19 @@ unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控
   行内任意位置都会露出操作浮层；把
   `.sessionRow:hover:not(.runningSession) .sessionLoading` 并入既有的标记隐藏
   规则，spinner 就不会压在按钮下面。
+- **尽力而为，绝不报错。** detached 解析器跑在会话列表响应路径里，因此探查的
+  一切失败都降级为 `unknown` 或「无 detached 工作」，而不是让请求失败。
+- **注册时记录操作系统的进程身份。** 前台转后台时，进程可能早于注册表写入的
+  `startTime` 很久就已启动。后续写入继续使用最初记录的 Linux 进程启动令牌与 PID
+  命名空间。注册表先写 `cancelled` 再请求取消，因此这些记录仍需探查进程。
+- **`unknown` 依旧不阻断。** 把它并进判据，会让所有在没有启动时间来源的平台
+  （macOS、Windows）上探查过的行都无法删除 —— 那些失败是环境性的，不是工作
+  存在的证据。
+- **合并对本次运行期的 shell 保持 live 优先。** live 会话自身的 shell 由注册表
+  负责：探查会排除 `startTime` 不早于 live 条目 `createdAt` 的 sidecar，因此
+  本次运行期的工作以注册表状态为准，不会重复上报。来自更早运行期的 shell 仍把
+  sidecar 裁决叠加在 live 行上，使删除闸门在两次目录刷新之间经受住新任务的开始
+  与结束。
 
 ## 约束与风险
 
@@ -140,6 +192,10 @@ unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控
   隐藏任何标记。
 - 忙标记与分支 / worktree 图标共用 meta 槽的尾位，因此 bg-only 行现在显示 spinner
   而不是该图标 —— 这与回合在跑的行本来就在做的取舍相同。
+- detached 扩展新增三个键：`background.detachedUnknown`（空心圆点的
+  tooltip）、`delete.mayStillBeRunning`（删除弹窗的提示）与
+  `delete.detachedRunningDisabled`（拦截删除的拒绝文案），四个词典（英文、
+  简体中文、繁体中文、俄语）均已翻译。
 
 ## 验证
 
@@ -187,10 +243,10 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    Session Overview 卡片上都不提供归档与删除，删除弹窗亦然。空闲的当前会话仍
    可删除。批量归档要跟随勾选之后标志的变化；勾选后才变忙的行要被取消勾选、
    不再计入计数，并从请求中剔除。
-5. 圆点优先级与 hover 链一致（启动 Spinner 优先于全部，仅后台琥珀色优先于
-   unread，unread 优先于 running/active-work，回合进行中门控关闭仅后台圆点，
-   且其他活跃工作按 #18072 复用运行绿色、蓝色仅保留给完成未读）；触屏布局与
-   既有悬停契约均成立。
+5. 圆点优先级与 hover 链一致（启动 Spinner 优先于全部；仅后台琥珀优先于
+   unread；unread 优先于 running/active-work；进行中的回合会关掉仅后台圆点，
+   active work 与 running 共用绿色（#18072），蓝色保留给已完成-unread）；
+   触屏布局与既有 hover 契约维持不变。
 6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵（含逐支后缀出现计数与
    unread 优先于 running 行）覆盖组合 hover 链；行侧见证以控制相钉住
    running→idle 晋升、background 优先于 unread 的槽位、unread 优先于
@@ -198,9 +254,16 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    清除 unread 身份。行上 running 圆点的 `!completedUnread` 守卫是面向 effect
    前渲染瞬态的防御性守卫，unread 优先于 running 这一环在 hover 侧由 tooltip
    矩阵钉住。
+7. 仅持久化、detached shell 可验证存活的行，显示琥珀背景标记，并在侧栏行与
+   删除弹窗中拒绝删除、拒绝归档，与内存态信号置位时完全一致。
+8. 仅持久化、detached shell 无法验证的行，显示空心 unknown 标记，处处保留
+   删除。删除弹窗在选中项有未知行时显示提示。等级清除或最后一条未知行取消勾选后，
+   提示消失。
+9. 重新打开会话后，旧 shell 的运行标记和删除保护继续生效。启动并结束新后台任务
+   也会保留这份保护。
+10. detached shell 退出后，保持 Web Shell 打开，探查缓存过期后的下一次慢速目录
+    刷新会移除运行标记。会话空闲时可以删除。
 
 ## 待决问题 / 后续
 
-- 非 live 会话上仍在跑的 detached 后台 shell 依旧无标记；修它需要 daemon 侧的
-  判活来源（status 文件加 pid 校验）以及有界的扫描成本。单独跟踪。
 - 琥珀标记是否最终要带任务计数。会话摘要目前没有计数字段，这需要协议新增字段。

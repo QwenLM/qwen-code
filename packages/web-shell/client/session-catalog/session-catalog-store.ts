@@ -283,6 +283,25 @@ export class SessionCatalogStore {
     return this.getOrCreateEntry(query).snapshot;
   }
 
+  hasSubscribedDetachedWorkCandidates(workspaceCwd: string): boolean {
+    const liveSessions = this.liveSessionsByWorkspace.get(workspaceCwd);
+    for (const entry of this.entries.values()) {
+      if (
+        entry.query.workspaceCwd === workspaceCwd &&
+        entry.subscribers.size > 0 &&
+        entry.snapshot.page?.sessions.some(
+          (session) =>
+            (!session.workspaceCwd || session.workspaceCwd === workspaceCwd) &&
+            (session.detachedBackgroundWork !== undefined ||
+              !liveSessions?.has(session.sessionId)),
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Reads a display name the catalog already holds for a session, scheduling
    * nothing. A history session's name exists only here — neither the load
@@ -313,6 +332,39 @@ export class SessionCatalogStore {
       }
     }
     return displayName;
+  }
+
+  /**
+   * Reads the latest summary the catalog already holds for a session,
+   * scheduling nothing. Spans every registered query — main, pinned,
+   * archived, and paginated history pages alike — so callers holding a
+   * captured row (a delete confirm opened earlier) can re-check the guard
+   * against freshest data instead of a stale snapshot (#17819).
+   */
+  peekSessionSummary(
+    sessionId: string,
+    workspaceCwd: string | undefined,
+  ): DaemonSessionSummary | undefined {
+    if (!workspaceCwd) return undefined;
+    let summary: DaemonSessionSummary | undefined;
+    let updatedAt = -Infinity;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      const session = entry.snapshot.page?.sessions.find(
+        // A page can hold sessions from another workspace (the daemon merges
+        // live runtime state), so match the row's workspace too, not just the
+        // entry's.
+        (session) =>
+          session.sessionId === sessionId &&
+          (!session.workspaceCwd || session.workspaceCwd === workspaceCwd),
+      );
+      const candidateUpdatedAt = entry.snapshot.updatedAt ?? 0;
+      if (session && candidateUpdatedAt >= updatedAt) {
+        summary = session;
+        updatedAt = candidateUpdatedAt;
+      }
+    }
+    return summary;
   }
 
   getEmptySnapshot(): SessionCatalogSnapshot {

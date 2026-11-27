@@ -27,6 +27,10 @@ describe('hasLiveWork', () => {
       'background work with no reported grade',
       { hasRunningBackgroundTasks: true },
     ],
+    [
+      'verified detached background work (#17819)',
+      { detachedBackgroundWork: 'running' as const },
+    ],
   ])('counts %s', (_label, overrides) => {
     expect(hasLiveWork(session(overrides))).toBe(true);
   });
@@ -42,6 +46,12 @@ describe('hasLiveWork', () => {
       { hasRunningBackgroundTasks: undefined },
     ],
     ['finished background work', { hasRunningBackgroundTasks: false }],
+    // The detached-unknown grade renders the "may still be running" hint but
+    // is not knowledge of work.
+    [
+      'unverifiable detached background work',
+      { detachedBackgroundWork: 'unknown' as const },
+    ],
   ])('does not count %s', (_label, overrides) => {
     expect(hasLiveWork(session(overrides))).toBe(false);
   });
@@ -65,6 +75,19 @@ describe('sessionBlocksDelete', () => {
       { activeWorkState: 'active' as const },
       true,
     ],
+    // The detached signal is not the attached runtime's work, so it blocks
+    // regardless of which row it lands on: that delete looks like harmless
+    // cleanup while a process is still running (#17819).
+    [
+      'detached background work on another row',
+      { detachedBackgroundWork: 'running' as const },
+      false,
+    ],
+    [
+      'detached background work on the attached row',
+      { detachedBackgroundWork: 'running' as const },
+      true,
+    ],
   ])('refuses %s', (_label, overrides, isCurrent) => {
     expect(sessionBlocksDelete(session(overrides), isCurrent)).toBe(true);
   });
@@ -85,6 +108,12 @@ describe('sessionBlocksDelete', () => {
       false,
     ],
     ['finished background work', { hasRunningBackgroundTasks: false }, false],
+    // Unknown is a hint, not knowledge of work: the row stays deletable.
+    [
+      'unverifiable detached background work',
+      { detachedBackgroundWork: 'unknown' as const },
+      false,
+    ],
   ])('allows %s', (_label, overrides, isCurrent) => {
     expect(sessionBlocksDelete(session(overrides), isCurrent)).toBe(false);
   });

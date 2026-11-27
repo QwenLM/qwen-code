@@ -209,9 +209,7 @@ export function ActivityView({
       ...restored.filter((entry) => !observed.has(entry.key)),
     ];
   }, [entries, restored]);
-  const [confirmation, setConfirmation] = useState<ActivityEntry[] | null>(
-    null,
-  );
+  const [confirmation, setConfirmation] = useState<string[] | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -330,9 +328,35 @@ export function ActivityView({
       update((previous) => ({ ...previous, pending: false }));
     }
   };
+  // The dialog captures only the selected session keys. Display and submit
+  // resolve them against the latest catalog rows, so a refresh between open
+  // and confirm cannot archive from a stale snapshot: rows that became
+  // detached-running, or left the catalog entirely, drop out. Archiving
+  // cannot stop a shell owned by a previous runtime — the detached sidecar
+  // verdict is observational — so those rows are skipped the same way the
+  // sidebar's canArchiveSession blocks them, and the stop-work copy is
+  // computed from the submitted rows only.
+  const [archivableTargets, skippedTargets] = useMemo(() => {
+    const archivable: ActivityEntry[] = [];
+    const skipped: ActivityEntry[] = [];
+    if (confirmation) {
+      const selected = new Map(
+        effectiveEntries.map((entry) => [entry.key, entry]),
+      );
+      for (const key of confirmation) {
+        const entry = selected.get(key);
+        if (!entry) continue;
+        (entry.session.detachedBackgroundWork === 'running'
+          ? skipped
+          : archivable
+        ).push(entry);
+      }
+    }
+    return [archivable, skipped] as const;
+  }, [confirmation, effectiveEntries]);
   const archive = () => {
-    const targets = confirmation;
-    if (!targets) return;
+    if (confirmation === null || archivableTargets.length === 0) return;
+    const targets = archivableTargets;
     const priorityKeys = snapshot.priorityKeys;
     setConfirmation(null);
     void execute(async () => {
@@ -532,19 +556,35 @@ export function ActivityView({
             size="sm"
             onClose={() => setConfirmation(null)}
           >
-            <p>
-              {t('activity.archiveDescription', { count: confirmation.length })}
-            </p>
-            {confirmation.some((entry) => hasLiveWork(entry.session)) && (
+            {archivableTargets.length > 0 && (
+              <p>
+                {t('activity.archiveDescription', {
+                  count: archivableTargets.length,
+                })}
+              </p>
+            )}
+            {skippedTargets.length > 0 && (
+              <p>
+                {t('activity.archiveSkippedDetached', {
+                  names: skippedTargets
+                    .map((entry) => entry.session.displayName)
+                    .join(', '),
+                })}
+              </p>
+            )}
+            {archivableTargets.some((entry) => hasLiveWork(entry.session)) && (
               <p>{t('activity.archiveRunning')}</p>
             )}
             <div className={sidebarStyles.confirmActions}>
               <Button variant="outline" onClick={() => setConfirmation(null)}>
                 {t('activity.cancel')}
               </Button>
-              <Button onClick={archive}>
+              <Button
+                onClick={archive}
+                disabled={archivableTargets.length === 0}
+              >
                 {t(
-                  confirmation.some((entry) => hasLiveWork(entry.session))
+                  archivableTargets.some((entry) => hasLiveWork(entry.session))
                     ? 'activity.confirmStopArchive'
                     : 'activity.confirmArchive',
                 )}
@@ -635,7 +675,9 @@ export function ActivityView({
           {canArchive && (
             <DropdownMenuItem
               disabled={pending || sections.priority.length === 0}
-              onSelect={() => setConfirmation([...sections.priority])}
+              onSelect={() =>
+                setConfirmation(sections.priority.map((entry) => entry.key))
+              }
             >
               {t('activity.archive')}
             </DropdownMenuItem>

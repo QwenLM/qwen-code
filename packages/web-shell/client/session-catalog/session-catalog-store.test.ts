@@ -13,6 +13,7 @@ import {
   peekSessionCatalogDisplayName,
   type SessionCatalogQuery,
 } from './session-catalog-store';
+import { sessionBlocksDelete } from './session-live-work';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -1178,6 +1179,69 @@ describe('SessionCatalogStore', () => {
       { sessionId: 'a', updatedAt: '2026-08-17T00:00:02.000Z' },
       { sessionId: 'gone', updatedAt: '2026-08-17T00:00:01.000Z' },
     ]);
+  });
+
+  it('keeps a restored session blocked after its new background work ends', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'restored',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+          detachedBackgroundWork: 'running' as const,
+        },
+        {
+          sessionId: 'unverifiable',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+          detachedBackgroundWork: 'unknown' as const,
+        },
+        {
+          sessionId: 'unheld',
+          workspaceCwd: '/work',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+          detachedBackgroundWork: 'running' as const,
+        },
+      ],
+    });
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+
+    const restored = {
+      sessionId: 'restored',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+      hasRunningBackgroundTasks: false,
+    };
+    const unverifiable = { ...restored, sessionId: 'unverifiable' };
+    const row = () => store.peekSessionSummary('restored', '/work')!;
+
+    store.applyLiveState('/work', [restored, unverifiable]);
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), false)).toBe(true);
+
+    store.applyLiveState('/work', [
+      { ...restored, hasRunningBackgroundTasks: true },
+      unverifiable,
+    ]);
+    expect(row().hasRunningBackgroundTasks).toBe(true);
+    expect(sessionBlocksDelete(row(), false)).toBe(true);
+
+    // A live-state sample reports the new work ended. The old process is
+    // still running and there has been no new catalog probe (#17819).
+    store.applyLiveState('/work', [restored, unverifiable]);
+    expect(row().hasRunningBackgroundTasks).toBe(false);
+    expect(row().detachedBackgroundWork).toBe('running');
+    expect(sessionBlocksDelete(row(), false)).toBe(true);
+    expect(
+      store.peekSessionSummary('unverifiable', '/work')?.detachedBackgroundWork,
+    ).toBe('unknown');
+    expect(
+      store.peekSessionSummary('unheld', '/work')?.detachedBackgroundWork,
+    ).toBe('running');
+    expect(legacy).toHaveBeenCalledTimes(1);
   });
 
   it('never stamps archived or cursored pages', async () => {

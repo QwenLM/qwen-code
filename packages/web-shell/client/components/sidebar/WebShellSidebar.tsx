@@ -297,6 +297,7 @@ function SelectableSessionRow({
       | 'hasActivePrompt'
       | 'activeWorkState'
       | 'hasRunningBackgroundTasks'
+      | 'detachedBackgroundWork'
     >,
   ) => void;
 }) {
@@ -306,6 +307,7 @@ function SelectableSessionRow({
     hasActivePrompt,
     activeWorkState,
     hasRunningBackgroundTasks,
+    detachedBackgroundWork,
   } = session;
   useEffect(() => {
     onRefresh(identity, {
@@ -313,6 +315,7 @@ function SelectableSessionRow({
       hasActivePrompt,
       activeWorkState,
       hasRunningBackgroundTasks,
+      detachedBackgroundWork,
     });
   }, [
     identity,
@@ -320,6 +323,7 @@ function SelectableSessionRow({
     hasActivePrompt,
     activeWorkState,
     hasRunningBackgroundTasks,
+    detachedBackgroundWork,
     onRefresh,
   ]);
   const label = getSessionLabel(session);
@@ -2106,6 +2110,7 @@ export function WebShellSidebar({
         | 'hasActivePrompt'
         | 'activeWorkState'
         | 'hasRunningBackgroundTasks'
+        | 'detachedBackgroundWork'
       >,
     ) => {
       setSelectedSessions((previous) => {
@@ -2116,7 +2121,8 @@ export function WebShellSidebar({
             selected.hasActivePrompt === state.hasActivePrompt &&
             selected.activeWorkState === state.activeWorkState &&
             selected.hasRunningBackgroundTasks ===
-              state.hasRunningBackgroundTasks)
+              state.hasRunningBackgroundTasks &&
+            selected.detachedBackgroundWork === state.detachedBackgroundWork)
         )
           return previous;
         return new Map(previous).set(identity, { ...selected, ...state });
@@ -4647,8 +4653,51 @@ export function WebShellSidebar({
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
     const sessionIdentity = getIdentityForSession(deleteCandidate);
-    if (!canDeleteSession(deleteCandidate)) {
+    // Re-check the guard against the live catalog row: the candidate was
+    // captured when the dialog opened, and a catalog refresh since then may
+    // have settled a detached-running verdict on this row that must not be
+    // bypassed by confirming a stale snapshot (#17819). The catalog cache is
+    // read first — it spans every registered query (main, pinned, archived,
+    // paginated history pages) and picks the most recently updated snapshot,
+    // so a fresh history page beats a stale main-list copy of the same row.
+    // The pool lists stay as a fallback, then the captured candidate.
+    const latestRow =
+      sessionCatalogController.peekSessionSummary(
+        sessionId,
+        getSessionWorkspaceCwd(deleteCandidate),
+      ) ??
+      [
+        sessions,
+        archivedSessions,
+        pinnedSessions,
+        secondaryActiveSessions,
+        secondaryPinnedSessions,
+        secondaryArchivedSessions,
+      ]
+        .flat()
+        .find(
+          (session) => getIdentityForSession(session) === sessionIdentity,
+        ) ??
+      deleteCandidate;
+    if (!canDeleteSession(latestRow)) {
       setDeleteCandidate(null);
+      // The row changed under the open dialog. Closing silently reads as a
+      // no-op press and invites a retry loop, so surface the refusal through
+      // the same error channel a failed delete uses (R1-7). Only a work
+      // blockage earns the "still running" copy; a workspace permission or
+      // capability change falls back to the generic delete-failure message.
+      const workBlocked = sessionBlocksDelete(
+        latestRow,
+        isCurrentSession(latestRow),
+      );
+      const refusal = !workBlocked
+        ? t('sidebar.deleteFailed')
+        : latestRow.detachedBackgroundWork === 'running'
+          ? t('delete.detachedRunningDisabled')
+          : isCurrentSession(latestRow)
+            ? t('delete.cannotCurrent')
+            : t('sidebar.deleteRunningDisabled');
+      onError(new Error(refusal), refusal);
       return;
     }
     // Captured before the request: the daemon's terminal `session_closed`
@@ -4699,6 +4748,7 @@ export function WebShellSidebar({
         setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
   }, [
+    archivedSessions,
     bumpWorkspaceReload,
     canDeleteSession,
     deleteArchivedSession,
@@ -4706,13 +4756,19 @@ export function WebShellSidebar({
     deleteSession,
     generatedUiOwner,
     getIdentityForSession,
+    getSessionWorkspaceCwd,
     isCurrentSession,
     onError,
     onSessionsDeleted,
+    pinnedSessions,
     primaryWorkspaceCwd,
     removeArchivedExtraSession,
     resolveSessionWorkspaceScope,
+    secondaryActiveSessions,
+    secondaryArchivedSessions,
+    secondaryPinnedSessions,
     sessionCatalogController,
+    sessions,
     setSessionBusy,
     t,
     workspace.client,
@@ -6224,12 +6280,23 @@ export function WebShellSidebar({
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
       const running = hasLiveWork(session);
-      const backgroundRunning =
-        !session.hasActivePrompt && session.hasRunningBackgroundTasks;
+      // Detached grades (#17819): a persisted session whose shell sidecars
+      // report a verified-running shell reads like background work; an
+      // unverifiable one gets its own muted marker and blocks nothing. The
+      // unread completion outranks the muted marker, mirroring the dot
+      // precedence; the verified-running grade survives it.
+      const backgroundTasks =
+        session.hasRunningBackgroundTasks === true ||
+        session.detachedBackgroundWork === 'running';
+      const detachedBackgroundUnknown =
+        !session.hasActivePrompt &&
+        session.detachedBackgroundWork === 'unknown' &&
+        !session.hasRunningBackgroundTasks &&
+        !completedUnread;
+      const backgroundRunning = !session.hasActivePrompt && backgroundTasks;
       // The status dot is prompt-gated, so a turn in flight hides the background
       // dot. The busy marker must not be: it is the only place left that can
       // still say this row is running background work.
-      const backgroundTasks = session.hasRunningBackgroundTasks === true;
       const busyLabel = backgroundRunning
         ? t('background.running')
         : sessionWorkActive
@@ -6299,11 +6366,13 @@ export function WebShellSidebar({
       const deleteDisabled = busy || currentStandalone || deleteBlocked;
       const deleteDisabledTitle = currentStandalone
         ? t('sidebar.currentStandaloneDeleteDisabled')
-        : isCurrent && running
-          ? t('sidebar.currentDeleteDisabled')
-          : deleteBlocked
-            ? t('sidebar.deleteRunningDisabled')
-            : undefined;
+        : session.detachedBackgroundWork === 'running'
+          ? t('delete.detachedRunningDisabled')
+          : isCurrent && running
+            ? t('sidebar.currentDeleteDisabled')
+            : deleteBlocked
+              ? t('sidebar.deleteRunningDisabled')
+              : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       // Archived sessions cannot load into a split pane (they leave an empty
       // pane), so the sidebar withholds the split action for them.
@@ -6452,10 +6521,24 @@ export function WebShellSidebar({
                   styles.sessionStatusDot,
                   styles.sessionBackgroundRunning,
                 )}
-                data-web-shell-session-background-running
+                data-web-shell-session-background-running={
+                  session.hasRunningBackgroundTasks ? true : 'detached'
+                }
                 role="img"
                 aria-label={t('background.running')}
                 title={t('background.running')}
+              />
+            )}
+            {!liveStarting && detachedBackgroundUnknown && (
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionBackgroundUnknown,
+                )}
+                data-web-shell-session-background-unknown
+                role="img"
+                aria-label={t('background.detachedUnknown')}
+                title={t('background.detachedUnknown')}
               />
             )}
             {!liveStarting && session.hasActivePrompt && !completedUnread ? (
@@ -6470,7 +6553,8 @@ export function WebShellSidebar({
             ) : !liveStarting &&
               sessionWorkActive &&
               !completedUnread &&
-              !backgroundRunning ? (
+              !backgroundRunning &&
+              !detachedBackgroundUnknown ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,

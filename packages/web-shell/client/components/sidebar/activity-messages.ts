@@ -21,6 +21,8 @@ export const ACTIVITY_MESSAGES_EN: Record<string, Message> = {
     'Running work in these conversations will stop. Undo restores conversations but does not restart work.',
   'activity.confirmArchive': 'Archive',
   'activity.confirmStopArchive': 'Stop and archive',
+  'activity.archiveSkippedDetached': (v) =>
+    `Skipped — detached background work is still running: ${v?.names ?? ''}.`,
   'activity.cancel': 'Cancel',
   'activity.undo': 'Undo',
   'activity.result': (v) =>
@@ -61,6 +63,8 @@ export const ACTIVITY_MESSAGES_ZH: Record<string, Message> = {
     '这些聊天中正在进行的工作将停止。撤销仅恢复聊天，不会重新启动工作。',
   'activity.confirmArchive': '归档',
   'activity.confirmStopArchive': '停止并归档',
+  'activity.archiveSkippedDetached': (v) =>
+    `已跳过仍有分离的后台任务在运行的聊天：${v?.names ?? ''}。`,
   'activity.cancel': '取消',
   'activity.undo': '撤销归档',
   'activity.result': (v) =>
@@ -100,6 +104,8 @@ export const ACTIVITY_MESSAGES_RU: Record<string, Message> = {
     'Идущая работа в этих разговорах остановится. Отмена восстанавливает разговоры, но не перезапускает работу.',
   'activity.confirmArchive': 'Архивировать',
   'activity.confirmStopArchive': 'Остановить и архивировать',
+  'activity.archiveSkippedDetached': (v) =>
+    `Пропущены разговоры, чья фоновая задача всё ещё выполняется отдельно: ${v?.names ?? ''}.`,
   'activity.cancel': 'Отмена',
   'activity.undo': 'Отменить',
   'activity.result': (v) =>

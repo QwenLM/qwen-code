@@ -1297,6 +1297,12 @@ export interface BridgeSessionSummary {
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
+  /**
+   * Detached-shell observation from the session's on-disk status sidecars.
+   * A restored session can carry this alongside `hasRunningBackgroundTasks`
+   * because its live runtime can report work it started after restoration.
+   */
+  detachedBackgroundWork?: 'running' | 'unknown';
   /** True while a non-question permission request awaits a response. */
   isWaitingForPermission?: boolean;
   /** True while an ask_user_question request awaits a response. */

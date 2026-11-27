@@ -2614,6 +2614,16 @@ button.livePendingSession:hover {
   color: var(--warning-color, #d29922);
 }
 
+/* Detached-shell unknown grade (#17819): hollow and muted — visibly not the
+   amber "known busy" dot, and it does not pulse, because nothing here is
+   confirmed. */
+.sessionBackgroundUnknown {
+  color: var(--muted-foreground);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+  animation: none;
+}
+
 /* Hover-gated: touch devices get no hover reveal, and a sticky tap-hover on
    the background dot must not hide the always-visible row actions. */
 @media (hover: hover) {

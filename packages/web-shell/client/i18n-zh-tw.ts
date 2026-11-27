@@ -1733,6 +1733,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.usage.dailySessionsTitle': '會話',
   'daemon.usage.dailySessionsSub': '每日活躍會話數',
   'delete.cannotCurrent': '當前會話正在執行，無法刪除。',
+  'delete.mayStillBeRunning': '該會話可能仍有後臺任務在執行，狀態未知。',
+  'delete.detachedRunningDisabled':
+    '該會話仍有分離的後臺任務在執行，請等它結束後再刪除。',
   'delete.action': '刪除',
   'delete.deleted': '會話已刪除。',
   'delete.deletedCount': (v) => `已刪除 ${v?.count ?? 0} 個會話。`,
@@ -2283,6 +2286,8 @@ export const ZH_TW: Record<string, MessageValue> = {
     '這些聊天中正在進行的工作將停止。撤銷僅恢復聊天，不會重新啟動工作。',
   'activity.confirmArchive': '歸檔',
   'activity.confirmStopArchive': '停止並歸檔',
+  'activity.archiveSkippedDetached': (v) =>
+    `已跳過仍有分離的背景工作在執行的聊天：${v?.names ?? ''}。`,
   'activity.cancel': '取消',
   'activity.undo': '撤銷歸檔',
   'activity.result': (v) =>
@@ -2755,6 +2760,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'background.result': '後臺結果',
   'background.agent': '後臺智慧體',
   'background.running': '後臺任務執行中',
+  'background.detachedUnknown': '可能仍在執行，狀態未知',
   'background.task': '後臺任務',
   'background.peer': '跨會話訊息',
   'background.details': '檢視詳情',

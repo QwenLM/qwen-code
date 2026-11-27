@@ -83,6 +83,22 @@ describe('SessionDetailsTooltip', () => {
     // cannot catch an unconditional composition, so this row also rejects it.
     [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
     [
+      {
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: false,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Running · Background tasks running',
+    ],
+    [
+      {
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: true,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Running · Background tasks running',
+    ],
+    [
       { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
       'Needs approval · Background tasks running',
     ],
@@ -92,8 +108,30 @@ describe('SessionDetailsTooltip', () => {
     ],
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
+    [
+      {
+        activeWorkState: 'active' as const,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Active work · Background tasks running',
+    ],
+    [
+      {
+        activeWorkState: 'unknown' as const,
+        detachedBackgroundWork: 'running' as const,
+      },
+      'Background activity unknown · Background tasks running',
+    ],
+    [
+      { detachedBackgroundWork: 'running' as const },
+      'Background tasks running',
+    ],
+    [
+      { detachedBackgroundWork: 'unknown' as const },
+      'May still be running — status unknown',
+    ],
   ])(
-    'prioritizes blocked states over an active prompt: %s',
+    'shows the appropriate live or detached work status for %s',
     async (flags, expected) => {
       vi.useFakeTimers();
       const container = document.createElement('div');
@@ -121,10 +159,21 @@ describe('SessionDetailsTooltip', () => {
         await openDetails(container);
         const details = document.querySelector('[role="dialog"]');
         expect(details?.textContent).toContain(expected);
-        if (expected !== 'Running')
+        expect(details?.textContent).not.toContain('Idle');
+        if (!expected.startsWith('Running'))
           expect(details?.textContent).not.toContain('Running');
-        if (flags.hasRunningBackgroundTasks === false)
+        if (
+          flags.hasRunningBackgroundTasks === false &&
+          !flags.detachedBackgroundWork
+        )
           expect(details?.textContent).not.toContain('Background');
+        if (
+          flags.hasRunningBackgroundTasks &&
+          flags.detachedBackgroundWork === 'running'
+        )
+          expect(
+            details?.textContent?.match(/Background tasks running/g),
+          ).toHaveLength(1);
       } finally {
         act(() => root.unmount());
       }

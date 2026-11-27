@@ -51,6 +51,10 @@ import {
   type SessionListLoad,
 } from './persisted-session-list-cache.js';
 import { laterActivityTimestamp } from './activity-timestamp.js';
+import {
+  projectTempDirFor,
+  resolveDetachedBackgroundWork,
+} from './detached-work-liveness.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import {
   normalizeSessionIdForLookup,
@@ -152,6 +156,13 @@ export interface ListWorkspaceSessionsReadOptions {
   signal?: AbortSignal;
   /** Optional retirement-fence probe for search results that lack a bridge parameter. */
   isSessionRetirementFenced?: (sessionId: string) => boolean;
+  /**
+   * Raw live summaries for the workspace. Search hits leave the catalog
+   * page, so without this source a detached-shell probe cannot tell
+   * current-lifetime shells (registry-owned) from earlier-lifetime orphans
+   * and would report the former as detached.
+   */
+  liveRows?: readonly BridgeSessionSummary[];
 }
 
 interface ResolvedListWorkspaceSessionsReadOptions {
@@ -896,6 +907,35 @@ async function enrichPromptContinuation(
   }
 }
 
+async function enrichDetachedBackgroundWork(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  liveRows: readonly BridgeSessionSummary[],
+  workspaceCwd: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (bySessionId.size === 0) return;
+  // The raw live summary timestamps the current registration. A merged row
+  // carries the original transcript timestamp, which would hide older shells.
+  const liveSince = new Map<string, number>();
+  for (const row of liveRows) {
+    if (!bySessionId.has(row.sessionId)) continue;
+    const createdAt = Date.parse(row.createdAt);
+    if (Number.isFinite(createdAt)) liveSince.set(row.sessionId, createdAt);
+  }
+  const verdicts = await resolveDetachedBackgroundWork({
+    sessionIds: [...bySessionId.keys()],
+    projectTempDir: projectTempDirFor(workspaceCwd),
+    liveSince,
+    signal,
+  });
+  for (const [sessionId, detachedBackgroundWork] of verdicts) {
+    const row = bySessionId.get(sessionId);
+    if (row) {
+      bySessionId.set(sessionId, { ...row, detachedBackgroundWork });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -1262,6 +1302,7 @@ async function enrichCatalogPage(
   liveRows: readonly BridgeSessionSummary[],
   service: SessionService,
   archiveState: SessionArchiveState,
+  workspaceCwd: string,
   signal: AbortSignal | undefined,
   revalidateWorktree: boolean,
   isSessionRetirementFenced?: (sessionId: string) => boolean,
@@ -1286,6 +1327,12 @@ async function enrichCatalogPage(
       );
     }
   }
+  await enrichDetachedBackgroundWork(
+    detailsById,
+    liveRows,
+    workspaceCwd,
+    signal,
+  );
   // Replay live merges on the enriched rows. The selected summaries keep
   // their organization, sort keys, and cursor identity.
   for (const live of liveRows) {
@@ -1308,6 +1355,8 @@ async function enrichCatalogPage(
     if (details.artifactCount !== undefined)
       session.artifactCount = details.artifactCount;
     if (details.goal !== undefined) session.goal = details.goal;
+    if (details.detachedBackgroundWork !== undefined)
+      session.detachedBackgroundWork = details.detachedBackgroundWork;
     if (details.needsContinuation !== undefined)
       session.needsContinuation = details.needsContinuation;
   }
@@ -1814,6 +1863,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     liveRows,
     sessionService,
     archiveState,
+    workspaceCwd,
     readOptions.signal,
     persisted.revalidateWorktree,
     (id) => isBridgeSessionRetirementFenced(bridge, id),
@@ -2029,6 +2079,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
     liveRows,
     sessionService,
     archiveState,
+    workspaceCwd,
     readOptions.signal,
     persisted.revalidateWorktree,
     (id) => isBridgeSessionRetirementFenced(bridge, id),
@@ -2286,15 +2337,29 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  const mergingLive =
+    archiveState !== 'archived' && readOptions.mergeLive !== false;
+  const preProbeLive = mergingLive
+    ? bridge
+        .listWorkspaceSessions(workspaceCwd)
+        .filter((session) => !isHiddenCatalogSource(session.sourceType))
+    : [];
+  await enrichDetachedBackgroundWork(
+    bySessionId,
+    preProbeLive,
+    workspaceCwd,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
-  if (archiveState === 'archived' || readOptions.mergeLive === false) {
+  if (!mergingLive) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
       persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
     return { sessions, nextCursor };
   }
 
+  // Re-read after the probe await so the response uses the latest live state.
   const liveSessions = bridge
     .listWorkspaceSessions(workspaceCwd)
     .filter((session) => !isHiddenCatalogSource(session.sourceType));
@@ -2483,6 +2548,16 @@ export async function searchWorkspaceSessionsForResponse(
       bySessionId,
       sessionService,
       'active',
+      readOptions.signal,
+    );
+    // Search hits render through the same row renderer as catalog entries
+    // and fall back to the captured summary at delete-confirm time, so the
+    // detached signal must be enriched here too or an orphaned shell stays
+    // invisible to the delete guard (R1-8).
+    await enrichDetachedBackgroundWork(
+      bySessionId,
+      readOptions.liveRows ?? [],
+      workspaceCwd,
       readOptions.signal,
     );
     readOptions.signal?.throwIfAborted();

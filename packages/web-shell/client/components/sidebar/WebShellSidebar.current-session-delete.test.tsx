@@ -54,6 +54,7 @@ const sessionCatalogController = {
   refreshWorkspace: vi.fn(),
   renamed: vi.fn(),
   toggleSessionPinned: vi.fn(),
+  peekSessionSummary: vi.fn(),
 };
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -1317,6 +1318,50 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current'], {
       attachedSessionId: 'session-current',
     });
+  });
+
+  it('re-checks a stale main-list row against the catalog cache on confirm', async () => {
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+      makeSession('session-other', { displayName: 'Other session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    const onSessionsDeleted = vi.fn();
+
+    const onError = vi.fn();
+    renderSidebar({ onSessionsDeleted, onError });
+    await flushSidebar();
+
+    const deleteButton = findSessionDeleteButton('Other session');
+    act(() => click(deleteButton));
+    await flushSidebar();
+    const confirm = confirmDeleteButton();
+    expect(confirm).toBeDefined();
+
+    // A later catalog refresh settled detached background work for this row
+    // while the main list still holds the stale copy. The cache read at
+    // confirm time must win over the stale pool hit (#17819).
+    sessionCatalogController.peekSessionSummary.mockReturnValue(
+      makeSession('session-other', {
+        displayName: 'Other session',
+        detachedBackgroundWork: 'running',
+      }),
+    );
+
+    await act(async () => {
+      confirm!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(active.deleteSession).not.toHaveBeenCalled();
+    expect(onSessionsDeleted).not.toHaveBeenCalled();
+    // The refusal must surface through the error channel instead of closing
+    // the dialog silently, or the retry loop repeats invisibly (R1-7).
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][1]).toBe(
+      'Detached background work is still running for this session. Wait for it to exit before deleting.',
+    );
+    sessionCatalogController.peekSessionSummary.mockReset();
   });
 
   it('disables delete for the current session while it is running', async () => {

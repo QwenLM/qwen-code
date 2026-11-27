@@ -1930,6 +1930,14 @@ export interface DaemonSessionSummary {
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   backgroundTurn?: DaemonBackgroundTurn;
   hasRunningBackgroundTasks?: boolean;
+  /**
+   * Detached-shell observation from the session's on-disk status sidecars.
+   * `running` requires a verified live process identity. `unknown` indicates
+   * an inconclusive observation. A restored session can carry this alongside
+   * `hasRunningBackgroundTasks`. Absent when no detached work was observed
+   * or on older daemons.
+   */
+  detachedBackgroundWork?: 'running' | 'unknown';
   isWaitingForPermission?: boolean;
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;

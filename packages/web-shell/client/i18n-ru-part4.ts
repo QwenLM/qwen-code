@@ -171,6 +171,7 @@ export const RU_PART4: Record<
   'background.result': 'Фоновый результат',
   'background.agent': 'Фоновый агент',
   'background.running': 'Выполняются фоновые задачи',
+  'background.detachedUnknown': 'Возможно, ещё выполняется — статус неизвестен',
   'background.task': 'Фоновая задача',
   'background.peer': 'Сообщение из другой сессии',
   'background.details': 'Подробности',
