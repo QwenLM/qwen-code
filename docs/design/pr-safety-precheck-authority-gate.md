@@ -166,13 +166,14 @@ flags preceding `-c` (such as `bash -o pipefail -c 'env'` or
 inside the quoted string (such as `sh -c '(env)'`). These forms are not repaired
 by this change and remain admitted unless a different rule fires.
 
-Two boundaries keep the rules from gating ordinary work. Both the bare
-command-position branch and the shell `-c` wrapper apply their terminator
-lookahead once **outside** the dump-command alternation, accepting operators,
-`<` / `>` redirects (including file-descriptor prefixes `\d*[<>]` such as `1>`
-and `2>&1`), closing parens, end of line, and closing quotes (in the bare branch
-a closing quote must itself be followed by an operator, redirect, or end of line,
-which reaches a dump after the first command of a `-c` string such as
+Two boundaries keep the rules from gating ordinary work. The bare
+command-position branch, the shell `-c` wrapper, and the `cat <(…)` helper all
+apply their terminator lookahead once **outside** the dump-command alternation,
+accepting operators, `<` / `>` redirects (including file-descriptor prefixes
+`\d*[<>]` such as `1>` and `2>&1`), closing parens, end of line, and — in the
+two main branches — closing quotes (in the bare branch a closing quote must
+itself be followed by an operator, redirect, or end of line, which reaches a
+dump after the first command of a `-c` string such as
 `bash -c "cd repo && env"`; in the `-c` wrapper branch the closing quote itself
 terminates the script). An option-taking prefix therefore stays ungated
 either way: `set -euo pipefail`, `env FOO=bar cmd`, `env -i FOO=bar node x.mjs`,
@@ -301,7 +302,7 @@ listed above. These are coverage gaps, not safety claims. Dumps written for anot
 
 Same-line JS/TS arrow-function parameters such as `(env) => env.id`, `  (set) => set.has(name)`, and `; (env) => env.id` are released only on bounded anchors that directly open a parenthesis (`^[ \t]{0,128}\(` and `[;&|][ \t]{0,64}\(`) and only on the same line (`(?!\)[ \t]*=>)`), where bash, sh and zsh all reject the line with a parse error before executing the subshell. Command substitution (`$(env) => /tmp/leak`), separator-anchored dumps inside command substitution (`$(true; env) => /tmp/leak`, `$(cd /tmp && env) => /tmp/leak`), and newline-split forms (`(env)\n=> foo`) do not share that release and remain held. `printenv` has no terminator grammar and is not a common arrow parameter, so `(printenv) =>` remains held — an intentional asymmetry with `(env) =>`.
 
-The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed on `/\bsystem prompt\b/i` rather than enumerating extraction verbs or releasing a bare noun phrase. Only exact full-line product prose lines are released: the CLI flag table rows for `--system-prompt` / `--append-system-prompt` anchored end-to-end (terminating at the description cell with at most an optional trailing pipe, or matching the exact documented table rows in `docs/users/configuration/settings.md` and `docs/users/features/headless.md` with no arbitrary trailing cell), the matching quoted option description strings in `packages/cli/src/config/top-level-options.ts`, and the exact cache-comment line `The cross-session-stable prefix of the main-session system prompt —` in `packages/core/src/config/config.ts`. Every other mention — including imperatives with any verb, inflection, synonym, newline, or long gap, a non-empty arbitrary third cell on a flag table row, as well as bare mentions such as `The system prompt is confidential.` — remains held. Hyphenated (`system-prompt`) and camelCase (`systemPrompt`) spellings are outside the baseline phrase rule and are not added here because CLI flags and code identifiers use them throughout the repository.
+The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed on `/\bsystem prompt\b/i` rather than enumerating extraction verbs or releasing a bare noun phrase. Only exact full-line product prose lines are released, matched linearly via `trim()` and `|`-cell splitting (with no competing whitespace quantifiers so long padding stays O(n)): the CLI flag table rows for `--system-prompt` / `--append-system-prompt` (terminating at the description cell with at most an optional trailing pipe, or matching the exact documented table rows in `docs/users/configuration/settings.md` and `docs/users/features/headless.md` with no arbitrary trailing cell), the matching quoted option description strings in `packages/cli/src/config/top-level-options.ts`, and the exact cache-comment line `The cross-session-stable prefix of the main-session system prompt —` in `packages/core/src/config/config.ts`. Every other mention — including imperatives with any verb, inflection, synonym, newline, or long gap, a non-empty arbitrary third cell on a flag table row, as well as bare mentions such as `The system prompt is confidential.` — remains held. Hyphenated (`system-prompt`) and camelCase (`systemPrompt`) spellings are outside the baseline phrase rule and are not added here because CLI flags and code identifiers use them throughout the repository.
 
 ## Constraints
 
@@ -365,7 +366,7 @@ The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed 
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 274 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 284 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout
@@ -443,8 +444,9 @@ needed the closing quote to count as a terminator in the bare branch too;
 where a matching `echo` in the trusted branch hid a deleted untrusted one.
 Disclosed rather than chased, since they are option and prefix grammar rather
 than the forms this rule enumerates: `env -u NAME`, the quoted-assignment spelling
-`env "FOO=bar"`, and command prefixes outside the anchor set — `time env`,
-`command env`, `{ env; }`, `! env`, `sudo -E env`.
+`env "FOO=bar"`, and command prefixes outside the anchor set such as `time env`,
+`command env`, `{ env; }`, `! env`, `sudo -E env`, `exec env`, `nohup env`, and
+`builtin env`.
 
 A fifth review added `.qwen/output-language.md` to the protected set and caught a
 defect outside the rules entirely: the script's entry guard compared
@@ -455,9 +457,9 @@ cases. Reverting the guard reds 2 tests; removing the new path reds 1.
 The sixth round added `)` to the terminator set, and that had a cost the round
 itself flagged: ordinary source whose last argument is `env` or `set` — `load(env)`,
 `.then(set)`, `map(set)` — was held. A bare `(` matched a function call as readily
-as a subshell, so the paren anchor is now a subshell anchor with a lookbehind that
-excludes a preceding word character; the four call shapes have committed release
-cases and a restoration arm reds them. The round also caught a stale code comment
+as a subshell, so that round replaced the bare paren with a subshell anchor
+(later replaced in turn by the bounded subshell anchors described above); the
+four call shapes have committed release cases and a restoration arm reds them. The round also caught a stale code comment
 that still asserted the withdrawn "latent" trust premise — corrected in place with
 the design, not only in the docs. And the entry guard had to learn to tolerate
 being imported: resolving `process.argv[1]` when it is absent threw before any

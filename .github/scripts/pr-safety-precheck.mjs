@@ -139,7 +139,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
 // Restores the historical process-substitution regression without restoring a
 // bare-parenthesis anchor that would hold ordinary function calls.
 const CAT_ENV_SUBSTITUTION =
-  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
+  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$))/;
 
 const METADATA_HOSTNAMES = new Set([
   '100.100.100.200',
@@ -215,24 +215,79 @@ const SECRET_VALUE_PATTERNS = [
 ];
 
 const SYSTEM_PROMPT_PHRASE = /\bsystem prompt\b/i;
-// Exact line-level product prose exceptions for the pre-existing `system prompt`
-// phrase rule so CLI flag docs (#16803) and the main-session cache comment stay
-// ungated without opening a noun-phrase or verb-list bypass in PR bodies.
-const RELEASED_SYSTEM_PROMPT_TABLE_ROW =
-  /^[ \t]*\|[ \t]*`--(?:append-)?system-prompt`[ \t]*\|(?:[ \t]*(?:`-[A-Za-z]`[ \t]*)?\|)?[ \t]*(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?[ \t]*(?:\|[ \t]*Your prompt text[ \t]*\|[ \t]*(?:Loaded context files such as `QWEN\.md` are still appended after this override\. Can be combined with `--append-system-prompt`\.|Applied after the built-in prompt and loaded context files\. Can be combined with `--system-prompt`\. See \[Headless Mode\]\(\.\.\/features\/headless\) for examples\.)[ \t]*\|[ \t]*|\|[ \t]*`qwen -p "query" (?:--system-prompt "You are a terse reviewer\."|--append-system-prompt "Focus on concrete findings\.")`[ \t]*\|[ \t]*|\|?[ \t]*)$/i;
-const RELEASED_SYSTEM_PROMPT_EXACT_LINE =
-  /^[ \t]*(?:['"](?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.(?: Can be combined with --(?:append-)?system-prompt\.)?['"],?|(?:\*[ \t]*)?The cross-session-stable prefix of the main-session system prompt(?:\s+—|\.)?)[ \t]*$/i;
+const RELEASED_OPTION_STRINGS = new Set([
+  "'override the main session system prompt for this run. can be combined with --append-system-prompt.',",
+  "'override the main session system prompt for this run. can be combined with --append-system-prompt.'",
+  '"override the main session system prompt for this run. can be combined with --append-system-prompt.",',
+  '"override the main session system prompt for this run. can be combined with --append-system-prompt."',
+  "'append instructions to the main session system prompt for this run. can be combined with --system-prompt.',",
+  "'append instructions to the main session system prompt for this run. can be combined with --system-prompt.'",
+  '"append instructions to the main session system prompt for this run. can be combined with --system-prompt.",',
+  '"append instructions to the main session system prompt for this run. can be combined with --system-prompt."',
+]);
+const RELEASED_CACHE_COMMENTS = new Set([
+  'the cross-session-stable prefix of the main-session system prompt —',
+  'the cross-session-stable prefix of the main-session system prompt.',
+  'the cross-session-stable prefix of the main-session system prompt',
+]);
+const RELEASED_SYSTEM_PROMPT_DESC =
+  /^(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?$/i;
+const RELEASED_SETTINGS_NOTES = new Set([
+  'loaded context files such as `qwen.md` are still appended after this override. can be combined with `--append-system-prompt`.',
+  'applied after the built-in prompt and loaded context files. can be combined with `--system-prompt`. see [headless mode](../features/headless) for examples.',
+]);
+const RELEASED_HEADLESS_EXAMPLES = new Set([
+  '`qwen -p "query" --system-prompt "you are a terse reviewer."`',
+  '`qwen -p "query" --append-system-prompt "focus on concrete findings."`',
+]);
+
+// Exact full-line product prose exceptions for the pre-existing `system prompt`
+// phrase rule, parsed linearly via trim/split (no competing whitespace regex
+// quantifiers) so long whitespace padding stays O(n).
+function isReleasedSystemPromptLine(rawLine) {
+  const trimmed = rawLine.trim();
+  const lower = trimmed.toLowerCase();
+  if (RELEASED_OPTION_STRINGS.has(lower)) return true;
+  const commentText = trimmed.startsWith('*')
+    ? trimmed.slice(1).trimStart().toLowerCase()
+    : lower;
+  if (RELEASED_CACHE_COMMENTS.has(commentText)) return true;
+  if (!trimmed.startsWith('|')) return false;
+
+  const parts = trimmed.split('|');
+  const cells = parts
+    .slice(1, trimmed.endsWith('|') ? -1 : parts.length)
+    .map((cell) => cell.trim());
+  if (cells.length < 2) return false;
+  const flag = cells[0].toLowerCase();
+  if (flag !== '`--system-prompt`' && flag !== '`--append-system-prompt`') {
+    return false;
+  }
+
+  let idx = 1;
+  if (cells.length >= 3 && (cells[1] === '' || /^`-[a-z]`$/i.test(cells[1]))) {
+    idx = 2;
+  }
+  if (!RELEASED_SYSTEM_PROMPT_DESC.test(cells[idx])) return false;
+
+  const rest = cells.slice(idx + 1);
+  if (rest.length === 0) return true;
+  if (rest.length === 1) {
+    return RELEASED_HEADLESS_EXAMPLES.has(rest[0].toLowerCase());
+  }
+  if (rest.length === 2) {
+    return (
+      rest[0].toLowerCase() === 'your prompt text' &&
+      RELEASED_SETTINGS_NOTES.has(rest[1].toLowerCase())
+    );
+  }
+  return false;
+}
 
 function hasSystemPromptMention(text) {
   for (const rawLine of text.split('\n')) {
-    const line = rawLine.replace(/\r$/, '');
-    if (!SYSTEM_PROMPT_PHRASE.test(line)) continue;
-    if (
-      RELEASED_SYSTEM_PROMPT_EXACT_LINE.test(line) ||
-      RELEASED_SYSTEM_PROMPT_TABLE_ROW.test(line)
-    ) {
-      continue;
-    }
+    if (!SYSTEM_PROMPT_PHRASE.test(rawLine)) continue;
+    if (isReleasedSystemPromptLine(rawLine)) continue;
     return true;
   }
   return false;
@@ -300,7 +355,8 @@ function diffHeaderPath(line) {
 function changedPaths(diffText) {
   const paths = new Set();
   let inHunk = false;
-  for (const line of diffText.split('\n')) {
+  for (const rawLine of diffText.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
     let path = null;
     if (line.startsWith('diff --git ')) {
       inHunk = false;

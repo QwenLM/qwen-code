@@ -903,6 +903,31 @@ for (const [label, payload, code] of [
     'ambient_credential:env_dump',
   ],
   [
+    'process substitution with a stdout fd redirect',
+    'cat <(env 1>/dev/stdout)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with a stderr fd duplication',
+    'cat <(env 2>&1)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with a stdout fd redirect to a file',
+    'cat <(env 1>/tmp/leak)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with env -0 and a stdout fd redirect',
+    'cat <(env -0 1>/dev/stdout)',
+    'ambient_credential:env_dump',
+  ],
+  [
+    'process substitution with env assignment and a stdout fd redirect',
+    'cat <(env FOO=bar 1>/dev/stdout)',
+    'ambient_credential:env_dump',
+  ],
+  [
     'command substitution env before an arrow-like redirect',
     'echo $(env) => /tmp/leak',
     'ambient_credential:env_dump',
@@ -1177,6 +1202,14 @@ for (const [label, payload] of [
   [
     'the three-column headless.md --system-prompt table row',
     '| `--system-prompt` | Override the main session system prompt for this run | `qwen -p "query" --system-prompt "You are a terse reviewer."` |',
+  ],
+  [
+    'the three-column headless.md --append-system-prompt table row with real padding',
+    `| \`--append-system-prompt\`     | Append extra instructions to the main session system prompt for this run${' '.repeat(412)}| \`qwen -p "query" --append-system-prompt "Focus on concrete findings."\`   |`,
+  ],
+  [
+    'the five-column settings.md --system-prompt table row with real padding',
+    `| \`--system-prompt\`            |       | Overrides the built-in main session system prompt for this run.${' '.repeat(513)}| Your prompt text                               | Loaded context files such as \`QWEN.md\` are still appended after this override. Can be combined with \`--append-system-prompt\`. |`,
   ],
   [
     'the five-column settings.md --system-prompt table row',
@@ -1526,4 +1559,63 @@ test('workflow passes every fail-closed flag the CLI reads', () => {
       `collect step must write ${output} from its own variable on the untrusted path`,
     );
   }
+});
+
+test('flag-table release stays linear on a long-padded non-matching row', () => {
+  const padded =
+    '| `--system-prompt` | Overrides the built-in main session system prompt for this run.' +
+    ' '.repeat(80000) +
+    'X';
+  const started = Date.now();
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: diffFor('docs/note.md', padded),
+  });
+  const elapsed = Date.now() - started;
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['prompt_injection:system_prompt']);
+  assert.ok(
+    elapsed < 500,
+    `80000-space flag-table row took ${elapsed}ms; release parsing must stay linear`,
+  );
+});
+
+test('releases the real padded CLI flag rows read from settings.md and headless.md', () => {
+  for (const rel of [
+    '../../docs/users/configuration/settings.md',
+    '../../docs/users/features/headless.md',
+  ]) {
+    const content = readFileSync(
+      fileURLToPath(new URL(rel, import.meta.url)),
+      'utf8',
+    );
+    const flagRows = content
+      .split('\n')
+      .filter((line) => /^\| `--(?:append-)?system-prompt`/.test(line));
+    assert.equal(flagRows.length, 2, `expected two flag rows in ${rel}`);
+    for (const row of flagRows) {
+      const result = assessPullRequestSafety({
+        pr: pr(),
+        diff: diffFor('docs/note.md', row),
+      });
+      assert.equal(result.decision, 'allow_triage', row);
+      assert.deepEqual(result.reason_codes, []);
+    }
+  }
+});
+
+test('gates protected basenames in CRLF diffs', () => {
+  const crlfDiff = [
+    'diff --git a/packages/x/package.json b/packages/x/package.json',
+    '--- a/packages/x/package.json',
+    '+++ b/packages/x/package.json',
+    '@@ -1 +1 @@',
+    '+"name": "x"',
+    '',
+  ].join('\r\n');
+  const result = assessPullRequestSafety({ pr: pr(), diff: crlfDiff });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['protected_path:authority_surface']);
 });

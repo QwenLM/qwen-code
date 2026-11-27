@@ -78,7 +78,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 `then`、`do` 等保留字引入的命令位置、命令前的赋值前缀（如 `FOO=1 env`）以及 dump 后的 `#` 注释，同样不在已识别的锚点或终止符内；shell `-c` 包装分支也不识别位于 `-c` 之前的带独立参数旗标（如 `bash -o pipefail -c 'env'`、`bash -o posix -c printenv`），以及引号内以子壳作为首个 token 的写法（如 `sh -c '(env)'`）。本次没有修复这些形态，除非另一条规则命中，它们仍会被放行。
 
-两条边界防止规则误拦正常工作。裸命令位置分支与 shell `-c` 包装分支都将终止符前瞻提到**候选之外**统一施加，接受操作符、`<`／`>` 重定向（含文件描述符前缀 `\d*[<>]` 如 `1>` 与 `2>&1`）、右括号、行尾与闭合引号（裸分支要求闭合引号后接操作符、重定向或行尾——这正是能覆盖 `-c` 串里第一条命令之后的导出如 `bash -c "cd repo && env"` 的原因；`-c` 包装分支的闭合引号本身即终止脚本）。因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期有两个版本的问题均记录为已关闭：包装分支曾经完全没有终止符判据。
+两条边界防止规则误拦正常工作。裸命令位置分支、shell `-c` 包装分支与 `cat <(…)` helper 都将终止符前瞻提到**候选之外**统一施加，接受操作符、`<`／`>` 重定向（含文件描述符前缀 `\d*[<>]` 如 `1>` 与 `2>&1`）、右括号、行尾，以及（在两条主分支中）闭合引号（裸分支要求闭合引号后接操作符、重定向或行尾——这正是能覆盖 `-c` 串里第一条命令之后的导出如 `bash -c "cd repo && env"` 的原因；`-c` 包装分支的闭合引号本身即终止脚本）。因此带选项的前缀两种写法都不被扣住：`set -euo pipefail`、`env FOO=bar cmd`、`env -i FOO=bar node x.mjs`、`declare -x FOO=bar`，以及被包成 `sh -c "set -euo pipefail; make"` 的同样形态。早期有两个版本的问题均记录为已关闭：包装分支曾经完全没有终止符判据。
 
 没有 utility 的 `env FOO=bar` **本身就是导出**，因此前瞻之前允许赋值前缀，而 `env FOO=bar cmd` 仍在 utility 处停下——此前那次让包装误报放行的精确化，曾把这一导出写法也一并放行了。
 
@@ -116,7 +116,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 同行 JS/TS 箭头函数参数（如 `(env) => env.id`、`  (set) => set.has(name)`、`; (env) => env.id`）仅在直接左括号的有界锚（`^[ \t]{0,128}\(` 与 `[;&|][ \t]{0,64}\(`）且同一行（`(?!\)[ \t]*=>)`）下放行——在 bash、sh 与 zsh 中该同行形态都会在解析期直接报语法错，不会执行子壳。命令替换（`$(env) => /tmp/leak`）、命令替换内由分隔符锚定的导出（`$(true; env) => /tmp/leak`、`$(cd /tmp && env) => /tmp/leak`）以及跨换行拆分的形态（`(env)\n=> foo`）不共享该放行，全部保持扣留。`printenv` 无终止符文法且并非常见箭头参数名，因此 `(printenv) =>` 保持扣留——这是与 `(env) =>` 有意保留的不对称。
 
-既有的 `prompt_injection:system_prompt` 短语规则保持在 `/\bsystem prompt\b/i` 上失败关闭，不再枚举提取动词，也不再放行裸名词短语。仅对整行锚定的精确产品文案放行：`--system-prompt` / `--append-system-prompt` 的 CLI 旗标表格行（在描述单元格处结束且至多带一个可选尾竖线，或精确匹配 `docs/users/configuration/settings.md` 与 `docs/users/features/headless.md` 中的已文档化表格行，不允许任意非空尾随单元格）、`packages/cli/src/config/top-level-options.ts` 中对应的带引号选项说明字符串行，以及 `packages/core/src/config/config.ts` 中精确的缓存注释行 `The cross-session-stable prefix of the main-session system prompt —`。其余所有提及——包括任意动词、屈折形态、同义词、换行或长间隔的祈使句、表格行上任意非空第三单元格，以及 `The system prompt is confidential.` 这类裸提及——全部保持扣留。连字符（`system-prompt`）与驼峰（`systemPrompt`）拼写本就不在基线短语规则范围内，且 CLI 旗标与代码标识符在全仓高频使用，因此此处不纳入主规则。
+既有的 `prompt_injection:system_prompt` 短语规则保持在 `/\bsystem prompt\b/i` 上失败关闭，不再枚举提取动词，也不再放行裸名词短语。仅对整行精确产品文案放行，并通过 `trim()` 与按 `|` 拆分单元格以线性 O(n) 方式匹配（不引入互相竞争的空白量词，避免长空格填充触发回溯）：`--system-prompt` / `--append-system-prompt` 的 CLI 旗标表格行（在描述单元格处结束且至多带一个可选尾竖线，或精确匹配 `docs/users/configuration/settings.md` 与 `docs/users/features/headless.md` 中的已文档化表格行，不允许任意非空尾随单元格）、`packages/cli/src/config/top-level-options.ts` 中对应的带引号选项说明字符串行，以及 `packages/core/src/config/config.ts` 中精确的缓存注释行 `The cross-session-stable prefix of the main-session system prompt —`。其余所有提及——包括任意动词、屈折形态、同义词、换行或长间隔的祈使句、表格行上任意非空第三单元格，以及 `The system prompt is confidential.` 这类裸提及——全部保持扣留。连字符（`system-prompt`）与驼峰（`systemPrompt`）拼写本就不在基线短语规则范围内，且 CLI 旗标与代码标识符在全仓高频使用，因此此处不纳入主规则。
 
 ## 约束
 
@@ -152,7 +152,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元与 workflow 套件：274 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元与 workflow 套件：284 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
 - 变异见证：56 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
@@ -169,11 +169,11 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 有一处枚举清单的缺口选择披露而非关闭：带独立参数的 shell 旗标，如 `bash -o posix -c printenv`，仍被放行。
 
-第四轮又关闭六项：`.credentials` 的**反引号行内代码**写法；`-c` 串里第一条命令之后的导出（裸分支也需要把「其后跟操作符或行尾的闭合引号」算作终止符）；没有 utility 的 `env FOO=bar`；此前空转的 `$(…)` 与 `(…)` 锚点（终止符需要补 `)`）；`-c` 之前的 `--flag=value`；以及旗标钉子的盲区——trusted 分支那行同名 `echo` 曾把「untrusted 那行被删」掩盖掉。以下几项选择披露而非追逐，因为它们属于选项与前缀文法、而非本规则枚举的形态：`env -u NAME`、带引号的赋值写法 `env "FOO=bar"`，以及锚点集合之外的命令前缀 `time env`、`command env`、`{ env; }`、`! env`、`sudo -E env`。
+第四轮又关闭六项：`.credentials` 的**反引号行内代码**写法；`-c` 串里第一条命令之后的导出（裸分支也需要把「其后跟操作符或行尾的闭合引号」算作终止符）；没有 utility 的 `env FOO=bar`；此前空转的 `$(…)` 与 `(…)` 锚点（终止符需要补 `)`）；`-c` 之前的 `--flag=value`；以及旗标钉子的盲区——trusted 分支那行同名 `echo` 曾把「untrusted 那行被删」掩盖掉。以下几项选择披露而非追逐，因为它们属于选项与前缀文法、而非本规则枚举的形态：`env -u NAME`、带引号的赋值写法 `env "FOO=bar"`，以及锚点集合之外的命令前缀（例如 `time env`、`command env`、`{ env; }`、`! env`、`sudo -E env`、`exec env`、`nohup env`、`builtin env`）。
 
 第五轮评审把 `.qwen/output-language.md` 纳入受保护集合，并抓到一个**与规则无关**的缺陷：脚本入口把 `import.meta.url` 与手工拼出的 URL 比较，因此含空格的检出路径或软链会让子进程以 0 退出且**完全没有输出**。两者现都有已提交用例。回退入口判断红 2 条用例，删除新路径红 1 条。
 
-第六轮给终止符补上 `)`，代价是该轮自己点出的：**普通源码**里以 `env`/`set` 作最后一个实参的调用——`load(env)`、`.then(set)`、`map(set)`——被扣住了。原因是裸 `(` 既匹配子壳也匹配函数调用，现在括号锚点改成带负向后顾的**子壳锚**（前导为单词字符则不算）。四种调用形态都有已提交的放行用例，并有一条「恢复裸括号」的臂让它们转红。该轮还抓到一条**与文档自相矛盾的旧注释**——仍在说「潜在通道」——已在源码里与设计文档同步更正。另外入口判断必须容忍**被 import**：`process.argv[1]` 缺席时解析它会先抛错、根本轮不到断言执行，而这正是套件加载模块的方式；该回归也已钉住。
+第六轮给终止符补上 `)`，代价是该轮自己点出的：**普通源码**里以 `env`/`set` 作最后一个实参的调用——`load(env)`、`.then(set)`、`map(set)`——被扣住了。原因是裸 `(` 既匹配子壳也匹配函数调用，该轮因此用子壳锚替代了裸括号（后来又改由上文所述的有界子壳锚替代）。四种调用形态都有已提交的放行用例，并有一条「恢复裸括号」的臂让它们转红。该轮还抓到一条**与文档自相矛盾的旧注释**——仍在说「潜在通道」——已在源码里与设计文档同步更正。另外入口判断必须容忍**被 import**：`process.argv[1]` 缺席时解析它会先抛错、根本轮不到断言执行，而这正是套件加载模块的方式；该回归也已钉住。
 
 对本设计此前两处表述的更正：选项文法残留只点了 `env "FOO=bar"`，而 `env FOO="bar baz"` 属同一文法、同样被放行，也应点名。另外，入口守卫的修复**并不**让「重放 base 或 prev head 时须把那份旧脚本副本放在检出目录内」这一要求消失——该 workaround 属于那些仍带旧守卫的臂，不属于已修好的这一版。
 
