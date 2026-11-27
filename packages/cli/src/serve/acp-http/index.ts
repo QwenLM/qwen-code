@@ -1741,7 +1741,7 @@ export function mountAcpHttp(
         fromLoopback &&
         (managedTerminalUpgrade !== undefined || !authenticatedRemoteBind)
       ) {
-if (
+        if (
           !hostHeaderMatchesLoopbackBind(
             host,
             opts.hostname && isLoopbackBind(opts.hostname)

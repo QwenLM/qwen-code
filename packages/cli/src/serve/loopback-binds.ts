@@ -116,7 +116,6 @@ export function isIpv4MappedLoopback(canonical: string): boolean {
   return Number.parseInt(match[1], 16) >> 8 === 0x7f;
 }
 
-
 /**
  * The hostnames a browser may legitimately put in the Host header when it
  * reaches a loopback-bound daemon. `host.docker.internal` is here because a
