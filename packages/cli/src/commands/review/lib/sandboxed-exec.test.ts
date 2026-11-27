@@ -54,6 +54,7 @@ import {
   sandboxPolicy,
   sandboxVerdict,
 } from './sandboxed-exec.js';
+import { trustInputFromPlan } from './sandbox-trust.js';
 
 describe('sandboxPolicy', () => {
   it('lets the environment outrank the setting, and defaults to off', () => {
@@ -1140,6 +1141,7 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       'QWEN_REVIEW_PROVIDER_VM_DRIVER',
       'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
       'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
+      'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }
@@ -1346,6 +1348,78 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       backend: 'direct',
       escalationReasons: [],
     });
+  });
+
+  it('discloses the external content-allowlist downgrade in the boundary only when opted in', () => {
+    const trustContext = {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'docs/guide.md' }],
+    };
+    const optedIn = describeExecutionBoundary({
+      policy: 'tiered',
+      backend: 'container',
+      trustContext,
+      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      fileSourced: () => false,
+    });
+    expect(optedIn).toEqual({
+      policy: 'tiered',
+      prTrust: 'external',
+      executionClass: 'trusted-shared-kernel',
+      backend: 'container',
+      escalationReasons: [],
+      downgradeReasons: ['external-content-allowlist'],
+    });
+    const optedOut = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext,
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(optedOut.executionClass).toBe('hardware-isolated');
+    expect(optedOut.downgradeReasons).toBeUndefined();
+    const repoSourced = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext,
+      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      fileSourced: (k) => k === 'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+    });
+    expect(repoSourced.executionClass).toBe('hardware-isolated');
+    expect(repoSourced.downgradeReasons).toBeUndefined();
+  });
+
+  it('the capability-gate fixture plan reads through the real plan reader to the refusal the probe asserts (R4-1)', () => {
+    // Same shape as .github/scripts/ensure-tiered-review-cli.sh's fixture plan,
+    // so a future required plan field cannot silently drift the probe away
+    // from the real trustInputFromPlan / describeExecutionBoundary code.
+    const plan = {
+      pr: 0,
+      head: 'probe',
+      base: 'probe',
+      mergeBase: 'probe',
+      isCrossRepository: false,
+      authorAssociation: 'MEMBER',
+      diffStat: { files: 1, added: 1, deleted: 0 },
+      files: [{ path: 'src/a.ts', added: 1, deleted: 0, mode: '100644' }],
+      worktree: '/tmp/probe/.qwen/tmp/review-probe',
+    };
+    const trustContext = trustInputFromPlan(plan);
+    expect(trustContext).toBeDefined();
+    const boundary = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext,
+      env: { QWEN_REVIEW_SANDBOX: 'tiered', QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      fileSourced: () => false,
+    });
+    expect(boundary.policy).toBe('tiered');
+    expect(boundary.executionClass).toBe('hardware-isolated');
+    expect(boundary.backend).toBe('refused');
+    expect(boundary.escalationReasons).toContain('operator-force-hardware');
   });
 
   it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {

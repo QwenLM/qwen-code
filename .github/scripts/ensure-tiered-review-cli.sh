@@ -67,16 +67,25 @@ if probe_cli; then
   echo "Review CLI implements the tiered sandbox boundary (behaviour probe passed)." >> "$GITHUB_STEP_SUMMARY"
   exit 0
 fi
-echo "::warning::the installed review CLI does not implement the tiered sandbox boundary; trying the newest published release."
-npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest' || true
-if probe_cli; then
-  echo "Review CLI implements the tiered sandbox boundary after published-release upgrade." >> "$GITHUB_STEP_SUMMARY"
-  exit 0
+echo "::warning::the installed review CLI did not confirm the tiered sandbox boundary (probe failed; see log tail on refusal); trying the newest published release into a private prefix."
+# Private per-run prefix inside the checkout (reclaimed by the next run's
+# checkout clean): never mutate the pool's global npm prefix (R5-1). On a
+# successful upgrade the prefix bin must be appended to GITHUB_PATH or the
+# review step would still resolve the pool's old CLI.
+latest_prefix="$GITHUB_WORKSPACE/.qwen-review-cli-latest"
+rm -rf "$latest_prefix"
+if npm install --prefix "$latest_prefix" --registry=https://registry.npmjs.org --no-audit --no-fund '@qwen-code/qwen-code@latest'; then
+  export PATH="$latest_prefix/node_modules/.bin:$PATH"
+  if probe_cli; then
+    echo "$latest_prefix/node_modules/.bin" >> "$GITHUB_PATH"
+    echo "Review CLI implements the tiered sandbox boundary after published-release upgrade." >> "$GITHUB_STEP_SUMMARY"
+    exit 0
+  fi
 fi
-echo "::warning::no published release implements the tiered sandbox boundary; building the CLI from the trusted base checkout."
+echo "::warning::no published release confirms the tiered sandbox boundary; building the CLI from the trusted base checkout."
 install_attempt=1
 while :; do
-  if corepack pnpm install --frozen-lockfile --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"; then
+  if corepack pnpm install --frozen-lockfile --reporter=append-only; then
     break
   fi
   if [ "$install_attempt" -ge 2 ]; then
@@ -85,8 +94,12 @@ while :; do
   find . -name node_modules -type d -prune -exec rm -rf {} +
   install_attempt=$((install_attempt + 1))
 done
-NODE_OPTIONS=--max-old-space-size=6144 npm run build
-NODE_OPTIONS=--max-old-space-size=6144 npm run bundle
+if ! NODE_OPTIONS=--max-old-space-size=6144 npm run build; then
+  refuse "base-checkout build failed; refusing to review with an unsupported CLI."
+fi
+if ! NODE_OPTIONS=--max-old-space-size=6144 npm run bundle; then
+  refuse "base-checkout bundle failed; refusing to review with an unsupported CLI."
+fi
 # Fixed-name wrapper dir inside the checkout: overwritten on each build, inert
 # unless this run appended it to GITHUB_PATH, and reclaimed by the next run's
 # checkout clean (actions/checkout clean=true runs git clean -ffdx). GITHUB_PATH

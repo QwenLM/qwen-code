@@ -3165,6 +3165,9 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     expect(review.env[forceHardwareEnvName]).toBe(
       '${{ steps.review_sandbox.outputs.force_hardware }}',
     );
+    // R3-3: CI pins the operator content-allowlist opt-in OFF so a stale
+    // runner/service env cannot silently grant external PRs the container tier.
+    expect(review.env.QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER).toBe('');
     expect(policies).toContain('tiered');
   });
 
@@ -3581,9 +3584,12 @@ describe('review CLI capability gate (production cutover blocker)', () => {
   it('upgrades to a capable published release without building when one exists', () => {
     const r = runGate({ cliBehavior: 'old', upgradeBehavior: 'new' });
     expect(r.status).toBe(0);
-    expect(r.calls).toContain('npm install -g');
+    // R5-1: private per-run prefix, never the pool's global npm prefix; and the
+    // prefix bin is appended to GITHUB_PATH so Run review resolves the upgrade.
+    expect(r.calls).toContain('npm install --prefix');
+    expect(r.calls).not.toContain('npm install -g');
     expect(r.calls).not.toContain('corepack');
-    expect(r.githubPath).toBe('');
+    expect(r.githubPath).toContain('.qwen-review-cli-latest');
     expect(r.summary).toContain('after published-release upgrade');
   });
 

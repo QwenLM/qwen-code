@@ -1357,6 +1357,11 @@ jobs:
           # container readiness failed (preventing fallback to an unpinned tag),
           # empty when a digest-pinned container image was resolved.
           QWEN_REVIEW_FORCE_HARDWARE: '${{ steps.review_sandbox.outputs.force_hardware }}'
+          # Pin the operator content-allowlist opt-in OFF in CI (R3-3): a stale
+          # runner/service environment must not silently grant external PRs the
+          # shared-kernel tier. Operators enable it via their own shell/user
+          # settings for local runs, never through this workflow.
+          QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: ''
           # The digest-bound image the resolver pulled, through its step
           # OUTPUT: later steps can append $GITHUB_ENV, so only the expression
           # context is unsteerable (#9527). Empty when the resolver did not
