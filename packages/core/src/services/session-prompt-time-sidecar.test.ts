@@ -108,7 +108,8 @@ describe('session-prompt-time-sidecar', () => {
       addPromptUuidToBloom(small, `sat-${i}`);
     }
     expect(encodePromptUuidBloom(small)).toBeUndefined();
-    expect(createPromptUuidBloom(200_000)).toBeUndefined();
+    expect(createPromptUuidBloom(120_000)?.buffer.length).toBe(131_072);
+    expect(createPromptUuidBloom(120_001)).toBeUndefined();
   });
 
   it('rejects malformed, corrupt, or invalid-field sidecars and honors AbortSignal', async () => {
@@ -186,7 +187,7 @@ describe('session-prompt-time-sidecar', () => {
         lastUserPromptAt: null,
         leafUuid: 'u1',
         firstRecordOwner: { sessionId: 's', cwd: '/r' },
-        prefixSha256: 'not-hex',
+        prefixSha256: 'z'.repeat(64),
       }),
       JSON.stringify({
         version: 1,
@@ -196,7 +197,31 @@ describe('session-prompt-time-sidecar', () => {
         lastUserPromptAt: null,
         leafUuid: 'u1',
         firstRecordOwner: { sessionId: 's', cwd: '/r' },
-        prefixSha256: 'abc123',
+        prefixSha256: 'a'.repeat(66),
+      }),
+      JSON.stringify({
+        version: 1,
+        fileIdentity: { dev: 1, ino: 1 },
+        snapshotSize: 100,
+        lastUpdated: '2026-06-01T12:00:00.000Z',
+        lastUserPromptAt: null,
+        leafUuid: 'u1',
+        firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        prefixSha256: 'A'.repeat(64),
+      }),
+      JSON.stringify({
+        version: 1,
+        fileIdentity: { dev: 1, ino: 1 },
+        snapshotSize: 100,
+        lastUpdated: '2026-06-01T12:00:00.000Z',
+        lastUserPromptAt: null,
+        leafUuid: 'u1',
+        firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        prefixUuidBloom: {
+          bits: Buffer.alloc(256).toString('base64'),
+          hashes: 17,
+          count: 1,
+        },
       }),
       JSON.stringify({
         version: 1,
@@ -257,6 +282,23 @@ describe('session-prompt-time-sidecar', () => {
           lastUserPromptAt: null,
           leafUuid: 'u1',
           firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        },
+      ),
+    ).toBe(false);
+
+    // I/O failure path (parent path is a regular file -> mkdirSync ENOTDIR) must return false, never throw.
+    const blockerFile = path.join(tmpDir, 'not-a-dir');
+    fs.writeFileSync(blockerFile, 'x', 'utf8');
+    expect(
+      writeSessionPromptTimeSidecar(
+        sessionPromptTimeSidecarPath(blockerFile, 'enotdir'),
+        {
+          fileIdentity: { dev: 1, ino: 1 },
+          snapshotSize: 100,
+          lastUpdated: '2026-06-01T12:00:00.000Z',
+          lastUserPromptAt: '2026-06-01T11:00:00.000Z',
+          leafUuid: 'u1',
+          firstRecordOwner: { sessionId: 'enotdir', cwd: '/r' },
         },
       ),
     ).toBe(false);

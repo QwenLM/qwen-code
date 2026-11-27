@@ -98,7 +98,6 @@ import {
   encodePromptUuidBloom,
   promptUuidBloomMayContain,
   readSessionPromptTimeSidecarAsync,
-  removeSessionPromptTimeSidecar,
   sessionPromptTimeSidecarPath,
   writeSessionPromptTimeSidecar,
   type SessionPromptTimeUuidBloom,
@@ -121,6 +120,7 @@ import {
   walkTranscriptUuidChain,
 } from '../utils/transcript-records.js';
 import {
+  parseBranchCheckpointPayload,
   resolveBranchPoints,
   type BranchPointRecord,
 } from './branch-points.js';
@@ -546,6 +546,7 @@ export interface SessionLiveRestoreProjection
 
 interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
+  signal?: AbortSignal;
 }
 
 interface LastUserPromptReadOptions {
@@ -1027,6 +1028,7 @@ let promptTimeScanModeHookForTest:
 let readStreamBytesHookForTest:
   | ((event: TranscriptReadStreamBytesEvent) => void)
   | undefined;
+let maxPromptTailRecordsForTest: number | undefined;
 
 class CooperativeReadScheduler {
   private processedBytes = 0;
@@ -1099,35 +1101,11 @@ function projectBranchPointParts(record: ChatRecord): Part[] {
   });
 }
 
-function projectBranchCheckpointPayload(raw: unknown):
-  | {
-      v: 1;
-      startExclusiveRecordUuid: string | null;
-      assistantRecordUuid: string;
-    }
-  | undefined {
-  if (!isObjectRecord(raw) || raw['v'] !== 1) return undefined;
-  const start = raw['startExclusiveRecordUuid'];
-  const assistant = raw['assistantRecordUuid'];
-  if (
-    (start !== null && (typeof start !== 'string' || start.length === 0)) ||
-    typeof assistant !== 'string' ||
-    assistant.length === 0
-  ) {
-    return undefined;
-  }
-  return {
-    v: 1,
-    startExclusiveRecordUuid: start,
-    assistantRecordUuid: assistant,
-  };
-}
-
 function projectBranchPointRecord(record: ChatRecord): BranchPointRecord {
   const parts = projectBranchPointParts(record);
   const checkpointPayload =
     record.subtype === 'branch_checkpoint'
-      ? projectBranchCheckpointPayload(record.systemPayload)
+      ? parseBranchCheckpointPayload(record.systemPayload)
       : undefined;
   return {
     uuid: record.uuid,
@@ -2169,8 +2147,10 @@ function getMaxAllReplayBytes(): number {
   return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
 }
 
-function estimateStringBytes(value: string | null | undefined): number {
-  return value ? value.length * INDEX_STRING_BYTES : 0;
+function estimateStringBytes(value: unknown): number {
+  return typeof value === 'string' && value.length > 0
+    ? value.length * INDEX_STRING_BYTES
+    : 0;
 }
 
 function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
@@ -4481,6 +4461,7 @@ interface PromptScanEnvelope {
 interface PromptScanNode {
   parentUuid: string | null;
   conversation: boolean;
+  metadataReanchor?: boolean;
   lastUserPromptAt?: string;
 }
 
@@ -4560,26 +4541,37 @@ function estimatePromptScanNodeBytes(
   );
 }
 
+function isMetadataReanchorRecord(
+  envelope: Pick<PromptScanEnvelope, 'type' | 'subtype'>,
+): boolean {
+  return (
+    envelope.type === 'system' &&
+    (envelope.subtype === 'custom_title' ||
+      envelope.subtype === 'session_source')
+  );
+}
+
 function promptTimeFromProjectedRecords(
   records: readonly ChatRecord[],
   sessionId: string,
 ): string | undefined {
-  const byUuid = new Map<string, string | undefined>();
+  // projectManagedSessionRecords already validates every record via
+  // validateTranscriptRecord; verify session ownership and scan backwards with
+  // last-wins UUID semantics without allocating an index-sized Map.
   for (const [position, record] of records.entries()) {
-    if (
-      validateTranscriptRecord(record as unknown as TranscriptRecordInput)
-        .record === undefined ||
-      record.sessionId !== sessionId
-    ) {
+    if (record.sessionId !== sessionId) {
       debugLogger.warn(
         `projected prompt-time record rejected session=${sessionId} position=${position}`,
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
-    byUuid.set(record.uuid, userPromptTimestamp(record));
   }
+  const seen = new Set<string>();
   for (let position = records.length - 1; position >= 0; position--) {
-    const ts = byUuid.get(records[position]!.uuid);
+    const record = records[position]!;
+    if (seen.has(record.uuid)) continue;
+    seen.add(record.uuid);
+    const ts = userPromptTimestamp(record);
     if (ts !== undefined) return ts;
   }
   return undefined;
@@ -4616,7 +4608,9 @@ export class SessionTranscriptReader {
     sessionId: string,
     filePath: string,
     snapshotSize: number,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
+    signal?.throwIfAborted();
     let projection: Awaited<
       ReturnType<typeof readManagedSessionRecordsAndTitle>
     >;
@@ -4629,8 +4623,10 @@ export class SessionTranscriptReader {
           sessionId,
         ),
         maxBytes: snapshotSize,
+        ...(signal !== undefined ? { signal } : {}),
       });
     } catch (error) {
+      if (signal?.aborted) throw signal.reason;
       if (error instanceof ManagedSessionProjectionLimitError) {
         throw new SessionTranscriptTooLargeError(
           sessionId,
@@ -4647,6 +4643,7 @@ export class SessionTranscriptReader {
       }
       throw error;
     }
+    signal?.throwIfAborted();
     return promptTimeFromProjectedRecords(projection.records, sessionId);
   }
 
@@ -4733,8 +4730,18 @@ export class SessionTranscriptReader {
               addPromptUuidToBloom(bloom, envelope.uuid);
               continue;
             }
+            if (isMetadataReanchorRecord(envelope)) {
+              if (envelope.parentUuid !== expectedParent) {
+                linear = false;
+                return false;
+              }
+              addPromptUuidToBloom(bloom, envelope.uuid);
+              continue;
+            }
+            const maxTailRecords =
+              maxPromptTailRecordsForTest ?? MAX_PROMPT_TAIL_EXTENSION_RECORDS;
             if (
-              tailConversationRecords >= MAX_PROMPT_TAIL_EXTENSION_RECORDS ||
+              tailConversationRecords >= maxTailRecords ||
               envelope.parentUuid !== expectedParent
             ) {
               linear = false;
@@ -4931,6 +4938,7 @@ export class SessionTranscriptReader {
                 hasManagedHeader = true;
               }
               const conversation = isTranscriptConversationRecord(envelope);
+              const metadataReanchor = isMetadataReanchorRecord(envelope);
               if (conversation) {
                 leafUuid = envelope.uuid;
               }
@@ -4938,6 +4946,7 @@ export class SessionTranscriptReader {
                 const node: PromptScanNode = {
                   parentUuid: envelope.parentUuid,
                   conversation,
+                  ...(metadataReanchor ? { metadataReanchor: true } : {}),
                   ...(envelope.lastUserPromptAt !== undefined
                     ? { lastUserPromptAt: envelope.lastUserPromptAt }
                     : {}),
@@ -5008,6 +5017,7 @@ export class SessionTranscriptReader {
           sessionId,
           filePath,
           snapshotSize,
+          signal,
         );
       } else {
         const visited = new Set<string>();
@@ -5066,12 +5076,27 @@ export class SessionTranscriptReader {
     const prefixSha256 = hasManagedHeader
       ? undefined
       : prefixHash.digest('hex');
+    let sidecarLeafUuid = leafUuid;
+    if (!hasManagedHeader) {
+      const seenAnchors = new Set<string>();
+      while (
+        sidecarLeafUuid !== undefined &&
+        !seenAnchors.has(sidecarLeafUuid)
+      ) {
+        seenAnchors.add(sidecarLeafUuid);
+        const node = nodes.get(sidecarLeafUuid);
+        if (!node?.metadataReanchor || node.parentUuid === null) break;
+        const parentNode = nodes.get(node.parentUuid);
+        if (!parentNode || !parentNode.conversation) break;
+        sidecarLeafUuid = node.parentUuid;
+      }
+    }
     return {
       snapshot: {
         lastUserPromptAt: timestamp,
         firstRecordOwner,
       },
-      leafUuid,
+      leafUuid: sidecarLeafUuid,
       ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
       ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       managed: hasManagedHeader,
@@ -5117,7 +5142,7 @@ export class SessionTranscriptReader {
       const managed = indexHasManagedHeader(index);
       const timestamp = managed
         ? promptTimeFromProjectedRecords(
-            await this.readManagedRecords(sessionId, index, {}),
+            await this.readManagedRecords(sessionId, index, { signal }),
             sessionId,
           )
         : lastUserPromptFromIndex(index);
@@ -5358,9 +5383,12 @@ export class SessionTranscriptReader {
               promptTimeScope(filePath, this.workspaceCwd).get(key) ===
                 owner.entry
             ) {
-              writeSessionPromptTimeSidecar(
-                sessionPromptTimeSidecarPath(path.dirname(filePath), sessionId),
-                {
+              const sidecarPath = sessionPromptTimeSidecarPath(
+                path.dirname(filePath),
+                sessionId,
+              );
+              if (
+                !writeSessionPromptTimeSidecar(sidecarPath, {
                   fileIdentity,
                   snapshotSize: stats.size,
                   lastUpdated,
@@ -5374,8 +5402,12 @@ export class SessionTranscriptReader {
                     ? { prefixUuidBloom: resolved.prefixUuidBloom }
                     : {}),
                   ...(resolved.managed ? { managed: true } : {}),
-                },
-              );
+                })
+              ) {
+                debugLogger.debug(
+                  `prompt-time sidecar write skipped session=${sessionId} path=${sidecarPath}`,
+                );
+              }
             }
           }
 
@@ -5411,20 +5443,12 @@ export class SessionTranscriptReader {
       : snapshot.lastUserPromptAt;
   }
 
-  invalidateLastUserPromptAt(
-    sessionId: string,
-    options: { removeSidecar?: boolean } = {},
-  ): void {
+  invalidateLastUserPromptAt(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const filePath = this.getSessionFilePath(sessionId, state);
       const key = JSON.stringify([filePath, this.workspaceCwd]);
       lastUserPromptUpdates.delete(key);
       promptTimeScope(filePath, this.workspaceCwd).delete(key);
-      if (options.removeSidecar) {
-        removeSessionPromptTimeSidecar(
-          sessionPromptTimeSidecarPath(path.dirname(filePath), sessionId),
-        );
-      }
     }
   }
 
@@ -5436,7 +5460,7 @@ export class SessionTranscriptReader {
     let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
     const key = JSON.stringify([filePath, this.workspaceCwd]);
     if (timestamp === undefined) {
-      this.invalidateLastUserPromptAt(sessionId, { removeSidecar: true });
+      this.invalidateLastUserPromptAt(sessionId);
       return;
     }
     const update = {};
@@ -5565,7 +5589,9 @@ export class SessionTranscriptReader {
     const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
-        ? await this.readManagedRecords(sessionId, index, {})
+        ? await this.readManagedRecords(sessionId, index, {
+            signal: options.signal,
+          })
         : undefined;
     options.signal?.throwIfAborted();
     const navigationTurns = projected
@@ -5605,6 +5631,7 @@ export class SessionTranscriptReader {
         if (detail) details.set(record.uuid, detail);
       }
     };
+    options.signal?.throwIfAborted();
     if (projected) {
       const wanted = new Set(selectedUuids);
       for (const record of projected) {
@@ -5617,6 +5644,7 @@ export class SessionTranscriptReader {
         collectPreview,
       );
     }
+    options.signal?.throwIfAborted();
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
       const historyPromptId = projected
@@ -5660,6 +5688,7 @@ export class SessionTranscriptReader {
     promptId: string,
     options: SessionTranscriptReadTurnIndexOptions = {},
   ): Promise<HookTurnPage | undefined> {
+    options.signal?.throwIfAborted();
     const limit = normalizeLimit(options.limit ?? 50);
     const start = options.start ?? 0;
     if (
@@ -5670,7 +5699,9 @@ export class SessionTranscriptReader {
     const { index, snapshotState } = await this.readTurnIndexSnapshot(
       sessionId,
       options.snapshot,
+      options.signal,
     );
+    options.signal?.throwIfAborted();
     if (!index) return undefined;
     const base = {
       sessionId,
@@ -6428,6 +6459,7 @@ export class SessionTranscriptReader {
     // would blank out the daemon's restore timings for these sessions.
     const startedAt = performance.now();
     try {
+      readOptions.signal?.throwIfAborted();
       // The first physical record proves which project the session belongs to.
       // Projecting without that gate would restore another project's session.
       let firstRecordSeen = false;
@@ -6445,6 +6477,7 @@ export class SessionTranscriptReader {
           firstRecordSeen = true;
         },
       );
+      readOptions.signal?.throwIfAborted();
       if (!firstRecordSeen) {
         throw new SessionTranscriptSnapshotUnavailableError(sessionId);
       }
@@ -6466,8 +6499,12 @@ export class SessionTranscriptReader {
             // the same prefix rather than from records appended since.
             maxBytes: index.snapshotSize,
             ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
+            ...(readOptions.signal !== undefined
+              ? { signal: readOptions.signal }
+              : {}),
           });
         } catch (error) {
+          if (readOptions.signal?.aborted) throw readOptions.signal.reason;
           if (error instanceof ManagedSessionProjectionLimitError) {
             throw new SessionTranscriptTooLargeError(
               sessionId,
@@ -6848,9 +6885,12 @@ export class SessionTranscriptReader {
     const index = indexHasManagedHeader(physicalIndex)
       ? managedPageIndex(
           physicalIndex,
-          await this.readManagedRecords(sessionId, physicalIndex, {}),
+          await this.readManagedRecords(sessionId, physicalIndex, {
+            signal: options.signal,
+          }),
         )
       : physicalIndex;
+    options.signal?.throwIfAborted();
     const frozenLeafUuid = cursor?.leafUuid ?? snapshot?.leafUuid;
     if (frozenLeafUuid !== undefined && frozenLeafUuid !== index.leafUuid) {
       debugLogger.warn(
@@ -7003,6 +7043,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexBuildModeHookForTest = undefined;
   promptTimeScanModeHookForTest = undefined;
   readStreamBytesHookForTest = undefined;
+  maxPromptTailRecordsForTest = undefined;
 }
 
 export function setSessionTranscriptMaxConcurrentBuildsForTest(
@@ -7027,6 +7068,12 @@ export function setSessionTranscriptReadStreamBytesHookForTest(
   hook: ((event: TranscriptReadStreamBytesEvent) => void) | undefined,
 ): void {
   readStreamBytesHookForTest = hook;
+}
+
+export function setSessionTranscriptMaxPromptTailRecordsForTest(
+  maxRecords: number | undefined,
+): void {
+  maxPromptTailRecordsForTest = maxRecords;
 }
 
 export function getSessionTranscriptBuildSemaphoreStatsForTest(): {

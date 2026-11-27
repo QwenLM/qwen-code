@@ -193,4 +193,72 @@ describe('SessionExecutionEngineAccumulator', () => {
       { value: JSON.parse(raw), record: undefined },
     ]);
   });
+
+  it('restores exact execution-engine state from snapshot() across incremental appends, conflicts, and torn tails', () => {
+    // 1. Managed owner in prefix + normal user record in tail.
+    const fullManaged = new SessionExecutionEngineAccumulator('s1');
+    const prefixManaged = new SessionExecutionEngineAccumulator('s1');
+    const managedOwner = ownerRecord('managed', 1, 'owner-m');
+    const u1 = userRecord('s1', 'u1');
+    fullManaged.parseLine(managedOwner, snapshot.filePath);
+    fullManaged.parseLine(u1, snapshot.filePath);
+    prefixManaged.parseLine(managedOwner, snapshot.filePath);
+    const resumedManaged = SessionExecutionEngineAccumulator.fromSnapshot(
+      's1',
+      prefixManaged.snapshot(),
+    );
+    resumedManaged.parseLine(u1, snapshot.filePath);
+    expect(resumedManaged.finish(snapshot)).toEqual(
+      fullManaged.finish(snapshot),
+    );
+    expect(resumedManaged.finish(snapshot)).toMatchObject({
+      status: 'verified',
+      engine: 'managed',
+      recorded: true,
+    });
+
+    // 2. Conflicting owner appended in tail must match single-pass conflict result.
+    const fullConflict = new SessionExecutionEngineAccumulator('s1');
+    const legacyOwner = ownerRecord('legacy', 1, 'owner-l');
+    fullConflict.parseLine(managedOwner, snapshot.filePath);
+    fullConflict.parseLine(legacyOwner, snapshot.filePath);
+    const resumedConflict = SessionExecutionEngineAccumulator.fromSnapshot(
+      's1',
+      prefixManaged.snapshot(),
+    );
+    resumedConflict.parseLine(legacyOwner, snapshot.filePath);
+    expect(resumedConflict.finish(snapshot)).toEqual(
+      fullConflict.finish(snapshot),
+    );
+    expect(resumedConflict.finish(snapshot)).toMatchObject({
+      status: 'unavailable',
+    });
+
+    // 3. Torn line in prefix stays incomplete after fromSnapshot, and torn line in tail flips complete=false.
+    const tornPrefix = new SessionExecutionEngineAccumulator('s1');
+    tornPrefix.parseLine('{"uuid":"torn', snapshot.filePath);
+    const resumedTorn = SessionExecutionEngineAccumulator.fromSnapshot(
+      's1',
+      tornPrefix.snapshot(),
+    );
+    resumedTorn.parseLine(u1, snapshot.filePath);
+    expect(resumedTorn.sourceComplete).toBe(false);
+    expect(resumedTorn.finish(snapshot)).toMatchObject({
+      status: 'unavailable',
+      reason: 'incomplete transcript',
+    });
+
+    // 4. Empty prefix snapshot + user record in tail preserves hasRecords=true.
+    const emptyPrefix = new SessionExecutionEngineAccumulator('s1');
+    const resumedEmpty = SessionExecutionEngineAccumulator.fromSnapshot(
+      's1',
+      emptyPrefix.snapshot(),
+    );
+    resumedEmpty.parseLine(u1, snapshot.filePath);
+    expect(resumedEmpty.finish(snapshot)).toMatchObject({
+      status: 'verified',
+      engine: 'legacy',
+      recorded: false,
+    });
+  });
 });

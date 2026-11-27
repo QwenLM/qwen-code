@@ -14,10 +14,10 @@ const isoTimestampSchema = z.string().datetime({ offset: true });
 const sha256HexSchema = /^[0-9a-f]{64}$/;
 
 const PROMPT_UUID_BLOOM_MIN_BYTES = 256;
-const PROMPT_UUID_BLOOM_MAX_BYTES = 131_072; // 128 KiB (~100k records at <1% FP)
+export const PROMPT_UUID_BLOOM_MAX_BYTES = 131_072; // 128 KiB (~100k records at <1% FP)
 const PROMPT_UUID_BLOOM_DEFAULT_HASHES = 7;
 const PROMPT_UUID_BLOOM_MAX_HASHES = 16;
-const PROMPT_UUID_BLOOM_MAX_ITEMS = 120_000;
+export const PROMPT_UUID_BLOOM_MAX_ITEMS = 120_000;
 
 export interface SessionPromptTimeUuidBloom {
   /** Canonical base64 bitset whose byte length is a power of 2 in [256, 131072]. */

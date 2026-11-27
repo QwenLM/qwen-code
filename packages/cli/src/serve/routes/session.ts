@@ -1208,6 +1208,7 @@ export function registerSessionRoutes(
     res.once('close', onResponseClosed);
     if (req.aborted || res.destroyed) onRequestAborted();
     try {
+      controller.signal.throwIfAborted();
       const value = await fn(controller.signal);
       if (controller.signal.aborted || res.destroyed) return undefined;
       return value;
@@ -1247,6 +1248,7 @@ export function registerSessionRoutes(
       signal,
     } = opts;
     return runWithWorkspaceRuntimeStorage(runtime, async () => {
+      signal?.throwIfAborted();
       const service = createWorkspaceRuntimeSessionService(runtime);
       // The default route's resolution already gated loadability: the
       // active-runtime path asserts it (allowActiveConflict:false) and the
@@ -1261,6 +1263,7 @@ export function registerSessionRoutes(
           runtime.sessionRuntimeBaseDir,
           { allowActiveConflict: true },
         );
+        signal?.throwIfAborted();
       }
       const reader = new SessionTranscriptReader(
         runtime.workspaceCwd,
@@ -1283,12 +1286,14 @@ export function registerSessionRoutes(
           throw error;
         }
       };
+      signal?.throwIfAborted();
       const promptStateBeforeRead = getLivePromptState();
       if (
         cursor === undefined &&
         direction === 'backward' &&
         promptStateBeforeRead.live
       ) {
+        signal?.throwIfAborted();
         try {
           if (runtime.bridge.flushSessionTranscript) {
             await runtime.bridge.flushSessionTranscript(sessionId);
@@ -1302,6 +1307,7 @@ export function registerSessionRoutes(
         } catch (error) {
           if (!(error instanceof SessionNotFoundError)) throw error;
         }
+        signal?.throwIfAborted();
       }
       let page;
       try {
@@ -7905,6 +7911,7 @@ export function registerSessionRoutes(
       const result = await withRequestAbortSignal(req, res, (signal) =>
         runWithoutDebugLogSession(() =>
           archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
             const runtime = await resolveTranscriptSessionRuntime(
               res,
               route,
@@ -7912,6 +7919,7 @@ export function registerSessionRoutes(
               cursor !== undefined || snapshot !== undefined,
             );
             if (!runtime) return undefined;
+            signal.throwIfAborted();
             const assertRuntimeGenerationOpen =
               captureRuntimeGenerationAssertion(runtime);
             assertRuntimeGenerationOpen?.();
@@ -8037,6 +8045,7 @@ export function registerSessionRoutes(
       const result = await withRequestAbortSignal(req, res, (signal) =>
         runWithoutDebugLogSession(() =>
           archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
             const runtime =
               preResolvedRuntime ??
               (await resolveQualifiedSessionRuntime(
@@ -8047,6 +8056,7 @@ export function registerSessionRoutes(
                 'active',
               ));
             if (!runtime) return undefined;
+            signal.throwIfAborted();
             const assertRuntimeGenerationOpen =
               captureRuntimeGenerationAssertion(runtime);
             assertRuntimeGenerationOpen?.();
@@ -8104,92 +8114,102 @@ export function registerSessionRoutes(
       return;
     }
     try {
-      const result = await runWithoutDebugLogSession(() =>
-        archiveCoordinator.runSharedMany([sessionId], async () => {
-          const runtime =
-            qualifiedTarget.kind === 'ordinary'
-              ? qualifiedTarget.runtime
-              : await resolveQualifiedSessionRuntime(
-                  req,
-                  res,
-                  route,
-                  [sessionId],
-                  'active',
-                );
-          if (!runtime) return undefined;
-          const assertRuntimeGenerationOpen =
-            captureRuntimeGenerationAssertion(runtime);
-          assertRuntimeGenerationOpen?.();
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            await assertSessionLoadable(
-              runtime.workspaceCwd,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-              {
-                allowActiveConflict: true,
-              },
-            );
-            try {
-              runtime.bridge.getSessionSummary(sessionId);
-              if (runtime.bridge.flushSessionTranscript) {
-                await runtime.bridge.flushSessionTranscript(sessionId);
-              } else {
-                await runtime.bridge.getSessionTranscriptPage({
-                  sessionId,
-                  direction: 'backward',
-                  limit: 1,
-                });
-              }
-            } catch (error) {
-              if (!(error instanceof SessionNotFoundError)) throw error;
-            }
-            const codec = getTranscriptCursorCodec(runtime);
-            const reader = new SessionTranscriptReader(
-              runtime.workspaceCwd,
-              codec,
-            );
-            const hasActivePrompt = () => {
+      const result = await withRequestAbortSignal(req, res, (signal) =>
+        runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            signal.throwIfAborted();
+            const runtime =
+              qualifiedTarget.kind === 'ordinary'
+                ? qualifiedTarget.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    route,
+                    [sessionId],
+                    'active',
+                  );
+            if (!runtime) return undefined;
+            signal.throwIfAborted();
+            const assertRuntimeGenerationOpen =
+              captureRuntimeGenerationAssertion(runtime);
+            assertRuntimeGenerationOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              signal.throwIfAborted();
+              await assertSessionLoadable(
+                runtime.workspaceCwd,
+                sessionId,
+                runtime.sessionRuntimeBaseDir,
+                {
+                  allowActiveConflict: true,
+                },
+              );
+              signal.throwIfAborted();
               try {
-                return runtime.bridge.getSessionSummary(sessionId)
-                  .hasActivePrompt;
+                runtime.bridge.getSessionSummary(sessionId);
+                signal.throwIfAborted();
+                if (runtime.bridge.flushSessionTranscript) {
+                  await runtime.bridge.flushSessionTranscript(sessionId);
+                } else {
+                  await runtime.bridge.getSessionTranscriptPage({
+                    sessionId,
+                    direction: 'backward',
+                    limit: 1,
+                  });
+                }
               } catch (error) {
-                if (error instanceof SessionNotFoundError) return false;
-                throw error;
+                if (!(error instanceof SessionNotFoundError)) throw error;
               }
-            };
-            let events;
-            try {
-              events = await readSessionToolCalls({
+              signal.throwIfAborted();
+              const codec = getTranscriptCursorCodec(runtime);
+              const reader = new SessionTranscriptReader(
+                runtime.workspaceCwd,
+                codec,
+              );
+              const hasActivePrompt = () => {
+                try {
+                  return runtime.bridge.getSessionSummary(sessionId)
+                    .hasActivePrompt;
+                } catch (error) {
+                  if (error instanceof SessionNotFoundError) return false;
+                  throw error;
+                }
+              };
+              let events;
+              try {
+                events = await readSessionToolCalls({
+                  sessionId,
+                  turnId,
+                  reader,
+                  codec,
+                  hasActivePrompt,
+                  signal,
+                });
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+              assertRuntimeGenerationOpen?.();
+              return {
+                v: 1 as const,
                 sessionId,
                 turnId,
-                reader,
-                codec,
-                hasActivePrompt,
-              });
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-                throw error;
-              const location =
-                await createWorkspaceRuntimeSessionService(
-                  runtime,
-                ).getSessionLocation(sessionId);
-              if (location === 'archived')
-                throw new SessionArchivedError(sessionId);
-              if (location === 'conflict')
-                throw new SessionConflictError(sessionId);
-              throw new SessionNotFoundError(sessionId);
-            }
-            assertRuntimeGenerationOpen?.();
-            return {
-              v: 1 as const,
-              sessionId,
-              turnId,
-              events: events.map((event) =>
-                redactSdkSurfaceEvent(event, runtime.trusted),
-              ),
-            };
-          });
-        }),
+                events: events.map((event) =>
+                  redactSdkSurfaceEvent(event, runtime.trusted),
+                ),
+              };
+            });
+          }),
+        ),
       );
       if (result === undefined) return;
       res
@@ -8259,86 +8279,96 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        const result = await runWithoutDebugLogSession(() =>
-          archiveCoordinator.runSharedMany([sessionId], async () => {
-            const runtime = qualified
-              ? target?.kind === 'ordinary'
-                ? target.runtime
-                : await resolveQualifiedSessionRuntime(
-                    req,
+        const result = await withRequestAbortSignal(req, res, (signal) =>
+          runWithoutDebugLogSession(() =>
+            archiveCoordinator.runSharedMany([sessionId], async () => {
+              signal.throwIfAborted();
+              const runtime = qualified
+                ? target?.kind === 'ordinary'
+                  ? target.runtime
+                  : await resolveQualifiedSessionRuntime(
+                      req,
+                      res,
+                      routeName,
+                      [sessionId],
+                      'active',
+                    )
+                : await resolveTranscriptSessionRuntime(
                     res,
                     routeName,
-                    [sessionId],
-                    'active',
-                  )
-              : await resolveTranscriptSessionRuntime(
-                  res,
-                  routeName,
-                  sessionId,
-                  snapshot !== undefined,
-                );
-            if (!runtime) return undefined;
-            const assertOpen = captureRuntimeGenerationAssertion(runtime);
-            assertOpen?.();
-            return runWithWorkspaceRuntimeStorage(runtime, async () => {
-              if (snapshot === undefined) {
-                await assertSessionLoadable(
-                  runtime.workspaceCwd,
-                  sessionId,
-                  runtime.sessionRuntimeBaseDir,
-                  { allowActiveConflict: true },
-                );
-                try {
-                  runtime.bridge.getSessionSummary(sessionId);
-                  if (runtime.bridge.flushSessionTranscript)
-                    await runtime.bridge.flushSessionTranscript(sessionId);
-                  else
-                    await runtime.bridge.getSessionTranscriptPage({
-                      sessionId,
-                      direction: 'backward',
-                      limit: 1,
-                    });
-                } catch (error) {
-                  if (!(error instanceof SessionNotFoundError)) throw error;
-                }
-                assertOpen?.();
-              }
-              try {
-                const page = await new SessionTranscriptReader(
-                  runtime.workspaceCwd,
-                  getTranscriptCursorCodec(runtime),
-                ).readTurnHooksPage(sessionId, promptId, {
-                  ...(snapshot !== undefined ? { snapshot } : {}),
-                  ...(start !== undefined ? { start } : {}),
-                  ...(limit !== undefined ? { limit } : {}),
-                });
-                assertOpen?.();
-                if (!page)
-                  res.status(404).json({
-                    code: 'turn_not_found',
-                    error: 'History turn not found',
                     sessionId,
-                  });
-                return page;
-              } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-                  throw error;
-                if (snapshot !== undefined)
-                  throw new SessionTranscriptSnapshotUnavailableError(
-                    sessionId,
+                    snapshot !== undefined,
                   );
-                const location =
-                  await createWorkspaceRuntimeSessionService(
-                    runtime,
-                  ).getSessionLocation(sessionId);
-                if (location === 'archived')
-                  throw new SessionArchivedError(sessionId);
-                if (location === 'conflict')
-                  throw new SessionConflictError(sessionId);
-                throw new SessionNotFoundError(sessionId);
-              }
-            });
-          }),
+              if (!runtime) return undefined;
+              signal.throwIfAborted();
+              const assertOpen = captureRuntimeGenerationAssertion(runtime);
+              assertOpen?.();
+              return runWithWorkspaceRuntimeStorage(runtime, async () => {
+                signal.throwIfAborted();
+                if (snapshot === undefined) {
+                  await assertSessionLoadable(
+                    runtime.workspaceCwd,
+                    sessionId,
+                    runtime.sessionRuntimeBaseDir,
+                    { allowActiveConflict: true },
+                  );
+                  signal.throwIfAborted();
+                  try {
+                    runtime.bridge.getSessionSummary(sessionId);
+                    signal.throwIfAborted();
+                    if (runtime.bridge.flushSessionTranscript)
+                      await runtime.bridge.flushSessionTranscript(sessionId);
+                    else
+                      await runtime.bridge.getSessionTranscriptPage({
+                        sessionId,
+                        direction: 'backward',
+                        limit: 1,
+                      });
+                  } catch (error) {
+                    if (!(error instanceof SessionNotFoundError)) throw error;
+                  }
+                  signal.throwIfAborted();
+                  assertOpen?.();
+                }
+                try {
+                  const page = await new SessionTranscriptReader(
+                    runtime.workspaceCwd,
+                    getTranscriptCursorCodec(runtime),
+                  ).readTurnHooksPage(sessionId, promptId, {
+                    ...(snapshot !== undefined ? { snapshot } : {}),
+                    ...(start !== undefined ? { start } : {}),
+                    ...(limit !== undefined ? { limit } : {}),
+                    signal,
+                  });
+                  assertOpen?.();
+                  if (!page)
+                    res.status(404).json({
+                      code: 'turn_not_found',
+                      error: 'History turn not found',
+                      sessionId,
+                    });
+                  return page;
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                    throw error;
+                  if (snapshot !== undefined)
+                    throw new SessionTranscriptSnapshotUnavailableError(
+                      sessionId,
+                    );
+                  const location =
+                    await createWorkspaceRuntimeSessionService(
+                      runtime,
+                    ).getSessionLocation(sessionId);
+                  if (location === 'archived')
+                    throw new SessionArchivedError(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  throw new SessionNotFoundError(sessionId);
+                }
+              });
+            }),
+          ),
         );
         if (result === undefined) return;
         res
@@ -8407,6 +8437,7 @@ export function registerSessionRoutes(
               // child (which would undo the cold-start win); the workspace-
               // qualified turn-index route carries no such barrier (no-bridge).
               if (snapshot === undefined) {
+                signal.throwIfAborted();
                 let live = false;
                 try {
                   runtime.bridge.getSessionSummary(sessionId);
@@ -8415,12 +8446,14 @@ export function registerSessionRoutes(
                   if (!(error instanceof SessionNotFoundError)) throw error;
                 }
                 if (live) {
+                  signal.throwIfAborted();
                   try {
                     await runtime.bridge.flushSessionTranscript?.(sessionId);
                   } catch (error) {
                     if (!(error instanceof SessionNotFoundError)) throw error;
                   }
                 }
+                signal.throwIfAborted();
               }
               try {
                 const page = await new SessionTranscriptReader(
@@ -8523,6 +8556,7 @@ export function registerSessionRoutes(
               captureRuntimeGenerationAssertion(runtime);
             assertRuntimeGenerationOpen?.();
             return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              signal.throwIfAborted();
               if (snapshot === undefined) {
                 await assertSessionLoadable(
                   runtime.workspaceCwd,
@@ -8530,6 +8564,7 @@ export function registerSessionRoutes(
                   runtime.sessionRuntimeBaseDir,
                   { allowActiveConflict: true },
                 );
+                signal.throwIfAborted();
               }
               try {
                 const page = await new SessionTranscriptReader(

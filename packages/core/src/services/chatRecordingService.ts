@@ -69,7 +69,11 @@ import {
 import {
   addPromptUuidToBloom,
   createPromptUuidBloom,
+  decodePromptUuidBloom,
   encodePromptUuidBloom,
+  PROMPT_UUID_BLOOM_MAX_BYTES,
+  PROMPT_UUID_BLOOM_MAX_ITEMS,
+  readSessionPromptTimeSidecarAsync,
   removeSessionPromptTimeSidecar,
   sessionPromptTimeSidecarPath,
   writeSessionPromptTimeSidecar,
@@ -1330,6 +1334,7 @@ export class ChatRecordingService {
   private prefixUuidBloomPath: string | undefined;
   private prefixHash: Hash | undefined;
   private prefixHashOffset = 0;
+  private prefixBloomNeedsResize = false;
   private legacyArchiveGeneration?: { filePath: string; value?: string };
   private pendingPromptTitleProjections = 0;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1722,41 +1727,238 @@ export class ChatRecordingService {
     this.prefixUuidBloomPath = undefined;
     this.prefixHash = undefined;
     this.prefixHashOffset = 0;
+    this.prefixBloomNeedsResize = false;
   }
 
-  private verifyPrefixUuidBloomBeforeWrite(
+  private async seedVerifiedPrefixHashAsync(
+    transcriptPath: string,
+    prefixSize: number,
+    expectedSha256: string,
+  ): Promise<Hash | undefined> {
+    if (prefixSize <= 0 || expectedSha256.length !== 64) return undefined;
+    const hash = createHash('sha256');
+    let bytesHashed = 0;
+    const stream = fs.createReadStream(transcriptPath, {
+      start: 0,
+      end: prefixSize - 1,
+      highWaterMark: 256 * 1024,
+    });
+    try {
+      for await (const chunk of stream) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (buffer.length > 0) {
+          hash.update(buffer);
+          bytesHashed += buffer.length;
+        }
+      }
+    } catch {
+      return undefined;
+    } finally {
+      stream.destroy();
+    }
+    if (
+      bytesHashed !== prefixSize ||
+      hash.copy().digest('hex') !== expectedSha256
+    ) {
+      return undefined;
+    }
+    return hash;
+  }
+
+  private async resizePrefixUuidBloomFromFileAsync(
+    transcriptPath: string,
+    targetSize: number,
+  ): Promise<void> {
+    this.prefixBloomNeedsResize = false;
+    if (
+      !this.prefixUuidBloom ||
+      this.prefixUuidBloomPath !== transcriptPath ||
+      targetSize <= 0
+    ) {
+      return;
+    }
+    if (this.prefixUuidBloom.buffer.length >= PROMPT_UUID_BLOOM_MAX_BYTES) {
+      this.prefixUuidBloom = undefined;
+      return;
+    }
+    const uuids = new Set<string>();
+    const stream = fs.createReadStream(transcriptPath, {
+      start: 0,
+      end: targetSize - 1,
+      highWaterMark: 64 * 1024,
+      encoding: 'utf8',
+    });
+    let remainder = '';
+    try {
+      for await (const chunk of stream) {
+        const text = remainder + String(chunk);
+        const lines = text.split('\n');
+        remainder = lines.pop() ?? '';
+        for (const rawLine of lines) {
+          const trimmed = rawLine.trim();
+          if (trimmed.length === 0) continue;
+          const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+            trimmed,
+            transcriptPath,
+          );
+          for (const value of parsed.records) {
+            if (
+              typeof value === 'object' &&
+              value !== null &&
+              typeof (value as { uuid?: unknown }).uuid === 'string' &&
+              (value as { uuid: string }).uuid.length > 0
+            ) {
+              uuids.add((value as { uuid: string }).uuid);
+              if (uuids.size > PROMPT_UUID_BLOOM_MAX_ITEMS) {
+                this.prefixUuidBloom = undefined;
+                return;
+              }
+            }
+          }
+        }
+      }
+      const trailing = remainder.trim();
+      if (trailing.length > 0) {
+        const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+          trailing,
+          transcriptPath,
+        );
+        for (const value of parsed.records) {
+          if (
+            typeof value === 'object' &&
+            value !== null &&
+            typeof (value as { uuid?: unknown }).uuid === 'string' &&
+            (value as { uuid: string }).uuid.length > 0
+          ) {
+            uuids.add((value as { uuid: string }).uuid);
+            if (uuids.size > PROMPT_UUID_BLOOM_MAX_ITEMS) {
+              this.prefixUuidBloom = undefined;
+              return;
+            }
+          }
+        }
+      }
+    } catch {
+      this.prefixUuidBloom = undefined;
+      return;
+    } finally {
+      stream.destroy();
+    }
+    const nextExpected = Math.max(
+      uuids.size,
+      this.prefixUuidBloom.buffer.length * 2,
+    );
+    const resized = createPromptUuidBloom(
+      Math.min(nextExpected, PROMPT_UUID_BLOOM_MAX_ITEMS),
+    );
+    if (!resized) {
+      this.prefixUuidBloom = undefined;
+      return;
+    }
+    for (const uuid of uuids) {
+      addPromptUuidToBloom(resized, uuid);
+    }
+    this.prefixUuidBloom = resized;
+  }
+
+  private preparePrefixStateBeforeWrite(
     record: ChatRecord,
     legacyConversationFile: string | undefined,
-  ): void {
-    if (!this.prefixUuidBloom) return;
+  ): Promise<void> | undefined {
     const transcriptPath = this.resolvePromptTimeTranscriptPath(
       legacyConversationFile,
     );
     if (!transcriptPath) {
       this.clearPrefixUuidBloom();
-      return;
+      return undefined;
     }
     if (this.prefixUuidBloomPath !== undefined) {
       if (this.prefixUuidBloomPath !== transcriptPath) {
         this.clearPrefixUuidBloom();
+      } else if (this.prefixUuidBloom && this.prefixHash) {
+        return undefined;
       }
-      return;
     }
-    if (record.parentUuid !== null || this.lastPersistedRecordUuid !== null) {
-      this.clearPrefixUuidBloom();
-      return;
-    }
+    let stats: fs.Stats | undefined;
     try {
+      stats = fs.existsSync(transcriptPath)
+        ? fs.statSync(transcriptPath)
+        : undefined;
+    } catch {
+      this.clearPrefixUuidBloom();
+      return undefined;
+    }
+    const currentSize = stats?.size ?? 0;
+    if (currentSize === 0) {
+      if (record.parentUuid === null && this.lastPersistedRecordUuid === null) {
+        this.prefixUuidBloom = createPromptUuidBloom(1024);
+        this.prefixUuidBloomPath = transcriptPath;
+        this.prefixHash = createHash('sha256');
+        this.prefixHashOffset = 0;
+        this.prefixBloomNeedsResize = false;
+      } else {
+        this.clearPrefixUuidBloom();
+      }
+      return undefined;
+    }
+    const sidecarPath = sessionPromptTimeSidecarPath(
+      path.dirname(transcriptPath),
+      path.basename(transcriptPath, '.jsonl'),
+    );
+    if (!stats || !fs.existsSync(sidecarPath)) {
+      this.clearPrefixUuidBloom();
+      return undefined;
+    }
+    // Existing non-empty transcript with a persisted sidecar (e.g. resumed
+    // session or after reader self-healing): carry forward the sidecar's bloom
+    // and verified prefix hash only when it matches the exact pre-append file.
+    return this.adoptSidecarPrefixStateAsync(
+      transcriptPath,
+      sidecarPath,
+      stats,
+    );
+  }
+
+  private async adoptSidecarPrefixStateAsync(
+    transcriptPath: string,
+    sidecarPath: string,
+    stats: fs.Stats,
+  ): Promise<void> {
+    try {
+      const sidecar = await readSessionPromptTimeSidecarAsync(sidecarPath);
       if (
-        fs.existsSync(transcriptPath) &&
-        fs.statSync(transcriptPath).size > 0
+        !sidecar ||
+        sidecar.managed ||
+        !sidecar.prefixSha256 ||
+        !sidecar.prefixUuidBloom ||
+        sidecar.fileIdentity.dev !== stats.dev ||
+        sidecar.fileIdentity.ino !== stats.ino ||
+        sidecar.snapshotSize !== stats.size ||
+        sidecar.lastUpdated !== new Date(stats.mtimeMs).toISOString()
       ) {
         this.clearPrefixUuidBloom();
         return;
       }
+      const decodedBloom = decodePromptUuidBloom(sidecar.prefixUuidBloom);
+      if (!decodedBloom) {
+        this.clearPrefixUuidBloom();
+        return;
+      }
+      const hash = await this.seedVerifiedPrefixHashAsync(
+        transcriptPath,
+        stats.size,
+        sidecar.prefixSha256,
+      );
+      if (!hash) {
+        this.clearPrefixUuidBloom();
+        return;
+      }
+      this.prefixUuidBloom = decodedBloom;
       this.prefixUuidBloomPath = transcriptPath;
-      this.prefixHash = createHash('sha256');
-      this.prefixHashOffset = 0;
+      this.prefixHash = hash;
+      this.prefixHashOffset = stats.size;
+      this.prefixBloomNeedsResize =
+        decodedBloom.count >= decodedBloom.buffer.length;
     } catch {
       this.clearPrefixUuidBloom();
     }
@@ -1798,23 +2000,22 @@ export class ChatRecordingService {
   }
 
   private recordUuidForPrefixBloom(record: ChatRecord): void {
-    if (record.subtype === 'rewind') {
-      this.clearPrefixUuidBloom();
-      return;
-    }
+    // Rewind records are append-only: every earlier physical record remains in
+    // the file and in the filter, so keep the bloom + hash across rewind and
+    // record the rewind record's own UUID as well.
     if (!this.prefixUuidBloom || this.prefixUuidBloomPath === undefined) return;
     addPromptUuidToBloom(this.prefixUuidBloom, record.uuid);
     if (this.prefixUuidBloom.count > this.prefixUuidBloom.buffer.length) {
-      this.clearPrefixUuidBloom();
+      this.prefixBloomNeedsResize = true;
     }
   }
 
-  private updatePromptTimeSidecar(
+  private async updatePromptTimeSidecar(
     record: ChatRecord,
     promptTime: string | undefined,
     legacyConversationFile: string | undefined,
     updateActiveTail: boolean,
-  ): void {
+  ): Promise<void> {
     try {
       const transcriptPath = this.resolvePromptTimeTranscriptPath(
         legacyConversationFile,
@@ -1838,9 +2039,19 @@ export class ChatRecordingService {
         return;
       }
       const stats = fs.statSync(transcriptPath);
+      if (
+        this.prefixBloomNeedsResize &&
+        this.prefixUuidBloom &&
+        this.prefixUuidBloomPath === transcriptPath
+      ) {
+        await this.resizePrefixUuidBloomFromFileAsync(
+          transcriptPath,
+          stats.size,
+        );
+      }
       const prefixSha256 =
         stats.size > 0 &&
-        this.prefixUuidBloom &&
+        this.prefixHash &&
         this.prefixUuidBloomPath === transcriptPath
           ? this.advancePrefixHashTo(transcriptPath, stats.size)
           : undefined;
@@ -1850,19 +2061,25 @@ export class ChatRecordingService {
         this.prefixUuidBloomPath === transcriptPath
           ? encodePromptUuidBloom(this.prefixUuidBloom)
           : undefined;
-      writeSessionPromptTimeSidecar(sidecarPath, {
-        fileIdentity: { dev: stats.dev, ino: stats.ino },
-        snapshotSize: stats.size,
-        lastUpdated: new Date(stats.mtimeMs).toISOString(),
-        lastUserPromptAt: promptTime,
-        leafUuid: record.uuid,
-        firstRecordOwner: {
-          sessionId: record.sessionId,
-          cwd: record.cwd,
-        },
-        ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
-        ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
-      });
+      if (
+        !writeSessionPromptTimeSidecar(sidecarPath, {
+          fileIdentity: { dev: stats.dev, ino: stats.ino },
+          snapshotSize: stats.size,
+          lastUpdated: new Date(stats.mtimeMs).toISOString(),
+          lastUserPromptAt: promptTime,
+          leafUuid: record.uuid,
+          firstRecordOwner: {
+            sessionId: record.sessionId,
+            cwd: record.cwd,
+          },
+          ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
+          ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
+        })
+      ) {
+        debugLogger.debug(
+          `prompt-time sidecar write skipped session=${record.sessionId} path=${sidecarPath}`,
+        );
+      }
     } catch {
       // Best-effort: a missing sidecar must never fail transcript recording.
     }
@@ -2376,7 +2593,8 @@ export class ChatRecordingService {
           this.clearPrefixUuidBloom();
           await managedSink.write(record);
         } else if (lease) {
-          this.verifyPrefixUuidBloomBeforeWrite(record, undefined);
+          const prep = this.preparePrefixStateBeforeWrite(record, undefined);
+          if (prep) await prep;
           await lease.appendJsonLine(record);
           this.recordUuidForPrefixBloom(record);
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
@@ -2387,10 +2605,11 @@ export class ChatRecordingService {
           try {
             lock.assertHeld();
             assertSessionArchiveGeneration(legacyConversationFile, generation);
-            this.verifyPrefixUuidBloomBeforeWrite(
+            const prep = this.preparePrefixStateBeforeWrite(
               record,
               legacyConversationFile,
             );
+            if (prep) await prep;
             if (this.cachedConversationFile !== legacyConversationFile) {
               this.createConversationFile(legacyConversationFile);
               this.cacheConversationFile(legacyConversationFile);
@@ -2399,12 +2618,13 @@ export class ChatRecordingService {
             lock.assertHeld();
             this.recordUuidForPrefixBloom(record);
             if (changesPromptTime) {
-              this.updatePromptTimeSidecar(
+              await this.updatePromptTimeSidecar(
                 record,
                 promptTime,
                 legacyConversationFile,
                 updateActiveTail,
               );
+              lock.assertHeld();
             }
             afterWrite?.(legacyConversationFile);
           } finally {
@@ -2415,7 +2635,7 @@ export class ChatRecordingService {
         }
         if (managedSink || lease) {
           if (changesPromptTime) {
-            this.updatePromptTimeSidecar(
+            await this.updatePromptTimeSidecar(
               record,
               promptTime,
               undefined,

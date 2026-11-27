@@ -207,6 +207,7 @@ import {
   setSessionTranscriptMaxConcurrentBuildsForTest,
   setSessionTranscriptMaxIndexEstimateBytesForTest,
   setSessionTranscriptMaxLineBytesForTest,
+  setSessionTranscriptMaxPromptTailRecordsForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexBuildModeHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
@@ -7918,6 +7919,8 @@ describe('SessionTranscriptReader', () => {
       let firstCompleted = false;
       let queuedPageRejectedWhileFirstRunning = false;
       let queuedTurnRejectedWhileFirstRunning = false;
+      let activeAtQueuedPageReject = -1;
+      let activeAtQueuedTurnReject = -1;
       const queuedPageAbort = new AbortController();
       const queuedTurnAbort = new AbortController();
       let abortedQueued = false;
@@ -7939,6 +7942,8 @@ describe('SessionTranscriptReader', () => {
         .readPage(s2.sid, { limit: 5, signal: queuedPageAbort.signal })
         .catch((err) => {
           queuedPageRejectedWhileFirstRunning = !firstCompleted;
+          activeAtQueuedPageReject =
+            getSessionTranscriptBuildSemaphoreStatsForTest().active;
           throw err;
         });
       const p3 = s3.reader
@@ -7948,6 +7953,8 @@ describe('SessionTranscriptReader', () => {
         })
         .catch((err) => {
           queuedTurnRejectedWhileFirstRunning = !firstCompleted;
+          activeAtQueuedTurnReject =
+            getSessionTranscriptBuildSemaphoreStatsForTest().active;
           throw err;
         });
 
@@ -7958,6 +7965,10 @@ describe('SessionTranscriptReader', () => {
       expect(r3.status).toBe('rejected');
       expect(queuedPageRejectedWhileFirstRunning).toBe(true);
       expect(queuedTurnRejectedWhileFirstRunning).toBe(true);
+      // Both queued waiters must reject while slot #1 is STILL held (active === 1),
+      // not merely inside drain() after slot #1 releases (active === 0).
+      expect(activeAtQueuedPageReject).toBe(1);
+      expect(activeAtQueuedTurnReject).toBe(1);
       expect(builtFiles).toEqual([s1.filePath]);
       expect(getSessionTranscriptBuildSemaphoreStatsForTest()).toEqual({
         active: 0,
@@ -8289,6 +8300,440 @@ describe('SessionTranscriptReader', () => {
         .split('\n')
         .map((line) => JSON.parse(line) as ChatRecord);
       expect(lines.filter((r) => r.type === 'user')).toHaveLength(2);
+    });
+
+    it('carries forward verified sidecar bloom + prefixSha256 across resumed >2048-record sessions, resizes on saturation, and preserves bloom across rewind (R1-1 & R1-6)', async () => {
+      // Build a >2048-record persisted transcript and self-heal its sidecar.
+      const initialRecords: ChatRecord[] = [];
+      let prev: string | null = null;
+      for (let i = 0; i < 2100; i += 1) {
+        const rec: ChatRecord = {
+          ...record(
+            i === 0 ? 'u-init-0' : `a-init-${i}`,
+            prev,
+            i === 0 ? 'initial prompt' : `reply ${i}`,
+          ),
+          type: i === 0 ? 'user' : 'assistant',
+          timestamp: `2026-01-01T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000Z`,
+        };
+        initialRecords.push(rec);
+        prev = rec.uuid;
+      }
+      const file = await writeRecords(initialRecords);
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        initialRecords[0]!.timestamp,
+      );
+      const healed = JSON.parse(await fs.readFile(sidecarPath, 'utf8'));
+      expect(healed.prefixUuidBloom?.count).toBe(2100);
+      expect(healed.prefixSha256).toHaveLength(64);
+
+      // Resume the >2048-record session through ChatRecordingService and write a new prompt.
+      const resumedConfig = {
+        storage: new Storage(workspaceDir),
+        getTargetDir: () => workspaceDir,
+        getSessionId: () => sessionId,
+        getProjectRoot: () => workspaceDir,
+        getCliVersion: () => 'test',
+        getModel: () => 'test',
+        getAuthType: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getResumedSessionData: () => ({
+          conversation: {
+            sessionId,
+            projectHash: 'test',
+            startTime: initialRecords[0]!.timestamp,
+            lastUpdated: initialRecords.at(-1)!.timestamp,
+            messages: initialRecords,
+          },
+          filePath: file,
+          lastRecordUuid: prev,
+        }),
+      } as unknown as Config;
+      const resumedRecorder = new ChatRecordingService(
+        resumedConfig,
+        undefined,
+        false,
+      );
+      resumedRecorder.recordUserMessage([{ text: 'resumed prompt #2101' }]);
+      await resumedRecorder.flush();
+
+      const afterResumeSidecar = JSON.parse(
+        await fs.readFile(sidecarPath, 'utf8'),
+      );
+      expect(afterResumeSidecar.prefixUuidBloom?.count).toBe(2101);
+      expect(afterResumeSidecar.prefixSha256).toHaveLength(64);
+      const sizeAfterPrompt = (await fs.stat(file)).size;
+
+      // Append an assistant record and clear memory -> MUST hit sidecar_tail at sizeAfterPrompt (not lightweight_scan@0).
+      resumedRecorder.recordAssistantTurn({
+        model: 'test',
+        message: [{ text: 'resumed answer' }],
+      });
+      await resumedRecorder.flush();
+      resetSessionTranscriptIndexCacheForTest();
+      const tailScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        tailScans.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        afterResumeSidecar.lastUserPromptAt,
+      );
+      expect(tailScans).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_tail',
+          startOffset: sizeAfterPrompt,
+        }),
+      ]);
+
+      // R1-6: Rewind followed by a new prompt keeps the bloom + hash alive so the next append still uses sidecar_tail.
+      resumedRecorder.rewindRecording(1, { truncatedCount: 1 });
+      await resumedRecorder.flush();
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      resumedRecorder.recordUserMessage([{ text: 'post-rewind prompt' }]);
+      await resumedRecorder.flush();
+      const postRewindSidecar = JSON.parse(
+        await fs.readFile(sidecarPath, 'utf8'),
+      );
+      expect(postRewindSidecar.prefixUuidBloom).toBeDefined();
+      expect(postRewindSidecar.prefixSha256).toHaveLength(64);
+      const sizePostRewindPrompt = (await fs.stat(file)).size;
+
+      resumedRecorder.recordAssistantTurn({
+        model: 'test',
+        message: [{ text: 'post-rewind answer' }],
+      });
+      await resumedRecorder.flush();
+      resetSessionTranscriptIndexCacheForTest();
+      const postRewindScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        postRewindScans.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        postRewindSidecar.lastUserPromptAt,
+      );
+      expect(postRewindScans).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_tail',
+          startOffset: sizePostRewindPrompt,
+        }),
+      ]);
+    });
+
+    it('handles custom_title and session_source metadata re-anchors, non-conversation tail records, tail cap, missing prefixSha256, and foreign tail records cleanly (R1-2, R1-11, R1-15)', async () => {
+      const u1 = {
+        ...record('u-meta-1', null, 'first question'),
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const a1 = {
+        ...record('a-meta-1', u1.uuid, 'first answer'),
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      };
+      const file = await writeRecords([u1, a1]);
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u1.timestamp,
+      );
+      const size1 = (await fs.stat(file)).size;
+
+      // R1-15 + R1-11: custom_title re-anchor, session_source re-anchor, and non-conversation
+      // generated_ui_state chained in tail before next prompt must take sidecar_tail.
+      const titleAnchor: ChatRecord = {
+        ...record('sys-title-1', a1.uuid, ''),
+        type: 'system',
+        subtype: 'custom_title',
+        message: undefined,
+      };
+      const sourceAnchor: ChatRecord = {
+        ...record('sys-source-1', a1.uuid, ''),
+        type: 'system',
+        subtype: 'session_source',
+        message: undefined,
+      };
+      const uiState: ChatRecord = {
+        ...record('sys-ui-1', a1.uuid, ''),
+        type: 'system',
+        subtype: 'generated_ui_state',
+        message: undefined,
+      };
+      const u2 = {
+        ...record('u-meta-2', a1.uuid, 'second question'),
+        timestamp: '2026-01-01T00:00:05.000Z',
+      };
+      await appendRecords(file, titleAnchor, sourceAnchor, uiState, u2);
+      resetSessionTranscriptIndexCacheForTest();
+      const scans1: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans1.push(e));
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u2.timestamp,
+      );
+      expect(scans1).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_tail',
+          startOffset: size1,
+        }),
+      ]);
+
+      // R1-2: sidecar missing prefixSha256 (even with valid prefixUuidBloom) must fail closed to lightweight_scan.
+      const rawSidecar = JSON.parse(await fs.readFile(sidecarPath, 'utf8'));
+      delete rawSidecar.prefixSha256;
+      await fs.writeFile(sidecarPath, JSON.stringify(rawSidecar), 'utf8');
+      const a2 = {
+        ...record('a-meta-2', u2.uuid, 'second answer'),
+        type: 'assistant' as const,
+      };
+      await appendRecords(file, a2);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansNoSha: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansNoSha.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u2.timestamp,
+      );
+      expect(scansNoSha).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // R1-11: exceeding MAX_PROMPT_TAIL_EXTENSION_RECORDS falls back to lightweight_scan@0.
+      setSessionTranscriptMaxPromptTailRecordsForTest(1);
+      const a3 = {
+        ...record('a-meta-3', a2.uuid, 'reply 3'),
+        type: 'assistant' as const,
+      };
+      const u3 = {
+        ...record('u-meta-3', a3.uuid, 'third question'),
+        timestamp: '2026-01-01T00:00:09.000Z',
+      };
+      await appendRecords(file, a3, u3);
+      resetSessionTranscriptIndexCacheForTest();
+      setSessionTranscriptMaxPromptTailRecordsForTest(1);
+      const scansCap: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansCap.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        u3.timestamp,
+      );
+      expect(scansCap).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // R1-11: foreign sessionId record appended in tail must throw Unavailable and never emit sidecar_tail.
+      const foreignTail = {
+        ...record('a-foreign', u3.uuid, 'foreign'),
+        type: 'assistant' as const,
+        sessionId: '99999999-9999-4999-8999-999999999999',
+      };
+      await appendRecords(file, foreignTail);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansForeign: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansForeign.push(e),
+      );
+      await expect(
+        newReader().getLastUserPromptAt(sessionId),
+      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+      expect(scansForeign).toEqual([]);
+    });
+
+    it('covers index_cache hit, managed_scan + AbortSignal, setLastUserPromptAt(undefined) sidecar preservation, numeric functionCall.id, and incremental execution-engine parity (R1-5, R1-14, R1-16, R1-19, R1-21)', async () => {
+      // R1-5 + R1-21: numeric functionCall.id in assistant message must not produce NaN in
+      // estimateBranchPointRecordBytes, and incremental build preserves executionEngine.
+      const ownerRec: ChatRecord = {
+        ...record('eng-1', null, ''),
+        type: 'system',
+        subtype: 'session_execution_engine',
+        message: undefined,
+        systemPayload: { engine: 'managed', version: 1 },
+      };
+      const u1 = {
+        ...record('u-num-1', ownerRec.uuid, 'ask tool'),
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const aWithNumId = {
+        ...record('a-num-1', u1.uuid, ''),
+        type: 'assistant' as const,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 123 as unknown as string, name: 'read' } },
+          ],
+        },
+      } as ChatRecord;
+      const file = await writeRecords([ownerRec, u1, aWithNumId]);
+      const reader = newReader();
+      const buildEvents: TranscriptIndexBuildModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => buildEvents.push(e));
+
+      await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents.at(-1)?.mode).toBe('full');
+      const restore1 = await reader.readRestoreProjection(sessionId, NONE);
+      expect(restore1?.executionEngine).toMatchObject({
+        status: 'verified',
+        engine: 'managed',
+      });
+
+      // R1-16: warm dense index hit -> getLastUserPromptAt reports mode='index_cache'.
+      const scansCache: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansCache.push(e),
+      );
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(u1.timestamp);
+      expect(scansCache).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'index_cache',
+        }),
+      ]);
+
+      // R1-19: setLastUserPromptAt(id, undefined) clears memory only and keeps healthy sidecar on disk -> sidecar_exact.
+      const sidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(file),
+        sessionId,
+      );
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+      await reader.setLastUserPromptAt(sessionId, undefined);
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      const scansExact: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansExact.push(e),
+      );
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(u1.timestamp);
+      expect(scansExact).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'sidecar_exact',
+        }),
+      ]);
+
+      // R1-5 + R1-21: append to numeric-id + managed-engine file -> MUST extend incrementally and preserve engine='managed'.
+      await reader.readPage(sessionId, { limit: 10 });
+      const a2 = {
+        ...record('a-num-2', aWithNumId.uuid, 'done'),
+        type: 'assistant' as const,
+      };
+      await appendRecords(file, a2);
+      await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents.at(-1)?.mode).toBe('incremental');
+      const restore2 = await reader.readRestoreProjection(sessionId, NONE);
+      expect(restore2?.executionEngine).toMatchObject({
+        status: 'verified',
+        engine: 'managed',
+      });
+
+      // R1-14 + R1-16: Managed session hits mode='managed_scan', persists sidecar.managed=true, and respects AbortSignal.
+      const managedSid = '660e8400-e29b-41d4-a716-446655440099';
+      const managedFile = newReader().getSessionFilePath(managedSid);
+      await fs.mkdir(path.dirname(managedFile), { recursive: true });
+      await fs.writeFile(managedFile, '', 'utf8');
+      const sessionKey = localManagedSessionKey(workspaceDir, managedSid);
+      const store = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: runtimeDir,
+        sessionKey,
+      });
+      const lease = await LocalManagedSessionAuthority.acquireWriter({
+        runtimeBaseDir: runtimeDir,
+        sessionId: managedSid,
+        transcriptPath: managedFile,
+      });
+      const reference = {
+        resourceId: 'test-ref',
+        kind: 'test',
+        schemaVersion: 1,
+        byteLength: 4,
+        digest: 'e'.repeat(64),
+      };
+      const authority = await LocalManagedSessionAuthority.open({
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
+        sessionKey,
+        cwd: workspaceDir,
+        version: 'test',
+        resources: store,
+        create: {
+          definitionRef: reference,
+          rootSnapshotRef: reference,
+          createdBy: 'daemon',
+        },
+      });
+      const projection = new ManagedSessionMessageProjection(authority, store);
+      const managedPrompt = {
+        ...record('m-u1', null, 'managed prompt'),
+        sessionId: managedSid,
+        timestamp: '2026-03-01T12:00:00.000Z',
+      };
+      try {
+        await projection.commit(
+          {
+            operation: 'commitMessage',
+            commandId: managedPrompt.uuid,
+            sessionKey,
+            contentDigest: 'e'.repeat(64),
+          },
+          { record: managedPrompt },
+          { class: 'trusted_entry' },
+        );
+      } finally {
+        await authority.close();
+      }
+      resetSessionTranscriptIndexCacheForTest();
+      const managedScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        managedScans.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(managedSid)).toBe(
+        managedPrompt.timestamp,
+      );
+      expect(managedScans).toEqual([
+        expect.objectContaining({
+          filePath: managedFile,
+          mode: 'managed_scan',
+          startOffset: 0,
+        }),
+      ]);
+      const managedSidecar = JSON.parse(
+        await fs.readFile(
+          sessionPromptTimeSidecarPath(path.dirname(managedFile), managedSid),
+          'utf8',
+        ),
+      );
+      expect(managedSidecar.managed).toBe(true);
+
+      // R1-14: pre-aborted AbortSignal rejects Managed readPage & readTurnHooksPage cleanly.
+      const aborted = new AbortController();
+      aborted.abort(new DOMException('client gone', 'AbortError'));
+      await expect(
+        newReader().readPage(managedSid, { limit: 5, signal: aborted.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(
+        newReader().readTurnHooksPage(managedSid, 'm-u1', {
+          signal: aborted.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     });
   });
 });
