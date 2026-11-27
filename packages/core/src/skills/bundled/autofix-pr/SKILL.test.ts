@@ -534,4 +534,40 @@ describe('bundled autofix-pr skill', () => {
     expect(scoping).not.toBeNull();
     expect(scoping![1]).toContain('beyond the fields these instructions name');
   });
+
+  it('supports --watch and scheduled --in-place --watch with per-round approval and no unattended/discard', () => {
+    const { config, body } = loadSkill();
+    expect(config.description).toContain('[--watch]');
+    expect(body).toContain(
+      'If the start gives `--once` with `--watch` or `--every`, stop and say so before running `prepare`',
+    );
+    expect(body).toContain(
+      '`--in-place --watch` (or `--in-place --every <n>`, which implies `--watch`)',
+    );
+    expect(body).toContain(
+      '- `tick <owner>/<repo>#<n>` followed by optional `--task <id>`, `--in-place`, `--no-reply` and `-- <instructions>`',
+    );
+    const inPlace =
+      /\n## In-place \(`--in-place`\)\n([\s\S]*?)\n## After a background fix/.exec(
+        body,
+      )?.[1] ?? '';
+    expect(inPlace).toContain('`Fix it` / `Not now` / `Stop watching`');
+    expect(inPlace).toContain(
+      '**Ask before editing on scheduled or resumed rounds.**',
+    );
+    expect(inPlace).toContain(
+      'ask the user with `ask_user_question` before writing the brief, launching the fix agent, re-running CI, pushing, or replying',
+    );
+    expect(inPlace).toContain('No background fix, no `unattended`.');
+    expect(inPlace).toContain('`sync --discard` is never run');
+    expect(inPlace).toContain(
+      'prepare <pr> --repo <repo> --host <host> --in-place --take-over',
+    );
+    // Resume passes --in-place for in-place watches and never grants unattended to them.
+    const resume = /\n## Resume\n([\s\S]*)$/.exec(body)?.[1] ?? '';
+    expect(resume).toContain(
+      'adding `--in-place` when the watch has `inPlace` true',
+    );
+    expect(resume).toContain('never for an `inPlace` watch');
+  });
 });

@@ -1931,5 +1931,114 @@ describe('runPrepare (real git)', () => {
         delete process.env['QWEN_CODE_SERVE'];
       }
     });
+
+    it('resumes an existing in-place watch owned by this session without touching dirty or ahead work', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      const first = readState(statePath())!;
+      // Preserve recorded watch options and history across resume.
+      writeFileSync(
+        statePath(),
+        JSON.stringify({
+          ...first,
+          watch: {
+            every: 5,
+            reply: false,
+            instructions: 'keep API',
+            task: 'aaaaaaaaaaaa',
+          },
+          handledCommentIds: ['IC_1'],
+        }),
+      );
+      writeFileSync(join(clone, 'wip.txt'), 'draft');
+      run(clone, 'commit', '-q', '--allow-empty', '-m', 'local wip');
+      const localTip = run(clone, 'rev-parse', 'HEAD');
+
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(lastReport()).toMatchObject({
+        inPlace: true,
+        resumed: true,
+        worktreePath: clone,
+        preparedAt: first.preparedAt,
+        localUnpushedCommits: 1,
+        localUncommittedChanges: true,
+      });
+      expect(readState(statePath())!).toMatchObject({
+        inPlace: true,
+        sessionId: 'session-a',
+        preparedAt: first.preparedAt,
+        watch: {
+          every: 5,
+          reply: false,
+          instructions: 'keep API',
+          task: 'aaaaaaaaaaaa',
+        },
+        handledCommentIds: ['IC_1'],
+      });
+      // Neither HEAD nor the uncommitted file was touched.
+      expect(run(clone, 'rev-parse', 'HEAD')).toBe(localTip);
+      expect(existsSync(join(clone, 'wip.txt'))).toBe(true);
+    });
+
+    it('refuses another session without --take-over (watched_elsewhere), and takes over with --take-over', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      const first = readState(statePath())!;
+      process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /watched by another session/,
+      );
+      expect(readState(statePath())!.sessionId).toBe('session-a');
+
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true, takeOver: true });
+      expect(lastReport()).toMatchObject({
+        inPlace: true,
+        resumed: true,
+        tookOver: true,
+        preparedAt: first.preparedAt,
+      });
+      expect(readState(statePath())!).toMatchObject({
+        inPlace: true,
+        sessionId: 'session-b',
+        preparedAt: first.preparedAt,
+      });
+    });
+
+    it('refuses resuming an in-place watch when the PR is closed (pr_closed)', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr')
+          return JSON.stringify(
+            prView({ state: 'MERGED', headRefOid: headSha }),
+          );
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+      let caught: unknown;
+      try {
+        runPrepare({ pr: 7, repo: 'o/r', inPlace: true, takeOver: true });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toMatchObject({ code: 'pr_closed' });
+    });
+
+    it('refuses resuming an in-place watch of another repository or another checkout', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(() =>
+        runPrepare({ pr: 7, repo: 'other/repo', inPlace: true }),
+      ).toThrow(/watch of github\.com\/o\/r/);
+
+      // A linked worktree of the same clone cannot hijack the main checkout's in-place watch.
+      const linked = join(dir, 'linked');
+      run(clone, 'worktree', 'add', '-q', linked, 'main');
+      process.chdir(linked);
+      try {
+        expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+          /already has an in-place watch in/,
+        );
+      } finally {
+        process.chdir(clone);
+      }
+    });
   });
 });
