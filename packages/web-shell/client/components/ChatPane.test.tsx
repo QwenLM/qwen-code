@@ -3350,6 +3350,7 @@ describe('ChatPane', () => {
       });
       expect(setReasoningEffort).toHaveBeenCalledWith('medium', {
         persist: !standalone,
+        preferSessionPersistence: true,
       });
     },
   );

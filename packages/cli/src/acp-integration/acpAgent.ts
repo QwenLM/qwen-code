@@ -386,6 +386,7 @@ import {
   hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
+  PERSIST_SESSION_REASONING_META_KEY,
   parseReasoningSelection,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
@@ -4028,6 +4029,10 @@ class QwenAgent implements Agent {
   private readonly workspaceSettings: LoadedSettings;
   private readonly turnSkillLeases = new TurnSkillLeases();
   private sessions: Map<string, Session> = new Map();
+  private readonly sessionModelWrites = new WeakMap<
+    Session,
+    Promise<unknown>
+  >();
   /**
    * Cross-session messaging for every session this process hosts.
    *
@@ -7287,10 +7292,15 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return await this.runInSessionContext(session, () =>
-      params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
-        ? session.setModel({ ...params, sessionId }, { persistDefault: false })
-        : session.setModel({ ...params, sessionId }),
+    return this.queueSessionModelWrite(session, () =>
+      this.runInSessionContext(session, () =>
+        params._meta?.[SESSION_MODEL_PERSIST_DEFAULT_META_KEY] === false
+          ? session.setModel(
+              { ...params, sessionId },
+              { persistDefault: false },
+            )
+          : session.setModel({ ...params, sessionId }),
+      ),
     );
   }
 
@@ -7308,7 +7318,10 @@ class QwenAgent implements Agent {
       );
     }
 
-    return this.runInSessionContext(session, async () => {
+    const persistToSession =
+      configId === 'reasoning_effort' &&
+      params._meta?.[PERSIST_SESSION_REASONING_META_KEY] === true;
+    const applyOption = async (): Promise<SetSessionConfigOptionResponse> => {
       switch (configId) {
         case 'mode': {
           await this.setSessionMode({
@@ -7398,13 +7411,35 @@ class QwenAgent implements Agent {
 
           const persist =
             params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
+          if (persistToSession) {
+            if (
+              persist ||
+              !this.isTrustedManagedParent() ||
+              this.hostExecutionEngine === 'managed' ||
+              config.getSessionExecutionEngine() === 'managed' ||
+              config.isProvisionalWorkspace() ||
+              config.getExecutionEnvironment() ||
+              !config.isTrustedFolder() ||
+              !config.getChatRecordingService()
+            ) {
+              throw RequestError.invalidParams(
+                undefined,
+                'Task-level reasoning settings require a recorded local workspace task',
+              );
+            }
+            await session.assertCanStartTurn();
+            if (this.sessions.get(sessionId) !== session) {
+              throw RequestError.invalidParams(undefined, 'Session changed');
+            }
+          }
           const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
             selected !== REASONING_EFFORT_DEFAULT;
           if (
             !modelReasoning &&
             tierSelected &&
-            generation.reasoning === false
+            generation.reasoning === false &&
+            !persistToSession
           ) {
             throw RequestError.invalidParams(
               undefined,
@@ -7428,8 +7463,20 @@ class QwenAgent implements Agent {
             if (modelReasoning && !modelReasoning.toggleOnly) {
               clearReasoningRequestOverrides(generation, config);
             }
-            applyReasoningSelection(config, selected, defaultReasoning);
-            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+            applyReasoningSelection(
+              config,
+              selected,
+              persistToSession &&
+                selected === REASONING_EFFORT_DEFAULT &&
+                generation.reasoning === false
+                ? defaultReasoning || {}
+                : defaultReasoning,
+            );
+            if (
+              !persistToSession &&
+              !modelReasoning &&
+              selected !== REASONING_EFFORT_NONE
+            ) {
               config.setReasoningEffort?.(
                 selected === REASONING_EFFORT_DEFAULT
                   ? defaultReasoning
@@ -7462,16 +7509,24 @@ class QwenAgent implements Agent {
                   : 'Reasoning effort cannot be applied while thinking is disabled',
               );
             }
-            if (persist) {
-              session.persistReasoningSelection(selected);
+            if (persistToSession) {
+              await recordDaemonSessionModelFromConfig(config, {
+                reasoningSelection: selected,
+                required: true,
+              });
+              session.setSessionReasoningSelection(selected, true);
+            } else {
+              if (persist) session.persistReasoningSelection(selected);
+              session.setSessionReasoningSelection(
+                persist ? undefined : selected,
+              );
             }
-            session.setSessionReasoningSelection(
-              persist ? undefined : selected,
-            );
             return {
               configOptions,
-              ...(persist
-                ? { _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true } }
+              ...(persist || persistToSession
+                ? {
+                    _meta: { [REASONING_SELECTION_PERSISTED_META_KEY]: true },
+                  }
                 : {}),
             };
           } catch (error) {
@@ -7499,7 +7554,24 @@ class QwenAgent implements Agent {
           session.getDefaultReasoningConfig(),
         ),
       };
-    });
+    };
+    const runOption = () => this.runInSessionContext(session, applyOption);
+    return configId === 'model' || configId === 'reasoning_effort'
+      ? this.queueSessionModelWrite(session, runOption)
+      : runOption();
+  }
+
+  private queueSessionModelWrite<T>(
+    session: Session,
+    apply: () => Promise<T>,
+  ): Promise<T> {
+    const pending = this.sessionModelWrites.get(session) ?? Promise.resolve();
+    const write = pending.then(apply);
+    this.sessionModelWrites.set(
+      session,
+      write.catch(() => undefined),
+    );
+    return write;
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -7528,6 +7600,9 @@ class QwenAgent implements Agent {
         : undefined;
     delete meta[TURN_SKILL_LEASE_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const persistSessionReasoning =
+      meta[PERSIST_SESSION_REASONING_META_KEY] === true;
+    delete meta[PERSIST_SESSION_REASONING_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     const suppliedModeBeforeStart =
       meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
@@ -7695,6 +7770,18 @@ class QwenAgent implements Agent {
           invocationContext,
           call.controller.signal,
           modelPrompt,
+          undefined,
+          persistSessionReasoning
+            ? async (effort) => {
+                const response = await this.setSessionConfigOption({
+                  sessionId,
+                  configId: 'reasoning_effort',
+                  value: effort,
+                  _meta: { [PERSIST_SESSION_REASONING_META_KEY]: true },
+                });
+                return response.configOptions;
+              }
+            : undefined,
         );
       if (!skillLeaseKey) return await execute();
       const lease = this.turnSkillLeases.claim(sessionId, skillLeaseKey);
@@ -18573,6 +18660,12 @@ class QwenAgent implements Agent {
         }
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
+      }
+      if (
+        config.getSessionRestoreRuntime?.()?.recording?.sessionModel
+          ?.reasoningSelection !== undefined
+      ) {
+        session.restoreRecordedReasoningSelection();
       }
       options.beforeSessionPublish?.();
       options.primeSession?.(session);

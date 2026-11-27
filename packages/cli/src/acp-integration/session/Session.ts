@@ -511,6 +511,7 @@ import {
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import {
   recordDaemonSessionApprovalMode,
   recordDaemonSessionApprovalModeFromConfig,
@@ -2372,6 +2373,10 @@ function isCallerCausedModelRefusal(error: Error): boolean {
  * - PlanEmitter for todo/plan updates
  * - SubAgentTracker for tracking sub-agent tool calls
  */
+type SetSessionReasoningEffort = (
+  effort: ReasoningEffort,
+) => Promise<SessionConfigOption[]>;
+
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
@@ -2695,6 +2700,7 @@ export class Session implements SessionContext {
   /** The end of the session's Mods, which `dispose` starts. */
   modsClosed?: Promise<void>;
   private sessionReasoningSelection?: ReasoningSelection;
+  private sessionReasoningSelectionSaved = false;
   private readonly restoredHistoryGaps?: HistoryGap[];
   private historySnapshotBoundary?: { hash: string; prefixLength: number };
   /**
@@ -2739,7 +2745,15 @@ export class Session implements SessionContext {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
     // Config releases the restore projection after this Session is created.
-    this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
+    const restoredRuntime = config.getSessionRestoreRuntime?.();
+    this.restoredHistoryGaps = restoredRuntime?.historyGaps;
+    const recordedSelection = parseReasoningSelection(
+      restoredRuntime?.recording?.sessionModel?.reasoningSelection,
+    );
+    this.setSessionReasoningSelection(
+      recordedSelection,
+      recordedSelection !== undefined,
+    );
     this.workflowHistory = [...workflowHistory];
     this.requiresManagedConversationBinding =
       isReservedStandaloneSessionSourceType(
@@ -5976,6 +5990,7 @@ export class Session implements SessionContext {
     admissionCancellation?: AbortSignal,
     modelPrompt?: string,
     scheduledGoalTurn?: AcpGoalTurn,
+    setSessionReasoningEffort?: SetSessionReasoningEffort,
   ): Promise<PromptResponse> {
     if (
       invocationContext !== undefined &&
@@ -6043,6 +6058,7 @@ export class Session implements SessionContext {
         scheduledGoalTurn,
         turnRecording,
         channelTask,
+        setSessionReasoningEffort,
       );
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
@@ -6207,6 +6223,7 @@ export class Session implements SessionContext {
     scheduledGoalTurn: AcpGoalTurn | undefined,
     turnRecording: InFlightTurnRecording | null,
     channelTask?: ChannelTaskResponseCapture,
+    setSessionReasoningEffort?: SetSessionReasoningEffort,
   ): Promise<PromptResponse> {
     this.assertHistoryContextAvailable();
     if (this.closing) {
@@ -6535,6 +6552,7 @@ export class Session implements SessionContext {
         !channelPromptTurn && goalTurn === undefined,
         goalTurn,
         channelPromptTurn,
+        setSessionReasoningEffort,
       );
       let branchPoint: BranchPoint | undefined;
       if (recording && branchCheckpointCursor) {
@@ -7002,6 +7020,7 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
+    setSessionReasoningEffort?: SetSessionReasoningEffort,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -7044,6 +7063,7 @@ export class Session implements SessionContext {
                 rejectOnLoopDetected,
                 goalTurn,
                 channelTurn,
+                setSessionReasoningEffort,
               );
             } finally {
               await this.#keepUnsentEarlyMidTurnInput(pendingSend.signal);
@@ -7147,6 +7167,7 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
+    setSessionReasoningEffort?: SetSessionReasoningEffort,
   ): Promise<PromptResponse> {
     let managedMemoryRecallStarted = false;
     let strippedRetryEntries: Content[] = [];
@@ -7511,6 +7532,8 @@ export class Session implements SessionContext {
               parts = continuationParts!;
             } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
+              const previousGeneration =
+                this.config.getContentGeneratorConfig?.();
               const slashCommandResult = await handleSlashCommand(
                 inputText,
                 pendingSend,
@@ -7520,6 +7543,18 @@ export class Session implements SessionContext {
                   // `/clear` swaps in a new Goal runtime under this
                   // long-lived Session; without this the goal-state
                   // subscription stays on the disposed instance.
+                  ...(setSessionReasoningEffort
+                    ? {
+                        setReasoningEffort: async (effort) => {
+                          const configOptions =
+                            await setSessionReasoningEffort(effort);
+                          await this.sendUpdate({
+                            sessionUpdate: 'config_option_update',
+                            configOptions,
+                          });
+                        },
+                      }
+                    : {}),
                   startNewSession: () => {
                     this.mods?.invalidateTools();
                     this.rebindGoalRuntimeForNewSession();
@@ -7542,6 +7577,11 @@ export class Session implements SessionContext {
               );
               // `/clear` gave the Config a new session id.
               await this.mods?.syncSession();
+              if (
+                previousGeneration !== this.config.getContentGeneratorConfig?.()
+              ) {
+                this.restoreRecordedReasoningSelection();
+              }
 
               if (
                 deferSlashRecording &&
@@ -15801,8 +15841,18 @@ export class Session implements SessionContext {
 
   setSessionReasoningSelection(
     selection: ReasoningSelection | undefined,
+    saved = false,
   ): void {
     this.sessionReasoningSelection = selection;
+    this.sessionReasoningSelectionSaved = saved;
+  }
+
+  restoreRecordedReasoningSelection(): void {
+    if (this.sessionReasoningSelectionSaved) {
+      this.reconcileReasoningSelection(this.config.getModel(), {
+        persist: false,
+      });
+    }
   }
 
   getSessionReasoningSelection(): ReasoningSelection | undefined {
@@ -15900,6 +15950,7 @@ export class Session implements SessionContext {
     const appliesSessionDefault =
       hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
     if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      if (this.sessionReasoningSelectionSaved) return;
       this.sessionReasoningSelection = undefined;
       if (frozenPreferences) return;
       hasSessionSelection = false;
@@ -15939,10 +15990,15 @@ export class Session implements SessionContext {
       (supported || appliesSessionDefault) && selection !== undefined
         ? selection
         : REASONING_EFFORT_DEFAULT;
+    const defaultReasoning = this.getDefaultReasoningConfig();
     applyReasoningSelection(
       this.config,
       effectiveSelection,
-      this.getDefaultReasoningConfig(),
+      this.sessionReasoningSelectionSaved &&
+        appliesSessionDefault &&
+        generation?.reasoning === false
+        ? defaultReasoning || {}
+        : defaultReasoning,
     );
   }
 

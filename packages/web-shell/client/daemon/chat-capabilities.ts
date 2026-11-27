@@ -218,6 +218,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_worktree_restore_v1: [],
   session_worktree_branch_v1: [],
   session_worktree_handoff_v1: [],
+  session_reasoning_persistence: [],
   workspace_qualified_acp: [],
   client_mcp_over_ws: [],
   cdp_tunnel_over_ws: [],

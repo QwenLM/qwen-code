@@ -27,6 +27,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { flushSync } from 'react-dom';
+import { StandaloneContext } from '../../config/standalone.js';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonClient,
@@ -1030,6 +1031,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     children,
   } = props;
   const workspace = useOptionalDaemonWorkspace();
+  const nativeWebShell = useContext(StandaloneContext);
   const availability = useDaemonAvailability();
   const availabilityController = useDaemonAvailabilityController();
   const availabilityRef = useRef(availabilityController);
@@ -5677,6 +5679,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     () =>
       createDaemonSessionActions({
         getClient: () => workspaceClientRef.current,
+        nativeWebShell,
         getPromptStatus: () => promptStatusRef.current,
         store,
         sessionRef,
@@ -5925,6 +5928,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       invalidateGeneratedUi,
       clientId,
       legacyClientIdDependency,
+      nativeWebShell,
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,

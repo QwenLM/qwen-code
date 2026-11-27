@@ -163,6 +163,7 @@ describe('DaemonSessionClient', () => {
   it.each([
     ['workflow_mode', 'invalid'],
     ['workflow_mode', 'on', { persist: true }],
+    ['workflow_mode', 'on', { persistToSession: true }],
   ])(
     'rejects invalid runtime mode arguments through its Promise: %j',
     async (...args) => {
@@ -212,6 +213,54 @@ describe('DaemonSessionClient', () => {
     });
     expect(calls[0]!.headers['x-qwen-client-id']).toBe('workflow-client');
   });
+
+  it.each([true, false])(
+    'uses REST on an ACP client for session reasoning and preserves persisted=%s',
+    async (persisted) => {
+      const response = { configOptions: [], persisted };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const acpFetch = vi.fn();
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          transport: {
+            type: 'acp-http',
+            supportsReplay: false,
+            connected: true,
+            fetch: acpFetch,
+            async *subscribeEvents() {},
+            dispose() {},
+          },
+        }),
+        session: {
+          sessionId: 'recorded-session',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'session-client',
+        },
+      });
+
+      await expect(
+        session.setConfigOption('reasoning_effort', 'none', {
+          persistToSession: true,
+        }),
+      ).resolves.toEqual(response);
+      expect(acpFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toBe(
+        'http://daemon/session/recorded-session/config-option',
+      );
+      expect(calls[0]!.headers['x-qwen-client-id']).toBe('session-client');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        configId: 'reasoning_effort',
+        value: 'none',
+        persistToSession: true,
+      });
+    },
+  );
 
   it('binds continuation admission to the session without waiting for SSE', async () => {
     const body = {

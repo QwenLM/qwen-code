@@ -56,7 +56,8 @@ export const effortCommand: SlashCommand = {
     const args = context.invocation?.args?.trim() || actionArgs.trim();
     const availableTiers = getReasoningEffortsForConfig(config);
 
-    if (availableTiers.length === 0) {
+    const setSessionEffort = context.session.setReasoningEffort;
+    if (availableTiers.length === 0 && (!args || !setSessionEffort)) {
       return {
         type: 'message',
         messageType: 'info',
@@ -90,31 +91,33 @@ export const effortCommand: SlashCommand = {
     }
 
     const tier = normalizeReasoningEffort(args);
-    if (!tier || !availableTiers.includes(tier)) {
+    if (!tier || (!setSessionEffort && !availableTiers.includes(tier))) {
       return {
         type: 'message',
         messageType: 'error',
         content: t(
           'Unknown reasoning effort "{{value}}". Choose one of: {{tiers}}.',
-          { value: args, tiers: availableTierList },
+          { value: args, tiers: availableTierList || TIER_LIST },
         ),
       };
     }
 
-    if (!settings) {
+    if (setSessionEffort) {
+      await setSessionEffort(tier);
+    } else if (!settings) {
       return {
         type: 'message',
         messageType: 'error',
         content: t('Settings service not available.'),
       };
+    } else {
+      applyModelReasoningEffort(
+        config,
+        settings,
+        tier,
+        context.executionPolicy?.persistModelSelection !== false,
+      );
     }
-
-    applyModelReasoningEffort(
-      config,
-      settings,
-      tier,
-      context.executionPolicy?.persistModelSelection !== false,
-    );
 
     return {
       type: 'message',
