@@ -146,13 +146,21 @@ describe('qwen pr review runner routing', () => {
     const review = parse(workflow).jobs['review-pr'].steps.find(
       (step) => step.id === 'review',
     );
+    // The token expression must invert the condition so the fork lane
+    // resolves to the empty string (R1-2): `cond && '' || PAT` falls through
+    // to the PAT because '' is falsy in GitHub expressions.
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
-      "'' || secrets.CI_BOT_PAT",
+      "!= 'true' && secrets.CI_BOT_PAT || ''",
     );
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain('secrets.CI_BOT_PAT');
     expect(review.env.SECURITY_GITHUB_TOKEN).toContain(
       'needs.review-trust.outputs.untrusted',
     );
+    // The fork lane reads via the read-only job token, not the PAT (R1-12):
+    // the hosts.yml it writes must carry the resolved token, not a sentinel.
+    expect(review.run).not.toContain('review-untrusted-no-token');
+    expect(review.run).toContain('oauth_token: %s');
+    expect(review.env.JOB_GH_TOKEN).toBe('${{ github.token }}');
     expect(review.run).toContain(
       '"${QWEN_CI_REAL_RM:-rm}" -f .qwen/tmp/qwen-skill-args-review.txt',
     );
@@ -167,7 +175,6 @@ describe('qwen pr review runner routing', () => {
     expect(invocation).toContain('-u SECURITY_GITHUB_TOKEN -u GITHUB_TOKEN');
     expect(review.run).toContain('/usr/bin/docker run --detach');
     expect(review.run).toContain('if [ "$FORK_LIFECYCLE_REVIEW" = \'true\' ]');
-    expect(review.run).toContain('review-untrusted-no-token');
 
     const publisher = parse(workflow).jobs['publish-review'];
     expect(publisher.uses).toBeUndefined();

@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 const repository = process.env.GITHUB_REPOSITORY;
@@ -15,7 +21,10 @@ if (
 ) {
   throw new Error('review publisher: invalid trusted target');
 }
-const inputRoot = realpathSync(inputPath);
+// A failed review stages no artifact, so the download may be skipped
+// (continue-on-error) and the path may not exist; only the completed path
+// reads from it.
+const inputRoot = existsSync(inputPath) ? realpathSync(inputPath) : inputPath;
 const gh = (args, input) => {
   const out = execFileSync('gh', args, {
     encoding: 'utf8',
@@ -43,7 +52,13 @@ if (current.headRefOid !== expectedHead && process.env.ALLOW_STALE !== 'true') {
 }
 const docsMarker = '<!-- qwen-review docs-only-medium -->';
 function comment(body) {
-  gh(['pr', 'comment', String(pr), '--repo', repository, '--body', body]);
+  // `gh pr comment` prints the created URL, not JSON — send it through the
+  // non-parsing path so a posted comment does not crash the publisher.
+  execFileSync(
+    'gh',
+    ['pr', 'comment', String(pr), '--repo', repository, '--body', body],
+    { stdio: 'inherit' },
+  );
 }
 function upsert(body, updateOnly = false) {
   const path = join(process.env.RUNNER_TEMP || '/tmp', 'qwen-review-relay.md');
@@ -75,7 +90,11 @@ if (
       : `${docsMarker}\n\n📄 ~~Docs-only change~~ **(superseded)** — this badge no longer reflects the current review state of this PR. See the latest review activity.`,
     true,
   );
-  if (process.env.REVIEW_FAILED !== 'true') process.exit(0);
+  // The badge update is a side effect; a completed non-docs review must still
+  // reach the submit below. Only a docs-only medium review (which never
+  // publishes a review body) exits here.
+  if (process.env.REVIEW_FAILED !== 'true' && process.env.DOCS_ONLY === 'true')
+    process.exit(0);
 }
 if (process.env.REVIEW_FAILED === 'true') {
   if (current.headRefOid !== expectedHead) {

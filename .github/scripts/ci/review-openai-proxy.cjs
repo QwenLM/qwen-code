@@ -1,9 +1,27 @@
 const http = require('node:http');
 const { Readable } = require('node:stream');
+const { timingSafeEqual } = require('node:crypto');
 
 const base = new URL(process.env.UPSTREAM_BASE_URL);
 const basePath = base.pathname.replace(/\/+$/, '');
 const token = process.env.PROXY_TOKEN;
+const upstreamKey = process.env.UPSTREAM_API_KEY;
+if (!token || !upstreamKey) {
+  console.error(
+    'review-openai-proxy: PROXY_TOKEN and UPSTREAM_API_KEY are required',
+  );
+  process.exit(1);
+}
+const tokenBuf = Buffer.from(String(token));
+function bearerMatches(header) {
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+  const presented = Buffer.from(header.slice('Bearer '.length));
+  return (
+    presented.length === token.length &&
+    presented.length > 0 &&
+    timingSafeEqual(presented, tokenBuf)
+  );
+}
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY) {
   try {
     // npm is bundled in the proxy image; its pinned Undici supplies Node
@@ -36,7 +54,7 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
-  if (req.headers.authorization !== `Bearer ${token}`) {
+  if (!bearerMatches(req.headers.authorization)) {
     res.writeHead(401);
     res.end();
     return;
@@ -44,7 +62,7 @@ const server = http.createServer(async (req, res) => {
   const headers = new Headers(req.headers);
   headers.delete('host');
   headers.delete('content-length');
-  headers.set('authorization', `Bearer ${process.env.UPSTREAM_API_KEY}`);
+  headers.set('authorization', `Bearer ${upstreamKey}`);
   const controller = new AbortController();
   let timer = setTimeout(() => controller.abort(), 600_000);
   try {
@@ -74,7 +92,10 @@ const server = http.createServer(async (req, res) => {
       res.end();
       return;
     }
+    // Re-arm after the headers so an upstream that flushes headers then stalls
+    // before the first byte still trips the budget (R1-16).
     clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), 600_000);
     const body = Readable.fromWeb(upstream.body);
     body.on('data', () => {
       clearTimeout(timer);

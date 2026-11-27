@@ -1714,8 +1714,9 @@ function submit(
 
   if (commentOnly) {
     if (!args.userAuthorized || aoneWrite) {
-      throw new Error(
+      refuse(
         'COMMENT-only publication requires GitHub and its trusted publisher.',
+        'comment-only-requires-github',
       );
     }
     event = 'COMMENT';

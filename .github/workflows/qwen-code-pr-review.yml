@@ -522,6 +522,7 @@ jobs:
     # including the fromJSON newline/CR pair, explained there.
     if: |-
       !cancelled() &&
+      needs.review-trust.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
       (github.event_name == 'pull_request_target' &&
@@ -569,8 +570,8 @@ jobs:
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && needs.review-trust.outputs.untrusted != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
-      pull-requests: "${{ needs.review-trust.outputs.untrusted != 'true' || 'read' }}"
-      issues: "${{ needs.review-trust.outputs.untrusted != 'true' || 'read' }}"
+      pull-requests: "${{ needs.review-trust.outputs.untrusted != 'true' && 'write' || 'read' }}"
+      issues: "${{ needs.review-trust.outputs.untrusted != 'true' && 'write' || 'read' }}"
     outputs:
       pr_number: '${{ steps.context.outputs.pr_number }}'
       expected_head_sha: '${{ steps.review.outputs.expected_head_sha }}'
@@ -583,7 +584,7 @@ jobs:
       failure_reason: '${{ steps.review.outputs.failure_reason }}'
       failure_kind: '${{ steps.review.outputs.failure_kind }}'
       effective_timeout_minutes: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'
-      salvage_post: "${{ env.QWEN_REVIEW_SALVAGE_POST == 'true' && steps.review.outputs.salvaged == 'true' }}"
+      salvage_post: "${{ steps.review.outputs.salvaged == 'true' }}"
       salvage_moved_to: '${{ steps.review.outputs.salvage_moved_to }}'
       completion_line: '${{ steps.review.outputs.completion_line }}'
     steps:
@@ -1284,9 +1285,10 @@ jobs:
         if: "steps.context.outputs.should_run == 'true'"
         env:
           UNTRUSTED_PR: '${{ needs.review-trust.outputs.untrusted }}'
-          SECURITY_GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted == 'true' && '' || secrets.CI_BOT_PAT }}"
+          SECURITY_GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted == 'true' && '' || secrets.CI_BOT_PAT }}"
+          GITHUB_TOKEN: "${{ needs.review-trust.outputs.untrusted != 'true' && secrets.CI_BOT_PAT || '' }}"
+          JOB_GH_TOKEN: '${{ github.token }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           # Review model, plus the canary split that sends a PR-number slice
           # of reviews to a second model. All three arrive as variables so a
@@ -1474,7 +1476,21 @@ jobs:
           if ! command -v qwen >/dev/null 2>&1; then
             fail "qwen CLI is required on the review runner."
           fi
+          # The trusted lane publishes from this same step, so GH_TOKEN must be
+          # exported for its own gh calls; the fork lane strips it again at the
+          # qwen invocation via `env -u`.
           GH_TOKEN="$SECURITY_GITHUB_TOKEN"
+          if [ "$UNTRUSTED_PR" != 'true' ] && [ -z "${GH_TOKEN:-}" ]; then
+            fail "CI_BOT_PAT is required on the trusted review lane."
+          fi
+          # Fork lane: gh needs a working read credential for its PR state/head
+          # reads. The job token is safe here because the untrusted lane's job
+          # permissions are read-only; a sentinel credential makes every read
+          # fail with Bad credentials (R1-12).
+          if [ "$UNTRUSTED_PR" = 'true' ]; then
+            GH_TOKEN="$JOB_GH_TOKEN"
+          fi
+          export GH_TOKEN
           readonly SECURITY_GITHUB_TOKEN GH_TOKEN
 
           # shellcheck disable=SC2016
@@ -1739,11 +1755,14 @@ jobs:
           if [ "$UNTRUSTED_PR" = 'true' ]; then
             # Keep fork reads public and deterministic: an empty GH_TOKEN would
             # otherwise let gh fall back to whatever hosts.yml the runner HOME
-            # happens to carry. Give it a private config with no credential.
+            # happens to carry. Give it a private config carrying the read-only
+            # job token — not a sentinel (which fails every read as Bad
+            # credentials), and not the bot PAT (which the fork lane must never
+            # hold).
             export GH_CONFIG_DIR="${PROXY_BIN}/public-gh-config"
             mkdir -p "$GH_CONFIG_DIR"
             printf 'hosts:\n  github.com:\n    oauth_token: %s\n' \
-              "review-untrusted-no-token" > "$GH_CONFIG_DIR/hosts.yml"
+              "$GH_TOKEN" > "$GH_CONFIG_DIR/hosts.yml"
             chmod 600 "$GH_CONFIG_DIR/hosts.yml"
           fi
 
@@ -2071,7 +2090,9 @@ jobs:
             UPSTREAM_OPENAI_API_KEY="$OPENAI_API_KEY"
             unset OPENAI_API_KEY
             PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN UPSTREAM_OPENAI_API_KEY
             OPENAI_PROXY_CONTAINER="qwen-review-openai-${GITHUB_RUN_ID}-${RANDOM}"
+            export OPENAI_PROXY_CONTAINER
             /usr/bin/docker run --detach --rm --name "$OPENAI_PROXY_CONTAINER" \
               --publish "127.0.0.1::8080" \
               --env PROXY_TOKEN --env UPSTREAM_API_KEY="$UPSTREAM_OPENAI_API_KEY" \
@@ -3689,6 +3710,10 @@ jobs:
           ref: '${{ github.sha }}'
           persist-credentials: false
       - name: 'Download the untrusted review artifact'
+        # A failed review stages nothing (the upload side is best-effort), so
+        # the artifact may legitimately not exist; the failure branch must
+        # still post its comment.
+        continue-on-error: true
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'qwen-review-pr-${{ needs.review-pr.outputs.pr_number || needs.review-trust.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
