@@ -9,3 +9,10 @@ Use an external Files provider, an authorized operator and an owner with a real 
 5. Release the remaining Session and request retirement of the original storage binding with an unacknowledged Files operation. The Worker must withhold its drained-stop proof. Acknowledge that operation, retry the same retirement and verify a stable receipt for the original binding and generation. Remove the test resources with their owning operator.
 
 The SQL-backed creation and placement checks run in `ExternalWorkspaceMaterializationTest` and its MySQL subclass. The provider, Worker and Broker checks run in their respective focused suites. The full journey requires a deployment able to verify the real storage mount.
+
+## Independent Workers with the same mount path
+
+1. In one tenant register two provider-owned backings under different Workspace aliases. Configure the same container-local mount root on both Workers.
+2. Warm the first Workspace and hold its original binding in drain awaiting the outstanding operation in step 5 above. Keep its binding ID and generation.
+3. Warm the second Workspace. Verify that it gets its own binding and Worker while the first drain is still pending. A new generation for the first Workspace must remain fenced.
+4. Settle the first operation. Retire each owned Worker and verify its own stop receipt. The H2 and MySQL placement tests also cover an unregistered alias, which cannot use the shared path to bypass recovery.

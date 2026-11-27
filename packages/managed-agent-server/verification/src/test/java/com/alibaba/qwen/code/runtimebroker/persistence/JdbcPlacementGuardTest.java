@@ -1,5 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.EphemeralWorkspaceRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -14,6 +17,8 @@ import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 import javax.sql.DataSource;
 
@@ -30,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcPlacementGuardTest {
     @Test
@@ -160,6 +166,47 @@ class JdbcPlacementGuardTest {
             fixture.nextId = "candidate-" + index;
             assertAdmissionMatches(fixture, history, candidates.get(index));
         }
+    }
+
+    @Test
+    void commonMountPathDoesNotFenceIndependentRegisteredExternalStorage() throws Exception {
+        verifyExternalPlacement(Fixture.h2());
+    }
+
+    static void verifyExternalPlacement(DataSource source) throws Exception {
+        Fixture fixture = new Fixture(source);
+        var jdbc = new JdbcTemplate(source);
+        var registry = new ExternalStorageRegistrationStore(jdbc, new DataSourceTransactionManager(source));
+        String mountRoot = "/mnt/workspace/w";
+        for (String alias : List.of("first", "second")) {
+            registry.registerExternalStorage("tenant", alias, new ExternalStorageRegistration(
+                    new ExternalStorageRegistration.ExternalStorageIdentity("host", "backing-" + alias, 1),
+                    new ExternalStorageRegistration.StorageAlias(alias, "/" + alias, mountRoot, "workspace")));
+        }
+        registry.registerEphemeralWorkspace("tenant", "ephemeral", new EphemeralWorkspaceRegistration(
+                "host", "ephemeral", mountRoot, 1));
+        fixture.history(externalRequest("first", "1", mountRoot), RuntimeBindingRecord.State.DRAINING, true, true, 1);
+        fixture.decrypts.set(0);
+
+        fixture.assertBlocked(externalRequest("first", "2", mountRoot));
+        assertEquals("alias_conflict", assertThrows(RuntimeBrokerException.class,
+                () -> registry.registerExternalStorage("tenant", "rename-first", new ExternalStorageRegistration(
+                        new ExternalStorageRegistration.ExternalStorageIdentity("host", "backing-first", 2),
+                        new ExternalStorageRegistration.StorageAlias("renamed", "/renamed", mountRoot, "workspace")))).getCode());
+        fixture.bindings.requestStorageFence("tenant", "first", "retire-first");
+        fixture.assertBlocked(externalRequest("unregistered", "1", mountRoot));
+        fixture.assertBlocked(request("tenant", "ephemeral", mountRoot, "ephemeral", "external-workspace"));
+        fixture.assertBlocked(request("tenant", "second", mountRoot, "second", "local-process"));
+        assertNotNull(fixture.bindings.findOrCreate(externalRequest("second", "1", mountRoot)));
+        assertEquals(0, fixture.decrypts.get());
+        assertTrue(fixture.bindings.isStorageFenced("tenant", "first", "retire-first"));
+        assertEquals("DRAINING", jdbc.queryForObject(
+                "SELECT binding_state FROM ma_runtime_binding WHERE binding_id = 'history'", String.class));
+    }
+
+    private static RuntimeProvisionRequest externalRequest(String alias, String generation, String cwd) {
+        var scope = new RuntimeScope("tenant", alias, generation, cwd, "sha256:" + "a".repeat(64), "workspace");
+        return new RuntimeProvisionRequest(scope, null, "external-workspace", alias);
     }
 
     private static RuntimeProvisionRequest request(String tenant, String workspace, String cwd,
