@@ -38,7 +38,10 @@ import {
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
 } from './constants.js';
-import { isDeepInfraModel } from './modelConfigResolver.js';
+import {
+  isDeepInfraEndpoint,
+  isDeepInfraModel,
+} from './modelConfigResolver.js';
 
 export {
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -1016,6 +1019,7 @@ export class ModelsConfig {
       baseUrl: model.baseUrl,
       envKey: model.envKey,
     });
+    const isTargetDeepInfraEndpoint = isDeepInfraEndpoint(model.baseUrl);
 
     // Resolve service_tier first so timeout resolution can inspect the effective tier
     if (gc.service_tier !== undefined) {
@@ -1095,7 +1099,7 @@ export class ModelsConfig {
           if (isUserConfigured) {
             // Retain explicit user configuration
           } else if (
-            isTargetDeepInfra &&
+            isTargetDeepInfraEndpoint &&
             this._generationConfig.service_tier === 'flex'
           ) {
             this._generationConfig.timeout = 600000;
