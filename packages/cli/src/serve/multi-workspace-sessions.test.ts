@@ -5409,9 +5409,10 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('propagates HTTP disconnect AbortSignal to readPage, readTurnIndexPage, readTurnHooksPage, and tool-calls routes (R1-7 & R1-8)', async () => {
+  it('propagates HTTP disconnect AbortSignal to readPage, readTurnIndexPage, readTurnHooksPage, and tool-calls routes (R1-7, R1-8, R2-1)', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440198';
+      const primarySessionId = '550e8400-e29b-41d4-a716-446655440199';
       await writeStoredSession({
         sessionId,
         cwd: SECONDARY_CWD,
@@ -5419,7 +5420,26 @@ describe('multi-workspace session dispatch', () => {
         prompt: 'abort propagation target',
         mtime: new Date('2026-07-08T00:00:00.000Z'),
       });
+      await writeStoredSession({
+        sessionId: primarySessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary abort propagation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
       const cases = [
+        {
+          url: `/session/${primarySessionId}/transcript?limit=5`,
+          method: 'readPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turn-index`,
+          method: 'readTurnIndexPage' as const,
+        },
+        {
+          url: `/session/${primarySessionId}/turns/u1/hooks`,
+          method: 'readTurnHooksPage' as const,
+        },
         {
           url: `/workspaces/secondary-id/session/${sessionId}/transcript?limit=5`,
           method: 'readPage' as const,

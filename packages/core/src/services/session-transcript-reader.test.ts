@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -45,6 +46,7 @@ const {
     count: 0,
     pause: null as null | Promise<void>,
     titleInfo: null as null | { title?: string; source?: 'auto' | 'manual' },
+    lastMaxBodyBytes: undefined as number | undefined,
   },
 }));
 
@@ -61,6 +63,7 @@ vi.mock(
         options: Parameters<typeof actual.readManagedSessionRecordsAndTitle>[0],
       ) => {
         projectionReads.count++;
+        projectionReads.lastMaxBodyBytes = options.maxBodyBytes;
         if (projectionReads.pause) {
           const pause = projectionReads.pause;
           projectionReads.pause = null;
@@ -347,6 +350,7 @@ describe('SessionTranscriptReader', () => {
     statFault.beforeCall = null;
     projectionReads.pause = null;
     projectionReads.titleInfo = null;
+    projectionReads.lastMaxBodyBytes = undefined;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -7288,7 +7292,7 @@ describe('SessionTranscriptReader', () => {
         }),
       ]);
 
-      // In-place rewrite with different prefix + extra newline on the same inode must fail tailHex check and fall back to lightweight_scan.
+      // In-place rewrite with different prefix + extra newline on the same inode must fail prefixSha256 check and fall back to lightweight_scan.
       const prevSize = (await fs.stat(file)).size;
       const rewritten = {
         ...record('u-rewritten', null, 'rewritten prompt'),
@@ -7593,6 +7597,9 @@ describe('SessionTranscriptReader', () => {
 
       let maxActive = 0;
       let maxQueued = 0;
+      let queuedBeforeAbort = -1;
+      let queuedImmediatelyAfterAbort = -1;
+      let activeImmediatelyAfterAbort = -1;
       let activeAtQueuedReject = -1;
       let queuedAtQueuedReject = -1;
       const queuedAbort = new AbortController();
@@ -7603,7 +7610,11 @@ describe('SessionTranscriptReader', () => {
         maxQueued = Math.max(maxQueued, stats.queued);
         if (!abortedQueued && stats.active === 2 && stats.queued >= 3) {
           abortedQueued = true;
+          queuedBeforeAbort = stats.queued;
           queuedAbort.abort(new DOMException('queued abort', 'AbortError'));
+          const afterAbort = getSessionTranscriptBuildSemaphoreStatsForTest();
+          activeImmediatelyAfterAbort = afterAbort.active;
+          queuedImmediatelyAfterAbort = afterAbort.queued;
         }
       });
 
@@ -7628,8 +7639,11 @@ describe('SessionTranscriptReader', () => {
       expect(maxActive).toBeLessThanOrEqual(2);
       expect(maxActive).toBe(2);
       expect(maxQueued).toBeGreaterThanOrEqual(1);
-      // Queued waiter #5 must reject immediately via its abort listener while
-      // both active slots are still occupied and earlier queued waiters remain.
+      // Aborting queued waiter #5 must synchronously remove it from the
+      // semaphore queue (dropping queued by 1 while active stays at 2),
+      // killing any mutation that omits TranscriptBuildSemaphore's abort handler.
+      expect(activeImmediatelyAfterAbort).toBe(2);
+      expect(queuedImmediatelyAfterAbort).toBe(queuedBeforeAbort - 1);
       expect(activeAtQueuedReject).toBe(2);
       expect(queuedAtQueuedReject).toBeGreaterThanOrEqual(1);
       expect(getSessionTranscriptBuildSemaphoreStatsForTest()).toEqual({
@@ -8375,9 +8389,25 @@ describe('SessionTranscriptReader', () => {
       resumedRecorder.recordUserMessage([{ text: 'resumed prompt #2101' }]);
       await resumedRecorder.flush();
 
+      const readLastRecordedUserTimestamp = async (
+        transcriptPath: string,
+      ): Promise<string> => {
+        const lines = (await fs.readFile(transcriptPath, 'utf8'))
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as ChatRecord);
+        const lastUser = [...lines]
+          .reverse()
+          .find((rec) => rec.type === 'user');
+        expect(lastUser?.timestamp).toBeDefined();
+        return lastUser!.timestamp;
+      };
+      const resumedPromptTs = await readLastRecordedUserTimestamp(file);
       const afterResumeSidecar = JSON.parse(
         await fs.readFile(sidecarPath, 'utf8'),
       );
+      expect(afterResumeSidecar.lastUserPromptAt).toBe(resumedPromptTs);
       expect(afterResumeSidecar.prefixUuidBloom?.count).toBe(2101);
       expect(afterResumeSidecar.prefixSha256).toHaveLength(64);
       const sizeAfterPrompt = (await fs.stat(file)).size;
@@ -8394,7 +8424,7 @@ describe('SessionTranscriptReader', () => {
         tailScans.push(e),
       );
       expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
-        afterResumeSidecar.lastUserPromptAt,
+        resumedPromptTs,
       );
       expect(tailScans).toEqual([
         expect.objectContaining({
@@ -8412,9 +8442,11 @@ describe('SessionTranscriptReader', () => {
       });
       resumedRecorder.recordUserMessage([{ text: 'post-rewind prompt' }]);
       await resumedRecorder.flush();
+      const postRewindPromptTs = await readLastRecordedUserTimestamp(file);
       const postRewindSidecar = JSON.parse(
         await fs.readFile(sidecarPath, 'utf8'),
       );
+      expect(postRewindSidecar.lastUserPromptAt).toBe(postRewindPromptTs);
       expect(postRewindSidecar.prefixUuidBloom).toBeDefined();
       expect(postRewindSidecar.prefixSha256).toHaveLength(64);
       const sizePostRewindPrompt = (await fs.stat(file)).size;
@@ -8430,7 +8462,7 @@ describe('SessionTranscriptReader', () => {
         postRewindScans.push(e),
       );
       expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
-        postRewindSidecar.lastUserPromptAt,
+        postRewindPromptTs,
       );
       expect(postRewindScans).toEqual([
         expect.objectContaining({
@@ -8512,9 +8544,11 @@ describe('SessionTranscriptReader', () => {
         { text: 'prompt triggering bloom resize' },
       ]);
       await satRecorder.flush();
+      const satPromptTs = await readLastRecordedUserTimestamp(satFile);
       const resizedSidecar = JSON.parse(
         await fs.readFile(satSidecarPath, 'utf8'),
       );
+      expect(resizedSidecar.lastUserPromptAt).toBe(satPromptTs);
       expect(resizedSidecar.prefixUuidBloom).toBeDefined();
       expect(
         Buffer.from(resizedSidecar.prefixUuidBloom.bits, 'base64').length,
@@ -8532,9 +8566,7 @@ describe('SessionTranscriptReader', () => {
       setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
         satTailScans.push(e),
       );
-      expect(await newReader().getLastUserPromptAt(satSid)).toBe(
-        resizedSidecar.lastUserPromptAt,
-      );
+      expect(await newReader().getLastUserPromptAt(satSid)).toBe(satPromptTs);
       expect(satTailScans).toEqual([
         expect.objectContaining({
           filePath: satFile,
@@ -8974,6 +9006,544 @@ describe('SessionTranscriptReader', () => {
           signal: aborted.signal,
         }),
       ).rejects.toMatchObject({ name: 'AbortError' });
+
+      // R2-10: readManagedPromptTime forwards maxBodyBytes = getMaxAllReplayBytes()
+      // and rejects when a Managed body exceeds the lowered all-replay budget.
+      expect(projectionReads.lastMaxBodyBytes).toBe(
+        SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES,
+      );
+      await fs.rm(
+        sessionPromptTimeSidecarPath(path.dirname(managedFile), managedSid),
+        { force: true },
+      );
+      resetSessionTranscriptIndexCacheForTest();
+      setSessionTranscriptMaxAllReplayBytesForTest(64);
+      projectionReads.lastMaxBodyBytes = undefined;
+      await expect(
+        newReader().getLastUserPromptAt(managedSid),
+      ).resolves.toBeUndefined();
+      expect(projectionReads.lastMaxBodyBytes).toBe(64);
+    });
+
+    it('unifies chained and sibling custom_title/session_source re-anchors across scan, index_cache, and sidecar_tail (R1-15)', async () => {
+      // Case A: Chained trailing custom_title (ChatRecordingService.recordCustomTitle
+      // writes parentUuid = a1, updateActiveTail = true; subsequent u2 chains onto title).
+      const sidA = '880e8400-e29b-41d4-a716-446655440001';
+      const u1 = {
+        ...record('u-chain-1', null, 'first chained question'),
+        sessionId: sidA,
+        timestamp: '2026-04-01T00:00:01.000Z',
+      };
+      const a1 = {
+        ...record('a-chain-1', u1.uuid, 'first answer'),
+        sessionId: sidA,
+        type: 'assistant' as const,
+        timestamp: '2026-04-01T00:00:02.000Z',
+      };
+      const chainedTitle: ChatRecord = {
+        ...record('meta-chain-title', a1.uuid, ''),
+        sessionId: sidA,
+        type: 'system',
+        subtype: 'custom_title',
+        message: undefined,
+        systemPayload: {
+          customTitle: 'Chained Title',
+          titleSource: 'manual',
+        },
+        timestamp: '2026-04-01T00:00:03.000Z',
+      };
+      const fileA = await writeRecords([u1, a1, chainedTitle], sidA);
+      const sizeA1 = (await fs.stat(fileA)).size;
+      const sidecarA = sessionPromptTimeSidecarPath(path.dirname(fileA), sidA);
+
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sidA)).toBe(u1.timestamp);
+      const savedA = JSON.parse(await fs.readFile(sidecarA, 'utf8'));
+      expect(savedA.leafUuid).toBe(a1.uuid);
+      expect(savedA.anchorLeafUuid).toBe(chainedTitle.uuid);
+
+      // Next user prompt chained onto chainedTitle.uuid MUST extend via sidecar_tail
+      // and clear anchorLeafUuid once a regular conversation record lands.
+      const u2 = {
+        ...record('u-chain-2', chainedTitle.uuid, 'second chained question'),
+        sessionId: sidA,
+        timestamp: '2026-04-01T00:00:04.000Z',
+      };
+      await appendRecords(fileA, u2);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansA: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scansA.push(e));
+      expect(await newReader().getLastUserPromptAt(sidA)).toBe(u2.timestamp);
+      expect(scansA).toEqual([
+        expect.objectContaining({
+          filePath: fileA,
+          mode: 'sidecar_tail',
+          startOffset: sizeA1,
+        }),
+      ]);
+      const savedA2 = JSON.parse(await fs.readFile(sidecarA, 'utf8'));
+      expect(savedA2.leafUuid).toBe(u2.uuid);
+      expect(savedA2.anchorLeafUuid).toBeUndefined();
+
+      // Case A2: Sibling trailing custom_title (32 KiB re-anchor: updateActiveTail=false,
+      // subsequent conversation record parents directly on a1.uuid, NOT title.uuid).
+      const sidA2 = '880e8400-e29b-41d4-a716-446655440002';
+      const sU1 = { ...u1, sessionId: sidA2, uuid: 'u-sib-1' };
+      const sA1 = {
+        ...a1,
+        sessionId: sidA2,
+        uuid: 'a-sib-1',
+        parentUuid: sU1.uuid,
+      };
+      const sibTitle: ChatRecord = {
+        ...chainedTitle,
+        sessionId: sidA2,
+        uuid: 'meta-sib-title',
+        parentUuid: sA1.uuid,
+      };
+      const fileA2 = await writeRecords([sU1, sA1, sibTitle], sidA2);
+      const sizeA2 = (await fs.stat(fileA2)).size;
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sidA2)).toBe(sU1.timestamp);
+
+      const sU2 = {
+        ...record('u-sib-2', sA1.uuid, 'sibling follow-up'),
+        sessionId: sidA2,
+        timestamp: '2026-04-01T00:00:05.000Z',
+      };
+      await appendRecords(fileA2, sU2);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansA2: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scansA2.push(e));
+      expect(await newReader().getLastUserPromptAt(sidA2)).toBe(sU2.timestamp);
+      expect(scansA2).toEqual([
+        expect.objectContaining({
+          filePath: fileA2,
+          mode: 'sidecar_tail',
+          startOffset: sizeA2,
+        }),
+      ]);
+
+      // Case B: index_cache warm path produces identical leafUuid + anchorLeafUuid
+      // and supports subsequent chained AND sibling tail extensions.
+      const sidB = '880e8400-e29b-41d4-a716-446655440003';
+      const bU1 = { ...u1, sessionId: sidB, uuid: 'u-ic-1' };
+      const bA1 = {
+        ...a1,
+        sessionId: sidB,
+        uuid: 'a-ic-1',
+        parentUuid: bU1.uuid,
+      };
+      const bTitle: ChatRecord = {
+        ...chainedTitle,
+        sessionId: sidB,
+        uuid: 'meta-ic-title',
+        parentUuid: bA1.uuid,
+      };
+      const fileB = await writeRecords([bU1, bA1, bTitle], sidB);
+      const sizeB1 = (await fs.stat(fileB)).size;
+      const sidecarB = sessionPromptTimeSidecarPath(path.dirname(fileB), sidB);
+      resetSessionTranscriptIndexCacheForTest();
+      const readerB = newReader();
+      await readerB.readPage(sidB, { limit: 10 });
+      const scansBWarm: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansBWarm.push(e),
+      );
+      expect(await readerB.getLastUserPromptAt(sidB)).toBe(bU1.timestamp);
+      expect(scansBWarm).toEqual([
+        expect.objectContaining({ filePath: fileB, mode: 'index_cache' }),
+      ]);
+      const savedB = JSON.parse(await fs.readFile(sidecarB, 'utf8'));
+      expect(savedB.leafUuid).toBe(bA1.uuid);
+      expect(savedB.anchorLeafUuid).toBe(bTitle.uuid);
+
+      // Append chained session_source on bTitle, then conversation record on that source -> single sidecar_tail!
+      const bSource: ChatRecord = {
+        ...record('meta-ic-source', bTitle.uuid, ''),
+        sessionId: sidB,
+        type: 'system',
+        subtype: 'session_source',
+        message: undefined,
+        systemPayload: { sourceType: 'cli' },
+        timestamp: '2026-04-01T00:00:06.000Z',
+      };
+      const bU2 = {
+        ...record('u-ic-2', bSource.uuid, 'after chained source'),
+        sessionId: sidB,
+        timestamp: '2026-04-01T00:00:07.000Z',
+      };
+      await appendRecords(fileB, bSource, bU2);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansBTail: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansBTail.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sidB)).toBe(bU2.timestamp);
+      expect(scansBTail).toEqual([
+        expect.objectContaining({
+          filePath: fileB,
+          mode: 'sidecar_tail',
+          startOffset: sizeB1,
+        }),
+      ]);
+    });
+
+    it('heals .prompt-time.json on warm/cached trusted hit after an untrusted read without rescanning (R2-11)', async () => {
+      const sid = '880e8400-e29b-41d4-a716-446655440011';
+      const u1 = {
+        ...record('u-heal-1', null, 'probe D prompt'),
+        sessionId: sid,
+        timestamp: '2026-04-02T00:00:01.000Z',
+      };
+      const file = await writeRecords([u1], sid);
+      const sidecarPath = sessionPromptTimeSidecarPath(path.dirname(file), sid);
+
+      // 1. Untrusted cold read scans once and writes NO sidecar.
+      resetSessionTranscriptIndexCacheForTest();
+      const scans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans.push(e));
+      expect(
+        await newReader().getLastUserPromptAt(sid, 'active', {
+          allowSidecarWrite: false,
+        }),
+      ).toBe(u1.timestamp);
+      expect(scans).toHaveLength(1);
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      // 2. Trusted warm hit (preferCache: true) heals sidecar with 0 new scans.
+      expect(
+        await newReader().getLastUserPromptAt(sid, 'active', {
+          preferCache: true,
+          allowSidecarWrite: true,
+        }),
+      ).toBe(u1.timestamp);
+      expect(scans).toHaveLength(1);
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+
+      // 3. Repeat for cached (preferCache: false) path.
+      await fs.rm(sidecarPath, { force: true });
+      resetSessionTranscriptIndexCacheForTest();
+      scans.length = 0;
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => scans.push(e));
+      expect(
+        await newReader().getLastUserPromptAt(sid, 'active', {
+          allowSidecarWrite: false,
+        }),
+      ).toBe(u1.timestamp);
+      expect(scans).toHaveLength(1);
+      await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(
+        await newReader().getLastUserPromptAt(sid, 'active', {
+          preferCache: false,
+          allowSidecarWrite: true,
+        }),
+      ).toBe(u1.timestamp);
+      expect(scans).toHaveLength(1);
+      await expect(fs.stat(sidecarPath)).resolves.toBeDefined();
+    });
+
+    it('extends oversized-class TranscriptIndex incrementally on append (R2-8)', async () => {
+      // Force the primary shared cache budget to 1 byte so the transcript index
+      // is admitted into the oversized cache class instead of the shared class.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      const u1 = record('u-ov-1', null, 'oversized turn one');
+      const a1 = {
+        ...record('a-ov-1', u1.uuid, 'oversized reply one'),
+        type: 'assistant' as const,
+      };
+      const file = await writeRecords([u1, a1]);
+      const size1 = (await fs.stat(file)).size;
+
+      const buildEvents: TranscriptIndexBuildModeEvent[] = [];
+      setSessionTranscriptIndexBuildModeHookForTest((e) => buildEvents.push(e));
+
+      const reader = newReader();
+      await reader.readPage(sessionId, { limit: 10 });
+      expect(buildEvents).toEqual([
+        {
+          filePath: file,
+          mode: 'full',
+          startOffset: 0,
+          snapshotSize: size1,
+        },
+      ]);
+      const statsBefore = getSessionTranscriptIndexCacheStatsForTest();
+      expect(statsBefore.entries).toBe(1);
+      expect(statsBefore.byteSize).toBeGreaterThan(1);
+
+      const u2 = record('u-ov-2', a1.uuid, 'oversized turn two');
+      const a2 = {
+        ...record('a-ov-2', u2.uuid, 'oversized reply two'),
+        type: 'assistant' as const,
+      };
+      await appendRecords(file, u2, a2);
+      const size2 = (await fs.stat(file)).size;
+
+      const page2 = await reader.readPage(sessionId, { limit: 10 });
+      expect(page2.records.map((r) => r.uuid)).toEqual([
+        'u-ov-1',
+        'a-ov-1',
+        'u-ov-2',
+        'a-ov-2',
+      ]);
+      expect(buildEvents.at(-1)).toEqual({
+        filePath: file,
+        mode: 'incremental',
+        startOffset: size1,
+        snapshotSize: size2,
+      });
+      const statsAfter = getSessionTranscriptIndexCacheStatsForTest();
+      // Both the frozen S1 snapshot and the incrementally extended S2 snapshot
+      // stay retained inside the oversized cache class budget.
+      expect(statsAfter.entries).toBe(2);
+      expect(statsAfter.byteSize).toBeGreaterThan(statsBefore.byteSize);
+    });
+
+    it('writes prompt-time sidecar in lease mode (writerLeaseRequired=true), hashes large turns asynchronously, and preserves verified reader-healed sidecars (R2-4, R2-5, R2-6)', async () => {
+      // R2-4 + R2-5: Real SessionWriterLease + writerLeaseRequired=true with
+      // config.storage undefined, writing a >512 KiB user prompt hashed asynchronously.
+      const leaseSid = '880e8400-e29b-41d4-a716-446655440024';
+      const service = new SessionService(workspaceDir, {
+        runtimeBaseDir: runtimeDir,
+      });
+      const lease = await service.acquireSessionWriterLease(leaseSid, {
+        processKind: 'daemon',
+        reclaimPolicy: 'never',
+      });
+      const leaseFile = newReader().getSessionFilePath(leaseSid);
+      const leaseSidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(leaseFile),
+        leaseSid,
+      );
+      try {
+        const leaseConfig = {
+          storage: undefined,
+          getTargetDir: () => workspaceDir,
+          getSessionId: () => leaseSid,
+          getProjectRoot: () => workspaceDir,
+          getCliVersion: () => 'test',
+          getModel: () => 'test',
+          getAuthType: () => undefined,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          getResumedSessionData: () => undefined,
+          isSessionWriterLeaseEnabled: () => true,
+        } as unknown as Config;
+        const recorder = new ChatRecordingService(leaseConfig, undefined, true);
+        recorder.activate(lease);
+        recorder.recordUserMessage([
+          { text: `large-turn:${'L'.repeat(600_000)}` },
+        ]);
+        await recorder.flush();
+
+        const rawBytes = await fs.readFile(leaseFile);
+        const expectedSha = createHash('sha256').update(rawBytes).digest('hex');
+        const sidecar = JSON.parse(await fs.readFile(leaseSidecarPath, 'utf8'));
+        expect(sidecar.prefixSha256).toBe(expectedSha);
+        expect(sidecar.prefixUuidBloom?.count).toBe(1);
+        const sizeAfterPrompt = rawBytes.length;
+
+        recorder.recordAssistantTurn({
+          model: 'test',
+          message: [{ text: 'lease reply' }],
+        });
+        await recorder.flush();
+        const writtenPromptTs = (
+          JSON.parse(
+            (await fs.readFile(leaseFile, 'utf8')).trim().split('\n')[0]!,
+          ) as ChatRecord
+        ).timestamp;
+        resetSessionTranscriptIndexCacheForTest();
+        const scansLease: PromptTimeScanModeEvent[] = [];
+        setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+          scansLease.push(e),
+        );
+        expect(await newReader().getLastUserPromptAt(leaseSid)).toBe(
+          writtenPromptTs,
+        );
+        expect(scansLease).toEqual([
+          expect.objectContaining({
+            filePath: leaseFile,
+            mode: 'sidecar_tail',
+            startOffset: sizeAfterPrompt,
+          }),
+        ]);
+      } finally {
+        await lease.release();
+      }
+
+      // R2-6 (ARM B): Preserve a verified reader-healed sidecar at S0 when
+      // the writer has no prefix state and later appends a prompt at S2 > S0.
+      const r26Sid = '880e8400-e29b-41d4-a716-446655440026';
+      const r26U1 = {
+        ...record('u-r26-1', null, 'initial prompt'),
+        sessionId: r26Sid,
+        timestamp: '2026-04-03T00:00:01.000Z',
+      };
+      const r26A1 = {
+        ...record('a-r26-1', r26U1.uuid, 'initial reply'),
+        sessionId: r26Sid,
+        type: 'assistant' as const,
+        timestamp: '2026-04-03T00:00:02.000Z',
+      };
+      const r26File = await writeRecords([r26U1, r26A1], r26Sid);
+      const r26Size0 = (await fs.stat(r26File)).size;
+      const r26SidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(r26File),
+        r26Sid,
+      );
+      // Reader heals verified sidecar at S0.
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(r26Sid)).toBe(
+        r26U1.timestamp,
+      );
+      const healedAtS0 = JSON.parse(await fs.readFile(r26SidecarPath, 'utf8'));
+      expect(healedAtS0.snapshotSize).toBe(r26Size0);
+      expect(healedAtS0.prefixSha256).toHaveLength(64);
+      expect(healedAtS0.prefixUuidBloom).toBeDefined();
+
+      // Assistant output grows file to S1 > S0 without updating sidecar, so
+      // when a resumed writer writes u2, adoptSidecarPrefixStateAsync sees
+      // stats.size (S1) !== sidecar.snapshotSize (S0) and leaves prefix state empty.
+      const r26A2 = {
+        ...record('a-r26-2', r26A1.uuid, 'mid-turn reply'),
+        sessionId: r26Sid,
+        type: 'assistant' as const,
+        timestamp: '2026-04-03T00:00:03.000Z',
+      };
+      await appendRecords(r26File, r26A2);
+      const r26Recorder = new ChatRecordingService(
+        {
+          storage: new Storage(workspaceDir),
+          getTargetDir: () => workspaceDir,
+          getSessionId: () => r26Sid,
+          getProjectRoot: () => workspaceDir,
+          getCliVersion: () => 'test',
+          getModel: () => 'test',
+          getAuthType: () => undefined,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          getResumedSessionData: () => ({
+            conversation: {
+              sessionId: r26Sid,
+              projectHash: 'test',
+              startTime: r26U1.timestamp,
+              lastUpdated: r26A2.timestamp,
+              messages: [r26U1, r26A1, r26A2],
+            },
+            filePath: r26File,
+            lastRecordUuid: r26A2.uuid,
+          }),
+        } as unknown as Config,
+        undefined,
+        false,
+      );
+      r26Recorder.recordUserMessage([{ text: 'second prompt after S0 heal' }]);
+      await r26Recorder.flush();
+
+      // Writer catches up from verified S0 sidecar to S2 (with full prefixSha256
+      // + prefixUuidBloom) so immediate restart hits O(1) sidecar_exact and the
+      // next assistant append hits sidecar_tail@S2 (never degrading to byte 0).
+      const r26RawS2 = await fs.readFile(r26File);
+      const r26Size2 = r26RawS2.length;
+      const r26ExpectedShaS2 = createHash('sha256')
+        .update(r26RawS2)
+        .digest('hex');
+      const caughtUpSidecar = JSON.parse(
+        await fs.readFile(r26SidecarPath, 'utf8'),
+      );
+      const r26Lines = r26RawS2
+        .toString('utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as ChatRecord);
+      const r26U2Ts = r26Lines.at(-1)!.timestamp;
+      expect(caughtUpSidecar.snapshotSize).toBe(r26Size2);
+      expect(caughtUpSidecar.lastUserPromptAt).toBe(r26U2Ts);
+      expect(caughtUpSidecar.prefixSha256).toBe(r26ExpectedShaS2);
+      expect(caughtUpSidecar.prefixUuidBloom?.count).toBe(4);
+
+      resetSessionTranscriptIndexCacheForTest();
+      const scansR26Exact: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansR26Exact.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(r26Sid)).toBe(r26U2Ts);
+      expect(scansR26Exact).toEqual([
+        expect.objectContaining({
+          filePath: r26File,
+          mode: 'sidecar_exact',
+          startOffset: r26Size2,
+        }),
+      ]);
+
+      r26Recorder.recordAssistantTurn({
+        model: 'test',
+        message: [{ text: 'reply after catch-up' }],
+      });
+      await r26Recorder.flush();
+      resetSessionTranscriptIndexCacheForTest();
+      const scansR26Tail: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansR26Tail.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(r26Sid)).toBe(r26U2Ts);
+      expect(scansR26Tail).toEqual([
+        expect.objectContaining({
+          filePath: r26File,
+          mode: 'sidecar_tail',
+          startOffset: r26Size2,
+        }),
+      ]);
+
+      // Forged sidecar with mismatched prefixSha256 at S0 < stats.size must NOT
+      // be adopted or preserved when a fresh writer without prefix state writes.
+      const forged = { ...healedAtS0, prefixSha256: 'f'.repeat(64) };
+      await fs.writeFile(r26SidecarPath, JSON.stringify(forged), 'utf8');
+      const r26LinesBeforeForged = (await fs.readFile(r26File, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as ChatRecord);
+      const r26LastBeforeForged = r26LinesBeforeForged.at(-1)!;
+      const r26FreshRecorder = new ChatRecordingService(
+        {
+          storage: new Storage(workspaceDir),
+          getTargetDir: () => workspaceDir,
+          getSessionId: () => r26Sid,
+          getProjectRoot: () => workspaceDir,
+          getCliVersion: () => 'test',
+          getModel: () => 'test',
+          getAuthType: () => undefined,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          getResumedSessionData: () => ({
+            conversation: {
+              sessionId: r26Sid,
+              projectHash: 'test',
+              startTime: r26U1.timestamp,
+              lastUpdated: r26LastBeforeForged.timestamp,
+              messages: r26LinesBeforeForged,
+            },
+            filePath: r26File,
+            lastRecordUuid: r26LastBeforeForged.uuid,
+          }),
+        } as unknown as Config,
+        undefined,
+        false,
+      );
+      r26FreshRecorder.recordUserMessage([
+        { text: 'third prompt overwrites forged' },
+      ]);
+      await r26FreshRecorder.flush();
+      const afterForgedSidecar = JSON.parse(
+        await fs.readFile(r26SidecarPath, 'utf8'),
+      );
+      expect(afterForgedSidecar.prefixSha256).toBeUndefined();
+      expect(afterForgedSidecar.snapshotSize).toBe(
+        (await fs.stat(r26File)).size,
+      );
     });
   });
 });

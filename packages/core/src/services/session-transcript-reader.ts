@@ -100,6 +100,7 @@ import {
   readSessionPromptTimeSidecarAsync,
   sessionPromptTimeSidecarPath,
   writeSessionPromptTimeSidecar,
+  type SessionPromptTimeSidecar,
   type SessionPromptTimeUuidBloom,
 } from './session-prompt-time-sidecar.js';
 import {
@@ -963,6 +964,7 @@ interface LastUserPromptCacheEntry {
   lastUpdated: string;
   snapshot: Promise<LastUserPromptSnapshot>;
   task?: SharedAbortableTask<LastUserPromptSnapshot>;
+  pendingSidecar?: Omit<SessionPromptTimeSidecar, 'version'>;
 }
 
 const lastUserPromptScopes = new Map<
@@ -4468,6 +4470,7 @@ interface PromptScanNode {
 interface PromptTimeResolution {
   snapshot: LastUserPromptSnapshot;
   leafUuid?: string;
+  anchorLeafUuid?: string;
   prefixSha256?: string;
   prefixUuidBloom?: SessionPromptTimeUuidBloom;
   managed?: boolean;
@@ -4577,6 +4580,31 @@ function promptTimeFromProjectedRecords(
   return undefined;
 }
 
+function resolveSidecarLeaf(
+  leafUuid: string,
+  lookup: (uuid: string) =>
+    | {
+        parentUuid: string | null;
+        conversation: boolean;
+        metadataReanchor: boolean;
+      }
+    | undefined,
+): { leafUuid: string; anchorLeafUuid?: string } {
+  let baseLeafUuid = leafUuid;
+  const seen = new Set<string>();
+  while (!seen.has(baseLeafUuid)) {
+    seen.add(baseLeafUuid);
+    const node = lookup(baseLeafUuid);
+    if (!node?.metadataReanchor || node.parentUuid === null) break;
+    const parentNode = lookup(node.parentUuid);
+    if (!parentNode || !parentNode.conversation) break;
+    baseLeafUuid = node.parentUuid;
+  }
+  return baseLeafUuid !== leafUuid
+    ? { leafUuid: baseLeafUuid, anchorLeafUuid: leafUuid }
+    : { leafUuid: baseLeafUuid };
+}
+
 export class SessionTranscriptReader {
   private readonly storage: Storage;
 
@@ -4623,6 +4651,7 @@ export class SessionTranscriptReader {
           sessionId,
         ),
         maxBytes: snapshotSize,
+        maxBodyBytes: getMaxAllReplayBytes(),
         ...(signal !== undefined ? { signal } : {}),
       });
     } catch (error) {
@@ -4657,6 +4686,7 @@ export class SessionTranscriptReader {
       snapshotSize: number;
       lastUserPromptAt: string | null;
       leafUuid: string;
+      anchorLeafUuid?: string;
       firstRecordOwner: { sessionId: string; cwd: string };
       prefixSha256?: string;
       prefixUuidBloom?: SessionPromptTimeUuidBloom;
@@ -4684,7 +4714,16 @@ export class SessionTranscriptReader {
     let linear = true;
     let hasManagedHeader = false;
     let sessionIdMismatch = false;
-    let expectedParent = sidecar.leafUuid;
+    // Accept both legacy-chained metadata records (next record chains off the
+    // title/source UUID) and sibling re-anchors (next record chains off the
+    // preceding conversation tail) as linear continuations.
+    let baseLeafUuid = sidecar.leafUuid;
+    let anchorLeafUuid = sidecar.anchorLeafUuid;
+    let allowedParents = new Set<string>(
+      anchorLeafUuid !== undefined
+        ? [baseLeafUuid, anchorLeafUuid]
+        : [baseLeafUuid],
+    );
     let latestPrompt = sidecar.lastUserPromptAt ?? undefined;
     let tailConversationRecords = 0;
     let tailChunks: Buffer[] | undefined = [];
@@ -4731,25 +4770,33 @@ export class SessionTranscriptReader {
               continue;
             }
             if (isMetadataReanchorRecord(envelope)) {
-              if (envelope.parentUuid !== expectedParent) {
+              if (
+                envelope.parentUuid === null ||
+                !allowedParents.has(envelope.parentUuid)
+              ) {
                 linear = false;
                 return false;
               }
               addPromptUuidToBloom(bloom, envelope.uuid);
+              allowedParents.add(envelope.uuid);
+              anchorLeafUuid = envelope.uuid;
               continue;
             }
             const maxTailRecords =
               maxPromptTailRecordsForTest ?? MAX_PROMPT_TAIL_EXTENSION_RECORDS;
             if (
               tailConversationRecords >= maxTailRecords ||
-              envelope.parentUuid !== expectedParent
+              envelope.parentUuid === null ||
+              !allowedParents.has(envelope.parentUuid)
             ) {
               linear = false;
               return false;
             }
             addPromptUuidToBloom(bloom, envelope.uuid);
             tailConversationRecords += 1;
-            expectedParent = envelope.uuid;
+            baseLeafUuid = envelope.uuid;
+            anchorLeafUuid = undefined;
+            allowedParents = new Set([envelope.uuid]);
             if (envelope.lastUserPromptAt !== undefined) {
               latestPrompt = envelope.lastUserPromptAt;
             }
@@ -4837,7 +4884,8 @@ export class SessionTranscriptReader {
         lastUserPromptAt: latestPrompt,
         firstRecordOwner: sidecar.firstRecordOwner,
       },
-      leafUuid: expectedParent,
+      leafUuid: baseLeafUuid,
+      ...(anchorLeafUuid !== undefined ? { anchorLeafUuid } : {}),
       ...(nextPrefixSha256 !== undefined
         ? { prefixSha256: nextPrefixSha256 }
         : {}),
@@ -5076,27 +5124,27 @@ export class SessionTranscriptReader {
     const prefixSha256 = hasManagedHeader
       ? undefined
       : prefixHash.digest('hex');
-    let sidecarLeafUuid = leafUuid;
-    if (!hasManagedHeader) {
-      const seenAnchors = new Set<string>();
-      while (
-        sidecarLeafUuid !== undefined &&
-        !seenAnchors.has(sidecarLeafUuid)
-      ) {
-        seenAnchors.add(sidecarLeafUuid);
-        const node = nodes.get(sidecarLeafUuid);
-        if (!node?.metadataReanchor || node.parentUuid === null) break;
-        const parentNode = nodes.get(node.parentUuid);
-        if (!parentNode || !parentNode.conversation) break;
-        sidecarLeafUuid = node.parentUuid;
-      }
-    }
+    const resolvedLeaf = hasManagedHeader
+      ? { leafUuid }
+      : resolveSidecarLeaf(leafUuid, (uuid) => {
+          const node = nodes.get(uuid);
+          return node
+            ? {
+                parentUuid: node.parentUuid,
+                conversation: node.conversation,
+                metadataReanchor: node.metadataReanchor === true,
+              }
+            : undefined;
+        });
     return {
       snapshot: {
         lastUserPromptAt: timestamp,
         firstRecordOwner,
       },
-      leafUuid: sidecarLeafUuid,
+      leafUuid: resolvedLeaf.leafUuid,
+      ...(resolvedLeaf.anchorLeafUuid !== undefined
+        ? { anchorLeafUuid: resolvedLeaf.anchorLeafUuid }
+        : {}),
       ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
       ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       managed: hasManagedHeader,
@@ -5166,6 +5214,18 @@ export class SessionTranscriptReader {
       const prefixUuidBloom = managed
         ? undefined
         : buildPromptUuidBloom(index.byUuid.keys(), index.byUuid.size);
+      const resolvedLeaf = managed
+        ? { leafUuid: index.leafUuid }
+        : resolveSidecarLeaf(index.leafUuid, (uuid) => {
+            const entry = index.byUuid.get(uuid);
+            return entry
+              ? {
+                  parentUuid: entry.parentUuid,
+                  conversation: isTranscriptConversationRecord(entry),
+                  metadataReanchor: isMetadataReanchorRecord(entry),
+                }
+              : undefined;
+          });
       promptTimeScanModeHookForTest?.({
         filePath,
         mode: 'index_cache',
@@ -5180,7 +5240,10 @@ export class SessionTranscriptReader {
             cwd: firstRecord.cwd,
           },
         },
-        leafUuid: index.leafUuid,
+        leafUuid: resolvedLeaf.leafUuid,
+        ...(resolvedLeaf.anchorLeafUuid !== undefined
+          ? { anchorLeafUuid: resolvedLeaf.anchorLeafUuid }
+          : {}),
         ...(prefixSha256 !== undefined ? { prefixSha256 } : {}),
         ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
         managed,
@@ -5244,6 +5307,60 @@ export class SessionTranscriptReader {
     });
   }
 
+  private async maybePersistPromptTimeSidecar(
+    entry: LastUserPromptCacheEntry,
+    filePath: string,
+    sessionId: string,
+    key: string,
+    readOptions: LastUserPromptReadOptions,
+  ): Promise<void> {
+    if (readOptions.allowSidecarWrite === false) return;
+    const pending = entry.pendingSidecar;
+    if (!pending) return;
+    if (promptTimeScope(filePath, this.workspaceCwd).get(key) !== entry) return;
+    const ownerMatches = readOptions.validateFirstRecord
+      ? await readOptions.validateFirstRecord(pending.firstRecordOwner)
+      : pending.firstRecordOwner.sessionId.toLowerCase() ===
+          sessionId.toLowerCase() &&
+        pending.firstRecordOwner.cwd === this.workspaceCwd;
+    if (!ownerMatches) return;
+    const sidecarPath = sessionPromptTimeSidecarPath(
+      path.dirname(filePath),
+      sessionId,
+    );
+    const [currentStats, existing] = await Promise.all([
+      fsp.stat(filePath).catch(() => undefined),
+      readSessionPromptTimeSidecarAsync(sidecarPath),
+    ]);
+    if (promptTimeScope(filePath, this.workspaceCwd).get(key) !== entry) return;
+    if (entry.pendingSidecar !== pending) return;
+    entry.pendingSidecar = undefined;
+    if (
+      !currentStats ||
+      !sameFileIdentity(
+        fileIdentityFromStats(currentStats),
+        pending.fileIdentity,
+      ) ||
+      currentStats.size < pending.snapshotSize
+    ) {
+      return;
+    }
+    if (
+      existing &&
+      existing.fileIdentity.dev === pending.fileIdentity.dev &&
+      existing.fileIdentity.ino === pending.fileIdentity.ino &&
+      existing.snapshotSize > pending.snapshotSize &&
+      currentStats.size >= existing.snapshotSize
+    ) {
+      return;
+    }
+    if (!writeSessionPromptTimeSidecar(sidecarPath, pending)) {
+      debugLogger.debug(
+        `prompt-time sidecar write skipped session=${sessionId} path=${sidecarPath}`,
+      );
+    }
+  }
+
   async getLastUserPromptAt(
     sessionId: string,
     archiveState: 'active' | 'archived' = 'active',
@@ -5260,12 +5377,21 @@ export class SessionTranscriptReader {
       let snapshot = warm.task
         ? await warm.task.attach(readOptions.signal)
         : await warm.snapshot;
+      let activeEntry = warm;
       const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
       if (current && current !== warm && !current.task?.aborted()) {
+        activeEntry = current;
         snapshot = current.task
           ? await current.task.attach(readOptions.signal)
           : await current.snapshot;
       }
+      await this.maybePersistPromptTimeSidecar(
+        activeEntry,
+        filePath,
+        sessionId,
+        key,
+        readOptions,
+      );
       return readOptions.validateFirstRecord &&
         (!snapshot.firstRecordOwner ||
           !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
@@ -5298,14 +5424,23 @@ export class SessionTranscriptReader {
       let snapshot = cached.task
         ? await cached.task.attach(readOptions.signal)
         : await cached.snapshot;
+      let activeEntry = cached;
       const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
       if (current && current !== cached && !current.task?.aborted()) {
+        activeEntry = current;
         snapshot = current.task
           ? await current.task.attach(readOptions.signal)
           : await current.snapshot;
       }
       cached.size = stats.size;
       cached.lastUpdated = lastUpdated;
+      await this.maybePersistPromptTimeSidecar(
+        activeEntry,
+        filePath,
+        sessionId,
+        key,
+        readOptions,
+      );
       return readOptions.validateFirstRecord &&
         (!snapshot.firstRecordOwner ||
           !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
@@ -5364,51 +5499,38 @@ export class SessionTranscriptReader {
           }
 
           if (
-            readOptions.allowSidecarWrite !== false &&
+            owner.entry &&
             resolved.shouldPersistSidecar &&
             resolved.leafUuid &&
             resolved.snapshot.firstRecordOwner &&
             promptTimeScope(filePath, this.workspaceCwd).get(key) ===
               owner.entry
           ) {
-            const ownerMatches = readOptions.validateFirstRecord
-              ? await readOptions.validateFirstRecord(
-                  resolved.snapshot.firstRecordOwner,
-                )
-              : resolved.snapshot.firstRecordOwner.sessionId.toLowerCase() ===
-                  sessionId.toLowerCase() &&
-                resolved.snapshot.firstRecordOwner.cwd === this.workspaceCwd;
-            if (
-              ownerMatches &&
-              promptTimeScope(filePath, this.workspaceCwd).get(key) ===
-                owner.entry
-            ) {
-              const sidecarPath = sessionPromptTimeSidecarPath(
-                path.dirname(filePath),
-                sessionId,
-              );
-              if (
-                !writeSessionPromptTimeSidecar(sidecarPath, {
-                  fileIdentity,
-                  snapshotSize: stats.size,
-                  lastUpdated,
-                  lastUserPromptAt: resolved.snapshot.lastUserPromptAt ?? null,
-                  leafUuid: resolved.leafUuid,
-                  firstRecordOwner: resolved.snapshot.firstRecordOwner,
-                  ...(resolved.prefixSha256 !== undefined
-                    ? { prefixSha256: resolved.prefixSha256 }
-                    : {}),
-                  ...(resolved.prefixUuidBloom !== undefined
-                    ? { prefixUuidBloom: resolved.prefixUuidBloom }
-                    : {}),
-                  ...(resolved.managed ? { managed: true } : {}),
-                })
-              ) {
-                debugLogger.debug(
-                  `prompt-time sidecar write skipped session=${sessionId} path=${sidecarPath}`,
-                );
-              }
-            }
+            owner.entry.pendingSidecar = {
+              fileIdentity,
+              snapshotSize: stats.size,
+              lastUpdated,
+              lastUserPromptAt: resolved.snapshot.lastUserPromptAt ?? null,
+              leafUuid: resolved.leafUuid,
+              ...(resolved.anchorLeafUuid !== undefined
+                ? { anchorLeafUuid: resolved.anchorLeafUuid }
+                : {}),
+              firstRecordOwner: resolved.snapshot.firstRecordOwner,
+              ...(resolved.prefixSha256 !== undefined
+                ? { prefixSha256: resolved.prefixSha256 }
+                : {}),
+              ...(resolved.prefixUuidBloom !== undefined
+                ? { prefixUuidBloom: resolved.prefixUuidBloom }
+                : {}),
+              ...(resolved.managed ? { managed: true } : {}),
+            };
+            await this.maybePersistPromptTimeSidecar(
+              owner.entry,
+              filePath,
+              sessionId,
+              key,
+              readOptions,
+            );
           }
 
           return resolved.snapshot;

@@ -39,6 +39,7 @@ export interface SessionPromptTimeSidecar {
   lastUpdated: string;
   lastUserPromptAt: string | null;
   leafUuid: string;
+  anchorLeafUuid?: string;
   firstRecordOwner: { sessionId: string; cwd: string };
   prefixSha256?: string;
   prefixUuidBloom?: SessionPromptTimeUuidBloom;
@@ -280,6 +281,11 @@ function parseSessionPromptTimeSidecar(
   const leafUuid = record['leafUuid'];
   if (!isNonEmptyString(leafUuid)) return undefined;
 
+  const anchorLeafUuid = record['anchorLeafUuid'];
+  if (anchorLeafUuid !== undefined && !isNonEmptyString(anchorLeafUuid)) {
+    return undefined;
+  }
+
   const rawOwner = record['firstRecordOwner'];
   if (
     typeof rawOwner !== 'object' ||
@@ -322,6 +328,7 @@ function parseSessionPromptTimeSidecar(
     lastUpdated,
     lastUserPromptAt,
     leafUuid,
+    ...(anchorLeafUuid !== undefined ? { anchorLeafUuid } : {}),
     firstRecordOwner: {
       sessionId: owner['sessionId'],
       cwd: owner['cwd'],
@@ -367,6 +374,8 @@ export function writeSessionPromptTimeSidecar(
       (!isNonEmptyString(data.lastUserPromptAt) ||
         !isoTimestampSchema.safeParse(data.lastUserPromptAt).success)) ||
     !isNonEmptyString(data.leafUuid) ||
+    (data.anchorLeafUuid !== undefined &&
+      !isNonEmptyString(data.anchorLeafUuid)) ||
     !isNonEmptyString(data.firstRecordOwner.sessionId) ||
     !isNonEmptyString(data.firstRecordOwner.cwd) ||
     (data.prefixSha256 !== undefined &&
@@ -386,6 +395,9 @@ export function writeSessionPromptTimeSidecar(
     lastUpdated: data.lastUpdated,
     lastUserPromptAt: data.lastUserPromptAt,
     leafUuid: data.leafUuid,
+    ...(data.anchorLeafUuid !== undefined
+      ? { anchorLeafUuid: data.anchorLeafUuid }
+      : {}),
     firstRecordOwner: {
       sessionId: data.firstRecordOwner.sessionId,
       cwd: data.firstRecordOwner.cwd,

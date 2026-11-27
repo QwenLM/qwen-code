@@ -2728,6 +2728,9 @@ export class AcpDispatcher {
               },
               {
                 runtimeBaseDir: this.sessionRuntimeBaseDir,
+                ...(!this.isWorkspaceTrusted()
+                  ? { allowSidecarWrite: false }
+                  : {}),
                 signal: conn.abortSignal,
               },
             );

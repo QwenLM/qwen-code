@@ -7779,7 +7779,11 @@ export function registerSessionRoutes(
         const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         try {
           summary.lastUserPromptAt =
-            await service.getLastUserPromptAt(sessionId);
+            runtime.trusted === false
+              ? await service.getLastUserPromptAt(sessionId, 'active', {
+                  allowSidecarWrite: false,
+                })
+              : await service.getLastUserPromptAt(sessionId);
         } catch {
           // An unreadable transcript omits the optional field, not the summary.
           summary.lastUserPromptAt = undefined;
@@ -11966,6 +11970,7 @@ export function registerSessionRoutes(
                     options,
                     {
                       mergeLive: !readOnlySecondary,
+                      allowSidecarWrite: runtime.trusted,
                       runtimeBaseDir: runtime.sessionRuntimeBaseDir,
                       signal: controller.signal,
                     },

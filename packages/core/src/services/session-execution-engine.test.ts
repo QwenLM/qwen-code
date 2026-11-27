@@ -248,7 +248,37 @@ describe('SessionExecutionEngineAccumulator', () => {
       reason: 'incomplete transcript',
     });
 
-    // 4. Empty prefix snapshot + user record in tail preserves hasRecords=true.
+    // 4. Non-empty legacy prefix snapshot with empty tail preserves hasRecords=true.
+    const nonEmptyLegacy = new SessionExecutionEngineAccumulator('s1');
+    nonEmptyLegacy.parseLine(u1, snapshot.filePath);
+    const resumedNonEmpty = SessionExecutionEngineAccumulator.fromSnapshot(
+      's1',
+      nonEmptyLegacy.snapshot(),
+    );
+    expect(resumedNonEmpty.finish(snapshot)).toEqual(
+      nonEmptyLegacy.finish(snapshot),
+    );
+    expect(resumedNonEmpty.finish(snapshot)).toMatchObject({
+      status: 'verified',
+      engine: 'legacy',
+      recorded: false,
+    });
+
+    // 5. Clean prefix snapshot followed by a torn line in tail flips sourceComplete=false.
+    const resumedBeforeTornTail =
+      SessionExecutionEngineAccumulator.fromSnapshot(
+        's1',
+        nonEmptyLegacy.snapshot(),
+      );
+    expect(resumedBeforeTornTail.sourceComplete).toBe(true);
+    resumedBeforeTornTail.parseLine('{"uuid":"torn-tail', snapshot.filePath);
+    expect(resumedBeforeTornTail.sourceComplete).toBe(false);
+    expect(resumedBeforeTornTail.finish(snapshot)).toMatchObject({
+      status: 'unavailable',
+      reason: 'incomplete transcript',
+    });
+
+    // 6. Empty prefix snapshot + user record in tail flips hasRecords=true.
     const emptyPrefix = new SessionExecutionEngineAccumulator('s1');
     const resumedEmpty = SessionExecutionEngineAccumulator.fromSnapshot(
       's1',

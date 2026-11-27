@@ -141,6 +141,8 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Explicitly control whether prompt-time reads may persist sidecars. */
+  allowSidecarWrite?: boolean;
   /** Paginate the combined persisted/live catalog, including unfiltered reads. */
   paginateMerged?: boolean;
   includeGroups?: boolean;
@@ -154,6 +156,7 @@ export interface ListWorkspaceSessionsReadOptions {
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  allowSidecarWrite?: boolean;
   paginateMerged?: boolean;
   includeGroups?: boolean;
   runtimeBaseDir: string;
@@ -2082,6 +2085,9 @@ export async function listWorkspaceSessionsForResponse(
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
           : {}),
+        ...(readOptions.allowSidecarWrite !== undefined
+          ? { allowSidecarWrite: readOptions.allowSidecarWrite }
+          : {}),
         ...(readOptions.paginateMerged !== undefined
           ? { paginateMerged: readOptions.paginateMerged }
           : {}),
@@ -2128,11 +2134,15 @@ async function enrichPromptTimes(
   sessions: BridgeSessionSummary[],
   service: SessionService,
   archiveState: SessionArchiveState,
-  readOptions: Pick<ListWorkspaceSessionsReadOptions, 'signal' | 'mergeLive'>,
+  readOptions: Pick<
+    ListWorkspaceSessionsReadOptions,
+    'signal' | 'mergeLive' | 'allowSidecarWrite'
+  >,
   preferCache = false,
 ): Promise<void> {
   let nextIndex = 0;
-  const allowSidecarWrite = readOptions.mergeLive !== false;
+  const allowSidecarWrite =
+    readOptions.allowSidecarWrite ?? readOptions.mergeLive !== false;
   const promptReadOptions =
     preferCache || readOptions.signal || !allowSidecarWrite
       ? {
