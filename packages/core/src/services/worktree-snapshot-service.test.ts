@@ -1093,6 +1093,149 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).toBe(false);
   });
 
+  it.each(['populated', 'empty'] as const)(
+    'preserves --separate-git-dir in ignored dist/ for an unignored .qwen/tmp/review repo beside an %s ignored .qwen/tmp/cache/',
+    async (cacheState) => {
+      await fs.writeFile(
+        path.join(worktree, '.gitignore'),
+        '.qwen/tmp/cache/\ndist/\n',
+      );
+      git(worktree, 'add', '.gitignore');
+      git(worktree, 'commit', '-qm', 'ignore-cache-and-dist', '--no-verify');
+
+      const cacheDir = path.join(worktree, '.qwen', 'tmp', 'cache');
+      await fs.mkdir(cacheDir, { recursive: true });
+      if (cacheState === 'populated') {
+        await fs.writeFile(path.join(cacheDir, 'entry.bin'), 'cache\n');
+      }
+
+      const review = path.join(worktree, '.qwen', 'tmp', 'review');
+      const storeDir = path.join(worktree, 'dist', 'inner.git');
+      await fs.mkdir(review, { recursive: true });
+      await fs.mkdir(path.dirname(storeDir), { recursive: true });
+      git(review, 'init', '-q', '-b', 'main', `--separate-git-dir=${storeDir}`);
+      git(review, 'config', 'user.email', 't@e.com');
+      git(review, 'config', 'user.name', 't');
+      git(review, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(review, 'old.txt'), 'first-revision\n');
+      await fs.writeFile(path.join(review, 'keep.txt'), 'kept\n');
+      git(review, 'add', '.');
+      git(review, 'commit', '-qm', 'c1', '--no-verify');
+      const firstCommit = git(review, 'rev-parse', 'HEAD');
+      await fs.rm(path.join(review, 'old.txt'));
+      git(review, 'add', '-A');
+      git(review, 'commit', '-qm', 'c2-delete-old', '--no-verify');
+
+      const { snapshotPath, metaPath, checkoutMatchesCapture } =
+        await captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        });
+      expect(checkoutMatchesCapture).toBe(true);
+
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+      });
+      expect(members.some((m) => m.startsWith('dist/inner.git/objects/'))).toBe(
+        true,
+      );
+
+      const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+      await fs.rm(path.join(worktree, '.qwen'), {
+        recursive: true,
+        force: true,
+      });
+      await fs.rm(path.join(worktree, 'dist'), {
+        recursive: true,
+        force: true,
+      });
+      await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+      expect(
+        await verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath,
+          meta: savedMeta,
+        }),
+      ).toBe(true);
+      expect(git(review, 'show', `${firstCommit}:old.txt`)).toBe(
+        'first-revision',
+      );
+    },
+  );
+
+  it('refuses capture for an unignored detached external linked worktree in .qwen/tmp/review beside an ignored .qwen/tmp/cache/', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/tmp/cache/\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-cache', '--no-verify');
+    await fs.mkdir(path.join(worktree, '.qwen', 'tmp', 'cache'), {
+      recursive: true,
+    });
+
+    const review = path.join(worktree, '.qwen', 'tmp', 'review');
+    await addNestedWorktree(review, '', true);
+    git(review, 'config', 'user.email', 't@e.com');
+    git(review, 'config', 'user.name', 't');
+    git(review, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(review, 'draft.md'), 'detached-draft\n');
+    git(review, 'add', 'draft.md');
+    git(review, 'commit', '-qm', 'detached-only', '--no-verify');
+    const detachedSha = git(review, 'rev-parse', 'HEAD');
+
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(
+      /nested checkout \.qwen\/tmp\/review has a detached or non-branch HEAD/,
+    );
+
+    const origin = path.join(root, 'nested-origin');
+    git(origin, 'worktree', 'prune', '--expire=now');
+    expect(git(review, 'rev-parse', 'HEAD')).toBe(detachedSha);
+  });
+
+  it('archives a standalone repository with an external --separate-git-dir and uncommitted draft so restore survives prune', async () => {
+    const extGitDir = path.join(root, 'external-standalone-git-dir');
+    const inner = path.join(worktree, 'vendor', 'inner');
+    await fs.mkdir(inner, { recursive: true });
+    git(inner, 'init', '-q', '-b', 'main', `--separate-git-dir=${extGitDir}`);
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    git(inner, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(inner, 'committed.txt'), 'v1-committed\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'c1', '--no-verify');
+    const headSha = git(inner, 'rev-parse', 'HEAD');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'uncommitted-draft\n');
+
+    const { snapshotPath, metaPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+    expect(checkoutMatchesCapture).toBe(true);
+
+    const savedMeta = await readWorktreeSnapshotMeta(metaPath);
+    await fs.rm(path.join(worktree, 'vendor'), {
+      recursive: true,
+      force: true,
+    });
+    git(root, `--git-dir=${extGitDir}`, 'worktree', 'prune', '--expire=now');
+    await restoreWorktreeSnapshot(snapshotPath, worktree, savedMeta);
+
+    expect(await fs.readFile(path.join(inner, 'draft.md'), 'utf8')).toBe(
+      'uncommitted-draft\n',
+    );
+    expect(git(inner, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(git(inner, 'show', 'HEAD:committed.txt')).toBe('v1-committed');
+  });
+
   it.each(['.qwen/tmp/*\n', ''])(
     'refuses capture when .qwen/tmp itself is a detached external linked worktree under ignore rule %j',
     async (ignoreRule) => {

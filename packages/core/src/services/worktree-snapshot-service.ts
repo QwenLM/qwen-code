@@ -838,6 +838,14 @@ interface ResolvedGitFileTargets {
   realCommonDir: string | undefined;
   inTreeStorePaths: string[];
   insideWorktree: boolean;
+  /**
+   * True when `realGitDir` is a linked-worktree admin directory (`commondir`
+   * or `gitdir` back-pointer present, or unreadable) that `git worktree prune`
+   * can delete once this checkout is removed. False for a standalone
+   * `--separate-git-dir` repository outside the checkout, whose git dir
+   * survives `git worktree prune` intact.
+   */
+  isLinkedWorktree: boolean;
 }
 
 async function resolveGitFileTargets(
@@ -857,16 +865,36 @@ async function resolveGitFileTargets(
   const rawGitDir = path.resolve(childPath, declared);
   const realGitDir = await fs.realpath(rawGitDir).catch(() => undefined);
   if (realGitDir === undefined) return undefined;
+  let commonDirUnreadable = false;
   const commonDirRaw = await fs
     .readFile(path.join(realGitDir, 'commondir'), 'utf8')
-    .catch(() => undefined);
+    .catch((error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        commonDirUnreadable = true;
+      }
+      return undefined;
+    });
   const hasCommonDir =
     commonDirRaw !== undefined && commonDirRaw.trim().length > 0;
+  const hasGitDirBackPointer = await fs
+    .lstat(path.join(realGitDir, 'gitdir'))
+    .then(
+      (stat) => stat.isFile(),
+      (error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code !== 'ENOENT' && code !== 'ENOTDIR';
+      },
+    );
+  const isLinkedWorktree =
+    hasCommonDir || commonDirUnreadable || hasGitDirBackPointer;
   const realCommonDir = hasCommonDir
     ? await fs
         .realpath(path.resolve(realGitDir, commonDirRaw.trim()))
         .catch(() => undefined)
-    : realGitDir;
+    : commonDirUnreadable
+      ? undefined
+      : realGitDir;
 
   const gitDirInside = relativePosixIfInside(realWorktree, realGitDir);
   const rawGitDirInside = relativePosixIfInside(resolvedWorktree, rawGitDir);
@@ -889,7 +917,13 @@ async function resolveGitFileTargets(
       }
     }
   }
-  return { realGitDir, realCommonDir, inTreeStorePaths, insideWorktree };
+  return {
+    realGitDir,
+    realCommonDir,
+    inTreeStorePaths,
+    insideWorktree,
+    isLinkedWorktree,
+  };
 }
 
 /**
@@ -1018,6 +1052,14 @@ async function classifyNestedCheckout(
     };
   }
 
+  // A standalone repository using an external `--separate-git-dir` has no
+  // linked-worktree admin dir for `git worktree prune` to remove: archiving
+  // the checkout preserves drafts and `.git` while the external store stays
+  // intact, so restore keeps drafts, HEAD, and commit history readable.
+  if (!targets.isLinkedWorktree) {
+    return { kind: 'archive', preserveRelPaths: [] };
+  }
+
   if (realCommonDir === undefined) {
     return {
       kind: 'refuse-external',
@@ -1137,7 +1179,6 @@ async function boundedSnapshotExclusions(
       preserve(gitDir);
     }
     for (const checkoutRel of inspection.checkouts) {
-      handledCheckouts.add(checkoutRel);
       const covered =
         ignoredFileSet.has(checkoutRel) ||
         matchesDirSet(checkoutRel, ignoredDirSet);
@@ -1147,6 +1188,7 @@ async function boundedSnapshotExclusions(
         }
         continue;
       }
+      handledCheckouts.add(checkoutRel);
       if (archived?.directories.has(`${checkoutRel}/`)) {
         preserve(checkoutRel);
         for (const p of await resolveInTreeGitStorePaths(
