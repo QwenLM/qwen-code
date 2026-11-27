@@ -6257,7 +6257,8 @@ export function WebShellSidebar({
             ) : !liveStarting &&
               sessionWorkActive &&
               !completedUnread &&
-              !backgroundRunning ? (
+              !backgroundRunning &&
+              !detachedBackgroundUnknown ? (
               <span
                 className={cx(
                   styles.sessionStatusDot,

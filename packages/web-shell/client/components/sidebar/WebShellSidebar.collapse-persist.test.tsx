@@ -649,6 +649,90 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(archiveItem!.hasAttribute('data-disabled')).toBe(true);
   });
 
+  it('keeps one status dot when active work coexists with an unknown orphan', async () => {
+    // Reopened sessions can carry both signals at once: an active-work
+    // category from the live row and an `unknown` orphan marker from the
+    // catalog probe. The status slot renders a single dot, so the
+    // active-work arm yields to the detached-unknown marker — the one that
+    // reports an unverified orphan. (The marker itself never blocks
+    // delete: only a confirmed `running` does; `unknown` feeds the delete
+    // dialog's "may still be running" advisory.)
+    active.sessions = [
+      makeSession('active-unknown', {
+        activeWorkState: 'active',
+        detachedBackgroundWork: 'unknown',
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-background-unknown]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+
+    // Control: without the orphan marker the active-work dot returns, so
+    // the gate suppresses only the coexistence, not the arm itself.
+    active.sessions = [
+      makeSession('active-only', { activeWorkState: 'active' }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-background-unknown]'),
+    ).toBeNull();
+  });
+
+  it('pins the background-running marker value to its source', async () => {
+    // The running dot's data attribute names its source: "detached" when
+    // the signal comes from the catalog probe, "true" when it comes from
+    // the live registry. Folding the attribute to a constant kept every
+    // case green in the review's mutation probe, so pin both values.
+    // A detached `running` also out-competes active work on its own.
+    active.sessions = [
+      makeSession('detached-running', {
+        activeWorkState: 'active',
+        detachedBackgroundWork: 'running',
+        hasRunningBackgroundTasks: false,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    expect(
+      container.querySelector(
+        '[data-web-shell-session-background-running="detached"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+
+    // The live-registry source keeps the generic "true" value.
+    active.sessions = [
+      makeSession('live-running', { hasRunningBackgroundTasks: true }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    expect(
+      container.querySelector(
+        '[data-web-shell-session-background-running="true"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-web-shell-session-background-running="detached"]',
+      ),
+    ).toBeNull();
+  });
+
   it('names background work on the marker when a live-starting row hides the dot', async () => {
     // A live-starting row swaps the status dot for its own spinner, so the
     // marker becomes the only carrier and must take the name back.

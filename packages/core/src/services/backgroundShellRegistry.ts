@@ -536,7 +536,7 @@ export class BackgroundShellRegistry {
     if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
     if (entry.error !== undefined) payload['error'] = entry.error;
     try {
-      // 0o600 + forceMode + noFollow: the sidecar embeds the full
+      // 0o600 + forceMode + noFollow: the sidecar embeds the (truncated)
       // `command`, so it matches the credential write sites' posture.
       // forceMode heals a looser pre-existing file back to 0o600;
       // noFollow refuses to write through a pre-placed symlink.
