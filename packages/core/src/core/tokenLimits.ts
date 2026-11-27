@@ -64,7 +64,7 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
 /**
  * Size an output request to the room actually left in the context window:
  * `min(ceiling, window − prompt − margin)`, floored at
- * `min(MIN_CLAMPED_OUTPUT_TOKENS, window − prompt)`. Makes
+ * `min(MIN_CLAMPED_OUTPUT_TOKENS, outputFloorLimit, window − prompt)`. Makes
  * `prompt + max_tokens ≤ window` an invariant on every main-turn request
  * whose prompt still fits the window (issue #5950 becomes structurally
  * impossible), which is what lets compaction thresholds run against the
@@ -80,11 +80,13 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
  * @param promptTokens - Estimated prompt size; use the API-authoritative
  *   count where available (a fresh chars/4 estimate under-counts CJK and
  *   tool-heavy prompts, which is the one way a residual 400 could return).
+ * @param outputFloorLimit - Optional cap on the minimum output budget.
  */
 export function clampOutputTokensToWindow(
   outputCeiling: number,
   contextWindowSize: number,
   promptTokens: number,
+  outputFloorLimit = MIN_CLAMPED_OUTPUT_TOKENS,
 ): TokenCount {
   const room =
     contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
@@ -97,7 +99,11 @@ export function clampOutputTokensToWindow(
   // window.
   const floor = Math.max(
     1,
-    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - promptTokens),
+    Math.min(
+      MIN_CLAMPED_OUTPUT_TOKENS,
+      outputFloorLimit,
+      contextWindowSize - promptTokens,
+    ),
   );
   // Floor the ROOM, then cap by the ceiling — never the other way around: an
   // explicit ceiling below the floor (e.g.

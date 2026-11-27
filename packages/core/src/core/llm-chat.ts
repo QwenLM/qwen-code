@@ -6434,6 +6434,13 @@ export class LlmChat {
                           explicitOutputCeiling,
                           promptSource,
                           usagePromptTokens,
+                          // A warm prompt still estimates its new input. Only
+                          // room after the reserve can raise the primary budget.
+                          outputFloorLimit:
+                            usagePromptTokens !== undefined &&
+                            !fallbackPromptSource?.messages
+                              ? params.config?.maxOutputTokens
+                              : undefined,
                         }
                       : undefined,
                   )) {
@@ -6877,6 +6884,7 @@ export class LlmChat {
       explicitOutputCeiling: number | undefined;
       promptSource?: OpenAIChatPromptSource;
       usagePromptTokens?: number;
+      outputFloorLimit?: number;
     },
   ): AsyncGenerator<StreamEvent> {
     if (outputClamp) {
@@ -6890,8 +6898,12 @@ export class LlmChat {
         contentGeneratorConfig,
         route?.limits?.output,
       );
-      const { explicitOutputCeiling, promptSource, usagePromptTokens } =
-        outputClamp;
+      const {
+        explicitOutputCeiling,
+        promptSource,
+        usagePromptTokens,
+        outputFloorLimit,
+      } = outputClamp;
       // Keep the primary cap when only a generic prompt estimate is available.
       const outputCeiling = Math.min(
         explicitOutputCeiling ?? Infinity,
@@ -6972,6 +6984,7 @@ export class LlmChat {
         outputCeiling,
         window,
         promptTokensForClamp,
+        outputFloorLimit,
       );
       this.lastRequestMaxOutputTokens = maxOutputTokens;
       params = { ...params, config: { ...params.config, maxOutputTokens } };

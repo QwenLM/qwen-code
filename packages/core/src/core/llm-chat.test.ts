@@ -8522,6 +8522,14 @@ describe('LlmChat', async () => {
         followUp: mongolianLine.repeat(310),
         measuredInput: 56_640,
       },
+      {
+        name: 'new Mongolian text with less than the default output floor',
+        window: 65_536,
+        followUp: mongolianLine.repeat(520),
+        measuredInput: 63_420,
+        primaryLimit: 1_000,
+        warmPromptTokens: 2_038,
+      },
       { name: 'a different system prompt', window: 36_000, otherSystem: true },
       {
         name: 'a raw message override',
@@ -8539,6 +8547,8 @@ describe('LlmChat', async () => {
         rawMessages,
         followUp,
         measuredInput,
+        primaryLimit = 8_000,
+        warmPromptTokens = 20_038,
       }) => {
         const fallbackModel = 'compatible-minimax';
         const fallback = vi.fn().mockResolvedValue(textStream('completed'));
@@ -8568,12 +8578,12 @@ describe('LlmChat', async () => {
           {
             ...narrowPrimary,
             contextWindowSize: primaryWindow,
-            ...(followUp && { extra_body: { max_tokens: 8_000 } }),
+            ...(followUp && { extra_body: { max_tokens: primaryLimit } }),
           },
         );
         mockCompress(noop());
         const promptTokenCount = followUp
-          ? 20_038
+          ? warmPromptTokens
           : primaryWindow === 33_000
             ? 27_038
             : 41_038;
@@ -8617,9 +8627,11 @@ describe('LlmChat', async () => {
         }
         if (measuredInput !== undefined) {
           const outputTokens = fallbackRequest.config.maxOutputTokens;
-          expect(primaryRequest.config?.maxOutputTokens).toBe(8_000);
+          expect(primaryRequest.config?.maxOutputTokens).toBe(primaryLimit);
           expect(outputTokens + measuredInput).toBeLessThanOrEqual(window);
-          expect(outputTokens).toBeGreaterThanOrEqual(4_000);
+          expect(outputTokens).toBeGreaterThanOrEqual(
+            Math.min(primaryLimit, 4_000),
+          );
         } else if (differentPrompt && output === undefined) {
           expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(5_000);
         } else {
