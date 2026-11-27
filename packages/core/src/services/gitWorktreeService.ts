@@ -187,7 +187,11 @@ export interface CarriedEntry {
  */
 export async function computeCarriedIdentities(
   worktreePath: string,
-  paths: readonly string[],
+  // Iterable, not `readonly string[]`: callers pass the Set they already built
+  // for the O(1) membership check rather than materializing it back to an array
+  // for this one call. The body only iterates, so the widened type adds no
+  // behaviour and every existing array caller still type-checks.
+  paths: Iterable<string>,
 ): Promise<CarriedEntry[]> {
   const entries: CarriedEntry[] = [];
   const present: Array<{ path: string; executable: boolean }> = [];

@@ -53,6 +53,16 @@ vi.mock('../utils/git-branches.js', async (importOriginal) => {
     },
   };
 });
+// Wrapped (not replaced) so every other case keeps the real implementation;
+// the scaling case below swaps in repeated genuine identities for one call.
+vi.mock('./gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./gitWorktreeService.js')>();
+  return {
+    ...actual,
+    computeCarriedIdentities: vi.fn(actual.computeCarriedIdentities),
+  };
+});
 vi.mock('tar', async (importOriginal) => {
   const actual = await importOriginal<typeof import('tar')>();
   const { statSync } = await import('node:fs');
@@ -331,9 +341,10 @@ describe('worktreeSnapshotService (P6 U1)', () => {
   it('verifies a large capture without an O(N^2) synchronous membership scan', async () => {
     // The post-capture check used `regularFiles.includes(entry.path)` per
     // entry: O(N^2) inside one microtask with no yield point, which froze the
-    // daemon event loop for minutes on a 300k-file checkout. Keep one timer
-    // ticking across the capture and require it to run while the membership
-    // check is pending; a linear scan of N entries would starve it.
+    // daemon event loop for minutes on a 300k-file checkout. A tick counter is
+    // not evidence of the fix — the capture's own async work (git status,
+    // hashing, tar) ticks the timer regardless, so `ticks > 0` held with the
+    // scan reverted too. What the fix changes is the *longest* synchronous gap.
     const bulk = path.join(worktree, 'bulk');
     await fs.mkdir(bulk);
     const FILES = 3000;
@@ -344,9 +355,35 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         ),
       );
     }
+
+    // Hand the membership check far more identities than files by repeating
+    // the genuine ones: the hashes stay real (the capture still completes and
+    // the archive comparison still matches) while the loop runs
+    // FILES * REPEAT times. A 300k-file checkout is large in both factors;
+    // this fixture reproduces the quadratic factor at a size that stays fast.
+    const REPEAT = 100;
+    const gitService = await import('./gitWorktreeService.js');
+    const genuineImpl = (
+      await vi.importActual<typeof import('./gitWorktreeService.js')>(
+        './gitWorktreeService.js',
+      )
+    ).computeCarriedIdentities;
+    let genuine: Awaited<ReturnType<typeof genuineImpl>> | undefined;
+    vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
+      async (worktreePath, paths) => {
+        genuine ??= await genuineImpl(worktreePath, paths);
+        return Array.from({ length: REPEAT }, () => genuine!).flat();
+      },
+    );
+
     let ticks = 0;
+    let maxGapMs = 0;
+    let last = Date.now();
     const timer = setInterval(() => {
       ticks += 1;
+      const now = Date.now();
+      maxGapMs = Math.max(maxGapMs, now - last);
+      last = now;
     }, 20);
     try {
       const result = await captureWorktreeSnapshot({
@@ -357,8 +394,16 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       expect(result.checkoutMatchesCapture).toBe(true);
     } finally {
       clearInterval(timer);
+      vi.mocked(gitService.computeCarriedIdentities).mockImplementation(
+        genuineImpl,
+      );
     }
     expect(ticks).toBeGreaterThan(0);
+    // Measured on this fixture (3000 files x 100 repeats = 3e5 identities):
+    // Set membership ~34ms against ~645ms with `regularFiles.includes`. The
+    // bound sits between them with room for a loaded runner and still fails a
+    // linear scan by more than 3x.
+    expect(maxGapMs).toBeLessThan(200);
   });
 
   it.skipIf(process.platform === 'win32').each([
