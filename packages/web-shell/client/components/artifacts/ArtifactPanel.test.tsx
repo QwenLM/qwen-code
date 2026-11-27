@@ -2930,6 +2930,63 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     },
   );
 
+  it('does not treat another workspace empty live snapshot as deleting a secondary durable tab', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:secondary:cross-ws',
+                kind: 'scheduled_task',
+                title: 'Scheduled Tasks',
+                workspaceCwd: '/secondary',
+                workspaceId: 'secondary-id',
+                sourceSessionId: 'active-session',
+                task: {
+                  id: secondaryScheduledTask.id,
+                  toolCallId: 'cron-cross-ws',
+                  title: 'Secondary task',
+                  cron: secondaryScheduledTask.cron,
+                  prompt: secondaryScheduledTask.prompt,
+                  recurring: true,
+                  durable: true,
+                  workspaceId: 'secondary-id',
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:secondary:cross-ws"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            liveDurableScheduledTasks={[]}
+            liveDurableScheduledTasksWorkspaceId={null}
+            hasLiveDurableScheduledSnapshot={true}
+            liveSessionScheduledTasksOwnerSessionId="active-session"
+            open={true}
+            onClose={vi.fn()}
+            onSelectTab={vi.fn()}
+            onCloseTab={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).not.toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(false);
+  });
+
   it('rejects an untrusted primary durable task without issuing a request', async () => {
     mockWorkspace.capabilities = {
       ...mockWorkspace.capabilities,

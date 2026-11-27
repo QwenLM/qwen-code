@@ -438,9 +438,13 @@ describe('real daemon session scheduled tasks', () => {
     expect(created.enabled).toBe(true);
     expect(created.sessionId).toBe(boundSession.sessionId);
 
+    // Wait past CronScheduler's 300ms fs.watch debounce so the live session
+    // scheduler has actually loaded the bound durable task before archiving.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
     const archiveBody = (await scheduledTaskRequest('/sessions/archive', {
       method: 'POST',
-      body: { sessionIds: [boundSession.sessionId] },
+      body: { sessionIds: [boundSession.sessionId], requireIdle: true },
     })) as {
       archived: string[];
       errors?: unknown[];

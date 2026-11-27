@@ -409,6 +409,8 @@ describe('ChatContextHeader', () => {
     expect(singleButton).not.toBeNull();
     expect(singleButton?.getAttribute('data-active')).toBe('true');
     expect(singleButton?.textContent).toBe('5m');
+    expect(singleButton?.getAttribute('aria-label')).toContain('Next in 5m');
+    expect(singleButton?.getAttribute('title')).toContain('Next in 5m');
     act(() => singleButton?.click());
     expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
 

@@ -25592,6 +25592,7 @@ export function App({
     confirmedCancelledSessionTaskIds:
       sessionScheduledTasks.confirmedCancelledSessionTaskIds,
     hasLiveDurableScheduledSnapshot:
+      scheduledTaskWorkspaceTarget.resolvable &&
       sessionScheduledTasks.hasLiveDurableSnapshot,
     hasLiveSessionScheduledSnapshot:
       sessionScheduledTasks.hasLiveSessionSnapshot,
