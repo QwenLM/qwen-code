@@ -6552,7 +6552,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     const configure = mysql.steps.find(
       (s) =>
         s.name ===
-        'Configure the database packet budget for large-object tests',
+        'Configure the database packet budget and the managed OSS test database',
     );
     const verify = mysql.steps.find((s) =>
       s.run?.includes('-Pmysql-integration'),
