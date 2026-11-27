@@ -1975,6 +1975,23 @@ describe('loadEnvironment', () => {
     expect(process.env['NVM_BIN']).toBeUndefined();
   });
 
+  it('never lets project settings.env choose the Node the clipboard helper spawns', () => {
+    const workspace = makeWorkspace();
+
+    loadEnvironment(
+      testSettings({
+        env: {
+          QWEN_NODE_BINARY: '/workspace-a/evil-node',
+          NVM_BIN: '/workspace-a/bin',
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['QWEN_NODE_BINARY']).toBeUndefined();
+    expect(process.env['NVM_BIN']).toBeUndefined();
+  });
+
   it('never applies entrypoint or trust-anchor keys from project .env files', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(

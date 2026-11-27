@@ -836,13 +836,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
 
   /**
    * Right-click anywhere in the shell: a transcript selection is cleared; with
-   * no selection the clipboard is pasted into the composer. The handler sits on
-   * the root and on the transcript scrollbox, so composer, footer, and status
-   * areas paste too; the scrollbox stops propagation to avoid a second paste.
+   * no selection the clipboard is pasted into the composer, or into the focused
+   * foreground shell when one owns input. The handler sits on the root and on
+   * the transcript scrollbox, so composer, footer, and status areas paste too;
+   * it stops propagation so one click cannot paste twice.
    */
   const handleShellMouseDown = useCallback(
     (event: OpenTuiMouseEvent) => {
       if (event.button !== MouseButton.RIGHT) return;
+      event.stopPropagation();
       if (
         dialog ||
         activeModal ||

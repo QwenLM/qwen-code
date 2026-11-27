@@ -14,7 +14,7 @@ const debugLogger = createDebugLogger('NATIVE_CLIPBOARD');
 
 const ADDON_NAME = '@teddyzhu/clipboard';
 const HELPER_TIMEOUT_MS = 5000;
-const MAX_HELPER_STDOUT_BYTES = 16 * 1024 * 1024;
+export const MAX_HELPER_STDOUT_BYTES = 16 * 1024 * 1024;
 
 /** clipboard-rs's error when another client owns the selection. It is
  *  transient, so reads retry and never surface it as clipboard content. */
@@ -137,6 +137,7 @@ export function runNodeHelper(
   script: string,
   input: string | null,
   entry: string | null = resolveAddonEntry(),
+  timeoutMs = HELPER_TIMEOUT_MS,
 ): Promise<HelperResult | null> {
   if (!entry) return Promise.resolve(null);
 
@@ -167,7 +168,7 @@ export function runNodeHelper(
       if (settled) return;
       child.kill('SIGKILL');
       finish(null);
-    }, HELPER_TIMEOUT_MS);
+    }, timeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       if (overflow) return;
@@ -321,8 +322,8 @@ const defaultBridge = createNativeClipboardBridge({
  * child so the addon's stdout stays out of the renderer; the child lingers
  * briefly for the OS clipboard handoff.
  *
- * Returns false when the child route is unavailable, leaving the caller free
- * to fall back to OSC 52.
+ * Returns false when no child can run the write or the read-back shows the
+ * copy did not persist, leaving the caller free to fall back to OSC 52.
  */
 export function copyTextViaNativeClipboard(text: string): Promise<boolean> {
   return defaultBridge.copyText(text);

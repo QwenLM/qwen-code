@@ -273,7 +273,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             if (await copyTextViaNativeClipboard(text)) return;
             if (!writeOsc52(text)) {
               throw new Error(
-                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel and native clipboard addon unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel and the native clipboard addon were unavailable or the copy did not persist, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
               );
             }
             return;
@@ -287,7 +287,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           if (writeOsc52(text)) return;
 
           throw new Error(
-            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}"), the native clipboard addon is unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}"), the native clipboard addon was unavailable or the copy did not persist, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }

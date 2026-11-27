@@ -5200,6 +5200,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.selectionContainer = null;
     mocks.state.selectionRenderables = null;
     mocks.state.clearSelection.mockClear();
+    mocks.state.readClipboardText.mockReset().mockResolvedValue(null);
   });
 
   function fakeConfig(
@@ -5462,6 +5463,97 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
 
     expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, 'ls -la');
     expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('hands focus back to the composer when the shell write fails', async () => {
+    const owner = { callId: 'shell', pid: 4301, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => false),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const pasteClipboard = vi.fn();
+    mocks.state.readClipboardText.mockResolvedValue('ls -la');
+    renderApp({
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      } as unknown as Config,
+      foregroundShellControl: control,
+      composerHandle: {
+        current: { getText: () => '', setText: () => {}, pasteClipboard },
+      },
+    });
+    await settle();
+    act(() => {
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)({
+        name: 'f',
+        sequence: '\x06',
+        ctrl: true,
+        shift: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      });
+    });
+
+    fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
+    await settle();
+    expect(control.writeShellInput).toHaveBeenCalledWith(owner, 'ls -la');
+
+    const beforeKey = control.writeShellInput.mock.calls.length;
+    let handled: boolean | undefined;
+    act(() => {
+      handled = (
+        mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean
+      )({
+        name: 'x',
+        sequence: 'x',
+        ctrl: false,
+        shift: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      });
+    });
+    expect(handled).toBe(false);
+    expect(control.writeShellInput).toHaveBeenCalledTimes(beforeKey);
+  });
+
+  it('pastes into the composer while a foreground shell is not focused', async () => {
+    const owner = { callId: 'shell', pid: 4301, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const pasteClipboard = vi.fn();
+    renderApp({
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      } as unknown as Config,
+      foregroundShellControl: control,
+      composerHandle: {
+        current: { getText: () => '', setText: () => {}, pasteClipboard },
+      },
+    });
+    await settle();
+
+    fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
+    await settle();
+
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    expect(mocks.state.readClipboardText).not.toHaveBeenCalled();
   });
 
   it('pastes the clipboard on right-click outside the transcript', async () => {

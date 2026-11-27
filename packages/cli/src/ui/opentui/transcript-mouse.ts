@@ -20,8 +20,8 @@ type TranscriptMouseEvent = Pick<
 
 /**
  * Transcript right-click policy: a scoped selection is cleared; otherwise the
- * clipboard is pasted into the composer. Left and middle buttons fall through
- * to their normal handlers.
+ * caller's paste action runs (the composer, or the focused foreground shell).
+ * Left and middle buttons fall through to their normal handlers.
  */
 export function handleTranscriptRightClick(
   event: TranscriptMouseEvent,

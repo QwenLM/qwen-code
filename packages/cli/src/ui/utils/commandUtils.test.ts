@@ -416,7 +416,7 @@ describe('commandUtils', () => {
 
         try {
           await expect(copyToClipboard('failure')).rejects.toThrow(
-            /wl-copy failed \("wl-copy not found"\); xclip\/xsel and native clipboard addon unavailable/,
+            /wl-copy failed \("wl-copy not found"\); xclip\/xsel and the native clipboard addon were unavailable or the copy did not persist/,
           );
           expect(mockSpawn).toHaveBeenCalledTimes(3);
         } finally {
@@ -689,7 +689,7 @@ describe('commandUtils', () => {
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}"), the native clipboard addon is unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}"), the native clipboard addon was unavailable or the copy did not persist, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);

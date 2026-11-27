@@ -13,6 +13,7 @@ transcript 滚动条也一直占用一列。期望的交互是：
 - 完成 OpenTUI 选取后自动复制，不论选取属于哪个区域（transcript、footer、
   composer、对话框）；
 - 在 shell 任意位置右键、且没有 transcript 选取时，把剪贴板贴到 composer；
+  前台 shell 拥有焦点时改为写入该 shell；
 - 在 transcript 选取上右键会取消选取；
 - PageUp/PageDown 与 Ctrl+Home/Ctrl+End 可在 transcript 中移动；
 - transcript 不在底部时显示 **Jump to bottom** 提示；
@@ -41,7 +42,8 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
 
 - 不提供应用内上下文菜单。链接操作、代码块操作与全选不在本变更范围内。
 - 终端原生的 Shift+拖曳选取对应用不可见，因此应用不会自动复制它。应用仍会收到下
-  一次点击：Shift+拖曳之后的右键会贴到 composer。设置 `ui.mouseTracking: false`
+  一次点击：Shift+拖曳之后的右键会贴到 composer，或在前台 shell 拥有焦点时写入该
+  shell。设置 `ui.mouseTracking: false`
   可把右键菜单交还给终端。
 - 虚拟化 transcript 已卸载的历史无法复制。
 - Ink 既有的选取与右键行为不变。
@@ -93,7 +95,8 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
    未设置或为 false 时隐藏滚动条；为 true 时 `scrollbarOptions` 保持 undefined，
    让 OpenTUI 使用自己的显示规则：内容超出视口时显示滚动条。
 7. Linux 剪贴板写入使用共用的 `copyToClipboard()` 分派：
-   `wl-copy` → `xclip` → `xsel` → 原生 `@teddyzhu/clipboard` addon → OSC 52。
+   Wayland 上 `wl-copy` → `xclip` → `xsel`；X11 上 `xclip` → `xsel`；之后是原生
+   `@teddyzhu/clipboard` addon → OSC 52。
    即使 addon 能在进程内加载，原生写入也一律在 Node 子进程执行：clipboard-rs 在替
    换 X11 拥有者时会把 `Somebody else owns the clipboard now` 之类的诊断打印到
    stdout，而在进程内 stdout 就是 TUI 的 alternate screen，消息会直接出现在
@@ -118,7 +121,7 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
   `@teddyzhu/clipboard` addon 读取文字，因此在 macOS 上运行 OpenTUI 时可以右键贴
   上文字。npm 包已附带 arm64 与 x64 的 Bun、`libopentui.dylib` 资源与剪贴板
   addon。
-- **Windows**：写入使用 `cmd /c chcp 65001 && clip`；文字与图片读取使用 addon，
+- **Windows**：写入使用 `cmd /c chcp 65001 >nul && clip`；文字与图片读取使用 addon，
   并声明了 `win32-x64-msvc` 与 `win32-arm64-msvc`。OpenTUI 的 npm 打包仍待完成：
   Bun 只发布 `@oven/bun-windows-x64`（没有 Windows ARM64），npm handoff 也还没有
   列出 Windows 包。
@@ -187,9 +190,9 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
 
 ## 风险与限制
 
-- Linux 剪贴板写入优先使用 `wl-copy`/`xclip`/`xsel`，其次是原生 addon，最后是
-  OSC 52。全部不可用时，即使写入回报成功，VTE 也可能忽略 OSC 52；安装
-  `wl-clipboard` 可获得最可靠的结果。原生 addon 的 Bun → Node 子进程路径需要 Node
+- Linux 剪贴板写入优先使用 `wl-copy`（仅 Wayland）/`xclip`/`xsel`，其次是原生
+  addon，最后是 OSC 52。全部不可用时，即使写入回报成功，VTE 也可能忽略 OSC 52；
+  Wayland 上安装 `wl-clipboard` 可获得最可靠的结果，X11 上则使用 `xclip`/`xsel`。原生 addon 的 Bun → Node 子进程路径需要 Node
   可执行文件；snap 版 Bun 无法启动 nvm 的 Node（本地 OpenTUI 构建请使用附带的
   Bun 1.4.4）。子进程写入后多存活 150 ms，让剪贴板管理器接手；没有这段停顿，紧接
   着的右键读取常会读到空剪贴板。在没有剪贴板管理器的 X11 上，原生复制无法在子进程

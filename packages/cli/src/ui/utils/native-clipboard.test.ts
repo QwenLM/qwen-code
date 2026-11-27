@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,7 @@ import {
   CLIPBOARD_BUSY_MESSAGE,
   CLIPBOARD_READ_MARKER,
   COPY_HELPER_SCRIPT,
+  MAX_HELPER_STDOUT_BYTES,
   READ_HELPER_SCRIPT,
   createNativeClipboardBridge,
   runNodeHelper,
@@ -79,8 +80,48 @@ describe('native clipboard bridge', () => {
     await expect(value.copyText('hello')).resolves.toBe(false);
   });
 
+  it('reports a read-back that contains different non-empty text', async () => {
+    const { value } = copyBridge({
+      code: 0,
+      stdout: `${CLIPBOARD_READ_MARKER}different`,
+      stderr: '',
+    });
+    await expect(value.copyText('hello')).resolves.toBe(false);
+  });
+
+  it('accepts a read-back that differs only by line endings', async () => {
+    const { value } = copyBridge({
+      code: 0,
+      stdout: `${CLIPBOARD_READ_MARKER}one\ntwo`,
+      stderr: '',
+    });
+    await expect(value.copyText('one\r\ntwo')).resolves.toBe(true);
+  });
+
+  it('reports a write helper that exited non-zero without reading back', async () => {
+    const runHelper = vi.fn().mockResolvedValueOnce({
+      code: 1,
+      stdout: '',
+      stderr: 'write failed',
+    });
+    const value = createNativeClipboardBridge({
+      loadModule: vi.fn().mockResolvedValue({ setClipboardText: vi.fn() }),
+      runHelper,
+    });
+
+    await expect(value.copyText('hello')).resolves.toBe(false);
+    expect(runHelper).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
-    ['failed', { code: 1, stdout: '', stderr: CLIPBOARD_BUSY_MESSAGE }],
+    [
+      'failed with a full payload',
+      {
+        code: 1,
+        stdout: `${CLIPBOARD_READ_MARKER}hello`,
+        stderr: CLIPBOARD_BUSY_MESSAGE,
+      },
+    ],
     ['timed out', { code: null, stdout: '', stderr: '' }],
   ] as const)(
     'reports a copy whose read-back %s, so the caller can fall back',
@@ -137,6 +178,15 @@ describe('native clipboard bridge', () => {
       getClipboardText: () => 'one\r\ntwo\rthree',
     });
     await expect(value.readText()).resolves.toBe('one\ntwo\nthree');
+  });
+
+  it('returns null when the in-process read throws', async () => {
+    const { value } = bridge({
+      getClipboardText: () => {
+        throw new Error('ownership race');
+      },
+    });
+    await expect(value.readText()).resolves.toBeNull();
   });
 
   it('reads the Node helper stdout when the addon is unavailable', async () => {
@@ -217,6 +267,7 @@ module.exports = {
   let entry: string;
   const saved = {
     node: process.env['QWEN_NODE_BINARY'],
+    nvm: process.env['NVM_BIN'],
     file: process.env['FAKE_CLIPBOARD_FILE'],
   };
 
@@ -231,6 +282,7 @@ module.exports = {
   afterEach(() => {
     for (const [key, value] of [
       ['QWEN_NODE_BINARY', saved.node],
+      ['NVM_BIN', saved.nvm],
       ['FAKE_CLIPBOARD_FILE', saved.file],
     ] as const) {
       if (value === undefined) delete process.env[key];
@@ -269,4 +321,65 @@ module.exports = {
       realBridge({ getClipboardText: () => 'in-process' }).readText(),
     ).resolves.toBe('in-process');
   });
+
+  it('round-trips multibyte clipboard text through real Node children', async () => {
+    const value = realBridge(null);
+    const text = '中文🙂\r\nline';
+    await expect(value.copyText(text)).resolves.toBe(true);
+    await expect(value.readText()).resolves.toBe('中文🙂\nline');
+  });
+
+  it('kills a helper that never exits', async () => {
+    const result = await runNodeHelper(
+      'setInterval(() => {}, 1000)',
+      null,
+      entry,
+      100,
+    );
+    expect(result?.code).toBeNull();
+  });
+
+  it('caps helper stdout and marks the result as overflowed', async () => {
+    const result = await runNodeHelper(
+      `process.stdout.write('x'.repeat(${MAX_HELPER_STDOUT_BYTES + 1}))`,
+      null,
+      entry,
+    );
+    expect(result?.overflow).toBe(true);
+    expect(result?.stdout).toHaveLength(MAX_HELPER_STDOUT_BYTES);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'uses NVM_BIN node when running under Bun',
+    async () => {
+      symlinkSync(process.execPath, join(dir, 'node'));
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.versions,
+        'bun',
+      );
+      const savedPath = process.env['PATH'];
+      Object.defineProperty(process.versions, 'bun', {
+        value: 'test',
+        configurable: true,
+      });
+      process.env['NVM_BIN'] = dir;
+      process.env['PATH'] = '';
+      delete process.env['QWEN_NODE_BINARY'];
+      try {
+        const result = await runNodeHelper(
+          'process.stdout.write("from-nvm")',
+          null,
+          entry,
+        );
+        expect(result?.stdout).toBe('from-nvm');
+      } finally {
+        process.env['PATH'] = savedPath;
+        if (descriptor) {
+          Object.defineProperty(process.versions, 'bun', descriptor);
+        } else {
+          delete (process.versions as Record<string, unknown>)['bun'];
+        }
+      }
+    },
+  );
 });

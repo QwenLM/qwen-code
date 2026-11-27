@@ -14,7 +14,8 @@ always consumes a column. The desired interaction is:
 - completing an OpenTUI selection copies it automatically, regardless of which
   region owns it (transcript, footer, composer, dialogs);
 - right-clicking anywhere in the shell with no transcript selection pastes the
-  clipboard into the composer;
+  clipboard into the composer, or into the focused foreground shell when one
+  owns input;
 - right-clicking a transcript selection dismisses it;
 - PageUp/PageDown and Ctrl+Home/Ctrl+End move through the transcript;
 - a **Jump to bottom** hint appears while the transcript is not at the tail;
@@ -50,7 +51,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
   out of this change.
 - Terminal-native Shift+drag selection is invisible to the app, so the app does
   not auto-copy it. The app still receives the next click: a right-click after
-  a Shift+drag pastes into the composer. Setting `ui.mouseTracking: false` gives
+  a Shift+drag pastes into the composer, or into the focused foreground shell
+  when one owns input. Setting `ui.mouseTracking: false` gives
   the right-click menu back to the terminal.
 - History unmounted by the virtualized transcript cannot be copied.
 - Ink's existing selection and right-click behavior is unchanged.
@@ -112,7 +114,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    OpenTUI keeps its own visibility rule: the bar shows whenever the content
    overflows.
 7. Linux clipboard writes use the shared `copyToClipboard()` dispatch:
-   `wl-copy` → `xclip` → `xsel` → native `@teddyzhu/clipboard` addon → OSC 52.
+   on Wayland `wl-copy` → `xclip` → `xsel`; on X11 `xclip` → `xsel`; then the
+   native `@teddyzhu/clipboard` addon → OSC 52.
    Native writes always run in a Node child, even when the addon loads in
    process: clipboard-rs prints ownership diagnostics such as
    `Somebody else owns the clipboard now` to stdout while replacing an X11
@@ -144,7 +147,7 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
   text through the `@teddyzhu/clipboard` addon, so right-click text paste works
   when OpenTUI runs there. The npm package already ships Bun, the
   `libopentui.dylib` asset, and the clipboard addon for arm64 and x64.
-- **Windows**: writes use `cmd /c chcp 65001 && clip`; text and image reads use
+- **Windows**: writes use `cmd /c chcp 65001 >nul && clip`; text and image reads use
   the addon, with `win32-x64-msvc` and `win32-arm64-msvc` declared. OpenTUI npm
   packaging is still pending: Bun publishes only `@oven/bun-windows-x64` (no
   Windows ARM64), and the npm handoff does not list the Windows package yet.
@@ -218,10 +221,10 @@ The new user-facing strings are:
 
 ## Risks and limitations
 
-- Clipboard writes on Linux prefer `wl-copy`/`xclip`/`xsel`, then the native
-  addon, then OSC 52. With none available, OSC 52 may be ignored by VTE even
-  though the write reports success; install `wl-clipboard` for the most
-  reliable result. The native addon's Bun → Node child path requires a Node
+- Clipboard writes on Linux prefer `wl-copy` (Wayland only)/`xclip`/`xsel`, then
+  the native addon, then OSC 52. With none available, OSC 52 may be ignored by
+  VTE even though the write reports success; on Wayland install `wl-clipboard`
+  for the most reliable result, on X11 use `xclip`/`xsel`. The native addon's Bun → Node child path requires a Node
   executable; the snap Bun package cannot spawn the nvm Node (use the bundled
   Bun 1.4.4 for local OpenTUI builds). The child lingers 150 ms after writing
   so the clipboard manager can take over; without that pause an immediate
