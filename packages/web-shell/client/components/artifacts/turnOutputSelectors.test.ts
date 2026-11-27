@@ -1205,4 +1205,44 @@ describe('live scheduled-task labels', () => {
     );
     expect(merged.get('turn-unbound')?.[0]?.liveStatus).toBeUndefined();
   });
+
+  it('marks default durable cron_create cards as unboundCreation and omits the flag for current-session or session-only tasks', () => {
+    const messages = [
+      userMessage('u-cron', 'schedule tasks'),
+      toolGroup('tg-cron', [
+        {
+          callId: 'call-default-durable',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '0 9 * * *', prompt: 'default durable', durable: true },
+          rawOutput: { returnDisplay: 'Created durable job abc12345' },
+        },
+        {
+          callId: 'call-current-durable',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: {
+            cron: '0 10 * * *',
+            prompt: 'current durable',
+            durable: true,
+            sessionMode: 'current',
+          },
+          rawOutput: { returnDisplay: 'Created durable job def67890' },
+        },
+        {
+          callId: 'call-session-only',
+          toolName: 'cron_create',
+          status: 'completed',
+          args: { cron: '*/5 * * * *', prompt: 'session only', durable: false },
+          rawOutput: { returnDisplay: 'Created session job ghi11111' },
+        },
+      ]),
+    ];
+
+    const byTurn = getScheduledTasksByTurn(messages).get('u-cron') ?? [];
+    expect(byTurn).toHaveLength(3);
+    expect(byTurn[0]?.unboundCreation).toBe(true);
+    expect(byTurn[1]?.unboundCreation).toBeUndefined();
+    expect(byTurn[2]?.unboundCreation).toBeUndefined();
+  });
 });

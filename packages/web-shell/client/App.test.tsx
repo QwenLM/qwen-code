@@ -60660,10 +60660,10 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await flush();
     testState.ownerVersion += 1;
 
-    testState.prompt = '/resume session-2';
+    testState.prompt = '/resume session-3';
     await clickSubmit(container);
     await vi.waitFor(() => {
-      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
         workspaceCwd: undefined,
       });
     });

@@ -300,6 +300,8 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
     getStringField(raw, 'llmContent') ??
     (typeof tool.rawOutput === 'string' ? tool.rawOutput : undefined);
   const display = outputText ? getFirstLine(outputText) : undefined;
+  const durable = getBooleanField(tool.args, 'durable') ?? false;
+  const sessionMode = getStringField(tool.args, 'sessionMode');
   return {
     id: outputText ? (getCronTaskId(outputText) ?? tool.callId) : tool.callId,
     toolCallId: tool.callId,
@@ -307,7 +309,8 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
     cron,
     prompt,
     recurring: getBooleanField(tool.args, 'recurring') ?? true,
-    durable: getBooleanField(tool.args, 'durable') ?? false,
+    durable,
+    ...(durable && sessionMode !== 'current' ? { unboundCreation: true } : {}),
     ...(display ? { display } : {}),
   };
 }

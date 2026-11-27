@@ -2199,12 +2199,58 @@ function matchesScheduledTaskScope(
   id: string,
   workspaceId: string | undefined,
   sourceSessionId: string | undefined,
+  unboundCreation = false,
 ): boolean {
+  if (
+    candidate.id !== id ||
+    (candidate.workspaceId !== undefined &&
+      candidate.workspaceId !== workspaceId)
+  ) {
+    return false;
+  }
+  if (unboundCreation) return true;
+  return candidate.sessionId == null || candidate.sessionId === sourceSessionId;
+}
+
+function findScopedDurableTask(
+  tasks: readonly DaemonScheduledTask[],
+  id: string,
+  workspaceId: string | undefined,
+  sourceSessionId: string | undefined,
+  unboundCreation: boolean,
+): DaemonScheduledTask | null {
+  if (unboundCreation) {
+    const matches = tasks.filter((item) =>
+      matchesScheduledTaskScope(item, id, workspaceId, sourceSessionId, true),
+    );
+    if (matches.length === 1) return matches[0]!;
+    return matches.find((item) => item.sessionId == null) ?? null;
+  }
   return (
-    candidate.id === id &&
-    (candidate.sessionId == null || candidate.sessionId === sourceSessionId) &&
-    (candidate.workspaceId === undefined ||
-      candidate.workspaceId === workspaceId)
+    tasks.find(
+      (item) =>
+        item.id === id &&
+        item.sessionId === sourceSessionId &&
+        (item.workspaceId === undefined || item.workspaceId === workspaceId),
+    ) ??
+    tasks.find((item) =>
+      matchesScheduledTaskScope(item, id, workspaceId, sourceSessionId, false),
+    ) ??
+    null
+  );
+}
+
+function isTaskNotFoundError(err: unknown): boolean {
+  if (err && typeof err === 'object') {
+    const candidate = err as { status?: unknown; code?: unknown };
+    if (candidate.status === 404 || candidate.code === 'task_not_found') {
+      return true;
+    }
+  }
+  return (
+    err instanceof Error &&
+    (err.message.includes('task_not_found') ||
+      err.message.includes('Task not found'))
   );
 }
 
@@ -2351,6 +2397,7 @@ function ScheduledTaskDetail({
   }, [task.id, task.workspaceId, sourceSessionId]);
 
   const hasKnownTaskId = task.id !== task.toolCallId;
+  const isUnboundCreation = task.durable && task.unboundCreation === true;
   const loadTask = useCallback(async () => {
     const loadRequest = ++loadRequestRef.current;
     const taskId = task.id;
@@ -2379,25 +2426,16 @@ function ScheduledTaskDetail({
         )
       )
         return;
-      const candidate =
-        tasks.find(
-          (item) =>
-            item.id === task.id &&
-            item.sessionId === sourceSessionId &&
-            (item.workspaceId === undefined ||
-              item.workspaceId === workspaceId),
-        ) ??
-        tasks.find((item) =>
-          matchesScheduledTaskScope(
-            item,
-            task.id,
-            workspaceId,
-            sourceSessionId,
-          ),
-        ) ??
-        null;
+      const candidate = findScopedDurableTask(
+        tasks,
+        task.id,
+        workspaceId,
+        sourceSessionId,
+        isUnboundCreation,
+      );
       const snapshot = liveDurableSnapshotRef.current;
       const match =
+        !isUnboundCreation &&
         candidate &&
         candidate.sessionId === sourceSessionId &&
         sourceSessionId !== undefined &&
@@ -2436,6 +2474,7 @@ function ScheduledTaskDetail({
     actions,
     hasKnownTaskId,
     isCurrentLoad,
+    isUnboundCreation,
     task.cron,
     task.durable,
     task.id,
@@ -2472,15 +2511,19 @@ function ScheduledTaskDetail({
     }
     if (hasLiveDurableScheduledSnapshot && sourceSessionId) {
       // The session-filtered snapshot only lists tasks bound to
-      // sourceSessionId; an unbound task (sessionId == null) is legitimately
+      // sourceSessionId; an unbound-created task (whether still null or adopted
+      // into its own dedicated task session by keepalive) is legitimately
       // absent from it and keeps its workspace-list hydration.
       setLoadedTask((previous) =>
-        previous && previous.sessionId == null ? previous : null,
+        previous && (isUnboundCreation || previous.sessionId == null)
+          ? previous
+          : null,
       );
     }
   }, [
     confirmedDurableDeletion,
     hasLiveDurableScheduledSnapshot,
+    isUnboundCreation,
     liveDurableTask,
     sourceSessionId,
   ]);
@@ -2537,6 +2580,86 @@ function ScheduledTaskDetail({
     setBuilder(parseCronToBuilder(loadedTask.cron));
   }, [loadedTask]);
 
+  const runWithCurrentTaskOwner = useCallback(
+    async <T,>(
+      request: number,
+      currentTask: DaemonScheduledTask,
+      mutate: (expectedOwner: string | null) => Promise<T>,
+    ): Promise<T> => {
+      const workspaceId = task.workspaceId;
+      let expectedOwner: string | null = currentTask.sessionId ?? null;
+      if (isUnboundCreation && expectedOwner === null) {
+        const refreshed = findScopedDurableTask(
+          await actions!.listScheduledTasks(workspaceId),
+          task.id,
+          workspaceId,
+          sourceSessionId,
+          true,
+        );
+        if (
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          )
+        ) {
+          throw new DOMException('Request superseded', 'AbortError');
+        }
+        if (refreshed?.sessionId) {
+          expectedOwner = refreshed.sessionId;
+        }
+      }
+      try {
+        return await mutate(expectedOwner);
+      } catch (err) {
+        if (
+          !isUnboundCreation ||
+          expectedOwner !== null ||
+          !isTaskNotFoundError(err) ||
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          )
+        ) {
+          throw err;
+        }
+        const refreshed = findScopedDurableTask(
+          await actions!.listScheduledTasks(workspaceId),
+          task.id,
+          workspaceId,
+          sourceSessionId,
+          true,
+        );
+        if (
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          ) ||
+          !refreshed?.sessionId
+        ) {
+          throw err;
+        }
+        return mutate(refreshed.sessionId);
+      }
+    },
+    [
+      actions,
+      isCurrentRequest,
+      isUnboundCreation,
+      sourceSessionId,
+      task.id,
+      task.workspaceId,
+    ],
+  );
+
   const handleSave = useCallback(async () => {
     if (!loadedTask || !actions || !sourceSessionId) return;
     const cron = buildCron(builder);
@@ -2555,15 +2678,20 @@ function ScheduledTaskDetail({
     setSubmitting(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(
-        loadedTask.id,
-        {
-          cron,
-          prompt: prompt.trim(),
-          name: name.trim() || null,
-        },
-        workspaceId,
-        loadedTask.sessionId ?? null,
+      const updated = await runWithCurrentTaskOwner(
+        request,
+        loadedTask,
+        (expectedOwner) =>
+          actions.updateScheduledTask(
+            loadedTask.id,
+            {
+              cron,
+              prompt: prompt.trim(),
+              name: name.trim() || null,
+            },
+            workspaceId,
+            expectedOwner,
+          ),
       );
       if (
         !isCurrentRequest(
@@ -2581,6 +2709,7 @@ function ScheduledTaskDetail({
           taskId,
           workspaceId,
           sourceSessionId,
+          isUnboundCreation,
         )
       ) {
         throw new Error(t('scheduledTasks.error.workspaceUnavailable'));
@@ -2608,10 +2737,12 @@ function ScheduledTaskDetail({
     actions,
     builder,
     isCurrentRequest,
+    isUnboundCreation,
     loadedTask,
     name,
     onMutated,
     prompt,
+    runWithCurrentTaskOwner,
     sourceSessionId,
     t,
     task.id,
@@ -2627,13 +2758,18 @@ function ScheduledTaskDetail({
     setBusy(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(
-        loadedTask.id,
-        {
-          enabled: !loadedTask.enabled,
-        },
-        workspaceId,
-        loadedTask.sessionId ?? null,
+      const updated = await runWithCurrentTaskOwner(
+        request,
+        loadedTask,
+        (expectedOwner) =>
+          actions.updateScheduledTask(
+            loadedTask.id,
+            {
+              enabled: !loadedTask.enabled,
+            },
+            workspaceId,
+            expectedOwner,
+          ),
       );
       if (
         !isCurrentRequest(
@@ -2651,6 +2787,7 @@ function ScheduledTaskDetail({
           taskId,
           workspaceId,
           sourceSessionId,
+          isUnboundCreation,
         )
       ) {
         throw new Error(t('scheduledTasks.error.workspaceUnavailable'));
@@ -2673,8 +2810,10 @@ function ScheduledTaskDetail({
   }, [
     actions,
     isCurrentRequest,
+    isUnboundCreation,
     loadedTask,
     onMutated,
+    runWithCurrentTaskOwner,
     sourceSessionId,
     t,
     task.id,
@@ -2690,11 +2829,15 @@ function ScheduledTaskDetail({
     setBusy(true);
     setFormError(null);
     try {
-      await actions.deleteScheduledTask(
-        loadedTask.id,
-        workspaceId,
-        loadedTask.sessionId ?? null,
-      );
+      let deletedOwner: string | null = loadedTask.sessionId ?? null;
+      await runWithCurrentTaskOwner(request, loadedTask, (expectedOwner) => {
+        deletedOwner = expectedOwner;
+        return actions.deleteScheduledTask(
+          loadedTask.id,
+          workspaceId,
+          expectedOwner,
+        );
+      });
       if (
         !isCurrentRequest(
           request,
@@ -2711,7 +2854,7 @@ function ScheduledTaskDetail({
       onDurableTaskDeleted?.(
         loadedTask.id,
         task.workspaceId,
-        loadedTask.sessionId ?? undefined,
+        deletedOwner ?? undefined,
       );
       onMutated?.();
     } catch (err) {
@@ -2733,6 +2876,7 @@ function ScheduledTaskDetail({
     loadedTask,
     onDurableTaskDeleted,
     onMutated,
+    runWithCurrentTaskOwner,
     sourceSessionId,
     task.id,
     task.workspaceId,

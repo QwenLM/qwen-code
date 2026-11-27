@@ -2843,6 +2843,93 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     expect(editBtn?.disabled).toBe(true);
   });
 
+  it.each(['adopted-before-open', 'adopted-before-save'] as const)(
+    'hydrates and saves a default unbound durable task even after keepalive adopts it into a dedicated session (%s)',
+    async (timing) => {
+      const dedicatedSessionId = 'dedicated-task-session-uuid';
+      const unboundBeforeAdopt = {
+        ...secondaryScheduledTask,
+        id: 'cron-secondary',
+        workspaceId: 'secondary-id',
+        sessionId: null,
+        prompt: 'Default unbound durable prompt',
+      };
+      const adoptedTask = {
+        ...unboundBeforeAdopt,
+        sessionId: dedicatedSessionId,
+      };
+      if (timing === 'adopted-before-open') {
+        mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+          adoptedTask,
+        ]);
+      } else {
+        mockWorkspaceActions.listScheduledTasks
+          .mockResolvedValueOnce([unboundBeforeAdopt])
+          .mockResolvedValue([adoptedTask]);
+      }
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+        ...adoptedTask,
+        prompt: 'Saved after keepalive adoption',
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          scheduledTaskPanel({
+            sourceSessionId: 'creating-session',
+            liveSessionScheduledTasksOwnerSessionId: 'creating-session',
+            liveDurableScheduledTasks: [],
+            hasLiveDurableScheduledSnapshot: true,
+            task: {
+              id: adoptedTask.id,
+              prompt: adoptedTask.prompt,
+              unboundCreation: true,
+            },
+          }),
+        ),
+      );
+      await flush();
+
+      expect(container.textContent).not.toContain('live status is unavailable');
+      const editBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Edit',
+      );
+      expect(editBtn?.disabled).toBe(false);
+
+      act(() => editBtn!.click());
+      await flush();
+      const promptInput =
+        document.body.querySelector<HTMLTextAreaElement>('textarea');
+      expect(promptInput).not.toBeNull();
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set;
+        setter?.call(promptInput, 'Saved after keepalive adoption');
+        promptInput!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const saveBtn = Array.from(document.body.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Save',
+      );
+      await act(async () => {
+        saveBtn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+        adoptedTask.id,
+        expect.objectContaining({ prompt: 'Saved after keepalive adoption' }),
+        'secondary-id',
+        dedicatedSessionId,
+      );
+      expect(container.textContent).toContain('Saved after keepalive adoption');
+    },
+  );
+
   it('rejects an untrusted primary durable task without issuing a request', async () => {
     mockWorkspace.capabilities = {
       ...mockWorkspace.capabilities,
