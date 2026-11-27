@@ -174,22 +174,24 @@ Fix them in your checkout?  [Fix it] [Not now] [Stop watching]
 
 ### 6.1 `schedule`（`packages/cli/src/commands/autofix-pr/schedule.ts`）
 
-- 移除 `runSchedule` 中对 `state.inPlace` 的拒绝；`authorCanPush !== true` 的
-  拒绝保留（非协作者 PR 任何模式都不允许 watch）。
+- 仅当 `state.inPlaceWatch === true` 或已记录 `state.watch` 时放行 in-place watch 的 `runSchedule`（未带 `--watch` 准备的一次性 `--in-place` 状态仍拒绝排程）；`authorCanPush !== true` 的拒绝保留（非协作者 PR 任何模式都不允许 watch，报错同时说明 `--once` 与一次性 `--in-place`）。
 - 当 `state.inPlace` 为真时，在 `scheduledTask` 的 `prompt` 中追加
   `--in-place`：`Run /autofix-pr tick <repo>#<n> --task <id> --in-place ...`。
 - `--again` 在没有已记录任务时的错误提示对 in-place watch 指引使用
   `/autofix-pr <n> --in-place --watch`。
 
-### 6.2 `prepare`（`packages/cli/src/commands/autofix-pr/prepare.ts`）
+### 6.2 `prepare` 与 `state`（`packages/cli/src/commands/autofix-pr/prepare.ts`、`state.ts`）
 
-- 在 `runInPlacePrepare` 中通过 `redirectedAncestor` 拦住检出内被替换成符号链接的 `.qwen` 或 `.qwen/tmp`（与经典 worktree prepare 一致）。
-- 允许 `runInPlacePrepare` 恢复同一检出里的已有 in-place watch（按实际找到的 watch 根目录 `where` 校验，而非可能陈旧的 `state.worktreePath`，使克隆目录移动后也可正常恢复），并在带 `--take-over` 时接管其他会话的 watch；重新校验 PR 资格（已合入/关闭时返回 `pr_closed`）、`authorCanPush`、remote、head 分支与 upstream 跟踪，同步刷新 `headRefName`、`baseRefName`、`branch`、`worktreePath`、`authorCanPush`、`remote`、`pushTarget` 与 `sessionId` 并重新确认 trust anchor，fetch 到私有引用 `paths.headRef` 以保证 `localCopy` 准确，且不触碰检出里的脏文件或超前提交（留给 `sync` 安全处理）。
+- 为 `prepare` 新增 `--watch` 标志（`AutofixPrState.inPlaceWatch?: true`，并纳入 `stateDefect` 校验），使定时 `--in-place --watch` 启动记录显式定时同意，而一次性 `--in-place` 状态保持不可排程。
+- 在 `runInPlacePrepare` 中通过 `redirectedAncestor` 拦住检出内被替换成符号链接的 `.qwen` 或 `.qwen/tmp`，通过 `assertStateNotTracked`（`gh` 调用前与持锁后双重校验，git 读索引失败时 fail-closed）拒绝 PR 分支中 `git add -f` 提交的伪造状态文件，并在 `sameInPlaceWatch` 中校验 `state.prNumber === prNumber`。
+- 允许 `runInPlacePrepare` 恢复同一检出里的已有 in-place watch（按实际找到的 watch 根目录 `where` 校验，而非可能陈旧的 `state.worktreePath`，使克隆目录移动后也可正常恢复），并在带 `--take-over` 时接管其他会话的 watch；重新校验 PR 资格（已合入/关闭时返回 `pr_closed`）、`authorCanPush`、remote、head 分支与 upstream 跟踪，同步刷新 `headRefName`、`baseRefName`、`branch`、`worktreePath`、`authorCanPush`、`remote`、`pushTarget`、`sessionId` 与 `inPlaceWatch` 并重新确认 trust anchor，fetch 到私有引用 `paths.headRef` 以保证 `localCopy` 准确，且不触碰检出里的脏文件或超前提交（留给 `sync` 安全处理）。
+- 在 `state.ts` 抽取 `isTakeOver` 与 `repositoryMismatchMessage` 供经典与 in-place 路径共用，并更新 `assertOwnedBySession` 对未排程的 in-place watch 指引使用 `/autofix-pr <n> --in-place --watch`。
 - 继续拒绝：已有 worktree watch（禁止静默转换模式）、不同仓库、不同检出（兄弟 worktree）、以及未带 `--take-over` 的他会话 watch（`watched_elsewhere`）。
 - 全新 `prepare --in-place` 保持 v1 全部前置条件（干净检出、位于或落后于 PR head），并在持锁后通过 `findWatchRoot(prNumber)` 关闭兄弟 worktree 并发竞态窗口。
 
 ### 6.3 `autofix_pr` 工具（`packages/core/src/tools/autofix-pr.ts`）
 
+- 在 `prepare` 白名单布尔参数中新增 `watch`（转发 `--watch`）。
 - 为 `prepare --in-place --take-over` 补充准确的 `startsWatchWarning` 提示。
 - 更新 `in_place` 参数说明；`schedule` 对已确认的 in-place watch 放行，而
   `checkUnattendedWatch` 继续拒绝 `watch.inPlace === true` 的 `unattended`。

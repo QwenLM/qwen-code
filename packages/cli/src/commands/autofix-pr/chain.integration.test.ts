@@ -1151,6 +1151,7 @@ describe.skipIf(process.platform === 'win32')(
         '--host',
         'ghe.example.com',
         '--in-place',
+        '--watch',
       );
       expect(prep).toMatchObject({
         inPlace: true,

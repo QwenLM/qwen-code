@@ -56,9 +56,13 @@ export interface AutofixPrState {
   worktreePath: string;
   /** `prepare --in-place`: the watch fixes in the user's own checkout of
    * the head branch — `worktreePath` is that checkout and `branch` the head
-   * branch itself. Attended, one round per start; no scheduled task, no
-   * background fix, and no helper ever discards what the checkout holds. */
+   * branch itself. Attended, foreground only, and no helper ever discards what
+   * the checkout holds; one-shot unless `inPlaceWatch` / `watch` records
+   * scheduled rounds. */
   inPlace?: true;
+  /** `prepare --in-place --watch`: records that the start consented to
+   * scheduled in-place rounds so `schedule` refuses one-shot in-place states. */
+  inPlaceWatch?: true;
   viewer: string;
   prAuthor: string;
   lastKnownHeadSha: string;
@@ -982,6 +986,12 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'failingChecks';
   }
+  if (state.inPlace !== undefined && state.inPlace !== true) {
+    return 'inPlace';
+  }
+  if (state.inPlaceWatch !== undefined && state.inPlaceWatch !== true) {
+    return 'inPlaceWatch';
+  }
   return null;
 }
 
@@ -1525,16 +1535,39 @@ export function ghNotFound(err: unknown): boolean {
   return /\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '');
 }
 
+export function isTakeOver(
+  state: Pick<AutofixPrState, 'sessionId'>,
+  takeOver?: boolean,
+): boolean {
+  return takeOver === true && state.sessionId !== currentSessionId();
+}
+
+export function repositoryMismatchMessage(
+  state: Pick<AutofixPrState, 'host' | 'owner' | 'repo'>,
+  prNumber: number,
+  host: string,
+  repo: string,
+): string {
+  const watched = `${state.host}/${state.owner}/${state.repo}`;
+  return (
+    `PR #${prNumber} here is a watch of ${watched}, not ${host}/${repo}. ` +
+    `Run \`qwen autofix-pr cleanup ${prNumber}\` first.`
+  );
+}
+
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {
+    const takeOverCommand = state.watch
+      ? `\`/autofix-pr resume ${state.prNumber}\``
+      : state.inPlace
+        ? `\`/autofix-pr ${state.prNumber} --in-place --watch\``
+        : `\`/autofix-pr ${state.prNumber}\``;
     throw new AutofixPrRefusal(
       'watched_elsewhere',
       `PR #${state.prNumber} is watched by another session ` +
         `(${state.sessionId || 'no session'}). Take it over with ` +
-        (state.watch
-          ? `\`/autofix-pr resume ${state.prNumber}\``
-          : `\`/autofix-pr ${state.prNumber}\``) +
+        takeOverCommand +
         `, end it keeping its work with ` +
         `\`qwen autofix-pr cleanup ${state.prNumber} --take-over\` (what ` +
         `\`/autofix-pr stop ${state.prNumber}\` runs), or discard it with ` +

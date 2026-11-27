@@ -573,5 +573,27 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       "skipping step 5's question and cancel cleanup and running only its last paragraph",
     );
+    // R1-1: Start step 3 carves out --in-place for localUnpushedCommits/localUncommittedChanges.
+    expect(body).toContain(
+      "for a worktree start (not `--in-place`), the user's own copy of the head branch could not be squared with the PR",
+    );
+    expect(body).toContain(
+      "otherwise mention what the checkout holds as the user's own work (never discarded",
+    );
+    // R1-3: Round step 1 and In-place preserve clean unpushed commits on --in-place instead of discarding.
+    expect(body).toContain(
+      "For an `--in-place` watch, `synced: true` with `unpushed` commits means the user's own local commits sit cleanly on top of the PR head: do not run `sync --discard` and do not stop",
+    );
+    expect(inPlace).toContain(
+      '`sync` answering `synced: true` with `unpushed` commits on a clean checkout is **not** discarded and does **not** stop the round',
+    );
+    // R1-4: prepare takes --watch with --in-place only for scheduled starts.
+    expect(body).toContain(
+      'adding `--in-place` when the start gave it — and also `--watch` when starting a scheduled `--in-place --watch` or `--in-place --every <n>`',
+    );
+    // R1-8: One-shot start on an already-running watch reports that the existing watch continues running.
+    expect(body).toContain(
+      'say that the existing watch continues running and `/autofix-pr stop <n>` ends it',
+    );
   });
 });

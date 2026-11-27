@@ -213,19 +213,16 @@ proposal answer.
 
 ### 6.1 `schedule` (`packages/cli/src/commands/autofix-pr/schedule.ts`)
 
-- Remove the `state.inPlace` refusal in `runSchedule`; `authorCanPush !==
-true` continues to refuse (non-collaborator PRs are never watched in
-  either mode).
+- Allow `runSchedule` for an in-place watch only when `state.inPlaceWatch === true` or `state.watch` is already recorded (refusing one-shot `--in-place` states prepared without `--watch`); `authorCanPush !== true` continues to refuse (non-collaborator PRs are never watched in either mode, naming both `--once` and one-shot `--in-place`).
 - Include `--in-place` in `scheduledTask`'s `prompt` when `state.inPlace`
   is true: `Run /autofix-pr tick <repo>#<n> --task <id> --in-place ...`.
 - Update the `--again` error message when no task is recorded to point
   in-place watches at `/autofix-pr <n> --in-place --watch`.
 
-### 6.2 `prepare` (`packages/cli/src/commands/autofix-pr/prepare.ts`)
+### 6.2 `prepare` and `state` (`packages/cli/src/commands/autofix-pr/prepare.ts`, `state.ts`)
 
-- Guard `runInPlacePrepare` against a symlinked `.qwen` or `.qwen/tmp`
-  inside the checkout via `redirectedAncestor` (matching classic worktree
-  prepare).
+- Add `--watch` to `prepare` (`inPlaceWatch?: true` on `AutofixPrState`, validated by `stateDefect`) so scheduled `--in-place --watch` starts record explicit watch consent while one-shot `--in-place` stays unschedulable.
+- Guard `runInPlacePrepare` against a symlinked `.qwen` or `.qwen/tmp` inside the checkout via `redirectedAncestor`, against a git-tracked `.qwen/tmp/autofix-pr-<n>-state.json` committed on the PR branch (`assertStateNotTracked`, checked both before `gh` and under the watch lock, failing closed if git cannot read the index), and against a state file whose `prNumber` does not match `<n>`.
 - Allow `runInPlacePrepare` to resume an existing in-place watch in the
   same checkout (matching the watch root `where` rather than a potentially
   stale `state.worktreePath`, so a moved clone directory can resume too)
@@ -233,10 +230,11 @@ true` continues to refuse (non-collaborator PRs are never watched in
   eligibility (`pr_closed` if merged/closed), `authorCanPush`, remotes,
   head branch, and upstream tracking, refreshing `headRefName`,
   `baseRefName`, `branch`, `worktreePath`, `authorCanPush`, `remote`,
-  `pushTarget`, and `sessionId` plus re-confirming the trust anchor,
-  fetching into `paths.headRef` so `localCopy` reports accurately, and
-  leaving any dirty/ahead work in the checkout untouched for `sync` to
+  `pushTarget`, `sessionId`, and `inPlaceWatch` plus re-confirming the trust
+  anchor, fetching into `paths.headRef` so `localCopy` reports accurately,
+  and leaving any dirty/ahead work in the checkout untouched for `sync` to
   handle.
+- Share `isTakeOver` and `repositoryMismatchMessage` in `state.ts` between classic and in-place prepare, and update `assertOwnedBySession` to suggest `/autofix-pr <n> --in-place --watch` for an unscheduled in-place watch.
 - Continue refusing: existing worktree watch (no silent mode conversion),
   different repository, different checkout (sibling worktree), and another
   session's watch without `--take-over` (`watched_elsewhere`).
@@ -246,6 +244,7 @@ true` continues to refuse (non-collaborator PRs are never watched in
 
 ### 6.3 The `autofix_pr` tool (`packages/core/src/tools/autofix-pr.ts`)
 
+- Add `watch` to `prepare`'s allowlisted boolean parameters (`--watch`).
 - Update `startsWatchWarning` for `prepare --in-place --take-over` so
   take-over confirmations accurately describe taking over an in-place watch.
 - Update the `in_place` parameter description; `schedule` already works on
