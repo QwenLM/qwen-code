@@ -3288,16 +3288,84 @@ describe('Server Config (config.ts)', () => {
         modalities: { image: false },
         accepted: false,
       },
-    ])('selects the Hugging Face bridge using $name', (fixture) => {
+      {
+        name: 'a pinned route with a text-only wire override',
+        candidate: hfVision,
+        override: hfText,
+        pin: true,
+        accepted: true,
+        flags: { imageUnsupported: true },
+      },
+      {
+        name: 'a pinned image-capable route',
+        candidate: hfVision,
+        pin: true,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a cross-provider pin with an image-capable wire override',
+        candidate: hfText,
+        override: hfVision,
+        pin: true,
+        primaryAuth: AuthType.USE_ANTHROPIC,
+        primaryBaseUrl: ANTHROPIC_URL,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a pinned explicit image opt-out',
+        candidate: hfText,
+        override: hfVision,
+        pin: true,
+        modalities: { image: false },
+        accepted: true,
+        flags: { imageUnsupported: true },
+      },
+      {
+        name: 'a pinned explicit vision capability override',
+        candidate: hfVision,
+        override: hfText,
+        pin: true,
+        explicitVision: true,
+        accepted: true,
+        flags: { agentCapable: true },
+      },
+      {
+        name: 'a direct pin with unknown Hugging Face modalities',
+        candidate: 'fixture/unknown-model',
+        pin: true,
+        accepted: true,
+      },
+      {
+        name: 'a non-Hugging Face pin with unknown modalities',
+        candidate: 'fixture/unknown-model',
+        baseUrl: TOKEN_PLAN_URL,
+        override: hfText,
+        pin: true,
+        accepted: true,
+      },
+    ])('uses the actual vision route for $name', (fixture) => {
       const primary = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+      const authType = fixture.primaryAuth ?? AuthType.USE_OPENAI;
+      const baseUrl = fixture.baseUrl ?? hfUrl;
       const config = makeConfig({
         model: primary,
-        authType: AuthType.USE_OPENAI,
+        authType,
+        ...(fixture.pin && {
+          visionModel: `openai:${fixture.candidate}\0${baseUrl}`,
+        }),
         modelProvidersConfig: {
           openai: [
             {
               id: fixture.candidate,
-              baseUrl: hfUrl,
+              baseUrl,
+              ...(fixture.pin && {
+                capabilities: {
+                  agent: true,
+                  ...(fixture.explicitVision && { vision: true }),
+                },
+              }),
               generationConfig: {
                 ...(fixture.override && {
                   extra_body: { model: fixture.override },
@@ -3310,8 +3378,8 @@ describe('Server Config (config.ts)', () => {
       });
       vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
         model: primary,
-        authType: AuthType.USE_OPENAI,
-        baseUrl: hfUrl,
+        authType,
+        baseUrl: fixture.primaryBaseUrl ?? hfUrl,
         ...(fixture.primaryOverride && {
           extra_body: { model: fixture.primaryOverride },
         }),
@@ -3319,7 +3387,7 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getDefaultVisionBridgeModel()).toEqual(
         fixture.accepted
-          ? { id: `openai:${fixture.candidate}`, baseUrl: hfUrl }
+          ? { id: `openai:${fixture.candidate}`, baseUrl, ...fixture.flags }
           : undefined,
       );
     });

@@ -226,6 +226,66 @@ describe('frozen Managed side-query input', () => {
   });
 
   it.each([
+    { kind: 'btw', shifts: 1, maxTokens: undefined, retained: 1 },
+    { kind: 'btw', shifts: 2, maxTokens: 32_000, retained: 1 },
+    { kind: 'recap', shifts: 3, maxTokens: undefined, retained: 2 },
+  ] as const)(
+    'fits $shifts numeric CSV exports for $kind with max_tokens $maxTokens',
+    async ({ kind, shifts, maxTokens, retained }) => {
+      const f = fixture();
+      const csv = [
+        'time,started,succeeded,failed,timeout,p50_ms,p90_ms,p95_ms,p99_ms,bytes_in,bytes_out',
+        ...Array.from({ length: 600 }, (_, minute) => {
+          const date = new Date(Date.UTC(2026, 9, 21, 8, minute));
+          const time = date.toISOString().slice(0, 19) + 'Z';
+          return (
+            time + ',2021,1986,32,3,54.57,67.39,92.68,195.38,18884129,35051762'
+          );
+        }),
+      ].join('\n');
+      const exports = Array.from({ length: shifts }, (_, index) =>
+        ['Shift ' + (index + 1), csv].join('\n'),
+      );
+      for (const [index, text] of exports.entries()) {
+        f.turn(String(index), 'completed', 'Keep this gateway export.', text);
+      }
+
+      const request = await prepareManagedSideQuery(
+        {
+          kind,
+          question: kind === 'btw' ? 'How many requests were started?' : null,
+          privateHistory: [],
+          throughSequence: f.events.length,
+        },
+        f.events,
+        f.resources,
+        {
+          model: 'MiniMaxAI/MiniMax-M2.5:digitalocean',
+          baseUrl: 'https://router.huggingface.co/v1',
+          ...(maxTokens === undefined
+            ? {}
+            : { samplingParams: { max_tokens: maxTokens } }),
+        },
+      );
+
+      const contents = request?.contents as Content[];
+      expect(
+        contents
+          .filter((content) => content.role === 'model')
+          .map((content) => content.parts?.[0]?.text),
+      ).toEqual(exports.slice(-retained));
+      if (shifts === 1) {
+        // The published MiniMax tokenizer counts 28,900 input tokens here.
+        expect(request?.config?.maxOutputTokens).toBeLessThanOrEqual(
+          65_536 - 28_900,
+        );
+      } else {
+        expect(request?.config?.maxOutputTokens).toBe(maxTokens ?? 300);
+      }
+    },
+  );
+
+  it.each([
     { kind: 'btw', length: 112_000, maxTokens: undefined },
     { kind: 'btw', length: 68_000, maxTokens: 32_000 },
     { kind: 'recap', length: 132_000, maxTokens: undefined },

@@ -46,6 +46,17 @@ export interface ManagedSideQueryPair {
   text: string;
 }
 
+function estimateSideQueryTextTokens(text: string): number {
+  let estimate = estimateContextTextTokens(text);
+  // Numbers and ASCII delimiters commonly tokenize in shorter runs than prose.
+  for (const [run] of text.matchAll(
+    /[0-9]+|[!-/:-@\u005b-\u0060{-~]+|\r?\n/g,
+  )) {
+    estimate += Math.ceil(run.length / 2) - run.length / 4;
+  }
+  return Math.ceil(estimate);
+}
+
 /** No live Session, authority, settings, or workspace is needed to prepare input. */
 export async function prepareManagedSideQuery(
   input: {
@@ -220,7 +231,7 @@ export async function prepareManagedSideQuery(
         estimate = estimateContentTokens(
           [content],
           undefined,
-          estimateContextTextTokens,
+          estimateSideQueryTextTokens,
         );
         estimatedTokens.set(content, estimate);
       }

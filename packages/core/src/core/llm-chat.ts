@@ -90,6 +90,7 @@ import type {
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
 import { getRequestModel, getSystemPromptModel } from './request-model.js';
+import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
@@ -993,6 +994,19 @@ function getToolArgumentStallRetryError(error: unknown) {
  * large windows (the output ceiling binds long before the pad matters).
  */
 const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
+
+function getConfiguredHuggingFaceChatOutputBudget(
+  config: ContentGeneratorConfig | undefined,
+  providerLimit: number | undefined,
+): number | undefined {
+  if (providerLimit === undefined || config?.authType !== AuthType.USE_OPENAI) {
+    return undefined;
+  }
+  return getWireOutputBudget({
+    ...config.samplingParams,
+    ...config.extra_body,
+  });
+}
 
 /**
  * Cap on how many routes' token counts are retained while their route is
@@ -3801,7 +3815,8 @@ export class LlmChat {
     // (params.config.maxOutputTokens from subagents, samplingParams.max_tokens
     // or QWEN_CODE_MAX_OUTPUT_TOKENS from user config), else
     // defaultOutputCeiling(model) (the model's output limit clipped to
-    // OUTPUT_TOKEN_CEILING).
+    // OUTPUT_TOKEN_CEILING). A verified Hugging Face Chat route may also set a
+    // ceiling in its provider-native body fields.
     const cgConfigForThresholds =
       exactRoute?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
@@ -3821,9 +3836,15 @@ export class LlmChat {
       budgetModel,
       cgConfigForThresholds?.baseUrl,
     );
+    const bodyOutputCeiling = getConfiguredHuggingFaceChatOutputBudget(
+      cgConfigForThresholds,
+      hfRoute?.limits?.output,
+    );
     const outputCeiling = Math.min(
       explicitOutputCeiling ??
+        bodyOutputCeiling ??
         defaultOutputCeiling(budgetModel, cgConfigForThresholds?.baseUrl),
+      bodyOutputCeiling ?? Infinity,
       hfRoute?.limits?.output ?? Infinity,
     );
     // Declared at function level so the MAX_TOKENS escalation path inside
@@ -6674,12 +6695,18 @@ export class LlmChat {
       const window =
         contentGeneratorConfig?.contextWindowSize ??
         tokenLimit(wireModel, 'input', baseUrl);
+      const bodyOutputCeiling = getConfiguredHuggingFaceChatOutputBudget(
+        contentGeneratorConfig,
+        route?.limits?.output,
+      );
       // The primary request's budget was sized for its own context window.
       const { explicitOutputCeiling } = outputClamp;
       const outputCeiling = Math.min(
         explicitOutputCeiling ?? Infinity,
+        bodyOutputCeiling ?? Infinity,
         contentGeneratorConfig?.samplingParams?.max_tokens ??
           explicitOutputCeiling ??
+          bodyOutputCeiling ??
           defaultOutputCeiling(wireModel, baseUrl),
         route?.limits?.output ?? Infinity,
       );

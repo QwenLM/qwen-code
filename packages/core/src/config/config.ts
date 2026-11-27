@@ -58,6 +58,7 @@ import type { VisionBridgeModelSelection } from '../services/visionBridge/vision
 import {
   getQualifiedVisionModelId,
   isFullTurnVisionCapable,
+  isImageCapable,
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
@@ -7990,6 +7991,33 @@ export class Config {
     return true;
   }
 
+  private resolveVisionBridgeCandidate(
+    candidate: AvailableModel,
+  ): { model: AvailableModel; imageUnsupported?: boolean } | undefined {
+    if (
+      candidate.authType !== AuthType.USE_OPENAI ||
+      !isHuggingFaceRouterUrl(candidate.baseUrl) ||
+      candidate.isRuntimeModel
+    ) {
+      return { model: candidate };
+    }
+    try {
+      const config = buildAgentContentGeneratorConfig(this, candidate.id, {
+        authType: candidate.authType,
+        baseUrl: candidate.baseUrl,
+      });
+      const model = { ...candidate, modalities: config.modalities };
+      // An HF Chat override can change whether the SDK sends the image.
+      const imageUnsupported =
+        !isImageCapable(model) &&
+        (getRequestModel(config) !== config.model ||
+          config.modalities?.image === false);
+      return { model, imageUnsupported };
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Resolve the user's explicit `visionModel` (set via `/model --vision`) into a
    * bridge selection. The selected id is auth-qualified so `runSideQuery`
@@ -8057,13 +8085,16 @@ export class Config {
       );
       return undefined;
     }
-    const agentCapable = isFullTurnVisionCapable(match);
+    const resolved = this.resolveVisionBridgeCandidate(match);
+    if (!resolved) return undefined;
+    const { model, imageUnsupported } = resolved;
     return {
-      id: getQualifiedVisionModelId(match),
-      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
-        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      id: getQualifiedVisionModelId(model),
+      ...((parsedSetting.baseUrl ?? model.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? model.baseUrl,
       }),
-      ...(agentCapable && { agentCapable: true }),
+      ...(isFullTurnVisionCapable(model) && { agentCapable: true }),
+      ...(imageUnsupported && { imageUnsupported: true }),
     };
   }
 
@@ -8088,9 +8119,7 @@ export class Config {
       if (
         !isHuggingFaceRouterUrl(baseUrl) ||
         model.baseUrl !== baseUrl ||
-        model.authType !== AuthType.USE_OPENAI ||
         model.id === primary ||
-        model.isRuntimeModel ||
         model.voiceOnly ||
         model.imageOnly ||
         listed.some(
@@ -8103,19 +8132,8 @@ export class Config {
       ) {
         return [model];
       }
-      try {
-        const { modalities } = buildAgentContentGeneratorConfig(
-          this,
-          model.id,
-          {
-            authType: model.authType,
-            baseUrl: model.baseUrl,
-          },
-        );
-        return [{ ...model, modalities }];
-      } catch {
-        return [];
-      }
+      const candidate = this.resolveVisionBridgeCandidate(model);
+      return candidate ? [candidate.model] : [];
     });
     return selectVisionBridgeModel(primary, candidates, {
       authType: contentGeneratorConfig?.authType,

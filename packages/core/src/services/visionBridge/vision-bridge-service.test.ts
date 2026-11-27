@@ -17,6 +17,7 @@ import {
   isImageCapable,
   isFullTurnVisionCapable,
   type VisionBridgeResult,
+  type VisionBridgeModelSelection,
   type VisionModelCandidate,
 } from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
@@ -45,7 +46,7 @@ const hasImage = (parts: unknown) =>
 
 const DASHSCOPE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 /** A Config whose default bridge model is `model`, plus any `extra` getters. */
-const configFor = (model: { id: string; baseUrl?: string }, extra = {}) =>
+const configFor = (model: VisionBridgeModelSelection, extra = {}) =>
   ({
     getDefaultVisionBridgeModel: () => ({ ...model }),
     ...extra,
@@ -433,6 +434,27 @@ describe('runVisionBridge', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toMatch(/image-capable model/);
     expect(mockSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('fails before dispatch when the pinned route would strip images', async () => {
+    const result = await bridge('should not be used', ['look', image()], {
+      config: configFor({
+        id: 'openai:fixture/vision-model',
+        baseUrl: 'https://router.huggingface.co/v1',
+        imageUnsupported: true,
+      }),
+    });
+
+    expect(mockSideQuery).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: 'failed',
+      applied: true,
+      convertedCount: 0,
+      modelEndpoint: 'router.huggingface.co',
+    });
+    expect(result.egressOccurred).toBeUndefined();
+    expect(textOf(result.parts)).toContain('does not accept images');
+    expect(hasImage(result.parts)).toBe(false);
   });
 
   it('uses whichever model getDefaultVisionBridgeModel returns', async () => {

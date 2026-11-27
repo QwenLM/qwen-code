@@ -8221,6 +8221,16 @@ describe('LlmChat', async () => {
         expected: 64_000,
       },
       {
+        name: 'a raw output budget on the wider fallback',
+        primary: narrowPrimary,
+        target: {
+          baseUrl: hfBaseUrl,
+          extra_body: { model: glmModel, max_completion_tokens: 180_000 },
+        },
+        primaryLimit: 14_286,
+        expected: 180_000,
+      },
+      {
         name: 'the caller ceiling when the primary window could not fit it',
         primary: narrowPrimary,
         target: { baseUrl: hfBaseUrl, extra_body: { model: glmModel } },
@@ -15756,6 +15766,76 @@ describe('LlmChat', async () => {
 
       expect(requestAt(0).config?.maxOutputTokens).toBe(32_000);
     });
+
+    it.each([
+      {
+        name: 'raw max_tokens',
+        extraBody: { max_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'raw max_completion_tokens',
+        extraBody: { max_completion_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'sampling max_new_tokens',
+        samplingParams: { max_new_tokens: 180_000 },
+        expected: 180_000,
+      },
+      {
+        name: 'a raw budget above the provider maximum',
+        extraBody: { max_tokens: 1_000_000 },
+        expected: 943_718,
+      },
+      {
+        name: 'a raw budget above the remaining window',
+        extraBody: { max_tokens: 180_000 },
+        window: 65_536,
+        message: ' cat'.repeat(21_250),
+        expected: 14_286,
+      },
+      {
+        name: 'a smaller caller budget',
+        extraBody: { max_tokens: 180_000 },
+        callerMax: 90_000,
+        expected: 90_000,
+      },
+    ])(
+      'budgets a verified Hugging Face Chat request with $name',
+      async ({
+        extraBody,
+        samplingParams,
+        window,
+        message,
+        callerMax,
+        expected,
+      }) => {
+        const model = 'zai-org/GLM-5.3-Flash:deepinfra';
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          baseUrl: 'https://router.huggingface.co/v1',
+          contextWindowSize: window ?? 1_048_576,
+          extra_body: extraBody,
+          samplingParams,
+        });
+        serveStreams(textStream('done'));
+
+        await drain(
+          await chat.sendMessageStream(
+            model,
+            {
+              message: message ?? 'write an essay',
+              config: { maxOutputTokens: callerMax },
+            },
+            'hf-configured-output',
+          ),
+        );
+
+        expect(requestAt(0).config?.maxOutputTokens).toBe(expected);
+      },
+    );
 
     it('retries protocol-tag leaks during direct output recovery', async () => {
       vi.useFakeTimers();

@@ -29,6 +29,10 @@ import { getBuiltinKimiK3Reasoning } from '../kimi-reasoning.js';
 import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import {
+  getWireOutputBudget,
+  PROVIDER_OUTPUT_BUDGET_KEYS,
+} from './output-budget.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
@@ -536,44 +540,12 @@ export class NonSSEResponseError extends Error {
   }
 }
 
-/**
- * Provider-specific output-budget keys that stand in for `max_tokens` on the
- * wire (e.g. GPT-5 / o-series use `max_completion_tokens`). When a user's
- * samplingParams already carries one of these, the window clamp must not also
- * inject `max_tokens`: sending the pair double-specifies the output budget and
- * some endpoints reject it.
- */
-const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
-
 function hasProviderOutputBudgetKey(samplingParams: {
   [key: string]: unknown;
 }): boolean {
   return PROVIDER_OUTPUT_BUDGET_KEYS.some(
     (key) => samplingParams[key] !== undefined,
   );
-}
-
-/**
- * Effective output-token ceiling carried by a wire request, whichever key the
- * budget travels under (`max_tokens` or a provider-specific stand-in).
- * Undefined when the request caps output by neither (e.g. a samplingParams
- * opt-out), in which case the converter's truncation corroboration check is
- * inconclusive and keeps its legacy inference.
- */
-function getWireOutputBudget(
-  request: OpenAI.Chat.ChatCompletionCreateParams,
-): number | undefined {
-  if (typeof request.max_tokens === 'number' && request.max_tokens > 0) {
-    return request.max_tokens;
-  }
-  const wire = request as unknown as Record<string, unknown>;
-  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
-    const value = wire[key];
-    if (typeof value === 'number' && value > 0) {
-      return value;
-    }
-  }
-  return undefined;
 }
 
 /**
