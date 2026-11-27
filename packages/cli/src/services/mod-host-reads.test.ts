@@ -100,6 +100,30 @@ describe('modHostReads', () => {
     });
   });
 
+  it('redacts environment and headers in arrays inside MCP server data', () => {
+    const mcpServers = {
+      docs: {
+        command: 'docs-mcp',
+        args: ['--verbose'],
+        extra: [{ env: { CUSTOM: 'hidden' }, headers: { 'X-Team': 'core' } }],
+      },
+    };
+    const { merged } = modHostReads(
+      loaded({ merged: { mcpServers } }),
+      {},
+    ).settings();
+
+    expect(merged).toEqual({
+      mcpServers: {
+        docs: {
+          command: 'docs-mcp',
+          args: ['--verbose'],
+          extra: [{}],
+        },
+      },
+    });
+  });
+
   it('hides a variable that only one source names', () => {
     const reads = modHostReads(
       loaded({

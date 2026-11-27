@@ -53,9 +53,9 @@ These follow the 2.1.332 declarations.
 - **Credentials are kept from Mods.** Claude Code passes the environment and the settings through unfiltered. In Qwen Code both hold the model provider's keys, the settings' `apiKey` and MCP servers' tokens. A Mod can send what it reads to the model, into a prompt or into its store, so a Mod that never asks for a credential should not be able to read one. The Mods examined read terminal and CI variables such as `HOME`, `TERM`, `CI` and `TMUX`, and settings such as `enabledPlugins` and the policy source; none reads a credential. Hiding credentials therefore breaks none of them. The rules:
   - A variable or settings key is a credential by its name. Its words, split at `_`, `-` and camelCase, include `TOKEN`, `SECRET`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`, `PASSWORD`, `PASSPHRASE`, `AUTHORIZATION`, `DSN` or `CONNECTION_STRING` (the full list is the rule the daemon already uses to redact worker diagnostics, now shared).
   - A variable that a settings `envKey`, `credentialEnv` or `apiKeyEnv` names, in any source, is a credential too: a provider's key may live under any name.
-  - `$.env.get` answers `undefined` for a credential, as for a variable that is unset. A Mod cannot tell the two apart, so it learns nothing about which credentials are set.
+  - `$.env.get` answers `undefined` for a credential or for a variable whose value contains a recognized credential of at least four characters, including values copied through settings aliases. A variable that is unset gives the same answer.
   - `$.settings.read` leaves out every string under a credential's key at any depth, including those variables in the top-level `env`. It also leaves out each MCP server's `env` and `headers` whole, because their names follow no rule.
-  - Settings resolve `$VAR` and `${VAR}` as they load, so a credential's value can sit under an ordinary key, such as a command or an MCP server's `args`. `$.settings.read` therefore also leaves out every string, at any depth, that contains the value of a hidden variable (four characters or longer).
+  - Settings resolve `$VAR` and `${VAR}` as they load, so a credential's value can sit under an ordinary key, such as a command or an MCP server's `args`. `$.settings.read` therefore also leaves out every string, at any depth, that contains the value of a hidden variable (four characters or longer). The host checks both the current environment and the values used during expansion, which can differ after loading a workspace environment or reloading a scope.
   - Only strings are left out. A number or a flag under such a name, such as `model.sessionTokenLimit`, is a limit and not a secret.
 - **Sources map onto Qwen Code's scopes.**
   - `user` is `~/.qwen/settings.json`.
@@ -100,7 +100,7 @@ Observed with Qwen Code 0.27.4, the global CLI, with an isolated `HOME` and a Mo
   - an unknown source, a key that is not a string, and a telemetry entry with free text are refused;
   - telemetry reaches the debug log only, and a deny rejects the call;
   - a host with no reads refuses both calls and does not list them;
-  - the CLI host's credential rules for variables, settings keys, `env`, provider-named variables, MCP `env` and `headers`, a string holding a resolved credential, and an untrusted folder;
+  - the CLI host's credential rules for variables and aliases, settings keys, `env`, provider-named variables, MCP `env` and `headers`, a string holding a resolved credential even after the environment changes, and an untrusted folder;
   - `isColorless` under `NO_COLOR`.
 - An integration test (`integration-tests/cli/mods-env-settings-telemetry.test.ts`) installs a Mod fixture on the built CLI. Its command reads `HOME`, a credential variable, the settings and one source, and logs telemetry. The test checks the answers, that no credential appears in the output, and that the run sends no model request.
 

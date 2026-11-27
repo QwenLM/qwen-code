@@ -8,7 +8,10 @@ import type {
   ModHostReads,
   ModSettingsLayer,
 } from '@qwen-code/qwen-code-core/mods/types.js';
-import type { LoadedSettings } from '../config/settings.js';
+import {
+  getSettingsEnvSubstitutions,
+  type LoadedSettings,
+} from '../config/settings.js';
 import { isCredentialName } from '../utils/credential-names.js';
 
 type Json = Record<string, unknown>;
@@ -39,7 +42,7 @@ function withoutCredentials(
   if (Array.isArray(value))
     return value
       .filter((item) => typeof item !== 'string' || !drops('', item))
-      .map((item) => withoutCredentials(item, drops));
+      .map((item) => withoutCredentials(item, drops, level));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value).flatMap(([key, item]) =>
@@ -54,9 +57,9 @@ function withoutCredentials(
                 drops,
                 level === 'servers'
                   ? 'server'
-                  : key === 'mcpServers'
+                  : level === 'any' && key === 'mcpServers'
                     ? 'servers'
-                    : 'any',
+                    : level,
               ),
             ],
           ],
@@ -75,32 +78,46 @@ export function modHostReads(
 ): ModHostReads {
   // Every source counts: a layer a Mod reads may hold an entry the merge
   // left out.
-  const hiding = () => {
+  const dropsCredential = () => {
+    const scopes = [
+      settings.systemDefaults.settings,
+      settings.user.settings,
+      settings.workspace.settings,
+      settings.system.settings,
+    ];
     const variables = credentialVariables(
-      [
-        settings.merged,
-        settings.systemDefaults.settings,
-        settings.user.settings,
-        settings.workspace.settings,
-        settings.system.settings,
-      ],
+      [settings.merged, ...scopes],
       new Set(),
     );
-    return (name: string) =>
+    const hidden = (name: string) =>
       isCredentialName(name) || variables.has(name.toUpperCase());
+    // A resolved value can differ from the environment after startup or reload.
+    const secrets = new Set<string>();
+    for (const entries of [
+      Object.entries(env),
+      ...scopes.map(getSettingsEnvSubstitutions),
+    ]) {
+      for (const [name, value] of entries ?? []) {
+        if (value && value.length >= 4 && hidden(name)) secrets.add(value);
+      }
+    }
+    return (name: string, value: string) => {
+      if (name && hidden(name)) return true;
+      for (const secret of secrets) {
+        if (value.includes(secret)) return true;
+      }
+      return false;
+    };
   };
   return {
-    env: (name) => (hiding()(name) ? undefined : env[name]),
+    env: (name) => {
+      const value = env[name];
+      return typeof value === 'string' && !dropsCredential()(name, value)
+        ? value
+        : undefined;
+    },
     settings: () => {
-      const hidden = hiding();
-      // Settings resolve `$VAR` as they load, so a credential's value may
-      // sit under any key.
-      const secrets = Object.entries(env)
-        .filter(([name, value]) => value && value.length >= 4 && hidden(name))
-        .map(([, value]) => value!);
-      const drops = (key: string, value: string) =>
-        (key !== '' && hidden(key)) ||
-        secrets.some((secret) => value.includes(secret));
+      const drops = dropsCredential();
       const clean = (value: unknown) =>
         withoutCredentials(value, drops) as Json;
       // System defaults name no source a Mod reads; they still count in

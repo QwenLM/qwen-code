@@ -52,4 +52,20 @@ describe('channel worker diagnostics', () => {
       }),
     ).toBe('<redacted>🙂🙂');
   });
+
+  it('keeps legacy mixed-case matches and recognizes camelCase names', () => {
+    const redact = createWorkerDiagnosticRedactor({
+      workerEnv: {
+        toKEN: 'fixture-one',
+        passWord: 'fixture-two',
+        DsN: 'fixture-three',
+        userApiKey: 'fixture-four',
+        LABEL: 'public-value',
+      },
+    });
+
+    expect(
+      redact('fixture-one fixture-two fixture-three fixture-four public-value'),
+    ).toBe('<redacted> <redacted> <redacted> <redacted> public-value');
+  });
 });

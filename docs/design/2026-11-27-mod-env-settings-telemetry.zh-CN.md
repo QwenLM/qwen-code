@@ -60,9 +60,9 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 检查过的 Mod 读的是 `HOME`、`TERM`、`CI`、`TMUX` 这类终端和 CI 变量，以及 `enabledPlugins`、policy 来源这类设置，没有一个读凭据，所以遮住凭据不会让它们出错。
   - 按名字判断凭据。把变量名或设置键按 `_`、`-` 和驼峰拆开，含有 `TOKEN`、`SECRET`、`API_KEY`、`ACCESS_KEY`、`PRIVATE_KEY`、`CREDENTIAL`、`PASSWORD`、`PASSPHRASE`、`AUTHORIZATION`、`DSN` 或 `CONNECTION_STRING` 等词的，就是凭据。完整列表就是 daemon 遮蔽 worker 诊断信息时已有的那条规则，这次抽出来共用。
   - 任一来源的设置里 `envKey`、`credentialEnv` 或 `apiKeyEnv` 指向的变量也算凭据，因为供应商的 key 可以放在任何名字下。
-  - 对凭据，`$.env.get` 回答 `undefined`，和变量未设置时一样。Mod 分不出这两种情况，也就无从知道设置了哪些凭据。
+  - 对凭据以及值包含至少四个字符的已识别凭据的变量，`$.env.get` 都回答 `undefined`，包括通过设置复制凭据的别名。变量未设置时也得到同样的回答。
   - `$.settings.read` 去掉任意层级下凭据键对应的字符串，包括顶层 `env` 里的这些变量。每个 MCP 服务器的 `env` 和 `headers` 整个去掉，因为它们的名字没有规律可循。
-  - 设置在加载时会解析 `$VAR` 和 `${VAR}`，所以凭据的值可能出现在普通键下，比如一条命令或 MCP 服务器的 `args`。因此 `$.settings.read` 还会去掉任意层级下包含被遮住变量的值（四个字符及以上）的字符串。
+  - 设置在加载时会解析 `$VAR` 和 `${VAR}`，所以凭据的值可能出现在普通键下，比如一条命令或 MCP 服务器的 `args`。因此 `$.settings.read` 还会去掉任意层级下包含被遮住变量的值（四个字符及以上）的字符串。宿主同时检查当前环境和展开时实际使用的值。加载工作区环境或重新加载设置时，两者可能不同。
   - 只去掉字符串。这类名字下的数字或开关（比如 `model.sessionTokenLimit`）是限额，不是秘密。
 - **来源对应到 Qwen Code 的作用域。**
   - `user` 是 `~/.qwen/settings.json`。
@@ -116,7 +116,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 未知来源、不是字符串的键、带自由文本的 telemetry entry 被拒绝；
   - telemetry 只进调试日志；被拒绝时调用被拒绝；
   - 没有 reads 的宿主拒绝两种读取调用，也不列出它们；
-  - CLI 宿主的凭据规则：变量、设置键、`env`、供应商指向的变量、MCP 的 `env` 和 `headers`、包含已解析凭据的字符串，以及不受信任的文件夹；
+  - CLI 宿主的凭据规则：变量及其别名、设置键、`env`、供应商指向的变量、MCP 的 `env` 和 `headers`、包含已解析凭据的字符串（包括环境值变化后），以及不受信任的文件夹；
   - `NO_COLOR` 下的 `isColorless`。
 - 集成测试（`integration-tests/cli/mods-env-settings-telemetry.test.ts`）在构建好的 CLI 上安装一个 Mod fixture。它的命令读取 `HOME`、一个凭据变量、设置和单个来源，并记录 telemetry。测试检查：
   - 各项回答；

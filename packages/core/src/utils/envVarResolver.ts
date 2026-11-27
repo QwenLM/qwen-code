@@ -12,6 +12,7 @@ export interface ResolveEnvVarsOptions {
    * `process.env`. Defaults to true.
    */
   readonly processEnvFallback?: boolean;
+  readonly onSubstitution?: (name: string, value: string) => void;
 }
 
 /**
@@ -54,8 +55,10 @@ export function resolveEnvVarsInString(
     ) {
       return match;
     }
-    if (customEnv && typeof customEnv[varName] === 'string') {
-      return customEnv[varName];
+    const customValue = customEnv?.[varName];
+    if (typeof customValue === 'string') {
+      options.onSubstitution?.(varName, customValue);
+      return customValue;
     }
     if (
       options.processEnvFallback !== false &&
@@ -63,7 +66,9 @@ export function resolveEnvVarsInString(
       process.env &&
       typeof process.env[varName] === 'string'
     ) {
-      return process.env[varName]!;
+      const resolved = process.env[varName]!;
+      options.onSubstitution?.(varName, resolved);
+      return resolved;
     }
     return match;
   });

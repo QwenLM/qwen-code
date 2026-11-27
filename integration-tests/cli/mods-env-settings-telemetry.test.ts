@@ -41,9 +41,13 @@ const MOD = `export function register(on) {
     return { text: JSON.stringify({
       home: await $.env.get('HOME'),
       key: (await $.env.get('OPENAI_API_KEY')) ?? null,
+      alias: (await $.env.get('PROBE_ALIAS')) ?? null,
+      priorAlias: (await $.env.get('PROBE_PRIOR_ALIAS')) ?? null,
+      workspaceEnv: await $.env.get('PROBE_WORKSPACE_ACTIVE'),
       general: await $.settings.read({ key: 'general' }),
       auth: await $.settings.read({ key: 'security' }),
       env: await $.settings.read({ key: 'env' }),
+      userEnv: await $.settings.read({ source: 'user', key: 'env' }),
       user: Object.keys(await $.settings.read({ source: 'user' })).sort(),
       local: await $.settings.read({ source: 'local' }),
     }) };
@@ -65,16 +69,30 @@ describe('a Mod reading the environment and settings in headless runs', () => {
     const plugin = join(scratch, 'reads-mod');
     for (const directory of [
       workspace,
+      join(workspace, '.qwen'),
       qwenHome,
       join(plugin, '.claude-plugin'),
       join(plugin, 'hooks'),
     ])
       mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      join(qwenHome, '.env'),
+      'PROBE_SOURCE_TOKEN=fixture-home-value\n',
+    );
+    writeFileSync(
+      join(workspace, '.qwen', '.env'),
+      'PROBE_SOURCE_TOKEN=fixture-workspace-value\nPROBE_WORKSPACE_ACTIVE=loaded\n',
+    );
     json(join(qwenHome, 'settings.json'), {
       experimental: { mods: true },
       general: { enableAutoUpdate: false, vimMode: true },
       memory: E2E_MEMORY_SETTINGS_DEFAULTS,
-      env: { EDITOR: 'vim', PROBE_TOKEN: 'settings-secret' },
+      env: {
+        EDITOR: 'vim',
+        PROBE_TOKEN: 'settings-secret',
+        PROBE_ALIAS: '${OPENAI_API_KEY}',
+        PROBE_PRIOR_ALIAS: '${PROBE_SOURCE_TOKEN}',
+      },
       security: {
         folderTrust: { enabled: false },
         auth: { selectedType: 'openai', apiKey: 'settings-api-key' },
@@ -98,6 +116,7 @@ describe('a Mod reading the environment and settings in headless runs', () => {
       QWEN_SANDBOX: 'false',
       QWEN_CODE_DISABLE_CRON: '1',
       QWEN_CODE_DISABLE_UPDATE_CHECK: '1',
+      QWEN_CODE_NO_RELAUNCH: '1',
       OPENAI_API_KEY: 'env-api-key',
     };
     await run(
@@ -137,16 +156,26 @@ describe('a Mod reading the environment and settings in headless runs', () => {
     expect(JSON.parse(String(result['result']))).toEqual({
       home,
       key: null,
+      alias: null,
+      priorAlias: null,
+      workspaceEnv: 'loaded',
       general: { enableAutoUpdate: false, vimMode: true },
       auth: {
         folderTrust: { enabled: false },
         auth: { selectedType: 'openai' },
       },
       env: { EDITOR: 'vim' },
+      userEnv: { EDITOR: 'vim' },
       user: expect.arrayContaining(['env', 'general', 'security']),
       local: {},
     });
-    for (const secret of ['env-api-key', 'settings-api-key', 'settings-secret'])
+    for (const secret of [
+      'env-api-key',
+      'settings-api-key',
+      'settings-secret',
+      'fixture-home-value',
+      'fixture-workspace-value',
+    ])
       expect(stdout).not.toContain(secret);
     expect(
       server.requests

@@ -259,6 +259,32 @@ export interface SettingsFile {
   rawJson?: string;
 }
 
+// Keep expansion values out of the settings objects that callers serialize.
+const settingsEnvSubstitutions = new WeakMap<
+  Settings,
+  ReadonlyMap<string, string>
+>();
+
+export function getSettingsEnvSubstitutions(
+  settings: Settings,
+): ReadonlyMap<string, string> | undefined {
+  return settingsEnvSubstitutions.get(settings);
+}
+
+function resolveSettingsEnvironment(
+  settings: Settings,
+  fallback: Record<string, string>,
+  processEnvFallback = true,
+): Settings {
+  const substitutions = new Map<string, string>();
+  const resolved = resolveEnvVarsInObject(settings, fallback, {
+    processEnvFallback,
+    onSubstitution: (name, value) => substitutions.set(name, value),
+  });
+  if (substitutions.size) settingsEnvSubstitutions.set(resolved, substitutions);
+  return resolved;
+}
+
 const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];
 
 function getSettingsFileKeyWarnings(
@@ -970,7 +996,7 @@ export class LoadedSettings {
         if (scope !== SettingScope.Workspace) {
           parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
         }
-        const resolved = resolveEnvVarsInObject(
+        const resolved = resolveSettingsEnvironment(
           parsed as Settings,
           getHomeEnvFallbackVars((message) => debugLogger.warn(message)),
         );
@@ -998,6 +1024,7 @@ export class LoadedSettings {
       return {
         file,
         settings: structuredClone(file.settings),
+        envSubstitutions: settingsEnvSubstitutions.get(file.settings),
         originalSettings: structuredClone(file.originalSettings),
         rawJson: file.rawJson,
       };
@@ -1007,6 +1034,11 @@ export class LoadedSettings {
 
     for (const snapshot of snapshots) {
       snapshot.file.settings = snapshot.settings;
+      if (snapshot.envSubstitutions)
+        settingsEnvSubstitutions.set(
+          snapshot.settings,
+          snapshot.envSubstitutions,
+        );
       snapshot.file.originalSettings = snapshot.originalSettings;
       snapshot.file.rawJson = snapshot.rawJson;
     }
@@ -1596,26 +1628,25 @@ function readSettingsLayers(
   const homeEnvFallback = snapshotOf
     ? spawnedEnvironmentView(snapshotOf.environment)
     : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
-  const resolveOptions = { processEnvFallback: !snapshot };
-  systemSettings = resolveEnvVarsInObject(
+  systemSettings = resolveSettingsEnvironment(
     systemResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  systemDefaultSettings = resolveEnvVarsInObject(
+  systemDefaultSettings = resolveSettingsEnvironment(
     systemDefaultsResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  userSettings = resolveEnvVarsInObject(
+  userSettings = resolveSettingsEnvironment(
     userResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
-  workspaceSettings = resolveEnvVarsInObject(
+  workspaceSettings = resolveSettingsEnvironment(
     workspaceResult.settings,
     homeEnvFallback,
-    resolveOptions,
+    !snapshot,
   );
 
   // Support legacy theme names

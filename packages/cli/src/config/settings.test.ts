@@ -43,6 +43,7 @@ import {
   vi,
   beforeEach,
   afterEach,
+  onTestFinished,
   type Mocked,
   type Mock,
 } from 'vitest';
@@ -53,6 +54,7 @@ import * as jsoncEditor from '../utils/jsonc-editor.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
+  getSettingsEnvSubstitutions,
   getSettingsWarnings,
   loadSettings,
   getUserSettingsPath,
@@ -5508,6 +5510,9 @@ describe('Settings Loading and Merging', () => {
       expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
 
       expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(getSettingsEnvSubstitutions(settings.user.settings)).toEqual(
+        new Map([['RELOADED_THEME', 'light']]),
+      );
       expect(settings.user.originalSettings.ui?.theme).toBe(
         '${RELOADED_THEME}',
       );
@@ -5622,8 +5627,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('rolls back every scope when an atomic reload partially fails', () => {
+      vi.stubEnv('ROLLBACK_OLD_MODEL', 'old-user');
+      vi.stubEnv('ROLLBACK_NEW_MODEL', 'new-user');
+      onTestFinished(() => vi.unstubAllEnvs());
       let userContent = JSON.stringify({
-        modelProviders: { openai: [{ id: 'old-user' }] },
+        modelProviders: { openai: [{ id: '${ROLLBACK_OLD_MODEL}' }] },
       });
       let workspaceContent = JSON.stringify({
         modelProviders: { gemini: [{ id: 'old-workspace' }] },
@@ -5641,7 +5649,7 @@ describe('Settings Loading and Merging', () => {
       );
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       userContent = JSON.stringify({
-        modelProviders: { openai: [{ id: 'new-user' }] },
+        modelProviders: { openai: [{ id: '${ROLLBACK_NEW_MODEL}' }] },
       });
       workspaceContent = '{bad json';
 
@@ -5655,6 +5663,9 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings.modelProviders).toEqual({
         openai: [{ id: 'old-user' }],
       });
+      expect(getSettingsEnvSubstitutions(settings.user.settings)).toEqual(
+        new Map([['ROLLBACK_OLD_MODEL', 'old-user']]),
+      );
       expect(settings.workspace.settings.modelProviders).toEqual({
         gemini: [{ id: 'old-workspace' }],
       });

@@ -12,7 +12,10 @@ const CREDENTIAL_WORDS =
  * credential, in any spelling: `OPENAI_API_KEY`, `apiKey`, `X-Api-Key`.
  */
 export function isCredentialName(name: string): boolean {
-  return CREDENTIAL_WORDS.test(
-    name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[-.\s]/g, '_'),
+  return (
+    CREDENTIAL_WORDS.test(name) ||
+    CREDENTIAL_WORDS.test(
+      name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[-.\s]/g, '_'),
+    )
   );
 }

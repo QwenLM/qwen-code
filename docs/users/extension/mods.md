@@ -726,13 +726,18 @@ model, a prompt or the store:
 - `$.env.get` answers `undefined` for a variable whose name marks a credential
   (`TOKEN`, `SECRET`, `API_KEY`, `PASSWORD` and the like, such as
   `OPENAI_API_KEY`), and for each variable that a settings `envKey`,
-  `credentialEnv` or `apiKeyEnv` names in any source.
+  `credentialEnv` or `apiKeyEnv` names in any source. It also hides variables
+  whose values contain a recognized credential of at least four characters.
 - `$.settings.read` leaves out every string under a key named the same way
   (`apiKey`, an `Authorization` header), those variables in `env`, each MCP
   server's `env` and `headers`, and every string that contains a hidden
-  variable's value, as a `$VAR` reference resolves to.
+  variable's value. This includes the value used to expand a `$VAR` reference
+  when it differs from the variable's current value.
+- Numeric or boolean settings remain readable, even under credential-like
+  names such as `sessionTokenLimit`.
 - A credential typed literally under an ordinary key, such as a token in an MCP
-  server's `args`, stays readable.
+  server's `args`, can stay readable. Credentials in variables whose names match
+  none of these rules can also remain visible.
 
 The settings are keyed as a Qwen Code `settings.json` is. The sources are
 `user` (`~/.qwen/settings.json`), `project` (the workspace's
