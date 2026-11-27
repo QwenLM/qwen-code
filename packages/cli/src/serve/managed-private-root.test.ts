@@ -46,6 +46,23 @@ describe('runPrivateRootShell', () => {
     });
   });
 
+  it('returns the confirmed output on a successful exit', async () => {
+    mockLaunch({ state: 'confirmed', exitCode: 0 }, false, 'workspace');
+    await expect(run()).resolves.toEqual({
+      executionStatus: 'success',
+      responseParts: [{ type: 'text', text: 'workspace' }],
+    });
+  });
+
+  it('returns confirmed output and the exit code on failure', async () => {
+    mockLaunch({ state: 'confirmed', exitCode: 2 }, false, 'bad input');
+    await expect(run()).resolves.toEqual({
+      executionStatus: 'error',
+      responseParts: [{ type: 'text', text: 'bad input' }],
+      error: { message: 'Shell exited with code 2.' },
+    });
+  });
+
   it.each([
     { state: 'unconfirmed' },
     { state: 'unconfirmed', payloadExitObserved: true },
@@ -68,15 +85,17 @@ function run() {
 function mockLaunch(
   sandboxStatus: SandboxStatus,
   cancelledBeforeSpawn = false,
+  output = '',
 ) {
   const pid = cancelledBeforeSpawn ? undefined : 123;
   launch.mockResolvedValue({
     pid,
     settled: Promise.resolve(sandboxStatus),
     result: Promise.resolve({
-      rawOutput: Buffer.alloc(0),
-      output: '',
-      exitCode: null,
+      rawOutput: Buffer.from(output),
+      output,
+      exitCode:
+        sandboxStatus.state === 'confirmed' ? sandboxStatus.exitCode : null,
       signal: null,
       error: null,
       aborted: sandboxStatus.state === 'interrupted',
