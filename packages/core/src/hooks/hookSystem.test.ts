@@ -786,7 +786,9 @@ describe('HookSystem', () => {
 
   describe('constructor', () => {
     it('should create instance with all dependencies', () => {
-      expect(HookRegistry).toHaveBeenCalledWith(mockConfig);
+      expect(HookRegistry).toHaveBeenCalledWith(mockConfig, {
+        emitFeedback: expect.any(Function),
+      });
       expect(HookRunner).toHaveBeenCalled();
       expect(HookAggregator).toHaveBeenCalled();
       expect(HookPlanner).toHaveBeenCalledWith(mockHookRegistry);
@@ -814,6 +816,22 @@ describe('HookSystem', () => {
     it('should reload configured hooks', async () => {
       await hookSystem.reload();
       expect(mockHookRegistry.reloadConfiguredHooks).toHaveBeenCalled();
+    });
+
+    it('keeps only the configuration warnings of the latest load', async () => {
+      const emitter = vi.mocked(HookRegistry).mock.calls.at(-1)![1]!;
+      vi.mocked(mockHookRegistry.initialize).mockImplementation(async () => {
+        emitter.emitFeedback('warning', 'old');
+        emitter.emitFeedback('warning', 'old');
+      });
+      vi.mocked(mockHookRegistry.reloadConfiguredHooks).mockImplementation(
+        async () => emitter.emitFeedback('warning', 'new'),
+      );
+
+      await hookSystem.initialize();
+      expect(hookSystem.getConfigWarnings()).toEqual(['old']);
+      await hookSystem.reload();
+      expect(hookSystem.getConfigWarnings()).toEqual(['new']);
     });
   });
 
@@ -963,9 +981,14 @@ describe('HookSystem', () => {
       method: 'fireUserPromptSubmitEvent',
       event: HookEventName.UserPromptSubmit,
       outputType: DefaultHookOutput,
-      args: ['model prompt', signal, 'submitted prompt'],
+      args: [
+        'model prompt',
+        signal,
+        'submitted prompt',
+        { session_id: 'sender', cwd: '/workspace/a' },
+      ],
       required: ['test prompt'],
-      defaults: [undefined, undefined],
+      defaults: [undefined, undefined, undefined],
     },
     {
       method: 'fireInstructionsLoadedEvent',

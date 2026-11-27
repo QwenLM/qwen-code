@@ -13,10 +13,15 @@ import {
   GROUP_COLOR_OPTIONS,
 } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptCooperativeReadBudgetForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -72,6 +77,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    resetSessionTranscriptIndexCacheForTest();
     abortHarness.controller = undefined;
     abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
@@ -117,9 +123,17 @@ describe('merged session catalog pagination', () => {
 
   function bridgeFor(sessions: BridgeSessionSummary[]) {
     const list = vi.fn(() => sessions);
+    const getSessionSummary = vi.fn((sessionId: string) => {
+      const session = sessions.find((row) => row.sessionId === sessionId);
+      if (!session) throw new SessionNotFoundError(sessionId);
+      return session;
+    });
     return {
       list,
-      bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
+      bridge: {
+        listWorkspaceSessions: list,
+        getSessionSummary,
+      } as unknown as AcpSessionBridge,
     };
   }
 
@@ -146,6 +160,11 @@ describe('merged session catalog pagination', () => {
         SessionService.prototype,
         'getArtifactSummaryPathForArchiveState',
       );
+      const goal = vi.spyOn(
+        SessionService.prototype,
+        'getGoalSessionPathForArchiveState',
+      );
+      const ledger = vi.spyOn(SessionService.prototype, 'getPromptLedgerPath');
 
       const firstPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -156,9 +175,10 @@ describe('merged session catalog pagination', () => {
       expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
         first.sessionId,
       ]);
-      for (const reader of [worktree, pr, artifact]) {
+      for (const reader of [worktree, pr, artifact, goal]) {
         expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
       }
+      expect(ledger.mock.calls).toEqual([[first.sessionId]]);
 
       const secondPage = await listWorkspaceSessionsForResponse(
         bridge,
@@ -185,9 +205,30 @@ describe('merged session catalog pagination', () => {
       ];
       expect(worktree.mock.calls).toEqual(persistedReads);
       expect(artifact.mock.calls).toEqual(persistedReads);
+      expect(goal.mock.calls).toEqual(persistedReads);
       expect(pr.mock.calls).toEqual([
         ...persistedReads,
         [live.sessionId, 'active'],
+      ]);
+
+      // A later request that reuses the settled projection revalidates the
+      // selected row instead of trusting the cached removal state.
+      const repeatedPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      expect(repeatedPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(worktree.mock.calls).toEqual([
+        ...persistedReads,
+        [second.sessionId, 'active'],
+      ]);
+      expect(ledger.mock.calls).toEqual([
+        [first.sessionId],
+        [second.sessionId],
       ]);
     },
   );
@@ -238,6 +279,30 @@ describe('merged session catalog pagination', () => {
       ).rejects.toThrow();
     },
   );
+
+  it('keeps prompt-time reads O(1) above the legacy 256 MiB limit', async () => {
+    const session = summary(0);
+    await persist(session);
+    const chats = path.join(
+      runtimeBaseDir,
+      'projects',
+      workspaceCwd.replace(/[^a-zA-Z0-9]/g, '-'),
+      'chats',
+    );
+    const file = path.join(chats, `${session.sessionId}.jsonl`);
+    await fs.truncate(file, 257 * 1024 * 1024);
+
+    let scannedLines = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      scannedLines += 1;
+    });
+    const snapshot = await new SessionService(workspaceCwd, {
+      runtimeBaseDir,
+    }).getLastUserPromptAt(session.sessionId);
+
+    expect(snapshot).toBeUndefined();
+    expect(scannedLines).toBe(0);
+  });
 
   it('sorts archived sessions by their archived question time, not activity', async () => {
     const sessions = [summary(0), summary(1), summary(2)];
@@ -1385,43 +1450,51 @@ describe('merged session catalog pagination', () => {
       });
     });
 
-    it('projects the goal sidecar of an archived session', async () => {
-      const session = summary(0);
-      await persist(session, session.createdAt, true);
-      await writeGoalSidecar(session, JSON.stringify(projection), true);
-      const { bridge } = bridgeFor([]);
-
-      const result = await listWorkspaceSessionsForResponse(
-        bridge,
-        workspaceCwd,
-        { archiveState: 'archived' },
-        { runtimeBaseDir },
-      );
-
-      expect(result.sessions[0]?.goal?.status).toBe('paused');
-    });
-
-    it.each(['{not json', '{"v":1}'])(
-      'leaves goal unset for a corrupt or absent sidecar: %s',
-      async (content) => {
-        const corrupt = summary(0);
-        const absent = summary(1);
-        await Promise.all([persist(corrupt), persist(absent)]);
-        await writeGoalSidecar(corrupt, content);
+    it.each([undefined, 'organized'] as const)(
+      'projects the goal sidecar of an archived session (%s)',
+      async (view) => {
+        const session = summary(0);
+        await persist(session, session.createdAt, true);
+        await writeGoalSidecar(session, JSON.stringify(projection), true);
         const { bridge } = bridgeFor([]);
 
         const result = await listWorkspaceSessionsForResponse(
           bridge,
           workspaceCwd,
-          {},
+          { archiveState: 'archived', view },
           { runtimeBaseDir },
         );
 
-        const byId = new Map(
-          result.sessions.map((session) => [session.sessionId, session]),
+        expect(result.sessions[0]?.goal?.status).toBe('paused');
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'leaves goal unset for a corrupt or absent sidecar (%s)',
+      async (view) => {
+        const corrupt = summary(0);
+        const invalid = summary(2);
+        const absent = summary(1);
+        await Promise.all([
+          persist(corrupt),
+          persist(invalid),
+          persist(absent),
+        ]);
+        await writeGoalSidecar(corrupt, '{not json');
+        await writeGoalSidecar(invalid, '{"v":1}');
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { view },
+          { runtimeBaseDir },
         );
-        expect(byId.get(corrupt.sessionId)?.goal).toBeUndefined();
-        expect(byId.get(absent.sessionId)?.goal).toBeUndefined();
+
+        expect(result.sessions).toHaveLength(3);
+        for (const session of result.sessions) {
+          expect(session.goal).toBeUndefined();
+        }
       },
     );
 
@@ -1449,30 +1522,62 @@ describe('merged session catalog pagination', () => {
       expect(result.sessions[0]?.clientCount).toBe(2);
     });
 
-    it('projects the goal sidecar in the organized view', async () => {
-      // The organized view scans persisted summaries through a different
-      // enrich call site than the default list; it must carry the goal too.
-      const session = summary(0);
-      await persist(session);
-      await writeGoalSidecar(session, JSON.stringify(projection));
-      const { bridge } = bridgeFor([]);
+    it.each([undefined, 'organized'] as const)(
+      'preserves persisted and live Goal precedence across deferred pages (%s)',
+      async (view) => {
+        const first = summary(1);
+        const second = summary(0);
+        for (const session of [first, second]) {
+          await persist(session);
+          await writeGoalSidecar(session, JSON.stringify(projection));
+        }
+        const persistedGoal = {
+          status: 'paused',
+          objective: 'ship it',
+          updatedAt: new Date(projection.updatedAt).toISOString(),
+        } as const;
+        const liveGoal = {
+          ...persistedGoal,
+          status: 'active',
+          objective: 'live goal',
+        } as const;
+        const { bridge } = bridgeFor([
+          { ...first, goal: liveGoal },
+          { ...second, clientCount: 2 },
+        ]);
+        const options = { size: 1, view };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
 
-      const result = await listWorkspaceSessionsForResponse(
-        bridge,
-        workspaceCwd,
-        { view: 'organized', group: 'all' },
-        { runtimeBaseDir },
-      );
+        const firstPage = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          readOptions,
+        );
+        expect(firstPage.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: first.sessionId,
+            goal: liveGoal,
+          }),
+        ]);
+        expect(firstPage.nextCursor).toEqual(expect.any(String));
 
-      const row = result.sessions.find(
-        (item) => item.sessionId === session.sessionId,
-      );
-      expect(row?.goal).toEqual({
-        status: 'paused',
-        objective: 'ship it',
-        updatedAt: new Date(1_700_000_000_000).toISOString(),
-      });
-    });
+        const secondPage = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { ...options, cursor: firstPage.nextCursor },
+          readOptions,
+        );
+        expect(secondPage.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: second.sessionId,
+            goal: persistedGoal,
+            clientCount: 2,
+          }),
+        ]);
+        expect(secondPage.nextCursor).toBeUndefined();
+      },
+    );
 
     it('projects the goal sidecar onto search results', async () => {
       const session = summary(0);
@@ -1494,6 +1599,214 @@ describe('merged session catalog pagination', () => {
         status: 'paused',
         objective: 'ship it',
         updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+  });
+  describe('prompt-ledger continuation enrichment', () => {
+    const inFlight = { v: 1, promptId: 'p1', state: 'in_flight', at: 1 };
+    const terminal = (
+      value: string,
+      extra: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      v: 1,
+      promptId: 'p1',
+      terminal: value,
+      at: 2,
+      ...extra,
+    });
+
+    async function writeLedger(
+      session: BridgeSessionSummary,
+      records: Array<Record<string, unknown>>,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.ledger.jsonl`),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+    }
+
+    async function listSessions(
+      live: BridgeSessionSummary[] = [],
+      options: Parameters<typeof listWorkspaceSessionsForResponse>[2] = {},
+    ) {
+      const { bridge } = bridgeFor(live);
+      return listWorkspaceSessionsForResponse(bridge, workspaceCwd, options, {
+        runtimeBaseDir,
+      });
+    }
+
+    it.each([
+      ['dangling admission', [inFlight]],
+      ['reconciled interruption', [inFlight, terminal('interrupted')]],
+      [
+        'daemon shutdown flush',
+        [inFlight, terminal('error', { code: 'daemon_shutdown' })],
+      ],
+      [
+        'channel exit flush',
+        [inFlight, terminal('error', { code: 'channel_closed' })],
+      ],
+      [
+        'session close flush',
+        [inFlight, terminal('error', { code: 'session_closed' })],
+      ],
+      [
+        'session kill flush',
+        [inFlight, terminal('error', { code: 'session_killed' })],
+      ],
+    ] as const)('flags a cut-off last record: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    it.each([
+      ['completed', [inFlight, terminal('completed')]],
+      ['cancelled', [inFlight, terminal('cancelled')]],
+      ['model error', [inFlight, terminal('error', { code: 'model_error' })]],
+      [
+        'deadline exceeded',
+        [inFlight, terminal('error', { code: 'prompt_deadline_exceeded' })],
+      ],
+      [
+        'superseded interruption',
+        [
+          inFlight,
+          terminal('interrupted'),
+          { v: 1, promptId: 'p2', state: 'in_flight', at: 3 },
+          { v: 1, promptId: 'p2', terminal: 'completed', at: 4 },
+        ],
+      ],
+    ] as const)('leaves the field absent: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('leaves the field absent for an unreadable ledger', async () => {
+      const session = summary(0);
+      await persist(session);
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      // A directory at the ledger path makes the read throw (EISDIR).
+      await fs.mkdir(path.join(chats, `${session.sessionId}.ledger.jsonl`));
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('does not enrich archived listings', async () => {
+      const session = summary(0);
+      await persist(session, session.createdAt, true);
+      await writeLedger(session, [inFlight], true);
+      const result = await listSessions([], { archiveState: 'archived' });
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it.each([
+      ['active prompt', { hasActivePrompt: true }],
+      ['active work', { activeWorkState: 'active' as const }],
+      ['running background tasks', { hasRunningBackgroundTasks: true }],
+      [
+        'background turn',
+        {
+          backgroundTurn: {
+            turnId: 't1',
+            taskId: 'task1',
+            kind: 'shell' as const,
+            startedAt: 1,
+          },
+        },
+      ],
+    ] as const)(
+      'drops the persisted flag when live state shows %s',
+      async (_label, liveExtra) => {
+        const session = summary(0);
+        await persist(session);
+        await writeLedger(session, [inFlight]);
+        const result = await listSessions([
+          { ...session, clientCount: 1, ...liveExtra },
+        ]);
+        expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+      },
+    );
+
+    it('keeps the flag when the live session is idle', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [inFlight]);
+      const result = await listSessions([
+        { ...session, clientCount: 1, hasActivePrompt: false },
+      ]);
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    describe.each([
+      ['organized', { view: 'organized' as const }],
+      ['metadata-filtered', { sourceType: 'default' }],
+    ] as const)('%s list', (_label, options) => {
+      it('returns the continuation hint on the second page', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        await writeLedger(second, [inFlight, terminal('interrupted')]);
+
+        const firstPage = await listSessions([second], { ...options, size: 1 });
+        expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+        ]);
+        expect(firstPage.sessions[0]?.needsContinuation).toBeUndefined();
+        expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+        const secondPage = await listSessions([second], {
+          ...options,
+          size: 1,
+          cursor: firstPage.nextCursor,
+        });
+        expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+          second.sessionId,
+        ]);
+        expect(secondPage.sessions[0]?.needsContinuation).toBe(true);
+        expect(secondPage.nextCursor).toBeUndefined();
+      });
+
+      it('clears the hint when a prompt starts during page enrichment', async () => {
+        const first = summary(2);
+        const second = summary(1);
+        await persist(first);
+        await persist(second);
+        const completed = [inFlight, terminal('completed')];
+        await writeLedger(second, completed);
+        const live = [second];
+        abortHarness.beforeRead = async () => {
+          abortHarness.beforeRead = undefined;
+          live[0] = { ...second, hasActivePrompt: true };
+          await writeLedger(second, [
+            ...completed,
+            { ...inFlight, promptId: 'p2', at: 3 },
+          ]);
+        };
+
+        const result = await listSessions(live, { ...options, size: 2 });
+        expect(result.sessions.map((row) => row.sessionId)).toEqual([
+          first.sessionId,
+          second.sessionId,
+        ]);
+        expect(live[0]?.hasActivePrompt).toBe(true);
+        expect(result.sessions[1]?.needsContinuation).toBeUndefined();
       });
     });
   });

@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -43,7 +44,7 @@ public final class ToolPublicationVerifier implements AutoCloseable {
                         slots.release();
                     }
                 });
-            } catch (java.util.concurrent.RejectedExecutionException error) {
+            } catch (RejectedExecutionException error) {
                 slots.release();
                 if (!closed) {
                     throw error;

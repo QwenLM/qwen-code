@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="71" viewBox="0 0 560 71">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="560" height="71" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="9" y="36" fill="#eeeeeb" textLength="9" lengthAdjust="spacingAndGlyphs">▪</text>
+    <text x="27" y="36" fill="#eeeeeb" textLength="108" lengthAdjust="spacingAndGlyphs" font-weight="bold">RetainedTool</text>
+    <text x="144" y="36" fill="#d4d4cf" textLength="63" lengthAdjust="spacingAndGlyphs">Working</text>
+    <text x="216" y="36" fill="#d4d4cf" textLength="63" lengthAdjust="spacingAndGlyphs">without</text>
+    <text x="288" y="36" fill="#d4d4cf" textLength="90" lengthAdjust="spacingAndGlyphs">remounting</text>
+  </g>
+</svg>

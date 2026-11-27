@@ -20,6 +20,8 @@ interface DiscoverProviderModelsOptions {
   apiKey: string;
   staticModels: readonly ModelSpec[];
   signal?: AbortSignal;
+  protocol?: 'openai' | 'openai-responses' | 'anthropic';
+  maxRedirects?: number;
 }
 
 interface DiscoveredModel {
@@ -28,10 +30,24 @@ interface DiscoveredModel {
 }
 
 function readModels(value: unknown): DiscoveredModel[] | null {
-  if (!value || typeof value !== 'object' || !('data' in value)) {
+  if (!value || typeof value !== 'object') {
     return null;
   }
-  const data = (value as { data?: unknown }).data;
+  const listing = value as { data?: unknown; models?: unknown };
+  const data =
+    listing.data ??
+    (listing.models &&
+    typeof listing.models === 'object' &&
+    !Array.isArray(listing.models)
+      ? Object.entries(listing.models)
+          .filter(
+            ([, model]) =>
+              model !== null &&
+              typeof model === 'object' &&
+              !Array.isArray(model),
+          )
+          .map(([id]) => ({ id }))
+      : undefined);
   if (!Array.isArray(data)) {
     return null;
   }
@@ -89,6 +105,8 @@ export async function discoverProviderModels({
   apiKey,
   staticModels,
   signal,
+  protocol = 'openai',
+  maxRedirects = 2,
 }: DiscoverProviderModelsOptions): Promise<ModelSpec[] | null> {
   const normalizedBaseUrl = baseUrl.trim();
   const normalizedApiKey = apiKey.trim();
@@ -97,14 +115,25 @@ export async function discoverProviderModels({
   }
 
   try {
-    const modelsUrl = `${normalizedBaseUrl.replace(/\/+$/, '')}/models`;
+    let base = normalizedBaseUrl.replace(/\/+$/, '');
+    if (protocol !== 'openai') base = base.replace(/\/v1$/, '') + '/v1';
+    const modelsUrl = `${base}/models${protocol === 'anthropic' ? '?limit=1000' : ''}`;
+    const hostname = new URL(base).hostname.toLowerCase();
+    const useAnthropicApiKey =
+      protocol === 'anthropic' &&
+      (hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com'));
     const result = await fetchWithPolicy(modelsUrl, {
       timeoutMs: DISCOVERY_TIMEOUT_MS,
       maxBytes: DISCOVERY_MAX_BYTES,
-      maxRedirects: 2,
+      maxRedirects,
       headers: {
         Accept: 'application/json',
-        Authorization: `Bearer ${normalizedApiKey}`,
+        ...(protocol === 'anthropic'
+          ? { 'anthropic-version': '2023-06-01' }
+          : {}),
+        ...(useAnthropicApiKey
+          ? { 'x-api-key': normalizedApiKey }
+          : { Authorization: `Bearer ${normalizedApiKey}` }),
       },
       signal,
     });

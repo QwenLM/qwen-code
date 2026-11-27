@@ -7,7 +7,6 @@ import type { Application, Request, Response, RequestHandler } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   previewSource,
   MemoryImportRequestError,
@@ -65,19 +64,7 @@ export function mountMemoryImportRoutes(
     }
   }
   function withRuntime<T>(runtime: WorkspaceRuntime, run: () => T): T {
-    const configured =
-      runtime.env.effectiveEnv !== undefined
-        ? runtime.env.effectiveEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE']
-        : runtime.env.mode === 'parent-process'
-          ? process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']
-          : undefined;
-    const scope =
-      configured?.trim().toLowerCase() === 'workspace'
-        ? 'workspace'
-        : 'git-root';
-    return runWithWorkspaceRuntimeStorage(runtime, () =>
-      runWithMemoryProjectScope(scope, run),
-    );
+    return runWithWorkspaceRuntimeStorage(runtime, run);
   }
   async function service(
     runtime: WorkspaceRuntime,

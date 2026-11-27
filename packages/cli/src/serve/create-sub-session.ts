@@ -1084,9 +1084,14 @@ async function awaitFirstTurn(
           appendChunk(d.update.content.text);
         }
       } else if (e.type === 'turn_complete') {
-        const d = e.data as { promptId?: string; stopReason?: string };
+        const d = e.data as {
+          promptId?: string;
+          stopReason?: string;
+          promptBlocked?: boolean;
+        };
         if (d?.promptId === promptId) {
-          stopReason = d.stopReason ?? 'end_turn';
+          stopReason =
+            d.promptBlocked === true ? 'blocked' : (d.stopReason ?? 'end_turn');
           break;
         }
       } else if (e.type === 'turn_error') {
@@ -1777,6 +1782,17 @@ export function createSubSessionLauncher(
           dispatchSignal ?? (remote || guardedSent ? stopAc.signal : undefined),
           {
             promptId,
+            // A prompt from another session is input to this one: the
+            // target's UserPromptSubmit hooks see it and its sender.
+            ...(source
+              ? {
+                  userPrompt: true as const,
+                  promptSource: {
+                    sessionId: source.sessionId,
+                    workspaceCwd: source.workspaceCwd,
+                  },
+                }
+              : {}),
             onPromptAdmitted,
             onPromptDispatched,
             dispatchSignal: followUpDispatchAbort?.signal ?? dispatchSignal,
@@ -2268,6 +2284,7 @@ export function createSubSessionLauncher(
       workspaceId: target.workspaceId,
       workspaceCwd: target.workspaceCwd,
       workspaceGeneration: target.workspaceGeneration,
+      sameWorkspace: target.launcher === launcher,
     };
   };
 
@@ -2347,7 +2364,13 @@ export function createSubSessionLauncher(
     info: CreateSubSessionInfo,
     byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
-    const { workspace, workspaceGeneration, requiresYolo, ...local } = info;
+    const {
+      workspace,
+      workspaceGeneration,
+      requiresYolo,
+      requiresAutoMode,
+      ...local
+    } = info;
     const report = outgoingReport(info.callerSessionId);
     if (workspace === undefined)
       return run(local, undefined, undefined, byPerson, report);
@@ -2364,10 +2387,13 @@ export function createSubSessionLauncher(
     }
     const isLocal = target.launcher === launcher;
     const callerApproval =
-      !isLocal || requiresYolo
+      !isLocal || requiresYolo || requiresAutoMode
         ? await readApprovalMode(bridge, info.callerSessionId)
         : undefined;
     if (requiresYolo && callerApproval?.mode !== ApprovalMode.YOLO) {
+      throw new Error('A named workspace requires one-time approval.');
+    }
+    if (requiresAutoMode && callerApproval?.mode !== ApprovalMode.AUTO) {
       throw new Error('A named workspace requires one-time approval.');
     }
     const assertTargetCurrent = () => {

@@ -81,6 +81,23 @@ export function isAskUserPermissionBlock(
   });
 }
 
+/**
+ * Cheap content revision for a pending permission block, used to key the
+ * binding's split cache. A re-emitted `permission.request` under the same
+ * request id can change the title/options while id and classification stay
+ * put, so id+classification alone would serve a stale render-ready request.
+ * Reads only scalar/option-id fields (no payload serialization) so a streaming
+ * delta does not re-serialize the payload; `updatedAt` additionally catches
+ * raw-input-only updates that bump the block's revision.
+ */
+export function pendingPermissionRevision(
+  block: DaemonTranscriptBlock,
+): string {
+  if (!isPermissionBlock(block)) return '';
+  const optionIds = block.options.map((option) => option.optionId).join(',');
+  return `${block.updatedAt}:${block.title}:${optionIds}`;
+}
+
 function hasPermissionDiffPreview(
   toolCall: Record<string, unknown> | undefined,
 ): boolean {

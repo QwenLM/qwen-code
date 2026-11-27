@@ -22,6 +22,16 @@ const baseConfig: LspServerConfig = {
 };
 
 describe('lspServerConfigHash', () => {
+  it('restarts a language server whose managed executable was replaced in place', () => {
+    const first = { ...baseConfig, extensionArtifactRevision: 'package:1' };
+    expect(lspServerConfigHash(first)).toBe(lspServerConfigHash({ ...first }));
+    expect(lspServerConfigHash(first)).not.toBe(
+      lspServerConfigHash({
+        ...baseConfig,
+        extensionArtifactRevision: 'package:2',
+      }),
+    );
+  });
   it('ignores object key order', () => {
     const reordered: LspServerConfig = {
       ...baseConfig,

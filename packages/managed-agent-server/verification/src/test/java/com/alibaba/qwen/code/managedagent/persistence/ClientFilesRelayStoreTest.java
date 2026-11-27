@@ -36,7 +36,7 @@ class ClientFilesRelayStoreTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         store = new ClientFilesRelayStore(jdbc);
-        tenant = "tenant-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
     }
 
     @Test
@@ -160,21 +160,18 @@ class ClientFilesRelayStoreTest {
         }
         assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
                 .map(StoreLockTrace.Event::sql)).hasSize(2).allSatisfy(sql -> assertThat(sql)
-                        .contains("where request_key = ?", "session_scope_key = ?", "binding_generation = ?", "request_id = ?",
+                        .contains("where tenant_id = ?", "session_id = ?", "binding_generation = ?", "request_id = ?",
                                 "expires_at>?", "b.connection_id = ?", "b.state = ?"));
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"request_key", "session_scope_key", "binding_generation", "request_id"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"session_id", "binding_generation", "request_id"})
     void settlementRequiresBothCanonicalKeyAndOriginalRequestIdentity(String corruption) {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.register(tenant, "other-session", actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "0", "{}", 9_000L, 1_000L));
         switch (corruption) {
-            case "request_key" -> jdbc.update("UPDATE ma_client_files_request SET request_key=?",
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("wrong-key"));
-            case "session_scope_key" -> jdbc.update("UPDATE ma_client_files_request SET session_scope_key=?",
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, "other-session"));
+            case "session_id" -> jdbc.update("UPDATE ma_client_files_request SET session_id='other-session'");
             case "binding_generation" -> jdbc.update("UPDATE ma_client_files_request SET binding_generation=2");
             case "request_id" -> jdbc.update("UPDATE ma_client_files_request SET request_id='other-id'");
             default -> throw new AssertionError(corruption);
@@ -271,7 +268,7 @@ class ClientFilesRelayStoreTest {
 
     @Test
     void tenantsSharingASessionIdStayIsolated() {
-        String otherTenant = "tenant-" + UUID.randomUUID();
+        String otherTenant = UUID.randomUUID().toString();
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.register(otherTenant, session, actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
         assertThat(tx(() -> store.find(tenant, session)).tokenHash()).isEqualTo("a".repeat(64));

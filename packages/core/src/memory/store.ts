@@ -6,20 +6,36 @@
 
 import * as fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
+import * as path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { openNoFollow } from '../utils/no-follow-open.js';
+import {
+  rebuildProjectMemoryIndexLocked,
+  recoverProjectMemoryIndex,
+} from './indexer.js';
+import {
+  readProjectMemoryCursorLocked,
+  withProjectMemoryCommit,
+  writeProjectMemoryCursorLocked,
+} from './project-commit.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
+  AUTO_MEMORY_METADATA_FILENAME,
   getAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from './paths.js';
+import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
   AUTO_MEMORY_SCHEMA_VERSION,
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
 } from './types.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_STORE');
 
 export function createDefaultAutoMemoryMetadata(
   now = new Date(),
@@ -69,45 +85,88 @@ async function writeFileIfMissing(
 export async function ensureAutoMemoryScaffold(
   projectRoot: string,
   now = new Date(),
+  owner?: ProjectMemoryOwner,
 ): Promise<void> {
-  const root = getAutoMemoryRoot(projectRoot);
-  await fs.mkdir(root, { recursive: true });
-
-  await writeFileIfMissing(
-    getAutoMemoryIndexPath(projectRoot),
-    createDefaultAutoMemoryIndex(),
-  );
-  await writeFileIfMissing(
-    getAutoMemoryMetadataPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryMetadata(now), null, 2) + '\n',
-  );
-  await writeFileIfMissing(
-    getAutoMemoryExtractCursorPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryExtractCursor(now), null, 2) + '\n',
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  await withProjectMemoryCommit(
+    root,
+    async () => {
+      await fs.mkdir(root, { recursive: true });
+      const metadataFile = path.join(
+        path.dirname(root),
+        AUTO_MEMORY_METADATA_FILENAME,
+      );
+      try {
+        if (!(await fs.lstat(metadataFile)).isFile()) {
+          throw new Error(
+            `Project memory state requires a regular file: ${metadataFile}`,
+          );
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await atomicWriteFile(
+          metadataFile,
+          `${JSON.stringify(createDefaultAutoMemoryMetadata(now), null, 2)}\n`,
+          { encoding: 'utf-8', noFollow: true },
+        );
+      }
+      if (!(await readProjectMemoryCursorLocked(root, owner))) {
+        await writeProjectMemoryCursorLocked(
+          root,
+          createDefaultAutoMemoryExtractCursor(now),
+        );
+      }
+      const indexExists = await fs
+        .lstat(path.join(root, AUTO_MEMORY_INDEX_FILENAME))
+        .then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error;
+            return false;
+          },
+        );
+      if (!indexExists) {
+        await rebuildProjectMemoryIndexLocked(root, owner).catch((error) => {
+          debugLogger.warn(
+            'Failed to bootstrap the project memory index:',
+            error,
+          );
+        });
+      }
+    },
+    owner,
   );
 }
 
 export async function readAutoMemoryIndex(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<string | null> {
-  try {
-    return await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
-  } catch (error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
+  return (
+    (await readAutoMemoryIndexWithStats(projectRoot, owner))?.content ?? null
+  );
 }
 
 async function readMemoryIndexWithStats(
   indexPath: string,
+  verifyRegularFile = false,
 ): Promise<AutoMemoryIndexRead | null> {
   try {
-    const stats = await fs.stat(indexPath);
-    const content = await fs.readFile(indexPath, 'utf-8');
-    return { content, stats };
+    const handle = await (verifyRegularFile
+      ? openNoFollow(indexPath, { nonBlocking: true })
+      : fs.open(indexPath, 'r'));
+    try {
+      const stats = await handle.stat();
+      if (verifyRegularFile && !stats.isFile()) {
+        throw new Error(
+          `Project memory index requires a regular file: ${indexPath}`,
+        );
+      }
+      const content = await handle.readFile('utf-8');
+      return { content, stats };
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {
@@ -119,8 +178,20 @@ async function readMemoryIndexWithStats(
 
 export async function readAutoMemoryIndexWithStats(
   projectRoot: string,
+  owner?: ProjectMemoryOwner,
 ): Promise<AutoMemoryIndexRead | null> {
-  return readMemoryIndexWithStats(getAutoMemoryIndexPath(projectRoot));
+  const root = getAutoMemoryRoot(projectRoot, owner);
+  const anchor = getMemoryRootTrustedAnchor(root, owner);
+  await recoverProjectMemoryIndex(root, owner).catch((error: unknown) => {
+    debugLogger.warn('Failed to repair the project memory index:', error);
+  });
+  const trustedRoot = await resolveTrustedMemoryRoot(root, anchor);
+  return trustedRoot
+    ? readMemoryIndexWithStats(
+        path.join(trustedRoot, AUTO_MEMORY_INDEX_FILENAME),
+        true,
+      )
+    : null;
 }
 
 /**

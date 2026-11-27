@@ -21,7 +21,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionSt
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -167,7 +166,7 @@ public class SurfaceAdmissionAcceptanceTest {
     @Autowired
     private JdbcSshWorkspaceStore sshWorkspaces;
 
-    private final String tenant = "acc-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final AtomicInteger keys = new AtomicInteger();
     private String bound;
     private String legacy;
@@ -262,18 +261,18 @@ public class SurfaceAdmissionAcceptanceTest {
     @Test
     public void aRetainedCancelKeyNeverBypassesCurrentAccess() throws Exception {
         String session = createSession(tenant, OWNER, true);
-        String recordKey = "e".repeat(64);
+        String recordKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(session, "child_run", "run-retained");
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
-                recordKey, tenant, session, "f".repeat(64));
+                tenant, session, "f".repeat(64));
         String key = nextKey();
         java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
                 () -> post("/v1/agents/sessions/{session}/tasks/{task}/cancel",
@@ -290,7 +289,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .isEqualTo(admitted);
         byte[] operator = OPERATOR.getBytes(StandardCharsets.UTF_8);
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant, operator);
         try {
             assertThat(mvc.perform(cancel.get())
@@ -300,7 +299,7 @@ public class SurfaceAdmissionAcceptanceTest {
         } finally {
             jdbc.update("UPDATE ma_workspace_access SET role ="
                     + " 'OPERATOR' WHERE tenant_id = ? AND workspace_id ="
-                    + " X'7773' AND actor_id = ?", tenant, operator);
+                    + " 'ws' AND actor_id = ?", tenant, operator);
         }
         jdbc.update("UPDATE ma_session SET status = 'DELETED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -312,34 +311,31 @@ public class SurfaceAdmissionAcceptanceTest {
     /** A settled child-agent task of the bound Session: the cancel probes
      * pass every admission rule and stop at the task's own state. */
     private String insertSettledTask(String tenant, String session) {
-        String recordKey = "a".repeat(64);
+        String recordKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(session, "child_run", "run-settled");
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create, settled_at)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, 'ws', ?, 'child_run',"
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
-                recordKey, tenant, session, "b".repeat(64));
+                tenant, session, "b".repeat(64));
         // The task view reads a child task's committed body for its child
         // Session link (#13746 F2), so the list probes need one.
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] body = "{\"childSessionId\":null}".getBytes(
                 StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key,"
-                        + " session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, gmt_create) VALUES (?,"
-                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " publish_command_id, state, gmt_create) VALUES ("
+                        + " ?, 'ws', ?, 'resource-settled',"
                         + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                         + " 'command', 'REFERENCED', 1)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "resource-settled"),
-                scope, tenant, session, body.length,
+                tenant, session, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
         return "task_" + recordKey;
@@ -668,7 +664,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // The state gate fires after the grants: a non-ACTIVE Workspace is
         // a domain refusal on the same family.
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -679,7 +675,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         // The legacy arm: no Workspace selection, no actor, admitted.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -950,7 +946,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // reaches the files gate's domain 409 rather than the role
         // family's 403.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/close")
@@ -961,7 +957,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         // Action respond by the recorded owner is admitted.
@@ -1062,7 +1058,7 @@ public class SurfaceAdmissionAcceptanceTest {
         for (String caller : List.of(OPERATOR, OWNER)) {
             String action = insertAction(tenant, bound);
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1077,7 +1073,7 @@ public class SurfaceAdmissionAcceptanceTest {
                             .value("workspace_unavailable"));
             jdbc.update("UPDATE ma_workspace_access"
                     + " SET role = 'OPERATOR'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1112,7 +1108,7 @@ public class SurfaceAdmissionAcceptanceTest {
         String operationId = JSON.readTree(first.getResponse()
                 .getContentAsString()).path("id").asText();
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1135,7 +1131,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
     }
@@ -1308,8 +1304,7 @@ public class SurfaceAdmissionAcceptanceTest {
             jdbc.update("UPDATE ma_session SET owner_only = 1, owner_actor_key = ?"
                     + " WHERE tenant_id = ? AND session_id = ?",
                     new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
-                            ARTIFACT_TENANT, OWNER).getActorId()
-                            .getBytes(StandardCharsets.UTF_8),
+                            ARTIFACT_TENANT, OWNER).getActorId(),
                     ARTIFACT_TENANT, ARTIFACT_SESSION);
             mvc.perform(query.apply(READER))
                     .andExpect(status().isOk())
@@ -1361,8 +1356,7 @@ public class SurfaceAdmissionAcceptanceTest {
         jdbc.update("UPDATE ma_session SET owner_actor_key = ?"
                 + " WHERE tenant_id = ? AND session_id = ?",
                 new com.alibaba.qwen.code.runtimebroker.managedworkspace
-                        .WorkspaceActor(tenant, OWNER_RANK).getActorId()
-                        .getBytes(StandardCharsets.UTF_8),
+                        .WorkspaceActor(tenant, OWNER_RANK).getActorId(),
                 tenant, scratch);
         assertThat(store.hasExecutionRegistryFacts(tenant, scratch)).isTrue();
         mvc.perform(post("/v1/agents/sessions/" + scratch + "/actions/"
@@ -1572,7 +1566,7 @@ public class SurfaceAdmissionAcceptanceTest {
         Object[] values = publicationColumns.stream().map(col ->
                         "publication_id".equals(col) ? "pub-open"
                                 : "state".equals(col) ? "OPEN"
-                                : "execution_key".equals(col)
+                                : "execution_call_id".equals(col)
                                         ? "b".repeat(64)
                                 : "capture_id".equals(col) ? "pub-open-cap"
                                                         : row.get(col))
@@ -2194,11 +2188,9 @@ public class SurfaceAdmissionAcceptanceTest {
             throws Exception {
         String action = "tool_approval_"
                 + UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_kind, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
-                + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                ManagedSessionStore.sessionScopeKey(tenant, session),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, "action", action),
+                + " VALUES ('ACTION', 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
                         "inputRevision", 1, "policyRevision", "policy",
@@ -2379,7 +2371,7 @@ public class SurfaceAdmissionAcceptanceTest {
                     new WorkspaceTerminalRelayService(sessions,
                             mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
                             settings),
-                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+                    mock(TerminalTicketStore.class));
         }
     }
 

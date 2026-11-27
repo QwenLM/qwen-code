@@ -71,7 +71,7 @@ class HostedHookStreamGapIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "hook-stream-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure =
             new AtomicReference<>();
@@ -520,7 +520,7 @@ class HostedHookStreamGapIT {
                 + " event_type, gmt_create, data_json, is_terminal"
                 + " FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'SESSION' AND"
-                + " stream_id = X'' ORDER BY sequence_id", tenant, session);
+                + " stream_id = '' ORDER BY sequence_id", tenant, session);
     }
 
     /** One ledger row exactly as the surface serves it. */

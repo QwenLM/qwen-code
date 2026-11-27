@@ -40,12 +40,14 @@ import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.Pendin
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -95,7 +97,7 @@ public class ManagedChannelService {
     private final Duration claimLease;
     private final Supplier<Long> clock;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ManagedChannelService(ChannelInstanceStore instances,
             ChannelRouteRepository routes, ChannelDeliveryRepository deliveries,
             ChannelSegmentRepository segments, ManagedAgentService sessions,
@@ -129,10 +131,21 @@ public class ManagedChannelService {
     public ChannelInstanceView register(String tenantId, String channelId,
             RegisterChannelRequest request) {
         requireChannelId(channelId);
+        // The actor column is VARCHAR under a PAD SPACE collation: a
+        // trailing-space variant would fold onto another actor's identity.
+        String actorId = request.actorId();
+        if (actorId == null || actorId.isBlank()
+                || Character.isWhitespace(
+                        actorId.codePointBefore(actorId.length()))) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The channel actor must be non-blank text without"
+                            + " trailing spaces.");
+        }
+        requireNoTrailingSpace(request.accountId(), "The channel account");
         String policyJson;
         try {
             policyJson = mapper.writeValueAsString(request.policy());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The channel policy is not serializable.");
         }
@@ -189,6 +202,9 @@ public class ManagedChannelService {
         String senderId = event.scope().senderId();
         String chatId = event.scope().chatId();
         String threadId = event.scope().threadId();
+        requireNoTrailingSpace(senderId, "The channel sender");
+        requireNoTrailingSpace(chatId, "The channel chat");
+        requireNoTrailingSpace(threadId, "The channel thread");
         String routeId = routeId(channelId, instance.accountId(), kind,
                 senderId, chatId, threadId);
         String routeKey = ChannelRouteRepository.routeKey(tenantId, channelId,
@@ -387,8 +403,8 @@ public class ManagedChannelService {
         }
         // The first-segment guard above only proves the chain's head matches.
         // A stored chain that shares segment 0 but diverges later would slip
-        // through it, and INSERT IGNORE (unique on (delivery_key, segment_id),
-        // not on ordinal) would splice the divergent segment in beside the old
+        // through it, and INSERT IGNORE (unique on (tenant_id, channel_id,
+        // delivery_id, segment_id), not on ordinal) would splice the divergent segment in beside the old
         // one — a mixed chain with two rows at one ordinal. Compare the full
         // (segmentId, ordinal) chain before planning so any divergence is
         // refused rather than spliced (review 5853133846). A stored chain that
@@ -765,7 +781,8 @@ public class ManagedChannelService {
         }
         // The head check only proves the chain's head matches. A stored chain
         // that diverges at a later segment would be spliced by planSegments
-        // (INSERT IGNORE, unique on segment_id, not ordinal). Guard the full
+        // (INSERT IGNORE, unique on (tenant_id, channel_id, delivery_id,
+        // segment_id), not ordinal). Guard the full
         // chain at the import site too: a resend refusal alone is not durable,
         // because the funnel already committed this record as planned and the
         // sweep discovers pending work from the journal, not from claim rows.
@@ -1044,6 +1061,21 @@ public class ManagedChannelService {
         }
     }
 
+    /**
+     * A platform or repository identity stored in a VARCHAR column under a
+     * PAD SPACE collation: a trailing-space variant would fold onto another
+     * identity. Null/empty pass (nullable route fields); required fields are
+     * separately bounded non-blank by the adapter contract.
+     */
+    static void requireNoTrailingSpace(String value, String name) {
+        if (value != null && !value.isEmpty()
+                && Character.isWhitespace(
+                        value.codePointBefore(value.length()))) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    name + " must be text without trailing spaces.");
+        }
+    }
+
     static ManagedAgentException translate(HarnessFailure error) {
         if (!(error instanceof HarnessHttpFailure http)) {
             // A generation clash or dropped connection is transient for the
@@ -1081,7 +1113,7 @@ public class ManagedChannelService {
         }
         try {
             return mapper.readTree(text);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(context + " is not JSON", error);
         }
     }

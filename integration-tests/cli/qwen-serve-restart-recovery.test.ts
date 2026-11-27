@@ -240,6 +240,9 @@ async function startDaemon(
       workspace,
       '--no-web',
       '--no-open',
+      // Restart recovery, not host-load admission, is under test here;
+      // keep a shared runner's load out of session creation.
+      '--no-load-admission',
       '--chat-recording',
       '--session-reap-interval-ms',
       '0',
@@ -400,6 +403,7 @@ describeDaemon('qwen serve — restart recovery', () => {
     if (!daemon || !fake) return;
     const fakeServer = fake;
     const baseUrl = daemon.baseUrl;
+    holdNext = true;
     await waitFor(
       'daemon runtime',
       async () => {
@@ -434,6 +438,7 @@ describeDaemon('qwen serve — restart recovery', () => {
       throw new Error('session create returned no sessionId');
     }
 
+    const requestCount = fakeServer.requests.length;
     const prompt = await jsonFetch(baseUrl, `/session/${sessionId}/prompt`, {
       method: 'POST',
       body: JSON.stringify({
@@ -443,9 +448,28 @@ describeDaemon('qwen serve — restart recovery', () => {
     expect(prompt.status).toBe(202);
     await waitFor(
       'fake model request',
-      async () => fakeServer.requests.length > 0,
+      async () => fakeServer.requests.length > requestCount,
       30_000,
     );
+    await waitFor('persisted user transcript', async () => {
+      const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
+      if (!transcriptPath) return false;
+      return readFileSync(transcriptPath, 'utf8')
+        .split('\n')
+        .some((line) => {
+          if (!line) return false;
+          try {
+            const record = asRecord(JSON.parse(line));
+            return (
+              record?.['type'] === 'user' &&
+              record['sessionId'] === sessionId &&
+              line.includes('E2E restart recovery')
+            );
+          } catch {
+            return false;
+          }
+        });
+    });
 
     const oldDaemon = daemon;
     await stopDaemon(oldDaemon);
@@ -465,7 +489,9 @@ describeDaemon('qwen serve — restart recovery', () => {
         if (record?.['code'] === 'daemon_runtime_starting') return false;
         expect(scan.status).toBe(200);
         scanItems = recoveryItems(scan.body);
-        return scanItems !== undefined;
+        return (
+          scanItems?.some((entry) => entry.sessionId === sessionId) ?? false
+        );
       },
       60_000,
     );

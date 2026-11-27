@@ -50,18 +50,27 @@ jobs:
       - name: 'Install Java toolchain'
         env:
           TEMURIN_VERSION: '21.0.12.1+1'
-          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
-          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          TEMURIN_SHA256_X64: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_SHA256_AARCH64: '23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223'
           MAVEN_VERSION: '3.9.11'
           MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
         run: |-
           set -euo pipefail
+          # Pool runners carry both X64 and ARM64 labels, so the host decides:
+          # an x64 JDK on an ARM host passes the download and checksum and then
+          # dies with "Exec format error" when the launcher runs.
+          case "$(uname -m)" in
+            x86_64) temurin_arch='x64'; temurin_sha="$TEMURIN_SHA256_X64" ;;
+            aarch64|arm64) temurin_arch='aarch64'; temurin_sha="$TEMURIN_SHA256_AARCH64" ;;
+            *) echo "::error::unsupported runner architecture: $(uname -m)"; exit 1 ;;
+          esac
+          temurin_url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${TEMURIN_VERSION//+/%2B}/OpenJDK21U-jdk_${temurin_arch}_linux_hotspot_${TEMURIN_VERSION//+/_}.tar.gz"
           prefix="${RUNNER_TEMP:?}/verify-java"
           rm -rf -- "$prefix"
           work="$(mktemp -d)"
           maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL"
-          echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$temurin_url"
+          echo "${temurin_sha}  $work/jdk.tar.gz" | sha256sum --check --status
           curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url"
           echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status
           tar -xzf "$work/jdk.tar.gz" -C "$work"

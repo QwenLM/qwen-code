@@ -230,12 +230,12 @@ public class EventTransportConsumerSqlTest {
         event(session, 2, "session.updated");
         jdbc.update(
                 "UPDATE ma_event_stream SET covered_sequence=1, replay_floor_sequence=1 WHERE"
-                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+                    + " tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''",
                 TENANT, session);
-        var before = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session);
+        var before = jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''", TENANT, session);
         JdbcTransportConsumerStore store = new JdbcTransportConsumerStore(jdbc);
         assertThat(store.claimWake(TENANT, session, 50)).isTrue();
-        assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", TENANT, session))
+        assertThat(jdbc.queryForMap("SELECT last_sequence, replay_floor_sequence, covered_sequence, projection_version, gmt_modified FROM ma_event_stream WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''", TENANT, session))
                 .isEqualTo(before);
         assertThat(consumer.materialize(publicEvent(session, 2))).isEqualTo(MaterializeOutcome.QUEUED);
         assertThat(projectionWatermark(session)).isEqualTo(2);
@@ -366,7 +366,7 @@ public class EventTransportConsumerSqlTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,"
                 + " session_id, stream_kind, stream_id, covered_sequence, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', X'', 0, 1)",
+                + " VALUES (?, ?, 'SESSION', '', 0, 1)",
                 TENANT, session);
         return session;
     }
@@ -383,14 +383,12 @@ public class EventTransportConsumerSqlTest {
                 + " writer_generation, writer_id, writer_lease_until,"
                 + " journal_revision, committed_sequence, activation_epoch,"
                 + " compacted_through_revision, recovery_status, gmt_create,"
-                + " gmt_modified, tenant_key, harness_key, harness_session_id, head_kind)"
+                + " gmt_modified, harness_session_id, head_kind)"
                 + " VALUES (?, ?, ?, ?, 1, 'writer', "
                 + (leaseOffsetSeconds == null ? "NULL"
                         : "(" + ManagedSchemaTime.SQL_NOW + " + " + leaseOffsetSeconds * 1000L + ")")
-                + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
-                TENANT, workspace, session, state, committed,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(TENANT),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session), session);
+                + ", 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, 'MANAGED_SESSION')",
+                TENANT, workspace, session, state, committed, session);
     }
 
     private void event(String session, long sequence, String type) {
@@ -402,21 +400,21 @@ public class EventTransportConsumerSqlTest {
                 1_760_000_000_000L + sequence);
         jdbc.update(
                 "UPDATE ma_event_stream SET last_sequence = ? WHERE tenant_id = ? AND session_id ="
-                        + " ? AND stream_kind = 'SESSION' AND stream_id = X''", sequence, TENANT,
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = ''", sequence, TENANT,
                 session);
     }
 
     private Long wakeWatermark(String session) {
         List<Long> covered = jdbc.queryForList("SELECT wake_covered_sequence FROM"
                 + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
-                + " stream_kind = 'SESSION' AND stream_id = X''", Long.class, TENANT, session);
+                + " stream_kind = 'SESSION' AND stream_id = ''", Long.class, TENANT, session);
         return covered.isEmpty() ? null : covered.getFirst();
     }
 
     private long projectionWatermark(String session) {
         return jdbc.queryForObject("SELECT covered_sequence FROM"
                 + " ma_event_stream WHERE tenant_id = ? AND session_id = ? AND"
-                + " stream_kind = 'SESSION' AND stream_id = X''",
+                + " stream_kind = 'SESSION' AND stream_id = ''",
                 Long.class, TENANT, session);
     }
 }

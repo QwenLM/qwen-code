@@ -130,6 +130,11 @@ import {
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
+import {
+  getSessionTranscriptIndexCacheStatsForTest,
+  resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { GeneratedUiStateError } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
@@ -162,6 +167,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionResetPendingError,
+  SystemOverloadedError,
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   WorkspaceMismatchError,
@@ -304,6 +310,20 @@ vi.mock('node:os', async (importOriginal) => {
     tmpdir: () => mockTmpdir.value ?? actual.tmpdir(),
   };
 });
+const { exportSessionTranscriptSpy } = vi.hoisted(() => ({
+  exportSessionTranscriptSpy: vi.fn(),
+}));
+
+// Delegates to the real exporter by default so existing export suites keep
+// their end-to-end behavior; individual cases can stub one call to observe
+// the config the daemon wiring passes down.
+vi.mock('./server/session-export.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./server/session-export.js')>();
+  exportSessionTranscriptSpy.mockImplementation(actual.exportSessionTranscript);
+  return { ...actual, exportSessionTranscript: exportSessionTranscriptSpy };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
@@ -716,6 +736,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',
@@ -819,6 +840,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -866,6 +888,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
@@ -899,6 +922,15 @@ const EXPECTED_REGISTERED_FEATURES = [
         feature,
         'hosted_harness_private_v1',
         'managed_session_journal_delta_v1',
+      ];
+    }
+    if (feature === 'workspace_file_upload') {
+      return [
+        feature,
+        'turn_skill_file_snapshot',
+        'turn_skill_session_effects_check',
+        'turn_extension_store_lease',
+        'session_retire_if_idle',
       ];
     }
     if (feature === 'workspace_skills') {
@@ -946,6 +978,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_git_log_exclude_refs' &&
       f !== 'workspace_git_worktrees' &&
       f !== 'workspace_git_check_ignore' &&
+      f !== 'workspace_input_history' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -985,6 +1018,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_restore_v1' &&
       f !== 'session_worktree_branch_v1' &&
       f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
@@ -1005,6 +1039,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   'session_recap',
   'session_mod_rows',
@@ -1073,6 +1108,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_restore_v1',
   'session_worktree_branch_v1',
   'session_worktree_handoff_v1',
   'workspace_qualified_acp',
@@ -1615,6 +1651,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  feedbackCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rateSessionTurn']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
@@ -1832,6 +1873,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
@@ -2534,6 +2576,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    feedbackCalls,
     setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
@@ -2948,6 +2991,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async rateSessionTurn(sessionId, req, context) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionConfigOption(sessionId, req, context) {
       setConfigOptionCalls.push({
@@ -3716,6 +3763,38 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'session_retire_if_idle') {
+          expect(predicate({ sessionRetireIfIdleAvailable: true })).toBe(true);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionRetireIfIdleAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
+        if (feature === 'turn_extension_store_lease') {
+          expect(predicate({ turnExtensionStoreLeaseAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          continue;
+        }
+        if (
+          feature === 'turn_skill_file_snapshot' ||
+          feature === 'turn_skill_session_effects_check'
+        ) {
+          expect(predicate({ turnSkillFileSnapshotAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              turnSkillFileSnapshotAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'require_auth') {
@@ -4848,6 +4927,7 @@ describe('createServeApp', () => {
       '/scheduled-tasks',
       '/pr-watches',
       '/goals',
+      '/artifacts',
       '/settings',
     ])(
       'serves page document %s without bypassing API authentication',
@@ -16023,6 +16103,64 @@ describe('createServeApp', () => {
       }
     });
 
+    it('refuses a fresh worktree session before creating a worktree while overloaded', async () => {
+      const createUserWorktree = vi.fn().mockResolvedValue({
+        success: true,
+        worktree: {
+          path: `${WS_BOUND}/.qwen/worktrees/overloaded`,
+          branch: '',
+        },
+      });
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree,
+        removeUserWorktree: () => Promise.resolve(),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(createUserWorktree).not.toHaveBeenCalled();
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
     it('500 when worktree creation fails without a typed code (R12-1)', async () => {
       // A genuine environment fault carries no code and stays a 500: the
       // merge-state 409 must not swallow real daemon failures.
@@ -17177,6 +17315,66 @@ describe('createServeApp', () => {
         expect(bridge.calls[0].worktree).toBeUndefined();
       } finally {
         mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('refuses a fresh branch before git mutation while overloaded', async () => {
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          getLoadAdmissionSnapshot: () => ({
+            enabled: true,
+            overloaded: true,
+            reason: 'cpu_load',
+            loadRatio: 2.5,
+            eventLoopLagP99Ms: 20,
+            sampledAtMs: 1_000,
+          }),
+        },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.resolve();
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/overloaded' } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        });
+        expect(rollbackCalls).toEqual([]);
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
       }
     });
 
@@ -21429,6 +21627,307 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
     });
 
+    it('requires proof from the admission runtime before accepting the skill effects check', async () => {
+      const bridge = fakeBridge();
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'd'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = (pinSkills: boolean) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'guarded' }],
+            pinSkills,
+            requireSessionSkillEffects: true,
+          });
+      expect((await submit(false)).status).toBe(400);
+      const declined = await submit(true);
+      expect(declined.status).toBe(409);
+      expect(declined.body).toMatchObject({
+        code: 'turn_skill_session_effects_unavailable',
+        sessionId: 'session-A',
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.updateTurnSkillLease).toHaveBeenLastCalledWith(
+        'session-A',
+        expect.any(String),
+        'release',
+      );
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
+    it('admits only a confirmed extension generation and binds retries to it', async () => {
+      const bridge = fakeBridge();
+      const digest = 'c'.repeat(64);
+      bridge.updateTurnSkillLease = vi.fn(
+        async (_session, _key, action, _digest, generation) => {
+          if (action === 'prepare' && generation === 7)
+            return { digest, extensionGeneration: 7 };
+          if (action === 'prepare' && generation === 5)
+            return { unsupportedExtensionComponent: true as const };
+          return {};
+        },
+      );
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const sid = 'session-A';
+      const submit = (generation: number, idempotencyKey: string) =>
+        request(app)
+          .post(`/session/${sid}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'extension prompt' }],
+            pinSkills: true,
+            pinExtensions: true,
+            expectedExtensionGeneration: generation,
+            idempotencyKey,
+          });
+      const unmanaged = await submit(5, 'unmanaged');
+      expect(unmanaged.status).toBe(409);
+      expect(unmanaged.body).toMatchObject({
+        code: 'turn_extension_component_unsupported',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      const unavailable = await submit(6, 'not-admitted');
+      expect(unavailable.status).toBe(409);
+      expect(unavailable.body).toMatchObject({
+        code: 'turn_extension_generation_unavailable',
+        sessionId: sid,
+        definitivelyNotStarted: true,
+      });
+      expect(bridge.promptCalls).toHaveLength(0);
+      const first = await submit(7, 'same');
+      expect(first.status).toBe(202);
+      expect(first.body.extensionGeneration).toBe(7);
+      expect((await submit(7, 'same')).body).toMatchObject({
+        extensionGeneration: 7,
+        promptId: first.body.promptId,
+        deduplicated: true,
+      });
+      expect((await submit(8, 'same')).status).toBe(409);
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('replays the pinned admission cursor after later events and fences an epoch change', async () => {
+      let cursor = 3;
+      let epoch = 'first-epoch';
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => cursor,
+        getSessionEventEpochImpl: () => epoch,
+      });
+      bridge.updateTurnSkillLease = vi.fn(async () => ({
+        digest: 'a'.repeat(64),
+      }));
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const submit = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            pinSkills: true,
+            idempotencyKey: 'pin-replay-cursor',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+      const first = await submit();
+      expect(first.status).toBe(202);
+      cursor = 10;
+      const replay = await submit();
+      expect(replay.body).toMatchObject({
+        promptId: first.body.promptId,
+        lastEventId: 3,
+        eventEpoch: epoch,
+        deduplicated: true,
+      });
+      epoch = 'another-epoch';
+      const stale = await submit();
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('turn_skill_receipt_conflict');
+      expect(stale.body.definitivelyNotStarted).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('pins one skill snapshot for concurrent retries and returns its original receipt', async () => {
+      const digest = 'a'.repeat(64);
+      const bridge = fakeBridge();
+      let completeCapture!: () => void;
+      const capturing = new Promise<void>((resolve) => {
+        completeCapture = resolve;
+      });
+      const update = vi.fn(
+        async (_session: string, _key: string, action: string) => {
+          if (action === 'prepare') {
+            await capturing;
+            return { digest };
+          }
+          return {};
+        },
+      );
+      bridge.updateTurnSkillLease = update;
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const capability = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capability.body.features).toContain('turn_skill_file_snapshot');
+      const body = {
+        prompt: [{ type: 'text', text: 'pinned' }],
+        pinSkills: true,
+        idempotencyKey: 'pin-1',
+        expectedSkillDigest: digest,
+      };
+      const submit = (params = body) =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(params);
+      const first = submit().then((response) => response);
+      const retry = submit().then((response) => response);
+      try {
+        await vi.waitFor(() => expect(update).toHaveBeenCalled());
+      } finally {
+        completeCapture();
+      }
+      const receipts = await Promise.all([first, retry]);
+      expect(receipts.map((r) => r.status)).toEqual([202, 202]);
+      expect(receipts.map((r) => r.body.skillDigest)).toEqual([digest, digest]);
+      expect(new Set(receipts.map((r) => r.body.promptId)).size).toBe(1);
+      expect(receipts.filter((r) => r.body.deduplicated)).toHaveLength(1);
+      expect(
+        update.mock.calls.filter(([, , action]) => action === 'prepare'),
+      ).toHaveLength(1);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('pinSkills');
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty(
+        'expectedSkillDigest',
+      );
+
+      const wrong = await submit({
+        ...body,
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(wrong.status).toBe(409);
+      expect(wrong.body.code).toBe('turn_skill_receipt_conflict');
+      const differentPayload = await submit({
+        ...body,
+        prompt: [{ type: 'text', text: 'other' }],
+      });
+      expect(differentPayload.status).toBe(409);
+      const mismatchedNew = await submit({
+        ...body,
+        idempotencyKey: 'pin-other',
+        expectedSkillDigest: 'b'.repeat(64),
+      });
+      expect(mismatchedNew.status).toBe(409);
+      expect(mismatchedNew.body.code).toBe('turn_skill_digest_mismatch');
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('returns exact retirement identities, busy refusal, and the stored receipt', async () => {
+      const sessionId = 'session-A';
+      const eventEpoch = '869de41b-bf9e-44ee-aa21-ab64a3af220a';
+      const operationId = '4279fbbe-7845-49a8-87fe-9cd4cc61b19c';
+      const pathName = `/session/${sessionId}/retirements/${operationId}`;
+      const bridge = fakeBridge({
+        getSessionEventEpochImpl: () => eventEpoch,
+        summaryImpl: () => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-11-01T00:00:00Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      let busy = true;
+      let fsyncPending = true;
+      let received:
+        | Awaited<ReturnType<NonNullable<typeof bridge.retireSessionIfIdle>>>
+        | undefined;
+      bridge.getSessionRetirement = (id, operation) =>
+        id === sessionId && (!operation || operation === operationId)
+          ? received
+          : undefined;
+      bridge.retireSessionIfIdle = vi.fn(async (identity) => {
+        if (busy)
+          throw Object.assign(new Error('held'), {
+            code: 'session_retire_busy',
+          });
+        received = fsyncPending
+          ? { ...identity, state: 'retiring', awaitingFenceSync: true }
+          : { ...identity, state: 'retired' };
+        return received;
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const host = `127.0.0.1:${baseOpts.port}`;
+      const caps = await request(app).get('/capabilities').set('Host', host);
+      expect(caps.body.features).toContain('session_retire_if_idle');
+      const status = await request(app)
+        .get(`/session/${sessionId}/status`)
+        .set('Host', host);
+      expect(status.status).toBe(200);
+      expect(status.body).toMatchObject({ sessionId, eventEpoch });
+      const put = () =>
+        request(app)
+          .put(pathName)
+          .set('Host', host)
+          .send({ expectedEventEpoch: eventEpoch });
+      const refused = await put();
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({
+        sessionId,
+        eventEpoch,
+        operationId,
+        definitivelyNotStarted: true,
+        code: 'session_retire_busy',
+      });
+      expect((await request(app).get(pathName).set('Host', host)).status).toBe(
+        404,
+      );
+      busy = false;
+      const pending = await put();
+      expect(pending.status).toBe(202);
+      expect(pending.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retiring',
+        awaitingFenceSync: true,
+      });
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        pending.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(2);
+      fsyncPending = false;
+      const accepted = await put();
+      expect(accepted.status).toBe(200);
+      expect(accepted.body).toEqual({
+        sessionId,
+        eventEpoch,
+        operationId,
+        state: 'retired',
+      });
+      expect((await put()).body).toEqual(accepted.body);
+      expect((await request(app).get(pathName).set('Host', host)).body).toEqual(
+        accepted.body,
+      );
+      expect(bridge.retireSessionIfIdle).toHaveBeenCalledTimes(3);
+    });
+
     it('scopes idempotency keys per session (W4)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -24429,7 +24928,8 @@ describe('createServeApp', () => {
           }),
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
-        expect(readSidecar).toHaveBeenCalledTimes(1);
+        // Metadata stays cached; each later view revalidates the sidecar.
+        expect(readSidecar).toHaveBeenCalledTimes(2);
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;
@@ -24482,7 +24982,9 @@ describe('createServeApp', () => {
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
-        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        // A historical missing checkout needs an ownership reread before
+        // considering its snapshot, but must not be enriched for this owner.
+        expect(mockWt.readSidecar).toHaveBeenCalledTimes(2);
         expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;
@@ -30536,6 +31038,233 @@ describe('createServeApp', () => {
       }
     });
 
+    it('refuses a worktree branch with 503 system_overloaded before creating a worktree or committing when overloaded', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-pre-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-rt-'),
+      );
+      const slug = 'overload-pre';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        const createUserWorktree = vi.fn();
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree,
+        });
+        const branchSession = vi.fn();
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        bridge.branchSession = branchSession;
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-overload-pre',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          {
+            workspaceRegistry: createWorkspaceRegistry([runtime]),
+            getLoadAdmissionSnapshot: () => ({
+              enabled: true,
+              overloaded: true,
+              reason: 'cpu_load',
+              loadRatio: 2.6,
+              eventLoopLagP99Ms: 18,
+              sampledAtMs: 1_000,
+            }),
+          },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.6,
+          eventLoopLagP99Ms: 18,
+        });
+        expect(createUserWorktree).not.toHaveBeenCalled();
+        expect(branchSession).not.toHaveBeenCalled();
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves 503 system_overloaded when loadSession refuses after worktree branch publication', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-race-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-overload-race-rt-'),
+      );
+      const slug = 'overload-race';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => {
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+            };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+          loadImpl: async () => {
+            throw new SystemOverloadedError('cpu_load', 2.8, 30);
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        bridge.branchSession = vi.fn(async (_src, req) => ({
+          sessionId: req.targetSessionId!,
+          workspaceCwd: repo,
+          displayName: 'Branched',
+          forkedFrom: 'source-session',
+        })) as unknown as AcpSessionBridge['branchSession'];
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-overload-race',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(503);
+        expect(res.headers['retry-after']).toBe('15');
+        expect(res.body).toMatchObject({
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 30,
+          // The branch + worktree are committed before the refusing
+          // loadSession; the body must expose the branched id so the
+          // caller can rehydrate the same child once load subsides
+          // (retrying the slug would otherwise hit worktree_exists).
+          sessionId: expect.any(String),
+        });
+        expect(res.body.sessionId).not.toBe('source-session');
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
     it('records the source checkout HEAD as worktreeBase when it diverges from the repo top (R5-4)', async () => {
       // Canonicalize: on macOS the default TMPDIR is a symlinked path
       // (/var -> /private/var) and the route records the realpath, so the
@@ -35430,21 +36159,79 @@ describe('createServeApp', () => {
     ])('exports %s format', async (format, mimeType, marker) => {
       const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
       await writeExportSession(sid);
-      const app = createExportApp();
+      // The export label is resolved from the launch environment frozen at
+      // createServeApp entry, so the marker-free ambient must be pinned
+      // BEFORE the app is built, not after.
+      const attributionKeys = [
+        'QWEN_CODE_MANAGED_RUNTIME',
+        'QWEN_CODE_DESKTOP',
+        'QWEN_CODE_SERVE',
+      ];
+      const saved: Record<string, string | undefined> = {};
+      for (const key of attributionKeys) {
+        saved[key] = process.env[key];
+        delete process.env[key];
+      }
+      try {
+        const app = createExportApp();
+        const res = await request(app)
+          .get(`/session/${sid}/export?format=${format}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
 
-      const res = await request(app)
-        .get(`/session/${sid}/export?format=${format}`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-type']).toContain(mimeType);
-      expect(res.headers['content-disposition']).toContain(`.${format}"`);
-      expect(res.text).toContain(marker);
-      expect(res.text).toContain('hello export');
-      if (format === 'json') {
-        expect(res.body.metadata.channel).toBe('daemon');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain(mimeType);
+        expect(res.headers['content-disposition']).toContain(`.${format}"`);
+        expect(res.text).toContain(marker);
+        expect(res.text).toContain('hello export');
+        if (format === 'json') {
+          expect(res.body.metadata.channel).toBe('daemon');
+        }
+      } finally {
+        for (const key of attributionKeys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
       }
     });
+
+    it.each([
+      ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+      ['daemon', {}],
+    ])(
+      'labels the export channel %s from the daemon launch markers',
+      async (channel, markers) => {
+        const sid = `55555555-bbbb-cccc-dddd-${channel.padEnd(12, '0')}`;
+        await writeExportSession(sid);
+        const keys = [
+          'QWEN_CODE_MANAGED_RUNTIME',
+          'QWEN_CODE_DESKTOP',
+          'QWEN_CODE_SERVE',
+        ];
+        const saved: Record<string, string | undefined> = {};
+        for (const key of keys) {
+          saved[key] = process.env[key];
+          delete process.env[key];
+        }
+        Object.assign(process.env, markers);
+        try {
+          // The export label is resolved once per daemon at boot (desktop
+          // launcher marker → desktop, else daemon); the hosted-harness
+          // label is pinned by the resolveDaemonExportChannel unit cases
+          // because its public API is gated by the private managed contract.
+          const app = createExportApp();
+          const res = await request(app)
+            .get(`/session/${sid}/export?format=json`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+          expect(res.status).toBe(200);
+          expect(res.body.metadata.channel).toBe(channel);
+        } finally {
+          for (const key of keys) {
+            if (saved[key] === undefined) delete process.env[key];
+            else process.env[key] = saved[key];
+          }
+        }
+      },
+    );
 
     it('rejects invalid export format', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -35627,26 +36414,10 @@ describe('createServeApp', () => {
 
     it('returns a paged transcript and does not expose EventBus cursors', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: 'hello transcript' },
-              },
-            },
-          ],
-          nextCursor: 'cursor-2',
-          hasMore: true,
-          startTime: '2026-05-28T12:00:00.000Z',
-          lastUpdated: '2026-05-28T12:00:01.000Z',
-        }),
-      });
+      // The default route reads daemon-local (no ACP child), so the page is
+      // replayed from the persisted file and the bridge page method is never
+      // called for a non-live session.
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -35662,20 +36433,56 @@ describe('createServeApp', () => {
       expect(res.body).toMatchObject({
         v: 1,
         sessionId: sid,
-        nextCursor: 'cursor-2',
-        hasMore: true,
+        hasMore: false,
       });
       expect(res.body).not.toHaveProperty('lastEventId');
       expect(res.body.events[0]).not.toHaveProperty('id');
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        {
-          sessionId: sid,
-          limit: 2,
-          direction: 'backward',
-        },
-      ]);
+      expect(res.body.events[0].data).toMatchObject({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hello transcript' },
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('reuses the daemon-side index across reads without an ACP child', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-cccccccccccc';
+      resetSessionTranscriptIndexCacheForTest();
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      try {
+        // No session is registered with the bridge: the ACP child is absent
+        // (as after a session switch, idle TTL, or daemon restart). The
+        // default route must still serve from the daemon-side index cache.
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { bridge, boundWorkspace: wsDir },
+        );
+
+        const first = await request(app)
+          .get(`/session/${sid}/transcript?limit=1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get(`/session/${sid}/transcript?limit=1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        // One daemon-side index build, reused on the second read; the bridge
+        // page method is never called, so the read survives child exit.
+        expect(builds).toBe(1);
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+        expect(bridge.sessionTranscriptCalls).toEqual([]);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
+        resetSessionTranscriptIndexCacheForTest();
+      }
     });
 
     it('reads tool calls only from the qualified persisted workspace without attaching ACP', async () => {
@@ -35953,31 +36760,30 @@ describe('createServeApp', () => {
 
     it('returns sparse turn-index pages through the owning runtime', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaae';
-      const bridge = fakeBridge({
-        sessionTurnIndexImpl: async (req) => {
-          if (req.start !== undefined && req.start > 1) {
-            throw Object.assign(new Error('Invalid transcript cursor'), {
-              data: { errorKind: 'invalid_transcript_cursor' },
-            });
-          }
-          return {
-            v: 1,
-            sessionId: req.sessionId,
-            snapshot: 'snapshot-1',
-            totalTurns: 1,
-            start: 0,
-            turns: [
-              {
-                ordinal: 0,
-                turnId: 'record-1',
-                kind: 'prompt',
-                label: 'hello transcript',
-              },
-            ],
-          };
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second turn');
+      await appendUser(3, `${sid}-user-2`, 'third turn');
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -35996,34 +36802,307 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      expect(res.body).toMatchObject({
-        snapshot: 'snapshot-1',
-        totalTurns: 1,
-      });
-      expect(bridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid, limit: 2 },
-      ]);
+      // Daemon-local read mints a real persisted-key snapshot and forwards
+      // limit (3 turns on disk, 2 returned).
+      expect(typeof res.body.snapshot).toBe('string');
+      expect(res.body.totalTurns).toBe(3);
+      expect(res.body.turns).toHaveLength(2);
+      expect(res.body.turns[0].label).toBe('second turn');
+      expect(res.body.turns[1].label).toBe('third turn');
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+
       const outOfRange = await request(app)
-        .get(`/session/${sid}/turn-index?snapshot=snapshot-1&start=2`)
+        .get(
+          `/session/${sid}/turn-index?snapshot=${encodeURIComponent(res.body.snapshot)}&start=4`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(outOfRange.status).toBe(400);
       expect(outOfRange.body.code).toBe('invalid_transcript_cursor');
       expect(bridge.loadCalls).toHaveLength(0);
     });
 
-    it('forwards snapshot-bound turn anchors and response metadata', async () => {
-      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaf';
+    it('reuses the daemon-side index for turn-index without an ACP child', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff1';
+      resetSessionTranscriptIndexCacheForTest();
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest(() => {
+        builds++;
+      });
+      try {
+        const bridge = fakeBridge();
+        await writeTranscriptSession(sid);
+        const app = createServeApp(
+          { ...baseOpts, workspace: wsDir },
+          undefined,
+          { bridge, boundWorkspace: wsDir },
+        );
+        const first = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        const second = await request(app)
+          .get(`/session/${sid}/turn-index`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(first.status).toBe(200);
+        expect(second.status).toBe(200);
+        expect(builds).toBe(1);
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+        expect(bridge.sessionTurnIndexCalls).toEqual([]);
+        // Cold session (getSessionSummary throws SessionNotFoundError): the
+        // live-flush barrier stays gated behind liveness and never calls flush.
+        expect(bridge.flushSessionTranscriptCalls).toEqual([]);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
+        resetSessionTranscriptIndexCacheForTest();
+      }
+    });
+
+    it('round-trips a singular-route cursor, propagates hasOlder, and crosses the turn-index snapshot key', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff3';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second message');
+      await appendUser(3, `${sid}-user-2`, 'third message');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const textOf = (page: {
+        events: Array<{ data?: Record<string, unknown> }>;
+      }) => {
+        const u = (page.events[0]?.data?.['update'] ?? page.events[0]?.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (u?.['content'] as { text?: string } | undefined)?.text;
+      };
+
+      const page1 = await request(app)
+        .get(`/session/${sid}/transcript?limit=1&direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      expect(textOf(page1.body)).toBe('third message');
+      expect(page1.body.hasMore).toBe(true);
+      expect(typeof page1.body.nextCursor).toBe('string');
+
+      // Cursor round-trip: the next page continues from the frozen cursor.
+      const page2 = await request(app)
+        .get(
+          `/session/${sid}/transcript?limit=1&cursor=${encodeURIComponent(page1.body.nextCursor)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      expect(textOf(page2.body)).toBe('second message');
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
+
+      // Cross-route snapshot-key contract: the turn-index ROUTE mints a
+      // snapshot the transcript ROUTE consumes for an anchored read.
+      const ti = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(ti.status).toBe(200);
+      const anchored = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${sid}-user-2&snapshot=${encodeURIComponent(ti.body.snapshot)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(anchored.status).toBe(200);
+      expect(anchored.body.targetRecordId).toBe(`${sid}-user-2`);
+      // hasOlder propagates on the anchored read (user-1 precedes user-2).
+      expect(anchored.body.hasOlder).toBe(true);
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+    });
+
+    it('flushes the live recorder before a snapshot-less turn-index page', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff2';
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      // A live session whose recorder drains a just-accepted turn on flush:
+      // the snapshot-less turn-index page must include it (R11-1 barrier).
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-          targetRecordId: req.atRecordId,
-          hasOlder: true,
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
         }),
+        flushSessionTranscriptImpl: async (sessionId) => {
+          await fsp.appendFile(
+            chatsFile,
+            JSON.stringify({
+              uuid: `${sessionId}-user-2`,
+              parentUuid: `${sessionId}-user-1`,
+              sessionId,
+              timestamp: '2026-05-28T12:00:02.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'second turn' }] },
+              cwd: wsDir,
+              version: '1.0.0',
+            }) + '\n',
+          );
+        },
       });
       await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.totalTurns).toBe(2);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+    });
+
+    it('pins the daemon-local replay tool-metadata fallback (accepted trade)', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const append = async (rec: Record<string, unknown>) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            sessionId: sid,
+            cwd: wsDir,
+            version: '1.0.0',
+            timestamp: '2026-05-28T12:00:02.000Z',
+            ...rec,
+          }) + '\n',
+        );
+      };
+      await append({
+        uuid: `${sid}-a1`,
+        parentUuid: `${sid}-user-1`,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { absolute_path: '/tmp/file.txt' },
+              },
+            },
+          ],
+        },
+      });
+      await append({
+        uuid: `${sid}-r1`,
+        parentUuid: `${sid}-a1`,
+        type: 'tool_result',
+        toolCallResult: {
+          callId: 'call-1',
+          name: 'read_file',
+          status: 'success',
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const events = res.body.events as Array<{
+        data?: Record<string, unknown>;
+      }>;
+      const toolEvent = events.find((e) => {
+        const u = (e.data?.['update'] ?? e.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (
+          u?.['sessionUpdate'] === 'tool_call' && u?.['toolCallId'] === 'call-1'
+        );
+      });
+      if (!toolEvent) {
+        throw new Error('no tool_call for call-1: ' + JSON.stringify(events));
+      }
+      const update = (toolEvent.data?.['update'] ?? toolEvent.data) as Record<
+        string,
+        unknown
+      >;
+      // Daemon-local replay passes no Config, so resolveToolMetadata falls
+      // back to the persisted name, kind 'other', empty locations. This is
+      // the accepted trade documented in the design doc (the workspace route
+      // has always fallen back the same way).
+      expect(update['title']).toBe('read_file');
+      expect(update['kind']).toBe('other');
+      expect(update['locations']).toEqual([]);
+    });
+
+    it('throws page-too-large from daemon-local serialization (413 source)', async () => {
+      // The default route's 413 arises daemon-side when the serialized replay
+      // page exceeds the response budget (no bridge involved). Pin that throw
+      // with a small budget override; error-response maps the class to 413.
+      const { serializeWorkspaceTranscriptResponseForTesting } = await import(
+        './routes/session.js'
+      );
+      const { SessionTranscriptPageTooLargeError } = await import(
+        '@qwen-code/qwen-code-core/services/session-transcript-reader.js'
+      );
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff4';
+      const oversized = {
+        v: 1,
+        sessionId: sid,
+        events: [{ data: { text: 'x'.repeat(200) } }],
+      };
+      expect(() =>
+        serializeWorkspaceTranscriptResponseForTesting(oversized, sid, 100),
+      ).toThrow(SessionTranscriptPageTooLargeError);
+    });
+
+    it('forwards snapshot-bound turn anchors and response metadata', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaf';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      // A real turn-index snapshot signed with the persisted per-workspace
+      // key the daemon-local reader also uses.
+      const snapshot = (
+        await new qwenCore.SessionTranscriptReader(wsDir).readTurnIndexPage(sid)
+      ).snapshot;
+      const anchorUuid = `${sid}-user-1`;
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -36046,36 +37125,35 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .get(
-          `/session/${sid}/transcript?atRecordId=record-1&snapshot=snapshot-1`,
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
         )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        targetRecordId: 'record-1',
-        hasOlder: true,
+        targetRecordId: anchorUuid,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        {
-          sessionId: sid,
-          atRecordId: 'record-1',
-          snapshot: 'snapshot-1',
-        },
-      ]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('reads and exports the active copy of an exact persisted conflict', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
       await writeTranscriptSession(sid);
       await writeTranscriptSession(sid, 'archived');
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      // Give the archived copy distinct text so the response body proves the
+      // active copy was read rather than the archived one.
+      const archivedFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        'archive',
+        `${sid}.jsonl`,
+      );
+      const archivedRaw = await fsp.readFile(archivedFile, 'utf8');
+      await fsp.writeFile(
+        archivedFile,
+        archivedRaw.replace('hello transcript', 'archived-only transcript'),
+      );
+      const bridge = fakeBridge();
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -36089,39 +37167,19 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(transcript.status).toBe(200);
+      expect(JSON.stringify(transcript.body)).toContain('hello transcript');
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'archived-only transcript',
+      );
       expect(exported.status).toBe(200);
       expect(exported.text).toContain(sid);
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      // Daemon-local read: the active copy is served without the bridge page.
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [
-            {
-              v: 1,
-              type: 'session_update',
-              data: {
-                sessionUpdate: 'available_commands_update',
-                availableCommands: [
-                  { name: 'help', description: 'Help' },
-                  { name: 'workflows', description: 'Manage workflows' },
-                ],
-                _meta: {
-                  availableSkills: ['bugfix'],
-                  availableSkillDetails: [
-                    { name: 'bugfix', body: 'x'.repeat(600_000) },
-                  ],
-                },
-              },
-            },
-          ],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36142,16 +37200,39 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      const event = res.body.events[0] as { data: Record<string, unknown> };
-      expect(event.data['sessionUpdate']).toBe('available_commands_update');
-      expect(event.data['availableCommands']).toEqual([
+      // The default route reads daemon-local and applies the same SDK-surface
+      // redaction as the workspace route; persisted replay never carries the
+      // live available_commands_update skill bodies, so the redaction itself
+      // is pinned at the shared helper the route wires in.
+      const { omitSkillDetailsForSdkSurface } = await import(
+        './skill-details-redaction.js'
+      );
+      const shaped = omitSkillDetailsForSdkSurface({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
+          _meta: {
+            availableSkills: ['bugfix'],
+            availableSkillDetails: [
+              { name: 'bugfix', body: 'x'.repeat(600_000) },
+            ],
+          },
+        },
+      }) as { data: Record<string, unknown> };
+      expect(shaped.data['availableCommands']).toEqual([
         { name: 'help', description: 'Help' },
         { name: 'workflows', description: 'Manage workflows' },
       ]);
-      const meta = event.data['_meta'] as Record<string, unknown>;
+      const meta = shaped.data['_meta'] as Record<string, unknown>;
       expect(meta['availableSkills']).toEqual(['bugfix']);
       expect(meta).not.toHaveProperty('availableSkillDetails');
-      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+      expect(JSON.stringify(shaped)).not.toContain('x'.repeat(64));
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('redacts workflows from untrusted transcript events', async () => {
@@ -36167,14 +37248,7 @@ describe('createServeApp', () => {
           ],
         },
       } satisfies Omit<BridgeEvent, 'id'>;
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [commandsEvent],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36195,22 +37269,22 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.events[0].data.availableCommands).toEqual([
+      // Untrusted-workflow redaction is wired through the same shared helper
+      // as the workspace route; pin the redaction at that helper.
+      const { redactWorkflowsFromAvailableCommandsEvent } = await import(
+        './workflow-session-gate.js'
+      );
+      const redacted = redactWorkflowsFromAvailableCommandsEvent(commandsEvent);
+      expect(redacted.data.availableCommands).toEqual([
         { name: 'help', description: 'Help' },
       ]);
       expect(commandsEvent.data.availableCommands).toHaveLength(2);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('forwards an exclusive persisted-record boundary', async () => {
       const sid = '55555555-bbbb-cccc-dddd-bbbbbbbbbbbb';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36218,13 +37292,16 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript?limit=100&beforeRecordId=record-3`)
+        .get(
+          `/session/${sid}/transcript?limit=100&beforeRecordId=${sid}-user-1`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, limit: 100, beforeRecordId: 'record-3' },
-      ]);
+      // The boundary is exclusive: nothing precedes the first record.
+      expect(res.body.events).toEqual([]);
+      expect(res.body.hasMore).toBe(false);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('routes inactive active transcript pages through the owning workspace runtime', async () => {
@@ -36234,14 +37311,7 @@ describe('createServeApp', () => {
       const secondaryWs = realpathSync(secondaryDir);
       await writeTranscriptSession(sid, 'active', secondaryWs);
       const primaryBridge = fakeBridge();
-      const secondaryBridge = fakeBridge({
-        sessionTranscriptImpl: async (req) => ({
-          v: 1,
-          sessionId: req.sessionId,
-          events: [],
-          hasMore: false,
-        }),
-      });
+      const secondaryBridge = fakeBridge();
       const registry = createWorkspaceRegistry([
         makeWorkspaceRuntimeForTest({
           workspaceId: 'primary',
@@ -36265,10 +37335,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
+      // Resolved to the owning secondary runtime and read daemon-local there;
+      // neither bridge's page method is called.
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
-      expect(secondaryBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid },
-      ]);
+      expect(secondaryBridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('reads persisted transcript and turn index for an explicit standalone session', async () => {
@@ -36315,12 +37385,10 @@ describe('createServeApp', () => {
       expect(turnIndex.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
-      expect(internalBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, direction: 'backward' },
-      ]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: sid },
-      ]);
+      // Transcript and turn index both read daemon-local from the owning
+      // internal runtime; neither bridge method is called.
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('rejects transcript and turn index for a child of an explicit standalone session', async () => {
@@ -36524,12 +37592,8 @@ describe('createServeApp', () => {
       expect(turnIndex.status).toBe(200);
       expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(primaryBridge.sessionTurnIndexCalls).toEqual([]);
-      expect(internalBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: childSid, direction: 'backward' },
-      ]);
-      expect(internalBridge.sessionTurnIndexCalls).toEqual([
-        { sessionId: childSid },
-      ]);
+      expect(internalBridge.sessionTranscriptCalls).toEqual([]);
+      expect(internalBridge.sessionTurnIndexCalls).toEqual([]);
     });
 
     it('skips the internal runtime for a transcript from a non-conversation source', async () => {
@@ -36954,9 +38018,8 @@ describe('createServeApp', () => {
       expect(internalOnlyTranscript.body.code).toBe('session_archived');
       expect(internalOnlyExport.status).toBe(409);
       expect(internalOnlyExport.body.code).toBe('session_conflict');
-      expect(primaryBridge.sessionTranscriptCalls).toEqual([
-        { sessionId: archivedSid },
-      ]);
+      // The active ordinary copy is read daemon-local; no bridge page call.
+      expect(primaryBridge.sessionTranscriptCalls).toEqual([]);
       expect(internalBridge.sessionTranscriptCalls).toEqual([]);
     });
 
@@ -37198,13 +38261,7 @@ describe('createServeApp', () => {
 
     it('maps child invalid cursor errors to 400', async () => {
       const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
-          throw Object.assign(new Error('Invalid transcript cursor'), {
-            data: { errorKind: 'invalid_transcript_cursor' },
-          });
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -37217,31 +38274,48 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_transcript_cursor');
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, cursor: 'not-a-cursor' },
-      ]);
+      // The daemon-local reader rejects the malformed cursor itself.
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps frozen snapshot conflicts to 409', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
-      const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
-          throw Object.assign(new Error('Transcript snapshot is unavailable'), {
-            data: {
-              errorKind: 'transcript_snapshot_unavailable',
-              sessionId: sid,
-            },
-          });
-        },
-      });
+      const bridge = fakeBridge();
       await writeTranscriptSession(sid);
+      const filePath = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const snapshot = (
+        await new qwenCore.SessionTranscriptReader(wsDir).readTurnIndexPage(sid)
+      ).snapshot;
+      const anchorUuid = `${sid}-user-1`;
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
       });
 
+      const first = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(first.status).toBe(200);
+
+      // Equal-size rewrite at an advanced mtime: the frozen snapshot's mtime
+      // guard fails the anchored read closed with 409.
+      const raw = await fsp.readFile(filePath, 'utf8');
+      const rewritten = raw.replace('hello transcript', 'HELLO transcript');
+      expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(raw));
+      await fsp.writeFile(filePath, rewritten);
+      const st = await fsp.stat(filePath);
+      await fsp.utimes(filePath, st.atime, new Date(st.mtimeMs + 1000));
+
       const res = await request(app)
-        .get(`/session/${sid}/transcript?cursor=stale`)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${anchorUuid}&snapshot=${encodeURIComponent(snapshot)}`,
+        )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(409);
@@ -37249,15 +38323,22 @@ describe('createServeApp', () => {
         code: 'transcript_snapshot_unavailable',
         sessionId: sid,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, cursor: 'stale' },
-      ]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps oversized transcript snapshots to 413', async () => {
       const sid = '55555555-bbbb-cccc-dddd-ffffffffffff';
+      // A live backward page first flushes through the bridge; a too-large
+      // snapshot error from that flush is mapped by the route unchanged.
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        }),
+        flushSessionTranscriptImpl: async () => {
           throw Object.assign(new Error('Transcript snapshot is too large'), {
             data: {
               errorKind: 'transcript_too_large',
@@ -37275,7 +38356,7 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript`)
+        .get(`/session/${sid}/transcript?direction=backward`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(413);
@@ -37285,13 +38366,21 @@ describe('createServeApp', () => {
         snapshotSize: 300,
         maxBytes: 200,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
 
     it('maps oversized transcript pages to 413', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaa';
       const bridge = fakeBridge({
-        sessionTranscriptImpl: async () => {
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        }),
+        flushSessionTranscriptImpl: async () => {
           throw Object.assign(new Error('Transcript page is too large'), {
             data: {
               errorKind: 'transcript_page_too_large',
@@ -37309,7 +38398,7 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript`)
+        .get(`/session/${sid}/transcript?direction=backward`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(413);
@@ -37319,7 +38408,8 @@ describe('createServeApp', () => {
         pageBytes: 300,
         maxBytes: 200,
       });
-      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
     });
   });
 
@@ -41555,6 +42645,47 @@ describe('createServeApp', () => {
           route: 'POST /session',
           limit: 10,
           scope: 'total',
+        }),
+      );
+    });
+
+    it('503 + Retry-After 15 + readings and daemon log when bridge throws SystemOverloadedError', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw Object.assign(new SystemOverloadedError('cpu_load', 2.5, 120), {
+            operation: 'spawn',
+            workspaceCwd: '/work/a',
+            sourceSessionId: 'sess-src',
+          });
+        },
+      });
+      const daemonLog = fakeDaemonLog();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('15');
+      expect(res.body).toMatchObject({
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.5,
+        eventLoopLagP99Ms: 120,
+      });
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'load admission rejected',
+        expect.objectContaining({
+          route: 'POST /session',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 120,
+          operation: 'spawn',
+          workspaceCwd: '/work/a',
+          sourceSessionId: 'sess-src',
         }),
       );
     });
@@ -48029,6 +49160,7 @@ describe('Live conversation runtime lifecycle', () => {
       inodeVerifiable: boolean;
     }> = {},
     serveOverrides: Partial<ServeOptions> = {},
+    daemonEnvOverrides: NodeJS.ProcessEnv = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -48139,7 +49271,7 @@ describe('Live conversation runtime lifecycle', () => {
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
       getSessionBridges: () =>
         registry.listManaged().map((runtime) => runtime.bridge),
-      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
+      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1', ...daemonEnvOverrides },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     } as Parameters<typeof createServeApp>[2]);
@@ -48172,6 +49304,54 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+    ['daemon', {}],
+  ] as const)(
+    'passes the boot-resolved export channel (%s) into the standalone service',
+    async (expectedChannel, daemonEnvOverrides) => {
+      // Pins the createServeApp -> StandaloneSessionService wiring: dropping
+      // exportChannel from that construction, or hardcoding it to 'daemon',
+      // must red this case, not just the service-level one (which builds its
+      // own harness).
+      const setup = setupLiveRuntime({}, {}, {}, daemonEnvOverrides);
+      const sid = '22222222-2222-4222-8222-222222222222';
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(sid);
+      vi.spyOn(
+        SessionService.prototype,
+        'getSessionLocation',
+      ).mockResolvedValue('active');
+      vi.spyOn(
+        SessionService.prototype,
+        'readCreationMetadataIfReadable',
+      ).mockResolvedValue({ sourceType: 'standalone' });
+      exportSessionTranscriptSpy.mockResolvedValueOnce({
+        format: 'json',
+        mimeType: 'application/json',
+        filename: 'session.json',
+        content: '{}',
+        metadata: {},
+      });
+      const pending = request(setup.app)
+        .get(`/standalone/sessions/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      const res = await pending;
+      expect(res.status).toBe(200);
+      const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
+        config?: { getChannel?: () => string | undefined };
+      };
+      expect(call?.config?.getChannel?.()).toBe(expectedChannel);
+    },
+  );
 
   it.each([
     ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
@@ -52984,4 +54164,152 @@ describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
       { timeout: 5_000 },
     );
   }, 15_000);
+});
+
+it('auto-records prompt, mid-turn-message, and shell inputs into workspace input history', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-input-hist-'));
+  const home = path.join(root, 'home');
+  const workspace = path.join(root, 'workspace');
+  await fsp.mkdir(home, { recursive: true });
+  await fsp.mkdir(workspace, { recursive: true });
+  vi.stubEnv('QWEN_HOME', home);
+  const bridge = fakeBridge({
+    enqueueMidTurnImpl: (_sessionId, message, _context, messageId) =>
+      message === 'rejected mid turn'
+        ? { accepted: false }
+        : { accepted: true, messageId: messageId ?? 'mid-default' },
+    getMidTurnMessagesImpl: () => ({
+      messages: [],
+      settledMessageIds: ['replayed-id'],
+      promotedMessageIds: [],
+    }),
+  });
+  const app = createServeApp(
+    { ...baseOpts, token: 'tkn', workspace, enableSessionShell: true },
+    undefined,
+    { bridge },
+  );
+  try {
+    const created = await request(app)
+      .post('/session')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ cwd: workspace });
+    expect(created.status).toBe(200);
+    const sessionId = created.body.sessionId as string;
+
+    // 1. Prompt with submittedPrompt metadata records the user-typed original.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'expanded file contents' }],
+        _meta: { 'qwen.submittedPrompt': 'check @src/a.ts' },
+      })
+      .expect(202);
+
+    // 2. Host-generated prompts explicitly opt out of composer history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'scheduled command' }],
+        suppressInputHistory: true,
+      })
+      .expect(202);
+
+    // 3. A normal prompt without optional metadata is still recorded.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ prompt: [{ type: 'text', text: 'normal user prompt' }] })
+      .expect(202);
+
+    // 4. Channel-marked prompt must NOT enter composer input history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'external channel message' }],
+        _meta: { 'qwen.channel.prompt': true },
+      })
+      .expect(202);
+
+    // 5. Mid-turn message records into prompt history.
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: '  follow up mid turn  ', messageId: 'fresh-id' })
+      .expect(200);
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: 'rejected mid turn' })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body.accepted).toBe(false);
+      });
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        message: 'different text from the replayed id',
+        messageId: 'replayed-id',
+      })
+      .expect(200)
+      .expect((response) => {
+        expect(response.body).toEqual({
+          accepted: true,
+          messageId: 'replayed-id',
+        });
+      });
+
+    // 6. Shell command records into shell history.
+    await request(app)
+      .post(`/session/${sessionId}/shell`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ command: 'git status' })
+      .expect(200);
+
+    await vi.waitFor(async () => {
+      const promptHist = await request(app)
+        .get('/workspace/input-history?kind=prompt')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(promptHist.status).toBe(200);
+      expect(promptHist.body.entries).toEqual([
+        'check @src/a.ts',
+        'normal user prompt',
+        'follow up mid turn',
+      ]);
+
+      const shellHist = await request(app)
+        .get('/workspace/input-history?kind=shell')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(shellHist.status).toBe(200);
+      expect(shellHist.body.entries).toEqual(['git status']);
+    });
+  } finally {
+    await stopCreatedApps();
+    vi.unstubAllEnvs();
+    await fsp.rm(root, { recursive: true, force: true });
+  }
 });
