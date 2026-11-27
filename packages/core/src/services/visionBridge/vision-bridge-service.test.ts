@@ -14,12 +14,15 @@ import {
   isVisionBridgeNoticeDisplay,
   runVisionBridge,
   selectVisionBridgeModel,
+  shouldRunVisionBridge,
   isImageCapable,
   isFullTurnVisionCapable,
   type VisionBridgeResult,
   type VisionModelCandidate,
 } from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
+import { resolveModelConfig } from '../../models/modelConfigResolver.js';
+import { AuthType } from '../../core/contentGenerator.js';
 
 vi.mock('../../utils/sideQuery.js', () => ({ runSideQuery: vi.fn() }));
 import { runSideQuery } from '../../utils/sideQuery.js';
@@ -964,5 +967,44 @@ describe('isFullTurnVisionCapable', () => {
         capabilities: { agent: true },
       }),
     ).toBe(true);
+  });
+});
+
+describe('shouldRunVisionBridge with a resolved provider config', () => {
+  // Regression: a modelProviders entry declaring capabilities.vision for a
+  // model the built-in catalog does not know used to resolve to text-only
+  // session modalities, so every image was transcribed by the bridge even
+  // though the per-request path (BaseLlmClient.resolveForModel) already
+  // honored capabilities.vision.
+  const resolvedConfig = (capabilities?: { vision?: boolean }) =>
+    resolveModelConfig({
+      authType: AuthType.USE_OPENAI,
+      env: { MY_KEY: 'key' },
+      modelProvider: {
+        id: 'custom-vlm',
+        name: 'Custom VLM',
+        envKey: 'MY_KEY',
+        baseUrl: 'https://api.example.com',
+        ...(capabilities && { capabilities }),
+      },
+    }).config;
+  const gateConfig = (modalities: { image?: boolean } | undefined) =>
+    ({
+      getEffectiveInputModalities: () => modalities,
+      getDefaultVisionBridgeModel: () => ({ id: 'qwen3-vl-plus' }),
+    }) as unknown as Config;
+
+  it('stays off when the provider declares capabilities.vision', () => {
+    expect(
+      shouldRunVisionBridge(
+        gateConfig(resolvedConfig({ vision: true }).modalities),
+      ),
+    ).toBe(false);
+  });
+
+  it('still runs for a catalog-unknown model without the capability', () => {
+    expect(shouldRunVisionBridge(gateConfig(resolvedConfig().modalities))).toBe(
+      true,
+    );
   });
 });

@@ -332,6 +332,7 @@ export function resolveModelConfig(
     authType,
     modelProvider?.id ?? modelResult.value,
     sources,
+    modelProvider?.capabilities?.vision === true,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -413,6 +414,7 @@ function resolveQwenOAuthConfig(
     AuthType.QWEN_OAUTH,
     resolvedModel,
     sources,
+    modelProvider?.capabilities?.vision === true,
   );
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
@@ -438,6 +440,7 @@ function resolveGenerationConfig(
   authType: AuthType | undefined,
   modelId: string | undefined,
   sources: ConfigSources,
+  visionCapability?: boolean,
 ): Partial<ContentGeneratorConfig> {
   const result: Partial<ContentGeneratorConfig> = {};
 
@@ -486,6 +489,21 @@ function resolveGenerationConfig(
   if (result.modalities === undefined && modelId) {
     result.modalities = defaultModalities(modelId);
     sources['modalities'] = computedSource('auto-detected from model');
+  }
+
+  // capabilities.vision declares image input support. BaseLlmClient
+  // .resolveForModel already merges it per request; apply the same merge here
+  // so session-level consumers (the vision-bridge gate, media slimming) agree
+  // with the request path for models the built-in catalog does not know.
+  if (visionCapability && result.modalities?.image !== true) {
+    result.modalities = { ...result.modalities, image: true };
+    if (authType && modelId) {
+      sources['modalities'] = modelProvidersSource(
+        authType,
+        modelId,
+        'capabilities.vision',
+      );
+    }
   }
 
   return result;
