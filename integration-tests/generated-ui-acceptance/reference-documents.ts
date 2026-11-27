@@ -173,6 +173,7 @@ export function comparatorDocument(options: {
   plan: 'basic' | 'pro' | 'team';
   withSupport: boolean;
 }): GeneratedUiDocument {
+  const maxSeats = 500;
   const radio = (
     name: string,
     value: string,
@@ -192,9 +193,7 @@ export function comparatorDocument(options: {
         ? ' Support adds CNY 12 per seat per month and is never discounted.'
         : ''),
     html:
-      '<label for="seats">Seats</label><input id="seats" type="number" min="1" max="500" value="' +
-      options.seats +
-      '">' +
+      `<label for="seats">Seats</label><input id="seats" type="number" min="1" max="${maxSeats}" value="${options.seats}">` +
       '<fieldset><legend>Billing</legend>' +
       radio('billing', 'monthly', 'Monthly', options.billing === 'monthly') +
       radio('billing', 'annual', 'Annual', options.billing === 'annual') +
@@ -220,7 +219,7 @@ var PRICES={basic:3900,pro:6900,team:9900}, SUPPORT=1200, DISCOUNT=20;
 function checked(name, values){for(var i=0;i<values.length;i++){if(ui.input(name+'-'+values[i]).checked)return values[i];}return values[0];}
 function payments(){
   var seats=Number(ui.input('seats').value);
-  if(!(Number.isInteger(seats)&&seats>=1)) return null;
+  if(!(Number.isInteger(seats)&&seats>=1&&seats<=${maxSeats})) return null;
   var billing=checked('billing',['monthly','annual']);
   var support=${options.withSupport ? "ui.input('support').checked" : 'false'};
   var months=billing==='annual'?12:1, result={seats:seats,billing:billing,months:months,plans:{}};
@@ -231,7 +230,7 @@ function payments(){
 }
 function render(){
   var r=payments();
-  if(!r){ui.text('selected','Seats must be a whole number of at least 1.');return;}
+  if(!r){ui.text('selected','Seats must be a whole number from 1 to ${maxSeats}.');return;}
   Object.keys(r.plans).forEach(function(p){
     ui.text(p+'-payment','CNY '+money(r.plans[p])+(r.billing==='annual'?' per year':' per month'));
     ui.text(p+'-monthly','CNY '+money(Math.round(r.plans[p]/r.months)));

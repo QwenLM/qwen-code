@@ -89,9 +89,11 @@ When the user wants to take the view's current result elsewhere, such as "copy t
 ui.on('copy', 'click', function () {
   var r = calculate(); // the view's own calculation from ui.input()
   if (r.error) return;
-  ui.copy(
-    'Total: CNY ' + r.total.toFixed(2) + '\nEach: CNY ' + r.share.toFixed(2),
-  );
+  var lines = ['Total: CNY ' + r.total.toFixed(2)];
+  r.shares.forEach(function (share, i) {
+    lines.push('Person ' + (i + 1) + ': CNY ' + share.toFixed(2));
+  });
+  ui.copy(lines.join('\n'));
 });
 ui.on('export', 'click', function () {
   var r = calculate();
