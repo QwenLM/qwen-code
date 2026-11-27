@@ -15,7 +15,7 @@ import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { completeModModel, resolveModModel } from './mod-model.js';
 
 const HF_ROUTER_URL = 'https://router.huggingface.co/v1';
-const GLM_MODEL = 'zai-org/GLM-5.3-Flash:zai-org';
+const GLM_MODEL = 'zai-org/GLM-5.3-Flash:deepinfra';
 
 const usage = {
   promptTokenCount: 10,

@@ -176,10 +176,16 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
 
-    it('keeps the configured window for a raw override on a regular gateway', () => {
-      const result = buildOver('gpt-4o', { authType: 'openai' });
+    it('keeps configured capabilities for a raw override on a regular gateway', () => {
+      const modalities = { image: false, audio: true };
+      const result = buildOver(
+        'gpt-4o',
+        { authType: 'openai' },
+        { ...parentConfig, modalities },
+      );
 
       expect(result.contextWindowSize).toBe(parentConfig.contextWindowSize);
+      expect(result.modalities).toEqual(modalities);
     });
 
     it('uses the overridden endpoint for a raw model window', () => {
@@ -194,6 +200,7 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.contextWindowSize).toBe(
         tokenLimit(model, 'input', baseUrl),
       );
+      expect(result.modalities?.image).toBe(true);
     });
 
     it.each([
@@ -217,6 +224,66 @@ describe('buildAgentContentGeneratorConfig', () => {
         expect(result).toMatchObject({ model, baseUrl, contextWindowSize });
       },
     );
+
+    describe('raw Hugging Face capabilities', () => {
+      const hfParent = {
+        ...parentConfig,
+        model: 'zai-org/GLM-5.3-Flash:deepinfra',
+        baseUrl: 'https://router.huggingface.co/v1',
+        contextWindowSize: 1_048_576,
+        modalities: { image: true },
+      };
+      const textModel = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+
+      it('uses the bare target model window and modalities', () => {
+        const result = buildOver(textModel, { authType: 'openai' }, hfParent);
+
+        expect(result).toMatchObject({
+          model: textModel,
+          baseUrl: hfParent.baseUrl,
+          contextWindowSize: 262_144,
+        });
+        expect(result.modalities).toEqual({});
+      });
+
+      it('uses the modalities of a suffixed text-only target', () => {
+        const result = buildOver(
+          'openai/gpt-oss-120b:cerebras',
+          { authType: 'openai' },
+          hfParent,
+        );
+
+        expect(result.modalities).toEqual({});
+      });
+
+      it('retains overrides on the same Hugging Face route', () => {
+        const overrides = {
+          ...hfParent,
+          contextWindowSize: 96_000,
+          modalities: { image: false, audio: true },
+        };
+        const result = buildOver(
+          hfParent.model,
+          { authType: 'openai' },
+          overrides,
+        );
+
+        expect(result.contextWindowSize).toBe(overrides.contextWindowSize);
+        expect(result.modalities).toEqual(overrides.modalities);
+      });
+
+      it('does not reuse Hugging Face modalities at an overridden endpoint', () => {
+        const baseUrl = 'https://other.example/v1';
+        const result = buildOver(
+          textModel,
+          { authType: 'openai', baseUrl },
+          hfParent,
+        );
+
+        expect(result.baseUrl).toBe(baseUrl);
+        expect(result.modalities).toEqual({});
+      });
+    });
 
     it('does not inherit mandatory thinking from another model', () => {
       const result = buildOver(

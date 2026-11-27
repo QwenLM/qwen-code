@@ -1127,6 +1127,38 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it.each([
+      {
+        extraBody: { max_tokens: 300_000 },
+        requestLimit: 64_000,
+        expected: { max_tokens: 32_768 },
+      },
+      {
+        extraBody: { max_completion_tokens: 300_000 },
+        requestLimit: 19_037,
+        expected: { max_tokens: undefined, max_completion_tokens: 19_037 },
+      },
+    ])(
+      'caps the final Hugging Face request with $extraBody',
+      async ({ extraBody, requestLimit, expected }) => {
+        mockClient.baseURL = 'https://router.huggingface.co/v1';
+        const model = 'deepseek-ai/DeepSeek-V4.1-Flash:featherless';
+        const apiCall = await executeWith(
+          {
+            baseUrl: mockClient.baseURL,
+            model,
+            samplingParams: undefined,
+            extra_body: extraBody,
+          },
+          userRequest(model, { maxOutputTokens: requestLimit }),
+          'prompt-id',
+          DefaultOpenAICompatibleProvider,
+        );
+
+        expectFields(apiCall, { ...expected, model });
+      },
+    );
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(

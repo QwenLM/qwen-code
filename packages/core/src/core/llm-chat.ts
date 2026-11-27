@@ -94,6 +94,7 @@ import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-contex
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
+  getHuggingFaceRoute,
   DEFAULT_TOKEN_LIMIT,
   OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
@@ -3809,9 +3810,12 @@ export class LlmChat {
       params.config?.maxOutputTokens ??
       cgConfigForThresholds?.samplingParams?.max_tokens ??
       parsedEnvMaxTokensForClamp;
-    const outputCeiling: number =
+    const hfRoute = getHuggingFaceRoute(model, cgConfigForThresholds?.baseUrl);
+    const outputCeiling = Math.min(
       explicitOutputCeiling ??
-      defaultOutputCeiling(model, cgConfigForThresholds?.baseUrl);
+        defaultOutputCeiling(model, cgConfigForThresholds?.baseUrl),
+      hfRoute?.limits?.output ?? Infinity,
+    );
     // Declared at function level so the MAX_TOKENS escalation path inside
     // the generator closure can re-clamp against the same window and prompt
     // estimate.
@@ -4659,7 +4663,9 @@ export class LlmChat {
         const effectiveInitialMaxOutputTokens =
           params.config?.maxOutputTokens ?? outputCeiling;
         const escalatedLimit = clampOutputTokensToWindow(
-          OUTPUT_TOKEN_CEILING,
+          hfRoute
+            ? Math.min(outputCeiling, OUTPUT_TOKEN_CEILING)
+            : OUTPUT_TOKEN_CEILING,
           contextWindowForClamp,
           promptTokensForClamp,
         );

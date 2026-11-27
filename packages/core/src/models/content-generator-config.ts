@@ -22,12 +22,13 @@ import {
   createContentGenerator,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   normalizeOpenAiWireBaseUrl,
 } from '../core/openaiContentGenerator/constants.js';
-import { getHuggingFaceRoute, tokenLimit } from '../core/tokenLimits.js';
+import { isHuggingFaceRouterUrl, tokenLimit } from '../core/tokenLimits.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
@@ -303,15 +304,22 @@ function buildInheritedAgentContentGeneratorConfig(
     ? parentConfig.apiKeyEnvKey
     : undefined;
 
-  if (
-    !sameProvider ||
-    nextConfig.baseUrl !== parentConfig.baseUrl ||
-    (nextConfig.model !== parentConfig.model &&
-      getHuggingFaceRoute(nextConfig.model, nextConfig.baseUrl))
-  ) {
+  const endpointChanged =
+    !sameProvider || nextConfig.baseUrl !== parentConfig.baseUrl;
+  const huggingFaceRouteChanged =
+    (endpointChanged || nextConfig.model !== parentConfig.model) &&
+    (isHuggingFaceRouterUrl(nextConfig.baseUrl) ||
+      isHuggingFaceRouterUrl(parentConfig.baseUrl));
+  if (endpointChanged || huggingFaceRouteChanged) {
     nextConfig.contextWindowSize = tokenLimit(
       nextConfig.model,
       'input',
+      nextConfig.baseUrl,
+    );
+  }
+  if (huggingFaceRouteChanged) {
+    nextConfig.modalities = defaultModalities(
+      nextConfig.model,
       nextConfig.baseUrl,
     );
   }

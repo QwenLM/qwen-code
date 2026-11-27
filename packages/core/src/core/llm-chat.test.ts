@@ -15595,6 +15595,35 @@ describe('LlmChat', async () => {
       expect(lastText()).toBe('Hello ending.');
     });
 
+    it.each([
+      ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 32_768],
+      ['deepseek-ai/DeepSeek-V4.1-Flash:fastest', 32_000],
+    ])(
+      'keeps Hugging Face output recovery within the %s ceiling',
+      async (model, limit) => {
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          baseUrl: 'https://router.huggingface.co/v1',
+        });
+        serveStreams(truncated('Hello'), textStream(' ending.'));
+
+        const events = await collect(
+          await sendOn(model, 'write a long essay', 'hf-recovery'),
+        );
+
+        expectStreamCalls(2);
+        expect(
+          streamMock().mock.calls.map(
+            ([request]) => request.config?.maxOutputTokens,
+          ),
+        ).toEqual([limit, limit]);
+        expect(
+          eventsOfType(events, StreamEventType.RETRY).map(continuationOf),
+        ).toEqual([true]);
+      },
+    );
+
     it('retries protocol-tag leaks during direct output recovery', async () => {
       vi.useFakeTimers();
       serveStreams(

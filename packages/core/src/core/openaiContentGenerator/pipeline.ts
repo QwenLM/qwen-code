@@ -38,6 +38,7 @@ import { createChildAbortController } from '../../utils/abortController.js';
 import {
   QWEN4_NON_THINKING_OUTPUT_CAP,
   reconcileMaxTokens,
+  getHuggingFaceRoute,
 } from '../tokenLimits.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
@@ -1949,6 +1950,23 @@ export class ContentGenerationPipeline {
         providerRequest.max_tokens = limit;
       }
       delete typed['max_output_tokens'];
+    }
+    const hfOutputLimit = getHuggingFaceRoute(
+      providerRequest.model,
+      this.client.baseURL,
+    )?.limits?.output;
+    if (hfOutputLimit !== undefined) {
+      const limit = Math.min(hfOutputLimit, requestLimit ?? hfOutputLimit);
+      const maxTokens = providerRequest.max_tokens;
+      if (hasProviderOutputBudgetKey(typed)) {
+        delete providerRequest.max_tokens;
+        clampProviderOutputBudgetKeys(
+          typed,
+          Math.min(limit, maxTokens ?? limit),
+        );
+      } else if (typeof maxTokens === 'number' && maxTokens > limit) {
+        providerRequest.max_tokens = limit;
+      }
     }
     return providerRequest;
   }

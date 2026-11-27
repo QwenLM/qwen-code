@@ -49,7 +49,7 @@ import {
   QWEN_STREAM_MAX_LIFETIME_MS_ENV,
   resolveRequestTimeout,
 } from '../openaiContentGenerator/constants.js';
-import { reconcileMaxTokens } from '../tokenLimits.js';
+import { getHuggingFaceRoute, reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
 import {
   withDashScopeSourceConfig,
@@ -543,6 +543,21 @@ export class ResponsesPipeline {
           requestRecord[key] = value;
         }
       }
+    }
+
+    const hfOutputLimit = getHuggingFaceRoute(
+      apiRequest.model,
+      this.config.baseUrl,
+    )?.limits?.output;
+    if (
+      hfOutputLimit !== undefined &&
+      typeof apiRequest.max_output_tokens === 'number'
+    ) {
+      apiRequest.max_output_tokens = Math.min(
+        apiRequest.max_output_tokens,
+        hfOutputLimit,
+        requestMaxTokens ?? hfOutputLimit,
+      );
     }
 
     const cachedRequest = applyResponsesPromptCaching(

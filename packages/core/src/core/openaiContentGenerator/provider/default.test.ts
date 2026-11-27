@@ -131,7 +131,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     ['https://router.huggingface.co/v1', 64_000],
     ['https://compatible.example/v1', 32_000],
   ])('scopes the router output ceiling to %s', (baseUrl, maxTokens) => {
-    const model = 'zai-org/GLM-5.3-Flash:zai-org';
+    const model = 'zai-org/GLM-5.3-Flash:deepinfra';
     const request = build(hello(model), providerWith({ baseUrl, model }));
 
     expect(request.model).toBe(model);

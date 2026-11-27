@@ -29,7 +29,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'glm-4-7': { context: 200_000, output: 131_072 },
     'qwen3-8-max': { context: 262_144, output: 131_072 },
     // Reachable only through the dashed spelling of a stripped dotted version.
-    'twin-model-v2-1': { context: 122_222, output: 33_333 },
+    'twin-model-v2-1': { context: 122_222, output: 7_777 },
   };
   // Only the catalog read is stubbed; versionSpellingAlias is a pure string
   // rewrite, so the twin fallback sees the real rule.
@@ -75,9 +75,8 @@ describe('normalize', () => {
 
   it('looks up family output limits and smaller family windows for HF router IDs', () => {
     for (const [id, base] of [
-      ['zai-org/GLM-5.3-Flash:zai-org', 'zai-org/GLM-5.3-Flash'],
+      ['zai-org/GLM-5.3-Flash:deepinfra', 'zai-org/GLM-5.3-Flash'],
       ['deepseek-ai/DeepSeek-V4.1-Flash:deepinfra', 'deepseek-v4.1-flash'],
-      ['deepseek-ai/DeepSeek-V3.1:together', 'deepseek-ai/DeepSeek-V3.1'],
     ]) {
       expect(tokenLimit(id, 'output', HF_ROUTER_URL)).toBe(
         tokenLimit(base, 'output'),
@@ -88,7 +87,7 @@ describe('normalize', () => {
     ).toBe(122_222);
     expect(
       tokenLimit('org/Twin-Model-V2.1:together', 'output', HF_ROUTER_URL),
-    ).toBe(33_333);
+    ).toBe(7_777);
   });
 
   it.each([
@@ -102,12 +101,24 @@ describe('normalize', () => {
   });
 
   it.each([
+    ['deepseek-ai/DeepSeek-V4.1-Flash:featherless', 262_144, 32_768],
+    ['Qwen/Qwen3.8-27B:cerebras', 65_536, 32_768],
+    ['MiniMaxAI/MiniMax-M2.5:digitalocean', 65_536, 58_982],
+  ])('uses both published HF limits for %s', (model, context, output) => {
+    expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(context);
+    expect(tokenLimit(model, 'output', HF_ROUTER_URL)).toBe(output);
+    expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(output);
+    expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(true);
+  });
+
+  it.each([
     'deepseek-ai/DeepSeek-V4.1-Flash:fastest',
     'deepseek-ai/DeepSeek-V4.1-Flash:unlisted',
     'another-org/DeepSeek-V4.1-Flash:featherless',
     'zai-org/GLM-5.3-Flash:zai-org',
+    'moonshotai/Kimi-K3:fireworks-ai',
   ])(
-    'keeps the default window for %s without a published route limit',
+    'keeps conservative defaults for %s without a published route limit',
     (model) => {
       expect(knownTokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
         DEFAULT_TOKEN_LIMIT,
@@ -115,6 +126,10 @@ describe('normalize', () => {
       expect(tokenLimit(model, 'input', HF_ROUTER_URL)).toBe(
         DEFAULT_TOKEN_LIMIT,
       );
+      expect(defaultOutputCeiling(model, HF_ROUTER_URL)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(hasExplicitOutputLimit(model, HF_ROUTER_URL)).toBe(false);
     },
   );
 

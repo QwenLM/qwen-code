@@ -144,14 +144,35 @@ const LIMITS = {
   '16k': 16_384,
 } as const;
 
-// The router publishes context_length for individual model and provider pairs.
-// https://huggingface.co/docs/inference-providers/hub-api
-const HUGGING_FACE_CONTEXT_WINDOWS = new Map<string, TokenCount>([
-  ['deepseek-ai/deepseek-v4.1-flash:deepinfra', 1_048_576],
-  ['deepseek-ai/deepseek-v4.1-flash:featherless', LIMITS['256k']],
-  ['moonshotai/kimi-k3:fireworks', 1_048_576],
-  ['zai-org/glm-5.3-flash:deepinfra', 1_048_576],
+// HF publishes context lengths per provider. Its OpenRouter partner publishes
+// the separate completion limits in /api/v1/models/:author/:slug/endpoints.
+const HUGGING_FACE_ROUTE_LIMITS = new Map<
+  string,
+  Record<TokenLimitType, TokenCount>
+>([
+  [
+    'deepseek-ai/deepseek-v4.1-flash:deepinfra',
+    { input: 1_048_576, output: 393_216 },
+  ],
+  [
+    'deepseek-ai/deepseek-v4.1-flash:featherless',
+    { input: LIMITS['256k'], output: 32_768 },
+  ],
+  ['minimaxai/minimax-m2.5:digitalocean', { input: 65_536, output: 58_982 }],
+  ['moonshotai/kimi-k3:fireworks', { input: 1_048_576, output: 943_718 }],
+  ['qwen/qwen3.8-27b:cerebras', { input: 65_536, output: 32_768 }],
+  ['zai-org/glm-5.3-flash:deepinfra', { input: 1_048_576, output: 943_718 }],
 ]);
+
+export function isHuggingFaceRouterUrl(baseUrl?: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const url = new URL(baseUrl);
+    return url.protocol === 'https:' && url.host === 'router.huggingface.co';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The Hugging Face router uses a single provider or policy suffix. Suffixes on
@@ -160,14 +181,14 @@ const HUGGING_FACE_CONTEXT_WINDOWS = new Map<string, TokenCount>([
 export function getHuggingFaceRoute(
   model: string,
   baseUrl?: string,
-): { id: string; model: string } | undefined {
-  if (!baseUrl || !model.includes(':')) return undefined;
-  try {
-    const url = new URL(baseUrl);
-    if (url.protocol !== 'https:' || url.host !== 'router.huggingface.co') {
-      return undefined;
-    }
-  } catch {
+):
+  | { model: string; limits?: Readonly<Record<TokenLimitType, TokenCount>> }
+  | undefined {
+  if (
+    typeof model !== 'string' ||
+    !model.includes(':') ||
+    !isHuggingFaceRouterUrl(baseUrl)
+  ) {
     return undefined;
   }
 
@@ -177,8 +198,8 @@ export function getHuggingFaceRoute(
   )?.[1];
   if (!id) return undefined;
   return {
-    id: id.toLowerCase(),
     model: trimmed.slice(0, trimmed.lastIndexOf(':')),
+    limits: HUGGING_FACE_ROUTE_LIMITS.get(id.toLowerCase()),
   };
 }
 
@@ -494,7 +515,10 @@ export function hasExplicitOutputLimit(
   model: Model,
   baseUrl?: string,
 ): boolean {
-  return curatedOutputLimit(normalize(model, baseUrl)) !== undefined;
+  const route = getHuggingFaceRoute(model, baseUrl);
+  return route
+    ? route.limits !== undefined
+    : curatedOutputLimit(normalize(model)) !== undefined;
 }
 
 export function knownTokenLimit(
@@ -504,10 +528,17 @@ export function knownTokenLimit(
 ): TokenCount | undefined {
   const route = getHuggingFaceRoute(model, baseUrl);
   if (!route) return findTokenLimit(model, type);
-  if (type === 'output') return findTokenLimit(route.model, type);
-
-  const providerWindow = HUGGING_FACE_CONTEXT_WINDOWS.get(route.id);
-  if (providerWindow !== undefined) return providerWindow;
+  const providerLimit = route.limits?.[type];
+  if (type === 'output') {
+    const ceiling =
+      providerLimit ??
+      Math.min(
+        findTokenLimit(model, type) ?? DEFAULT_OUTPUT_TOKEN_LIMIT,
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+    return Math.min(findTokenLimit(route.model, type) ?? ceiling, ceiling);
+  }
+  if (providerLimit !== undefined) return providerLimit;
 
   // A family window can narrow the default when the selected provider's
   // window is unknown.
@@ -554,9 +585,8 @@ export function defaultOutputCeiling(
   model: Model,
   baseUrl?: string,
 ): TokenCount {
-  const lookupModel = getHuggingFaceRoute(model, baseUrl)?.model ?? model;
-  const outputLimit = tokenLimit(lookupModel, 'output');
-  const normalized = normalize(lookupModel);
+  const outputLimit = tokenLimit(model, 'output', baseUrl);
+  const normalized = normalize(model, baseUrl);
   if (
     CLAUDE_OPUS_EXTENDED.test(normalized) ||
     QWEN4_OUTPUT_EXTENDED.test(normalized)
