@@ -45,6 +45,7 @@ import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
+  type SlimOptions,
 } from './compactionInputSlimming.js';
 import {
   CHARS_PER_TOKEN,
@@ -356,6 +357,26 @@ export type CompactTrigger = 'manual' | 'auto';
  * summary-friendly size. Token-driven compactions keep text intact.
  */
 export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
+
+/**
+ * The slim options of a cold compaction request. The payload-overflow
+ * request and the request reduced to fit its window (#9455) add the text
+ * cap, and the kept request adds `keepTypedText` to that and nothing else,
+ * so it differs from the reduced request only in the typed text it keeps:
+ * the output budget it gives up is measured on that difference. Built from
+ * one another so an option added here reaches all of them (#9455 R3-4).
+ */
+const COLD_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  stripUnsignedThoughts: true,
+});
+const REDUCED_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  ...COLD_SLIM_OPTIONS,
+  maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+});
+const KEPT_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  ...REDUCED_SLIM_OPTIONS,
+  keepTypedText: true,
+});
 
 export interface ChatCompressionCandidate {
   readonly newHistory: Content[];
@@ -922,12 +943,7 @@ export class ChatCompressionService {
       coldInput ??= slimCompactionInput(
         sideQueryHistory,
         undefined,
-        opts.requestPayloadTooLarge
-          ? {
-              maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
-              stripUnsignedThoughts: true,
-            }
-          : { stripUnsignedThoughts: true },
+        opts.requestPayloadTooLarge ? REDUCED_SLIM_OPTIONS : COLD_SLIM_OPTIONS,
       );
       return coldInput;
     };
@@ -1108,10 +1124,8 @@ export class ChatCompressionService {
     const reduceColdInput = (): Content[] =>
       opts.requestPayloadTooLarge
         ? getColdInput().slimmedHistory
-        : slimCompactionInput(sideQueryHistory, undefined, {
-            maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
-            stripUnsignedThoughts: true,
-          }).slimmedHistory;
+        : slimCompactionInput(sideQueryHistory, undefined, REDUCED_SLIM_OPTIONS)
+            .slimmedHistory;
     const historyChars = (history: Content[]) =>
       history.reduce(
         (sum, content) =>
@@ -1136,11 +1150,11 @@ export class ChatCompressionService {
     const keepTypedText = (
       plain: Content[],
     ): { history: Content[]; sizing: ColdRequestSizing } | undefined => {
-      const kept = slimCompactionInput(sideQueryHistory, undefined, {
-        maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
-        stripUnsignedThoughts: true,
-        keepTypedText: true,
-      }).slimmedHistory;
+      const kept = slimCompactionInput(
+        sideQueryHistory,
+        undefined,
+        KEPT_SLIM_OPTIONS,
+      ).slimmedHistory;
       const keptChars = historyChars(kept) - historyChars(plain);
       if (keptChars <= 0) return undefined;
       const plainBudget = coldBudgetFor(plain);
