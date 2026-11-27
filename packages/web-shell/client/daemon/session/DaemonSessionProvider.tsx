@@ -1040,6 +1040,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const hasSessionAdapter = sessionAdapter !== undefined;
   const sessionAdapterRef = useRef(sessionAdapter);
   sessionAdapterRef.current = sessionAdapter;
+  const adapterOwnedSessionsRef = useRef(new WeakSet<DaemonSessionClient>());
   const availabilityRef = useRef(availabilityController);
   availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
@@ -1976,6 +1977,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreSessionId === sessionRef.current?.sessionId &&
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
     const effectPendingSessionLoad = pendingSessionLoadRef.current;
+    const adapterOwnedSessions = adapterOwnedSessionsRef.current;
     let runnerSession = sessionRef.current;
     let generatedUiSubscriptionOwner: DaemonSessionClient | undefined;
     let unsubscribeGeneratedUiRevocation: (() => void) | undefined;
@@ -2125,6 +2127,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           requestClientId,
           DaemonSessionClient,
         );
+        adapterOwnedSessions.add(loaded);
         await loaded.hydrateReplaySnapshot(abort.signal);
         return loaded;
       };
@@ -2769,6 +2772,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     client,
                     createOptions,
                   );
+              if (adapter) adapterOwnedSessions.add(nextSession);
               standaloneCreateAttempted = false;
             } else {
               if (effectSessionContext?.kind === 'live') {
@@ -2798,7 +2802,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             if (disposed || abort.signal.aborted) {
-              const detachPromise = sessionAdapterRef.current
+              const detachPromise = adapterOwnedSessions.has(nextSession)
                 ? nextSession.detach()
                 : detachDaemonClient({
                     baseUrl: resolvedBaseUrl!,
@@ -5411,7 +5415,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
     void run();
     return () => {
-      const session = runnerSession;
+      const isUnmounting = !mountedRef.current;
+      const session = isUnmounting
+        ? (sessionRef.current ?? runnerSession)
+        : runnerSession;
       if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
       unsubscribeGeneratedUiRevocation?.();
@@ -5435,7 +5442,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         contextErrorPreservedSessionRef.current = undefined;
         contextErrorPreservedProductContextRef.current = undefined;
       }
-      const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
         if (!keepSessionForNextEffect || isUnmounting || !session) {
           trajectoryLiveStore.clear();
@@ -5472,12 +5478,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (isUnmounting) {
         detachPendingRestoredSession(pendingSessionLoadRef.current);
       }
+      const adapterOwnedSession =
+        session !== undefined && adapterOwnedSessions.has(session);
       if (
         ownsCurrentSession &&
         (!keepSessionForNextEffect || isUnmounting) &&
-        session.clientId
+        (adapterOwnedSession || session.clientId)
       ) {
-        if (sessionAdapterRef.current) {
+        if (adapterOwnedSession) {
           void session.detach().catch((err) => {
             console.warn('[DaemonSessionProvider] detach failed:', err);
           });
@@ -5862,9 +5870,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const created = adapter
             ? adapter.create(client, createOptions, DaemonSessionClient)
             : DaemonSessionClient.createStandalone(client, createOptions);
-          return created.then((owner) =>
-            turnNotifications.remember(owner, { kind: 'standalone' }),
-          );
+          return created.then((owner) => {
+            if (adapter) adapterOwnedSessionsRef.current.add(owner);
+            return turnNotifications.remember(owner, { kind: 'standalone' });
+          });
         },
         restoreDetachedWorktreeSession: (sessionId, workspaceCwd) => {
           const client =

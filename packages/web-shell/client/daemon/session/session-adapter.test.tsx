@@ -43,8 +43,8 @@ class FakeAdapterClient extends DaemonClient {
     return undefined;
   }
 
-  override async detachSession() {
-    await this.detachMock();
+  override async detachSession(sessionId: string) {
+    await this.detachMock(sessionId);
   }
 
   override async *subscribeEvents(
@@ -99,7 +99,6 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
           session: {
             sessionId,
             attached: false,
-            clientId: 'client-adapter-1',
             sourceType: 'standalone',
             context: { kind: 'standalone' },
           },
@@ -209,6 +208,151 @@ describe('WebShellSessionAdapter provider lifecycle', () => {
     await act(async () => new Promise((r) => setTimeout(r, 10)));
 
     expect(clients[0]!.detachMock).toHaveBeenCalledTimes(1);
+    expect(
+      fetchSpy.mock.calls.filter(([input]) =>
+        String(input).includes('/detach'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('detaches an action-created adapter session whose host omits clientId', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 404 }));
+    const client = new FakeAdapterClient({
+      baseUrl: 'http://host.example',
+    });
+    const loadPromise = Promise.withResolvers<DaemonSessionClient>();
+    const load = vi.fn(async () => loadPromise.promise);
+    const adapter: WebShellSessionAdapter = {
+      createClient: () => client,
+      create: async (daemonClient) =>
+        new DaemonSessionClient({
+          client: daemonClient,
+          session: {
+            sessionId: 'sa-created-no-client-id',
+            attached: false,
+            sourceType: 'standalone',
+            context: { kind: 'standalone' },
+          },
+        }),
+      load,
+      submitPrompt: async () => {
+        throw new Error('unused');
+      },
+    };
+    let session: DaemonSessionContextValue | undefined;
+    function Harness() {
+      session = useDaemonSession();
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://host.example"
+          sessionAdapter={adapter}
+        >
+          <DaemonSessionProvider
+            sessionContext={{ kind: 'standalone' }}
+            sessionId="sa-pending-no-client-id"
+            sessionAdapter={adapter}
+          >
+            <Harness />
+          </DaemonSessionProvider>
+        </DaemonWorkspaceProvider>,
+      ),
+    );
+    expect(session).toBeDefined();
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await session!.actions.createSession({
+        sessionContext: { kind: 'standalone' },
+      });
+    });
+    await vi.waitFor(() =>
+      expect(session!.connection.sessionId).toBe('sa-created-no-client-id'),
+    );
+    loadPromise.resolve(
+      new DaemonSessionClient({
+        client,
+        session: {
+          sessionId: 'sa-pending-no-client-id',
+          attached: false,
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+        },
+      }),
+    );
+    await act(async () => root!.unmount());
+    root = undefined;
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+
+    expect(client.detachMock).toHaveBeenCalledTimes(2);
+    expect(client.detachMock).toHaveBeenCalledWith('sa-created-no-client-id');
+    expect(
+      fetchSpy.mock.calls.filter(([input]) =>
+        String(input).includes('/detach'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('detaches a pending adapter session after the adapter prop disappears', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 404 }));
+    const client = new FakeAdapterClient({
+      baseUrl: 'http://host.example',
+    });
+    const loaded = Promise.withResolvers<DaemonSessionClient>();
+    const load = vi.fn(async () => loaded.promise);
+    const adapter: WebShellSessionAdapter = {
+      createClient: () => client,
+      create: async () => {
+        throw new Error('unused');
+      },
+      load,
+      submitPrompt: async () => {
+        throw new Error('unused');
+      },
+    };
+    const renderTree = (currentAdapter?: WebShellSessionAdapter) => (
+      <DaemonWorkspaceProvider
+        baseUrl="http://host.example"
+        {...(currentAdapter ? { sessionAdapter: currentAdapter } : {})}
+      >
+        <DaemonSessionProvider
+          sessionContext={{ kind: 'standalone' }}
+          sessionId="sa-pending"
+          {...(currentAdapter ? { sessionAdapter: currentAdapter } : {})}
+        />
+      </DaemonWorkspaceProvider>
+    );
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root!.render(renderTree(adapter)));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+
+    await act(async () => root!.render(renderTree()));
+    loaded.resolve(
+      new DaemonSessionClient({
+        client,
+        session: {
+          sessionId: 'sa-pending',
+          attached: false,
+          clientId: 'client-adapter-1',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(client.detachMock).toHaveBeenCalledTimes(1));
+
     expect(
       fetchSpy.mock.calls.filter(([input]) =>
         String(input).includes('/detach'),
