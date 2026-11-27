@@ -4201,6 +4201,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
+  enableDelegatedPromptHooks: {
+    type: 'boolean',
+    label: 'Enable Delegated Prompt Hooks',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: false,
+    description:
+      'Treat prompts from other sessions as messages checked by UserPromptSubmit hooks in the receiving session.',
+    showInDialog: false,
+  },
+
   stopHookBlockingCap: {
     type: 'number',
     label: 'Stop Hook Blocking Cap',

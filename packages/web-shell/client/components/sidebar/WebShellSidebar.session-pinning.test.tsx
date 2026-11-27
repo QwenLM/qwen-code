@@ -133,6 +133,7 @@ function renderSidebar(
       typeof WebShellSidebar
     >['sessionActions'];
     portalRoot?: HTMLElement | null;
+    archivedSessionsTarget?: HTMLElement | null;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
@@ -152,6 +153,7 @@ function renderSidebar(
             onNewSession={() => false}
             onLoadSession={loadSession}
             onError={onError}
+            archivedSessionsTarget={props.archivedSessionsTarget}
             sessionActions={props.sessionActions ?? { inlineItems: ['pin'] }}
           />
         </I18nProvider>
@@ -256,11 +258,12 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
-  it('carries the selected question sort into secondary archive queries', async () => {
+  it('carries the archived panel question sort into secondary archive queries independently of sidebar sort', async () => {
     connection.capabilities = {
       ...organizationCapabilities,
       features: [
         ...organizationCapabilities.features,
+        'session_archive',
         'session_last_user_prompt_sort',
         'workspace_qualified_rest_core',
       ],
@@ -272,43 +275,62 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
         { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
       ],
     };
-    renderSidebar();
-    await flushSidebar();
-    const archiveQuery = () =>
-      useSessionCatalogQueries.mock.calls
-        .flatMap((call) => call[1])
-        .filter(
-          (query) =>
-            query.workspaceCwd === '/tmp/other' &&
-            query.options.archiveState === 'archived',
-        )
-        .at(-1);
-    expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
-    await act(async () =>
-      click(
-        container.querySelector<HTMLElement>(
-          'button[aria-label="Display options"]',
-        )!,
-        true,
-      ),
-    );
-    const sortBy = Array.from(
-      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent?.startsWith('Sort by'));
-    expect(sortBy).toBeDefined();
-    await act(async () => {
-      sortBy!.focus();
-      sortBy!.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    const archivedTarget = document.createElement('div');
+    document.body.appendChild(archivedTarget);
+    try {
+      renderSidebar({ archivedSessionsTarget: archivedTarget });
+      await flushSidebar();
+      const archiveQuery = () =>
+        useSessionCatalogQueries.mock.calls
+          .flatMap((call) => call[1])
+          .filter(
+            (query) =>
+              query.workspaceCwd === '/tmp/other' &&
+              query.options.archiveState === 'archived',
+          )
+          .at(-1);
+      expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+      await act(async () =>
+        click(
+          container.querySelector<HTMLElement>(
+            'button[aria-label="Display options"]',
+          )!,
+          true,
+        ),
       );
-    });
-    const choice = Array.from(
-      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-    ).find((item) => item.textContent === 'Last question');
-    expect(choice).toBeDefined();
-    await act(async () => click(choice!));
-    await flushSidebar();
-    expect(archiveQuery()?.options.sortBy).toBe('lastUserPromptAt');
+      const sortBy = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.startsWith('Sort by'));
+      expect(sortBy).toBeDefined();
+      await act(async () => {
+        sortBy!.focus();
+        sortBy!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+        );
+      });
+      const choice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((item) => item.textContent === 'Last question');
+      expect(choice).toBeDefined();
+      await act(async () => click(choice!, true));
+      await flushSidebar();
+      expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+
+      const archiveTrigger = archivedTarget.querySelector<HTMLElement>(
+        'button[aria-label="Filter and sort archived conversations"]',
+      )!;
+      expect(archiveTrigger).not.toBeNull();
+      await act(async () => click(archiveTrigger, true));
+      const archiveChoice = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ).find((item) => item.textContent === 'Last question');
+      expect(archiveChoice).toBeDefined();
+      await act(async () => click(archiveChoice!, true));
+      await flushSidebar();
+      expect(archiveQuery()?.options.sortBy).toBe('lastUserPromptAt');
+    } finally {
+      archivedTarget.remove();
+    }
   });
 
   it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
