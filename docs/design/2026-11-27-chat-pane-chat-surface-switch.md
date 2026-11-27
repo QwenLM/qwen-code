@@ -3,8 +3,10 @@
 [English](2026-11-27-chat-pane-chat-surface-switch.md) |
 [简体中文](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)
 
-Status: implemented (Slice 4 of
-[Unified Chat Surface](2026-11-16-unified-chat-surface.md)). Date: 2026-11-27.
+Status: implemented (Slice 4a of
+[Unified Chat Surface](2026-11-16-unified-chat-surface.md) — `ChatPane`
+rendering plus approval/question routing; remaining submit/cancel/status
+convergence is tracked as Slice 4b in the parent design). Date: 2026-11-27.
 
 ## Problem
 
@@ -38,8 +40,10 @@ main daemon column in `App.tsx`.
   composer status stack (`StreamingStatus`, `ComposerStatusStack`,
   `SessionRecoveryBanner`, `runtimeStopped`), `CapacityRecoveryDialog`,
   `CustomComposerFooter`, and `ChatPane.handleSubmit` (slash/plan/goal/queue/
-  capacity orchestration) behaviorally and visually unchanged across both
-  `SplitView` and `SideTaskPanel` (`embedded` and `readOnly` modes).
+  capacity orchestration) behaviorally and visually unchanged across
+  `SplitView`, `SideTaskPanel` (`embedded`), and
+  `components/artifacts/SessionPanel.tsx` (`embedded` + `readOnly`, the
+  artifacts panel's session tab).
 
 ## Non-goals
 
@@ -61,9 +65,12 @@ main daemon column in `App.tsx`.
     directly).
 - **`packages/web-shell/client/daemon/useDaemonChatController.ts` and
   `permission-signals.ts`:**
-  - Extract the shared binding core (`useDaemonChatControllerFromState`) and
-    delegate standalone `useDaemonChatController()` to it with zero contract
-    change.
+  - Extract the shared private binding core (`useDaemonChatControllerCore`);
+    standalone `useDaemonChatController()` calls it with the strict
+    `useDaemonPromptSettled` guard and pending-permission split (zero contract
+    change), while `useDaemonChatControllerFromState()` calls the same core
+    with the optional, non-throwing `useOptionalDaemonPromptSettled`
+    subscription.
   - `useDaemonChatControllerFromState` accepts caller-owned `connection`,
     `actions`, `transcriptHistory`, `messages`, `pendingApprovals`,
     `pendingQuestions`, `pendingSignature`, and optional `transcriptState` and
@@ -123,13 +130,15 @@ main daemon column in `App.tsx`.
 ## Key Design Decisions
 
 1. **Shared-state daemon binding (`useDaemonChatControllerFromState`) reusing
-   one core.**
+   one private core (`useDaemonChatControllerCore`).**
    - `ChatPane` already throttles transcript updates via
      `useAnimationFrameTranscriptSnapshot` and memoizes `messages` via
      `useMessagesFromBlocks`, and its tests mock
-     `@qwen-code/web-shell/daemon-react-sdk` directly. Factoring
-     `useDaemonChatController()` as a thin wrapper over
-     `useDaemonChatControllerFromState()` avoids a second `messages` projection,
+     `@qwen-code/web-shell/daemon-react-sdk` directly. Having both
+     `useDaemonChatController()` (with strict `useDaemonPromptSettled`) and
+     `useDaemonChatControllerFromState()` (with optional
+     `useOptionalDaemonPromptSettled`) call the shared private
+     `useDaemonChatControllerCore` avoids a second `messages` projection,
      eliminates duplicated controller-binding logic, and keeps standalone
      `useDaemonChatController()`'s public contract and strict provider guard
      unchanged.
@@ -176,8 +185,10 @@ main daemon column in `App.tsx`.
   keys.
 - Web Shell CSS scoping (`data-web-shell-root`, portal roots) and React 18/19
   `forwardRef` compatibility remain intact.
-- Both `SplitView` (multi-pane) and `SideTaskPanel` (`embedded` + `readOnly`)
-  layouts remain pixel-consistent.
+- Both `SplitView` (multi-pane) and `SideTaskPanel` (`embedded`) layouts
+  remain pixel-consistent, and `components/artifacts/SessionPanel.tsx`
+  (`embedded` + `readOnly`, the artifacts panel's session tab) keeps its
+  read-only status chrome.
 
 ## Validation & Acceptance Criteria
 
@@ -203,6 +214,7 @@ main daemon column in `App.tsx`.
   `npm run build && npm run typecheck`.
 - **Real browser Before/After E2E:** Real local Vite + Chromium (`<StrictMode>`)
   mounting `ChatPane` Before (unmodified `origin/main` baseline) vs After
-  (switched onto `ChatSurface`), verifying pixel-consistent layout, tool
-  approval, `AskUserQuestion` submit/dismiss, turn cancellation, `readOnly`
-  status chrome, and zero page or unexpected console errors.
+  (switched onto `ChatSurface`), verifying pixel-consistent layout across
+  `SplitView`, tool approval, `AskUserQuestion` submit/dismiss, turn
+  cancellation, `readOnly` status chrome (as mounted by the artifacts panel's
+  session tab `SessionPanel`), and zero page or unexpected console errors.

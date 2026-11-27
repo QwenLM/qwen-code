@@ -2153,7 +2153,7 @@ describe('ChatSurface', () => {
     expect(captured.editor?.onCancel).toBeUndefined();
   });
 
-  it('does not report a late approval rejection onto a newly selected session after switching away', async () => {
+  it('does not report a late approval rejection after switching sessions or unmounting', async () => {
     let resolveApproval!: (result: {
       admission: 'unknown';
       target: { sessionId: string; requestId: string };
@@ -2189,6 +2189,39 @@ describe('ChatSurface', () => {
       target: { sessionId: 's1', requestId: 'a1' },
     });
     await expect(pending).rejects.toThrow('localized:chat.approvalNotAccepted');
+    expect(onError).not.toHaveBeenCalled();
+
+    // Unmount arm: same session, but surface unmounts before rejection arrives.
+    let resolveUnmounted!: (result: {
+      admission: 'unknown';
+      target: { sessionId: string; requestId: string };
+    }) => void;
+    const s3 = fakeController({
+      sessionId: 's3',
+      pendingApprovals: [
+        { id: 'a3', status: 'pending', request: permissionRequest('a3') },
+      ],
+      respondApproval: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveUnmounted = resolve;
+          }),
+      ),
+    });
+    mountReact(<ChatSurface controller={s3} onError={onError} />);
+    const confirmUnmounted = captured.approval?.onConfirm as (
+      id: string,
+      optionId: string,
+    ) => Promise<void>;
+    const pendingUnmounted = confirmUnmounted('a3', 'submit');
+    cleanupReact();
+    resolveUnmounted({
+      admission: 'unknown',
+      target: { sessionId: 's3', requestId: 'a3' },
+    });
+    await expect(pendingUnmounted).rejects.toThrow(
+      'localized:chat.approvalNotAccepted',
+    );
     expect(onError).not.toHaveBeenCalled();
   });
 });

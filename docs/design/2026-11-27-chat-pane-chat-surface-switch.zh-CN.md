@@ -4,7 +4,8 @@
 [简体中文](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)
 
 状态：已实现（[统一聊天界面](2026-11-16-unified-chat-surface.zh-CN.md)
-Slice 4）。日期：2026-11-27。
+切片 4a —— `ChatPane` 渲染及审批/提问路由；剩余提交/取消/状态编排收敛在父设计
+文档中登记为切片 4b）。日期：2026-11-27。
 
 ## 背景与问题
 
@@ -34,8 +35,9 @@ Slice 4）。日期：2026-11-27。
   `ReportedArtifactRegistration`、编辑器状态区（`StreamingStatus`、
   `ComposerStatusStack`、`SessionRecoveryBanner`、`runtimeStopped`）、
   `CapacityRecoveryDialog`、`CustomComposerFooter` 以及 `ChatPane.handleSubmit`
-  （斜杠命令 / `/plan` / `/goal` / 队列 / 容量恢复编排），在 `SplitView` 与
-  `SideTaskPanel`（含 `embedded` 与 `readOnly` 模式）下保持行为与像素布局不变。
+  （斜杠命令 / `/plan` / `/goal` / 队列 / 容量恢复编排），在 `SplitView`、
+  `SideTaskPanel`（`embedded`）与 `components/artifacts/SessionPanel.tsx`
+  （制品面板的 session 页签，`embedded` + `readOnly`）下保持行为与像素布局不变。
 
 ## 非目标
 
@@ -55,8 +57,10 @@ Slice 4）。日期：2026-11-27。
     `@qwen-code/web-shell/daemon-react-sdk` 的单测宿主）。
 - **`packages/web-shell/client/daemon/useDaemonChatController.ts` 与
   `permission-signals.ts`：**
-  - 抽取共享绑定核心 `useDaemonChatControllerFromState`，并让独立
-    `useDaemonChatController()` 直接委托给该核心，既有公开契约与行为零变化。
+  - 抽取共享私有绑定核心 `useDaemonChatControllerCore`；独立
+    `useDaemonChatController()` 保留严格的 `useDaemonPromptSettled` 守卫与
+    pending 拆分，既有公开契约与行为零变化；`useDaemonChatControllerFromState()`
+    调用同一核心并配可选、不抛异常的 `useOptionalDaemonPromptSettled` 订阅。
   - `useDaemonChatControllerFromState` 接收调用方已持有的 `connection`、
     `actions`、`transcriptHistory`、`messages`、`pendingApprovals`、
     `pendingQuestions`、`pendingSignature`，以及可选的 `transcriptState` 与
@@ -106,12 +110,16 @@ Slice 4）。日期：2026-11-27。
 
 ## 关键设计决策
 
-1. **通过 `useDaemonChatControllerFromState` 复用同一份 Daemon 绑定核心。**
+1. **通过私有核心 `useDaemonChatControllerCore` 让
+   `useDaemonChatControllerFromState` 与独立绑定共享同一份实现。**
    - `ChatPane` 已通过 `useAnimationFrameTranscriptSnapshot` 对转录更新做帧节流、
      经 `useMessagesFromBlocks` 缓存 `messages`，且其单测直接 mock
-     `@qwen-code/web-shell/daemon-react-sdk`。将 `useDaemonChatController()` 收拢为
-     `useDaemonChatControllerFromState()` 的薄包装，既避免二次消息投影与代码复
-     制，又完整保留独立 `useDaemonChatController()` 的公开契约与严格上下文守卫。
+     `@qwen-code/web-shell/daemon-react-sdk`。让 `useDaemonChatController()`
+     （保留严格的 `useDaemonPromptSettled` 守卫）与
+     `useDaemonChatControllerFromState()`（使用可选的
+     `useOptionalDaemonPromptSettled` 订阅）共同调用私有核心
+     `useDaemonChatControllerCore`，既避免二次消息投影与代码复制，又完整保留
+     独立 `useDaemonChatController()` 的公开契约与严格上下文守卫。
 2. **`TranscriptViewport.pendingApproval` 仅透传工具审批。**
    - `MessageList` 用 `pendingApproval` 在工具审批期间保持对应紧凑工具组展开，
      `DaemonTranscriptViewport` 也将 `props.pendingApproval !== null` 并入
@@ -147,8 +155,9 @@ Slice 4）。日期：2026-11-27。
 - 不改动 Daemon HTTP/SSE 路由、OpenAPI schema、存储键或 i18n 文案键。
 - 完整遵循 Web Shell CSS 作用域（`data-web-shell-root`、portal root）及 React
   18/19 `forwardRef` 规范。
-- `SplitView`（多窗格）与 `SideTaskPanel`（`embedded` + `readOnly`）布局保持像素
-  一致。
+- `SplitView`（多窗格）与 `SideTaskPanel`（`embedded`）布局保持像素一致，
+  且 `components/artifacts/SessionPanel.tsx`（制品面板的 session 页签，
+  `embedded` + `readOnly`）保留只读状态栏。
 
 ## 验证与验收标准
 
@@ -171,5 +180,6 @@ Slice 4）。日期：2026-11-27。
   `npm run build && npm run typecheck`。
 - **本地真实浏览器 Before/After E2E：** 真实本地 Vite + Chromium（`<StrictMode>`）
   分别挂载未改动 `origin/main`（改前）与切至 `ChatSurface`（改后）的 `ChatPane`，
-  验证布局像素一致、工具审批、`AskUserQuestion` 提交/忽略、取消回合、`readOnly`
-  状态栏以及 0 页面错误、0 非预期控制台错误。
+  验证 `SplitView` 布局像素一致、工具审批、`AskUserQuestion` 提交/忽略、取消回
+  合、制品面板 session 页签（`SessionPanel`）同形态的 `readOnly` 状态栏以及 0
+  页面错误、0 非预期控制台错误。

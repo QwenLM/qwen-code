@@ -61,6 +61,7 @@ type ToolApprovalTestProps = Parameters<
 let latestToolApprovalProps: ToolApprovalTestProps | undefined;
 let latestAskUserQuestionProps: any;
 let renderRealChatEditor: boolean;
+let renderRealAskUserQuestion: boolean;
 const transcriptScrollToBottom = vi.fn();
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
@@ -485,6 +486,9 @@ vi.mock('./messages/ToolApproval', () => ({
 vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => {
     latestAskUserQuestionProps = props;
+    if (renderRealAskUserQuestion) {
+      return <RealAskUserQuestion {...props} />;
+    }
     return (
       <button
         data-testid="ask-approval"
@@ -500,6 +504,11 @@ vi.mock('./messages/AskUserQuestion', () => ({
 const RealChatEditor = (
   await vi.importActual<typeof import('./ChatEditor')>('./ChatEditor')
 ).ChatEditor;
+const RealAskUserQuestion = (
+  await vi.importActual<typeof import('./messages/AskUserQuestion')>(
+    './messages/AskUserQuestion',
+  )
+).AskUserQuestion;
 const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
@@ -539,6 +548,7 @@ beforeEach(() => {
   latestToolApprovalProps = undefined;
   latestAskUserQuestionProps = undefined;
   renderRealChatEditor = false;
+  renderRealAskUserQuestion = false;
   transcriptScrollToBottom.mockClear();
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
@@ -4731,7 +4741,10 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
       },
     };
     render();
-    expect(testid('chat-surface')).not.toBeNull();
+    const surface = testid('chat-surface');
+    expect(surface).not.toBeNull();
+    expect(surface?.className).toContain('surface');
+    expect(testid('pane-messages')?.parentElement?.className).toContain('body');
     expect(testid('pane-messages')?.getAttribute('data-responding')).toBe(
       'true',
     );
@@ -4847,7 +4860,7 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     setApprovalMode.mockReturnValueOnce(modeDeferred.promise);
     render({ onError });
 
-    // Same-tick mode lock surfaces the specific 'still pending' error once.
+    // Same-tick mode lock surfaces the localized mode.changePending error once.
     await act(async () => {
       latestChatEditorProps.onSelectMode('yolo');
       await expect(
@@ -4856,7 +4869,7 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     });
     expect(onError).toHaveBeenCalledTimes(1);
     expect((onError.mock.calls[0]?.[0] as Error)?.message).toContain(
-      'still pending',
+      'A mode change or plan confirmation is pending',
     );
     expect(onError.mock.calls[0]?.[1]).toBe(
       'Failed to submit permission choice',
@@ -4882,9 +4895,11 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
       'Failed to submit permission choice',
     );
 
-    // A failed AskUserQuestion dismiss reports once directly and does not leave
-    // stale state that hijacks a subsequent AskUserQuestion onError call.
+    // Mount the real AskUserQuestion card: a failed dismissal must report the
+    // original cause exactly once (no double report from card + pane) and leave
+    // no stale record for a subsequent tool-approval refusal.
     onError.mockClear();
+    renderRealAskUserQuestion = true;
     pendingPermission = {
       id: 'ask-diag',
       options: [
@@ -4898,21 +4913,58 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     rerender({ onError });
     const dismissErr = new Error('dismiss failed');
     submitPermission.mockRejectedValueOnce(dismissErr);
+    const ignoreBtn = [...container!.querySelectorAll('button')].find((btn) =>
+      /ignore/i.test(btn.textContent ?? ''),
+    );
+    expect(ignoreBtn).toBeDefined();
     await act(async () => {
-      const ok = await latestAskUserQuestionProps.onConfirm(
-        'ask-diag',
-        'reject-once',
-      );
-      expect(ok).toBe(false);
+      ignoreBtn!.click();
+      await Promise.resolve();
+      await Promise.resolve();
     });
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(
       dismissErr,
       'Failed to submit permission choice',
     );
+
+    // Next tool-approval refusal (returning false with no thrown cause) must
+    // surface the generic approval-rejection fallback, not the stale dismissErr.
     onError.mockClear();
-    const otherErr = new Error('question validation failed');
-    latestAskUserQuestionProps.onError(otherErr, 'Question fallback');
-    expect(onError).toHaveBeenCalledWith(otherErr, 'Question fallback');
+    renderRealAskUserQuestion = false;
+    pendingPermission = {
+      id: 'perm-after-dismiss',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
+    rerender({ onError });
+    submitPermission.mockResolvedValueOnce(false);
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('perm-after-dismiss', 'proceed'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Approval was not accepted',
+    );
+  });
+
+  it('wires onComposerCancel so a failed cancel reports the pane handler error instead of the surface fallback', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    const cancelErr = new Error('daemon cancel boom');
+    cancel.mockRejectedValueOnce(cancelErr);
+    render({ onError });
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(cancelErr, 'Failed to cancel request');
   });
 });

@@ -82,6 +82,7 @@ vi.mock('../components/ChatEditor.js', () => ({
 }));
 
 import { ChatSurface } from '../chat-core/ChatSurface.js';
+import * as permissionSignals from './permission-signals.js';
 import {
   useDaemonChatController,
   useDaemonChatControllerFromState,
@@ -860,6 +861,8 @@ describe('useDaemonChatControllerFromState', () => {
       .mockResolvedValueOnce('rejected')
       .mockResolvedValueOnce('accepted');
 
+    let transcriptStateOverride: SessionChatController['transcriptState'] =
+      'loading';
     function SharedProbe() {
       const [, bump] = useReducer((n: number) => n + 1, 0);
       rerender = () => act(() => bump());
@@ -876,7 +879,7 @@ describe('useDaemonChatControllerFromState', () => {
         pendingApprovals,
         pendingQuestions,
         pendingSignature,
-        transcriptState: 'ready',
+        transcriptState: transcriptStateOverride,
         submitPermission: customSubmitPermission,
       });
       return null;
@@ -884,7 +887,15 @@ describe('useDaemonChatControllerFromState', () => {
 
     mountReact(<SharedProbe />);
     expect(controller!.sessionId).toBe('s-shared');
+    // Connection has loadingTranscript=false / missingSession=false (would
+    // derive 'ready'); explicit override must win in both directions.
+    expect(controller!.transcriptState).toBe('loading');
+    harness.connection = { ...harness.connection, missingSession: true };
+    transcriptStateOverride = 'ready';
+    rerender();
     expect(controller!.transcriptState).toBe('ready');
+    harness.connection = { ...harness.connection, missingSession: false };
+    rerender();
 
     // Omitting actions.submitPrompt rejects submit() fail-closed.
     const submitRes = await controller!.submit({ text: 'hi' });
@@ -1054,6 +1065,162 @@ describe('useDaemonChatControllerFromState', () => {
     rerender();
     expect(
       controller!.operations.find((op) => op.kind === 'approval')?.state,
+    ).toBe('established');
+  });
+
+  it('clears answered tracking after an unknown custom submitPermission so supersession emits currency false instead of applied decision', async () => {
+    let controller: SessionChatController | undefined;
+    let rerender!: () => void;
+    let pendingApprovals: DaemonChatControllerFromStateOptions['pendingApprovals'] =
+      [
+        {
+          id: 'perm-unk',
+          status: 'pending',
+          request: {
+            id: 'perm-unk',
+            toolName: 'write_file',
+            content: [],
+            options: [{ id: 'allow-1', label: 'Allow', kind: 'allow_once' }],
+            rawInput: {},
+          },
+        },
+      ];
+    let pendingSignature = 'a:perm-unk';
+    const customSubmitPermission = vi.fn(async () => 'unknown' as const);
+    const deriveSpy = vi.spyOn(permissionSignals, 'derivePermissionSignals');
+
+    function UnknownProbe() {
+      const [, bump] = useReducer((n: number) => n + 1, 0);
+      rerender = () => act(() => bump());
+      controller = useDaemonChatControllerFromState({
+        connection:
+          harness.connection as unknown as DaemonChatControllerFromStateOptions['connection'],
+        actions: {
+          cancel: harness.cancel,
+          submitPermission: harness.submitPermission,
+          respondToPermission: harness.respondToPermission,
+        },
+        transcriptHistory: harness.history,
+        messages: [],
+        pendingApprovals,
+        pendingQuestions: [],
+        pendingSignature,
+        submitPermission: customSubmitPermission,
+      });
+      return null;
+    }
+
+    try {
+      mountReact(<UnknownProbe />);
+      const outcome = await controller!.respondApproval('perm-unk', 'allow-1');
+      expect(outcome.admission).toBe('unknown');
+
+      deriveSpy.mockClear();
+      pendingApprovals = [];
+      pendingSignature = '';
+      rerender();
+      expect(deriveSpy).toHaveBeenCalledTimes(1);
+      expect(deriveSpy.mock.results[0]?.value).toEqual({
+        currency: [['perm-unk', false]],
+        decisions: [],
+        answered: new Set(),
+      });
+    } finally {
+      deriveSpy.mockRestore();
+    }
+  });
+
+  it('rejects respondQuestion when no allow_once option exists or request id is unknown', async () => {
+    let controller: SessionChatController | undefined;
+    const rejectOnlyQuestions: DaemonChatControllerFromStateOptions['pendingQuestions'] =
+      [
+        {
+          id: 'q-no-allow',
+          request: {
+            id: 'q-no-allow',
+            content: [],
+            options: [
+              { id: 'reject-opt', label: 'Cancel', kind: 'reject_once' },
+            ],
+            rawInput: {
+              questions: [{ question: 'Choose', options: [{ label: 'A' }] }],
+            },
+          },
+        },
+      ];
+
+    function QuestionGuardProbe() {
+      controller = useDaemonChatControllerFromState({
+        connection:
+          harness.connection as unknown as DaemonChatControllerFromStateOptions['connection'],
+        actions: {
+          cancel: harness.cancel,
+          submitPermission: harness.submitPermission,
+          respondToPermission: harness.respondToPermission,
+        },
+        transcriptHistory: harness.history,
+        messages: [],
+        pendingApprovals: [],
+        pendingQuestions: rejectOnlyQuestions,
+        pendingSignature: 'q:q-no-allow',
+      });
+      return null;
+    }
+
+    mountReact(<QuestionGuardProbe />);
+    const noAllowRes = await controller!.respondQuestion('q-no-allow', [
+      { questionId: '0', value: 'A' },
+    ]);
+    expect(noAllowRes.admission).toBe('rejected');
+
+    const unknownRes = await controller!.respondQuestion('q-missing', [
+      { questionId: '0', value: 'A' },
+    ]);
+    expect(unknownRes.admission).toBe('rejected');
+    expect(harness.submitPermission).not.toHaveBeenCalled();
+  });
+
+  it('delivers prompt settlements through useOptionalDaemonPromptSettled in useDaemonChatControllerFromState', async () => {
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p-shared-1' });
+    let controller: SessionChatController | undefined;
+
+    function PromptSettledProbe() {
+      controller = useDaemonChatControllerFromState({
+        connection:
+          harness.connection as unknown as DaemonChatControllerFromStateOptions['connection'],
+        actions: {
+          submitPrompt: harness.submitPrompt,
+          cancel: harness.cancel,
+          submitPermission: harness.submitPermission,
+          respondToPermission: harness.respondToPermission,
+        },
+        transcriptHistory: harness.history,
+        messages: [],
+        pendingApprovals: [],
+        pendingQuestions: [],
+        pendingSignature: '',
+      });
+      return null;
+    }
+
+    mountReact(<PromptSettledProbe />);
+    const submitted = await controller!.submit({ text: 'hi shared' });
+    expect(submitted.admission).toBe('accepted');
+    expect(controller!.activeTurnId).toBe('p-shared-1');
+    expect(
+      controller!.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('running');
+
+    act(() => {
+      harness.promptSettledListener?.({
+        sessionId: 's-shared',
+        promptId: 'p-shared-1',
+        outcome: 'completed',
+      });
+    });
+    expect(controller!.activeTurnId).toBeUndefined();
+    expect(
+      controller!.operations.find((op) => op.kind === 'submit')?.state,
     ).toBe('established');
   });
 });

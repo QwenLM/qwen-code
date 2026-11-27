@@ -1556,7 +1556,11 @@ export function ChatPane({
   const handleSurfaceError = useCallback(
     (error: unknown, fallback: string) => {
       const pending = pendingPermissionFailureRef.current;
-      if (pending && fallback === t('chat.approvalNotAccepted')) {
+      if (
+        pending &&
+        (fallback === t('chat.approvalNotAccepted') ||
+          fallback === t('askUser.submitFailed'))
+      ) {
         pendingPermissionFailureRef.current = null;
         reportError(pending.error, pending.fallback);
         return;
@@ -1570,13 +1574,10 @@ export function ChatPane({
     async (id: string, selectedOption: string): Promise<Admission> => {
       pendingPermissionFailureRef.current = null;
       const request = pendingToolApprovalRef.current;
-      const isToolApproval = request?.id === id;
-      const isPlan = isToolApproval && isExitPlanApprovalRequest(request);
+      const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
       if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
         pendingPermissionFailureRef.current = {
-          error: new Error(
-            'Approval mode or plan confirmation is still pending',
-          ),
+          error: new Error(t('mode.changePending')),
           fallback: 'Failed to submit permission choice',
         };
         return 'rejected';
@@ -1621,24 +1622,20 @@ export function ChatPane({
       } catch (error) {
         if (transition) releaseModeTransition(transition);
         if (owner.isCurrent()) {
-          if (isToolApproval) {
-            pendingPermissionFailureRef.current = {
-              error,
-              fallback: 'Failed to submit permission choice',
-            };
-          } else {
-            reportError(error, 'Failed to submit permission choice');
-          }
+          pendingPermissionFailureRef.current = {
+            error,
+            fallback: 'Failed to submit permission choice',
+          };
         }
         return 'unknown';
       }
     },
     [
       actions,
-      reportError,
       sessionOwnerGuard,
       releaseModeTransition,
       connection.planExecutionMode,
+      t,
     ],
   );
 
