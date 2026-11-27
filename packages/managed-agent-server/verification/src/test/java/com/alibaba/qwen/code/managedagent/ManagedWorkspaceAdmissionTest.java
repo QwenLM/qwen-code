@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Attachment;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
@@ -15,6 +16,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
@@ -2439,6 +2442,26 @@ class ManagedWorkspaceAdmissionTest {
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session"
                 + " WHERE tenant_id = ?", Integer.class, tenant)).isEqualTo(2);
+    }
+
+    @Test
+    void publicCreateRejectsParentDirectoryInSharedExternalWorkspace(
+            @Autowired ExternalStorageRegistrationStore registrations,
+            @Autowired ExternalWorkspaceMaterializationStore workspaces) throws Exception {
+        String tenant = UUID.randomUUID().toString();
+        registrations.registerExternalStorage(tenant, "register", new ExternalStorageRegistration(
+                new ExternalStorageRegistration.ExternalStorageIdentity("provider", tenant, 1),
+                new ExternalStorageRegistration.StorageAlias("shared", "/aliases/" + tenant, "/worker/shared", "workspace")));
+        workspaces.materialize(tenant, "shared", "Shared", "owner", "prepare");
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", "create")
+                        .principal(actor(tenant, "owner")).contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","workspace":{"workspace_id":"shared","cwd_relative":"../.."}}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_cwd"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?", Integer.class, tenant)).isZero();
     }
 
     @Test

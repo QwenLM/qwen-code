@@ -574,6 +574,13 @@ class ExternalWorkspaceMaterializationTest {
             assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> registry.resolveForCreation(
                     "tenant", "owner", new WorkspaceSelection("workspace", "conversations/alpha"))))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+            properties.getRuntimeBroker().setEnabled(false);
+            assertThat(registry.listReadable("tenant", "owner", null, 10))
+                    .filteredOn(row -> "shared".equals(row.workspaceId())).singleElement()
+                    .satisfies(row -> assertThat(row.canCreateSession()).isFalse());
+            assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> registry.resolveForCreation(
+                    "tenant", "owner", new WorkspaceSelection("shared", "conversations/alpha"))))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         }
     }
 

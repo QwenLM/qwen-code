@@ -56,9 +56,12 @@ that reads the shared database before writing the first registration with
 `isolationClass`. Registrars scan existing registrations when creating another
 alias. After that first write, any rollback version must also read this field.
 
-With an explicit `workspace` placement, an authorized external Files Session
-can select an existing directory below the mount. The Session stores its
-normalized relative cwd. The Broker keys its binding on the canonical mount
+With an explicit `workspace` placement, discovery marks the Workspace available
+for Session creation when the external Files provider and lifecycle are ready.
+The owner can still see a registered Workspace when that capability is unavailable.
+Both the public and WebShell create routes normalize the selected cwd and
+reject parent directory segments before creating a Session. The root selection
+`.` and existing directories below the mount are valid. The Broker keys its binding on the canonical mount
 root and the Workspace's generation and capability digest. Sessions selecting
 different directories can therefore hold the same Worker. The Worker validates
 the directory on the live mount when installing the Session context. Closing
