@@ -328,6 +328,18 @@ SSH Runtime nodes: hosts the server reaches over SSH, on which users may registe
 | `enabled` | — | boolean | — | Whether SSH Workspaces are offered: an actor listed in a node's `access` may browse that node's allowed roots and register a directory there as a Workspace; while off, those routes answer `404 ssh_runtime_disabled`. Startup refuses it without `qwen.managed-agent.harness.workspace-files-enabled` or without `qwen.managed-agent.runtime-broker.ssh.nodes`, with an external provisioner, and under the `managed-local` profile. |
 | `nodes` | — | YAML list | *(empty)* | The SSH Runtime nodes, set in a configuration file (YAML) as a list. Each entry has `node-id` and `display-name`, `ssh-host` (a host alias of the server account's SSH configuration), the absolute node paths `node-executable`, `qwen-entry` and `state-directory`, `allowed-roots` (at least one absolute directory Workspaces may be registered under), `publication-port` (the node's loopback port that tool publication is forwarded to over SSH), `qwen-version` (required; must equal the version the node reports) and `access` (the `tenant-id` and `actor-id` pairs that may use the node). Startup refuses an invalid entry. With nodes set, `qwen.managed-agent.tool-publication.service-base-url` must be an `http` URL. |
 
+## `qwen.managed-agent.session-resource-gc`
+
+Optional collection of retired MySQL-only Session resources with SQL polling and RocketMQ wakeups.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `consumer-group` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_CONSUMER_GROUP` | string | *(empty)* | Pre-created ordinary RocketMQ consumer group shared by all Session resource GC consumers. |
+| `enabled` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENABLED` | boolean | `false` | Enable GC for retired MySQL-only Sessions. Requires tool publication and Session resource externalization, packing, and eviction to be disabled. Sessions with historical external resources, captures, or packs are held. Uses the existing tool-publication deletion grace. |
+| `endpoints` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENDPOINTS` | string | *(empty)* | RocketMQ proxy gRPC endpoints. Set together with topic and consumer group. Leave all three empty for SQL polling only. |
+| `topic` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_TOPIC` | string | *(empty)* | Pre-created RocketMQ DELAY topic dedicated to Session resource GC. Broker delay limits must cover the configured grace for scheduled wakeups. |
+| `worker-enabled` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_WORKER_ENABLED` | boolean | `true` | Run the Session resource GC polling worker and, when configured, its MQ consumer on this replica. Keep a worker enabled on at least one replica. API-only replicas can still publish wakeups. |
+
 ## `qwen.managed-agent.session-resources`
 
 Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.

@@ -328,6 +328,18 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `enabled` | — | 布尔 | — | 是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。 |
 | `nodes` | — | YAML 列表 | *（空）* | SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。 |
 
+## `qwen.managed-agent.session-resource-gc`
+
+可选的纯 MySQL 已退役 Session 资源回收，支持 SQL 轮询和 RocketMQ 唤醒。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `consumer-group` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_CONSUMER_GROUP` | 字符串 | *（空）* | 预先创建的普通 RocketMQ 消费组，由所有 Session 资源 GC 消费者共享。 |
+| `enabled` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENABLED` | 布尔 | `false` | 启用纯 MySQL 已退役 Session 的 GC。要求关闭工具发布以及 Session 资源外置、打包和腾空。带历史外部资源、capture 或 journal pack 的 Session 会被暂缓。沿用工具发布的删除宽限期。 |
+| `endpoints` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_ENDPOINTS` | 字符串 | *（空）* | RocketMQ proxy gRPC 地址，与 topic 和消费组一起配置。三项均留空时只运行 SQL 轮询。 |
+| `topic` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_TOPIC` | 字符串 | *（空）* | 预先创建的 Session 资源 GC 专用 RocketMQ DELAY topic。要让定时唤醒生效，Broker 的延迟上限须覆盖配置的宽限期。 |
+| `worker-enabled` | `QWEN_MANAGED_AGENT_SESSION_RESOURCE_GC_WORKER_ENABLED` | 布尔 | `true` | 在此副本运行 Session 资源 GC 轮询 worker，并在配置了 MQ 时启动消费者。至少在一个副本启用 worker。仅 API 副本仍可发布唤醒。 |
+
 ## `qwen.managed-agent.session-resources`
 
 将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。
