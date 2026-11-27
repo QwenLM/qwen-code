@@ -8,6 +8,7 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { AlreadyReportedError } from '../../utils/errors.js';
 import type {
   MCPServerConfig,
   MCPOAuthConfig,
@@ -210,7 +211,7 @@ async function addMcpServer(
 }
 
 export const addCommand: CommandModule = {
-  command: 'add <name> <commandOrUrl> [args...]',
+  command: 'add <name> <commandOrUrl>',
   describe: 'Add a server',
   builder: (yargs) =>
     yargs
@@ -218,6 +219,17 @@ export const addCommand: CommandModule = {
       .parserConfiguration({
         'unknown-options-as-args': true, // Pass unknown options as server args
         'populate--': true, // Populate server args after -- separator
+        'parse-positional-numbers': false,
+      })
+      .strict(false)
+      .strictOptions()
+      .strictCommands(false)
+      // Throw after reporting so a parent failure handler cannot allow a write.
+      .fail((message, error, parser) => {
+        const failure = message || error?.message || 'Unknown argument error';
+        writeStderrLine(failure);
+        parser.showHelp(writeStdoutLine);
+        throw new AlreadyReportedError(failure);
       })
       .positional('name', {
         describe: 'Name of the server',
@@ -308,11 +320,11 @@ export const addCommand: CommandModule = {
         string: true,
       })
       .middleware((argv) => {
-        // Handle -- separator args as server args if present
-        if (argv['--']) {
-          const existingArgs = (argv['args'] as Array<string | number>) || [];
-          argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
-        }
+        // A named variadic positional reparses server flags as CLI options.
+        const existingArgs = argv._.slice(argv._.indexOf('add') + 1);
+        argv['args'] = argv['--']
+          ? [...existingArgs, ...(argv['--'] as string[])]
+          : existingArgs;
 
         // Auto-detect transport from URL if not explicitly specified
         if (!argv['transport']) {
