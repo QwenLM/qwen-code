@@ -416,15 +416,11 @@ describe('real daemon session scheduled tasks', () => {
     const boundSession = await client.createOrAttachSession({
       workspaceCwd: HOME,
       approvalMode: 'yolo',
+      sessionScope: 'thread',
     });
-    const accepted = await client.promptNonBlocking(boundSession.sessionId, {
+    await client.prompt(boundSession.sessionId, {
       prompt: [{ type: 'text', text: 'seed archive transcript' }],
     });
-    await vi.waitFor(async () => {
-      const summary = await client.getSession(boundSession.sessionId);
-      expect(summary.hasActivePrompt).toBe(false);
-    });
-    expect(accepted.promptId).toBeTruthy();
 
     const created = (await scheduledTaskRequest('/scheduled-tasks', {
       method: 'POST',
