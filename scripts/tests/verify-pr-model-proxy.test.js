@@ -4782,19 +4782,27 @@ describe('local container recipe pins', () => {
                 ) {
                   return remember(true);
                 }
-              } else if (astWrappers.has(name)) {
+              } else if (
+                astWrappers.has(name) ||
+                /^(?:busybox|toybox)$/i.test(name)
+              ) {
                 const firstClean = args[0] ? astCleanToken(args[0]) : '';
                 const evalLike = name === 'eval' || name === 'exec';
-                const multiCallWrapper =
-                  name === 'busybox' || name === 'toybox';
+                const multiCallWrapper = /^(?:busybox|toybox)$/i.test(name);
                 const proseCopula =
                   rawLine &&
                   !evalLike &&
                   /^(?:is|are|was|were)$/i.test(args[0] ?? '');
+                // A copula only makes the line prose when no later word names a
+                // wrapper, danger command, flag or path: `busybox is sh -c '…'`
+                // is an invocation wearing a copula, not a sentence.
+                const proseOnly =
+                  proseCopula &&
+                  !args.slice(1).some((arg) => astRealWrapperArg(arg));
                 if (
                   hasRedir ||
                   (evalLike && args.length > 0) ||
-                  (multiCallWrapper && args.length > 0 && !proseCopula) ||
+                  (multiCallWrapper && args.length > 0 && !proseOnly) ||
                   (!(name === 'command' && /^-[vV]$/.test(firstClean)) &&
                     !proseCopula &&
                     args.some((arg) => astRealWrapperArg(arg)))
@@ -8660,6 +8668,29 @@ describe('local container recipe pins', () => {
       ['bare busybox flagless applet (S11-1)', 'busybox id'],
       ['inline toybox sh -c (S11-1)', "`toybox sh -c 'gh pr merge <n>'`"],
       ['inline direct ash -c (S11-1)', "`ash -c 'gh pr merge <n>'`"],
+      [
+        'inline ash copula-wrapped sh -c (S11-1)',
+        "`ash is sh -c 'gh pr merge <n>'`",
+      ],
+      [
+        'bare busybox copula-wrapped sh -c (S11-1)',
+        "busybox is sh -c 'gh pr merge <n>'",
+      ],
+      [
+        'bare busybox copula-wrapped env (S11-1)',
+        'busybox is env gh pr merge <n>',
+      ],
+      [
+        'bare toybox copula-wrapped sh -c (S11-1)',
+        "toybox is sh -c 'gh pr merge <n>'",
+      ],
+      [
+        'bare busybox copula naming a merge command',
+        'busybox is gh pr merge <n>',
+      ],
+      ['inline uppercase BUSYBOX sh -c', "`BUSYBOX sh -c 'gh pr merge <n>'`"],
+      ['inline uppercase TOYBOX sh -c', "`TOYBOX sh -c 'gh pr merge <n>'`"],
+      ['bare uppercase Busybox id', 'Busybox id'],
       ['bare busybox sh -c (S11-1)', "busybox sh -c 'gh pr merge <n>'"],
       [
         'bare quoted busybox sh -c (S11-1)',
@@ -8683,6 +8714,10 @@ describe('local container recipe pins', () => {
       ['inline benign marker citation', 'Check `/.dockerenv` before running.'],
       ['inline benign slash command', 'Invoke `/verify-pr <n>` locally.'],
       ['bare busybox prose copula', 'busybox is not installed on macOS.'],
+      ['bare capitalized Busybox prose', 'Busybox is a multi-call binary.'],
+      ['bare toybox prose copula', 'toybox is a multi-call binary.'],
+      ['bare ash prose copula', 'ash is the Almquist shell.'],
+      ['bare busybox past-tense prose', 'busybox was removed from the image.'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
