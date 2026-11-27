@@ -2358,6 +2358,7 @@ function SessionOverviewPanelInner({
                   size="sm"
                   variant="outline"
                   disabled={!canOpenSelection}
+                  data-web-shell-session-split-button
                   onClick={() => onOpenSplit(splitIds)}
                   title={
                     selectedCount > MAX_SPLIT_PANES

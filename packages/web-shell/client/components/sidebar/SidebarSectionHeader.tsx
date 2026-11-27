@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import styles from './WebShellSidebar.module.css';
 
 export function SidebarSectionHeader({
@@ -6,11 +6,14 @@ export function SidebarSectionHeader({
   expanded,
   onToggle,
   action,
+  buttonProps,
 }: {
   label: string;
   expanded?: boolean;
   onToggle?: () => void;
   action?: ReactNode;
+  buttonProps?: ButtonHTMLAttributes<HTMLButtonElement> &
+    Record<`data-${string}`, string | undefined>;
 }) {
   return (
     <div className={`relative ${styles.projectsHeader}`}>
@@ -20,6 +23,7 @@ export function SidebarSectionHeader({
           type="button"
           aria-expanded={expanded}
           onClick={onToggle}
+          {...buttonProps}
         >
           <span>{label}</span>
           <svg viewBox="0 0 24 24" aria-hidden="true">

@@ -200,6 +200,7 @@ export function WorkspaceSelector({
                 ref={triggerRef}
                 type="button"
                 className={className}
+                data-web-shell-workspace-select-trigger
                 aria-label={t('sidebar.workspaceSelectLabel')}
                 onPointerEnter={() => {
                   if (!menuOpenRef.current) {

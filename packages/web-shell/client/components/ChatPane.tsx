@@ -2113,6 +2113,7 @@ export function ChatPane({
                     <button
                       type="button"
                       className={styles.maximizeButton}
+                      data-web-shell-pane-maximize-button
                       onClick={onToggleMaximize}
                       aria-pressed={isMaximized}
                       aria-label={t(
