@@ -1,31 +1,53 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.server.ServletServerHttpRequest;
 import org.springframework.http.server.ServletServerHttpResponse;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
-import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * The upgrade's only authentication is the single-use ticket: the interceptor
- * must consume it once and re-check that it names this URL's Session and
- * terminal, refusing every other shape.
+ * must consume it once, re-check that it names this URL's Session and
+ * terminal, and re-read the binding it names, refusing every other shape.
  */
 class TerminalRelayHandshakeInterceptorTest {
-    private final TerminalTicketStore tickets =
-            new TerminalTicketStore(Clock.systemUTC());
-    private final TerminalRelayHandshakeInterceptor interceptor =
-            new TerminalRelayHandshakeInterceptor(tickets);
+    private final WorkspaceTerminalRelayService relay = mock(WorkspaceTerminalRelayService.class);
+    private final RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+    private TerminalTicketStore tickets;
+    private TerminalRelayHandshakeInterceptor interceptor;
+
+    @BeforeEach
+    void setUp() {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:terminal-upgrade-" + UUID.randomUUID()
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        ManagedSchema.initialize(source);
+        tickets = new TerminalTicketStore(new ManagedSchemaJdbcTemplate(source));
+        interceptor = new TerminalRelayHandshakeInterceptor(tickets, relay);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(3L);
+        when(relay.terminalBinding("tenant", "session-a")).thenReturn(binding);
+    }
 
     private String mint(String sessionId, String terminalId) {
         return tickets.issue(new TerminalTicketStore.Admission(
-                "tenant", "actor", sessionId, terminalId, null));
+                "tenant", sessionId, terminalId, "binding-1", 3L));
     }
 
     private boolean handshake(String path, String terminalId, String ticket,
@@ -54,7 +76,29 @@ class TerminalRelayHandshakeInterceptorTest {
                 .isEqualTo("session-a");
         assertThat(attributes.get(TerminalRelayHandshakeInterceptor.TERMINAL_ATTRIBUTE))
                 .isEqualTo("term-1");
-        assertThat(attributes).containsKey(TerminalRelayHandshakeInterceptor.BINDING_ATTRIBUTE);
+        assertThat(attributes.get(TerminalRelayHandshakeInterceptor.BINDING_ATTRIBUTE))
+                .isSameAs(binding);
+    }
+
+    @Test
+    void refusesWhenTheBindingChangedSinceAdmission() {
+        String ticket = mint("session-a", "term-1");
+        when(binding.getGeneration()).thenReturn(4L);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        assertThat(handshake("/api/agent/web-shell/v1/sessions/session-a/terminal",
+                "term-1", ticket, new HashMap<>(), response)).isFalse();
+        assertThat(response.getStatus()).isEqualTo(409);
+    }
+
+    @Test
+    void refusesWhenTheSessionNoLongerAdmitsATerminal() {
+        String ticket = mint("session-a", "term-1");
+        when(relay.terminalBinding("tenant", "session-a")).thenThrow(new ManagedAgentException(
+                409, "workspace_unavailable", "The Session runtime does not admit a terminal."));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        assertThat(handshake("/api/agent/web-shell/v1/sessions/session-a/terminal",
+                "term-1", ticket, new HashMap<>(), response)).isFalse();
+        assertThat(response.getStatus()).isEqualTo(409);
     }
 
     @Test

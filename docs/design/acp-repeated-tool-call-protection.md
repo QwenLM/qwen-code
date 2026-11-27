@@ -2,6 +2,7 @@
 
 Date: 2026-07-31
 Status: Implemented on the PR branch; pre-merge manual ACP validation and post-merge shadow rollout pending
+Superseded by: [remove loop detection](2026-11-25-remove-loop-detection.md)
 Revision: Updated for PR #8176 and PR #8180
 Area: Interactive ACP foreground prompt loop
 

@@ -500,7 +500,6 @@ export default {
   'Screen Reader Mode': 'Modo de Leitor de Tela',
   'Max Session Turns': 'Máximo de Turnos da Sessão',
   'Skip Next Speaker Check': 'Pular Verificação do Próximo Falante',
-  'Skip Loop Detection': 'Pular Detecção de Loop',
   'Skip Startup Context': 'Pular Contexto de Inicialização',
   'Enable OpenAI Logging': 'Ativar Log do OpenAI',
   'OpenAI Logging Directory': 'Diretório de Log do OpenAI',

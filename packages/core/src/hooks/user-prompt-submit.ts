@@ -14,7 +14,7 @@ import {
   captureHookExecutionOwner,
   type HookExecutionOwner,
 } from './hook-execution-context.js';
-import { createHookOutput } from './types.js';
+import { createHookOutput, type UserPromptSource } from './types.js';
 
 export interface UserPromptSubmitDecision {
   blockReason?: string;
@@ -27,6 +27,7 @@ export async function runUserPromptSubmit(
   submittedPrompt: string | undefined,
   signal?: AbortSignal,
   owner?: HookExecutionOwner,
+  source?: UserPromptSource,
 ): Promise<UserPromptSubmitDecision | undefined> {
   if (
     config.getDisableAllHooks?.() ||
@@ -49,6 +50,7 @@ export async function runUserPromptSubmit(
         ...(submittedPrompt !== undefined
           ? { submitted_prompt: submittedPrompt }
           : {}),
+        ...(source ? { source } : {}),
       },
       ...(signal ? { signal } : {}),
     },

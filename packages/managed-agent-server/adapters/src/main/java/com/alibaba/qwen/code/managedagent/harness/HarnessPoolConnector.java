@@ -906,6 +906,23 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        Selected selected = select(session.tenantId(), session.sessionId(), false);
+        if (selected == null || !"ACTIVE".equals(selected.placement().state())) {
+            return null;
+        }
+        if (!selected.member().reachable) {
+            throw unavailable();
+        }
+        var leaf = selected.member().connector;
+        var status = leaf.withPlacement(selected.call(), () -> leaf.inspectUnattachedRecovery(session, promptId));
+        if (!selected.placement().equals(placements.get(session.tenantId(), session.sessionId()))) {
+            throw unavailable();
+        }
+        return status;
+    }
+
+    @Override
     public Attachment cachedRecoveryAttachment(String tenant, String session) {
         return observe(tenant, session, null, leaf -> leaf.cachedRecoveryAttachment(tenant, session));
     }

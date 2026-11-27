@@ -158,6 +158,34 @@ const OUTBOUND_CHANNEL_KEYS = [
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
+  it.each([
+    ['sessionsOverview.restoreWorktree', 'Восстановить снимок'],
+    [
+      'sessionsOverview.restoreWorktreeUnavailable',
+      'Снимок недоступен для этого рабочего пространства',
+    ],
+    ['sessionsOverview.restoringWorktree', 'Восстановление…'],
+    [
+      'sessionsOverview.restoreWorktreeFailed',
+      'Не удалось восстановить снимок',
+    ],
+  ] as const)(
+    'provides the Russian %s entry through the locale resolver',
+    (key, expected) => {
+      expect(getTranslator('ru')(key)).toBe(expected);
+      expect(RU_PART6[key]).toBe(expected);
+    },
+  );
+
+  it('provides the traditional Chinese retention setting', () => {
+    expect(getTranslator('zh-TW')('settings.label.worktree.maxRetained')).toBe(
+      '保留的會話 Worktree 上限',
+    );
+    expect(
+      getTranslator('zh-TW')('settings.description.worktree.maxRetained'),
+    ).toContain('設為 0 只關閉自動清掃，不禁止明確復原快照');
+  });
+
   it('labels the incremental session expansion with its count in both locales', () => {
     expect(getTranslator('en')('sidebar.showMoreSessions', { count: 10 })).toBe(
       'Show 10 more',

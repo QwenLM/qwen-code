@@ -544,6 +544,35 @@ describe('Mod session ownership', () => {
     },
   );
 
+  it.each([false, true])(
+    'keeps aliases and offers a terminal-only command in the terminal alone (terminal: %s)',
+    async (terminal) => {
+      const { session, runtime } = setup(
+        terminal ? { isInteractive: () => true } : {},
+        terminal
+          ? {
+              surface: 'terminal',
+              log: vi.fn(),
+              presentation: () => ({ isFullscreen: false, columns: 80 }),
+            }
+          : undefined,
+      );
+      runtime.getCommands.mockReturnValue([
+        { name: 'hello', description: 'Hello', aliases: ['hi'] },
+        { name: 'pane', description: 'Pane', isTerminalOnly: true },
+      ]);
+      const [hello, pane] = await session.loadCommands(
+        new AbortController().signal,
+      );
+      expect(hello.altNames).toEqual(['hi']);
+      expect(pane).not.toHaveProperty('altNames');
+      const mode = terminal ? 'interactive' : 'non_interactive';
+      expect(hello.supportedModes).toEqual([mode]);
+      // A headless run still knows it, so typing it is refused, not prompted.
+      expect(pane.supportedModes).toEqual(['interactive']);
+    },
+  );
+
   it('waits for cancellation to settle before dispatching the next command', async () => {
     const { session, runtime } = setup();
     const [command] = await session.loadCommands(new AbortController().signal);
