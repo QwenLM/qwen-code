@@ -4449,6 +4449,11 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       summary?: string;
       /** Answer with no usage, as a provider that omits it does. */
       withoutUsage?: boolean;
+      /**
+       * Report the output only as the total less the prompt, with no output
+       * count of its own, as some providers do.
+       */
+      totalUsageOnly?: boolean;
     } = {},
   ) {
     const window = o.window ?? WINDOW;
@@ -4535,10 +4540,15 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         text: o.summary ?? '<state_snapshot>summary</state_snapshot>',
         usage: o.withoutUsage
           ? undefined
-          : {
-              promptTokenCount: promptTokens,
-              candidatesTokenCount: o.outputTokens ?? 2_000,
-            },
+          : o.totalUsageOnly
+            ? {
+                promptTokenCount: promptTokens,
+                totalTokenCount: promptTokens + (o.outputTokens ?? 2_000),
+              }
+            : {
+                promptTokenCount: promptTokens,
+                candidatesTokenCount: o.outputTokens ?? 2_000,
+              },
       };
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -4825,6 +4835,52 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       expect(sent).toHaveLength(2);
       expect(requestText(sent[0]!)).toBe(typed);
       expect(requestText(sent[1]!)).toBe(plainCut(typed));
+    });
+
+    // The fallback above fires only on all three of its conditions: each case
+    // below has one of them false, and sends the kept request alone (#9455
+    // R2-2, R3-3).
+    it('sends once when the kept reply counts its output only as total less prompt', async () => {
+      const typed = ASCII.repeat(700);
+      mockBackend({
+        summary: 'A summary that skips the snapshot block.',
+        totalUsageOnly: true,
+      });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expectCompressed(result);
+      expect(sent).toHaveLength(1);
+      expect(requestText(sent[0]!)).toBe(typed);
+    });
+
+    it('sends once when the kept reply has no usage but a closed snapshot', async () => {
+      const typed = ASCII.repeat(700);
+      mockBackend({ withoutUsage: true });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expectCompressed(result);
+      expect(sent).toHaveLength(1);
+      expect(requestText(sent[0]!)).toBe(typed);
+    });
+
+    it('does not resend the plain cut for a kept reply that is only analysis', async () => {
+      const typed = ASCII.repeat(700);
+      mockBackend({
+        summary: '<analysis>Only the reasoning came back.</analysis>',
+        withoutUsage: true,
+      });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expect(result.info.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      );
+      expect(sent).toHaveLength(1);
     });
 
     it('sends the plain cut when the request overflowed the payload limit', async () => {
