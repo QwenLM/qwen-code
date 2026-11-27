@@ -154,6 +154,22 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Qwen's own regenerable caches under `.qwen/`: per-workspace scratch files
+ * (`tmp`) and hook logs (`logs`). Their value is bounded by age rather than by
+ * the session that wrote them, and a long-running workspace can accumulate
+ * hundreds of thousands of entries. They are disposable **only where git
+ * actually ignores them**: the predicate below is only consulted for `!!`
+ * entries, so a tracked or non-ignored file under either directory is still
+ * work, and the archive still carries it — the two geometries cannot disagree.
+ * Every other `.qwen/` path (skills, commands, settings, drafts) is a stated
+ * snapshot subject.
+ */
+export const REGENERABLE_QWEN_CACHE_DIRS: ReadonlySet<string> = new Set([
+  'tmp',
+  'logs',
+]);
+
+/**
  * One path of the dirty overlay a creation carried, with the content
  * identity it had at carry time (R9-6). The managed-session has-work gate
  * waives a carried path only while its current state still matches this
@@ -1048,6 +1064,15 @@ async function hasNonCarriedWork(
 export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');
   if (DISPOSABLE_IGNORED_ROOTS.has(segments[0] ?? '')) return true;
+  // `.qwen/tmp/…` and `.qwen/logs/…`: regenerable caches, but only when git
+  // reports them ignored (callers pass `!!` entries only). A tracked edit under
+  // either directory keeps its ordinary status, so it is never waived here.
+  if (
+    segments[0] === '.qwen' &&
+    REGENERABLE_QWEN_CACHE_DIRS.has(segments[1] ?? '')
+  ) {
+    return true;
+  }
   return (
     entry.endsWith('/') &&
     DISPOSABLE_IGNORED_ROOTS.has(segments[segments.length - 1] ?? '')

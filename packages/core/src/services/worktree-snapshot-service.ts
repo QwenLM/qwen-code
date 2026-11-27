@@ -25,8 +25,10 @@ import {
   WORKTREE_SESSION_FILE,
   computeCarriedIdentities,
   hasHiddenIndexBit,
+  REGENERABLE_QWEN_CACHE_DIRS,
   isDisposableIgnoredEntry,
   worktreeHasPendingGitOperation,
+  worktreeHasWork,
 } from './gitWorktreeService.js';
 import { runGit } from '../utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
@@ -136,28 +138,16 @@ interface DisposableIgnoredMatcher {
   dirs: string[];
   files: ReadonlySet<string>;
   /**
-   * Subtrees excluded regardless of the ignore listing: Qwen's own
-   * regenerable caches and a nested checkout's managed worktree directory.
-   * Every exclusion here is unconditional for the archive AND the
-   * post-capture checkout check, so the two geometries cannot disagree.
+   * Subtrees excluded regardless of the ignore listing: nested checkouts under
+   * `.qwen/worktrees/` that hold no work of their own, so archiving them would
+   * only duplicate another checkout's clean tree. Everything else this matcher
+   * excludes is derived from the ignore listing — the same geometry the
+   * has-work gate waives — so no path the gate counts as work can be dropped
+   * from the archive. A nested checkout that DOES hold work is refused before
+   * this list is built instead of being silently excluded.
    */
   neverDirs: readonly string[];
 }
-
-/**
- * Regenerable Qwen cache subtrees under `.qwen/`. They hold per-workspace
- * scratch data (agent tmp files) and hook logs whose value is bounded by age,
- * not by the session that produced them, and a long-running workspace can
- * accumulate hundreds of thousands of entries there. A snapshot is the
- * session's restorable work, so archiving this cache makes one checkout
- * produce a multi-GB archive for data no restore needs. Only these exact
- * descendants are dropped; every other `.qwen/` path (skills, commands,
- * settings, drafts, nested worktrees) stays a stated, gated snapshot subject.
- */
-const REGENERABLE_QWEN_CACHE_DIRS: readonly string[] = [
-  '.qwen/tmp/',
-  '.qwen/logs/',
-];
 
 /**
  * Whether a worktree-relative path is excluded from the snapshot. `.git`
@@ -165,11 +155,12 @@ const REGENERABLE_QWEN_CACHE_DIRS: readonly string[] = [
  * excluded. A path is excluded as regenerable output only when it is an
  * ignored disposable file or sits under an ignored disposable directory —
  * the same geometry the has-work gate waives — so a tracked or non-ignored
- * file under `dist/` (or `node_modules/`, `coverage/`) is archived rather than
- * silently dropped, while nested ignored output (`packages/app/node_modules/`)
- * is excluded exactly as the gate waives it. A nested checkout's own managed
- * worktree directory is a separate checkout, not this session's work, and is
- * excluded likewise.
+ * file under `dist/`, `node_modules/`, `coverage/`, `.qwen/tmp/` or
+ * `.qwen/logs/` is archived rather than silently dropped, while ignored cache
+ * and build output is excluded exactly as the gate waives it. The only
+ * non-ignore-derived exclusions are nested checkouts with no work of their own
+ * (`neverDirs`); one that holds work is refused outright in
+ * {@link boundedSnapshotExclusions}.
  */
 function isExcludedFromSnapshot(
   relativePath: string,
@@ -745,31 +736,74 @@ async function readSnapshotExclusions(
         (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
       ),
     ),
-    neverDirs: boundedSnapshotExclusions(worktreePath),
+    neverDirs: await boundedSnapshotExclusions(worktreePath, ignoredEntries),
   };
   await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
   return matcher;
 }
 
 /**
- * Subtrees excluded from every capture of this checkout because they bound
- * the archive rather than describe the session's work. A checkout can itself
- * be a repository whose managed worktrees live under its own
- * `.qwen/worktrees/`: those are OTHER checkouts, and archiving them here both
- * multiplies the archive by every nested worktree and can nest this same
- * capture inside itself. The set is path-derived, not `.qwen/`-wide: a
- * workspace's `.qwen/skills`, `commands`, `settings.json` and drafts remain
- * snapshot subjects because they are not regenerable.
+ * The `neverDirs` half of the matcher: nested checkouts under this checkout's
+ * own `.qwen/worktrees/`. Those are OTHER trees, and archiving a clean one only
+ * duplicates a working tree that its branch still reconstructs — so a clean
+ * nested checkout is excluded, exactly as before.
+ *
+ * A nested checkout that holds work is a different matter. The git worktree's
+ * files are unique bytes, and they vanish with the parent directory, so
+ * excluding it would delete work the has-work gate had already counted (the
+ * gate sees `?? .qwen/worktrees/`). Instead of silently dropping it, refuse the
+ * capture: `captureWorktreeSnapshot` throwing makes every caller preserve the
+ * checkout, which is the fail-closed direction.
+ *
+ * Nothing else is excluded here. Qwen's regenerable caches are excluded through
+ * the ignore listing (`isDisposableIgnoredEntry`), so they are skipped only
+ * where git actually ignores them.
  */
-function boundedSnapshotExclusions(worktreePath: string): readonly string[] {
-  const exclusions = [...REGENERABLE_QWEN_CACHE_DIRS];
+async function boundedSnapshotExclusions(
+  worktreePath: string,
+  ignoredEntries: readonly string[],
+): Promise<readonly string[]> {
   const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
   const relative = path
     .relative(path.resolve(worktreePath), path.resolve(managedDir))
     .split(path.sep)
     .join('/');
-  if (relative.length > 0 && !relative.startsWith('..')) {
-    exclusions.push(`${relative.replace(/\/$/, '')}/`);
+  const exclusions: string[] = [];
+  // A regenerable cache is skipped only where git ignores it. Git collapses a
+  // broad rule (`.qwen/`) to one `!! .qwen/` entry, so an ignored ANCESTOR
+  // counts as covering the cache too; without that, a common `.qwen/` rule
+  // would put the whole scratch tree back into the archive.
+  for (const cacheDir of REGENERABLE_QWEN_CACHE_DIRS) {
+    const trailing = `.qwen/${cacheDir}/`;
+    const covered = ignoredEntries.some(
+      (entry) => entry.endsWith('/') && trailing.startsWith(entry),
+    );
+    if (covered) exclusions.push(trailing);
+  }
+  if (relative.length === 0 || relative.startsWith('..')) return exclusions;
+  let entries;
+  try {
+    entries = await fs.readdir(managedDir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return exclusions;
+    throw error;
+  }
+  for (const entry of entries) {
+    // A plain file (or symlink) here is content, not another checkout: leave it
+    // to the archive.
+    if (!entry.isDirectory()) continue;
+    const child = path.join(managedDir, entry.name);
+    try {
+      await fs.access(path.join(child, '.git'));
+    } catch {
+      continue;
+    }
+    if (await worktreeHasWork(child)) {
+      throw new Error(
+        `Worktree snapshot: nested checkout ${relative}/${entry.name} holds work; refusing to capture a parent that would delete it`,
+      );
+    }
+    exclusions.push(`${relative}/${entry.name}/`);
   }
   return exclusions;
 }

@@ -267,11 +267,14 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
   });
 
-  it('excludes the checkout’s own managed worktree directory and regenerable .qwen caches only', async () => {
+  it('excludes the regenerable .qwen caches git ignores and archives everything else under .qwen/', async () => {
     // The reported production archive was 93% nested `.qwen/` content: this
-    // checkout's own managed worktrees (other checkouts) and its scratch tmp
-    // tree. Both are excluded; a stated `.qwen/` subject stays archived so the
-    // fix does not silently drop a workspace's skills/commands.
+    // checkout's scratch tmp tree and hook logs. They are skipped because
+    // `.qwen/` is ignored here — and a stated `.qwen/` subject stays archived.
+    // Content that merely LOOKS like a nested checkout but carries no `.git`
+    // is ordinary files this checkout may hold, so it is archived rather than
+    // dropped (R1-1: only real nested checkouts are excluded, and only when
+    // they hold no work).
     await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/\n');
     const nestedWorktree = path.join(
       worktree,
@@ -308,9 +311,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       },
     });
     expect(
-      members.filter((member) => member.startsWith('./.qwen/worktrees/')),
-    ).toEqual([]);
-    expect(
       members.filter((member) => member.startsWith('./.qwen/tmp/')),
     ).toEqual([]);
     expect(
@@ -332,7 +332,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       fs.access(
         path.join(restored, '.qwen', 'worktrees', 'inner', 'src', 'inner.ts'),
       ),
-    ).rejects.toThrow();
+    ).resolves.toBeUndefined();
     await expect(
       fs.access(path.join(restored, '.qwen', 'tmp', 'blobs', 'scratch.bin')),
     ).rejects.toThrow();
@@ -419,6 +419,115 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     // outside the window. 200ms leaves more than 3x on the green arm while the
     // linear scan misses it by more than 7x.
     expect(maxGapMs).toBeLessThan(200);
+  });
+
+  // R1-1 (18494): the archive used to drop every `.qwen/tmp` / `.qwen/logs`
+  // descendant unconditionally while the has-work gate counted a tracked edit
+  // there as work, so the snapshot said "faithful", the checkout was deleted,
+  // and the session edit existed nowhere. Exclusions now come from the ignore
+  // listing, so only content git actually ignores is skipped.
+  it('archives a tracked edit under .qwen/tmp and skips only the ignored cache beside it', async () => {
+    await fs.writeFile(
+      path.join(worktree, '.gitignore'),
+      '.qwen/tmp/\n.qwen/logs/\n',
+    );
+    await fs.mkdir(path.join(worktree, '.qwen', 'tmp'), { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, '.qwen', 'tmp', 'notes.md'),
+      'committed\n',
+    );
+    git(worktree, 'add', '.gitignore');
+    // A tracked file under an ignored directory: git never ignores it, and the
+    // gate counts its edit as work, so the archive has to carry it.
+    git(worktree, 'add', '-f', '.qwen/tmp/notes.md');
+    git(worktree, 'commit', '-qm', 'track-cache-note', '--no-verify');
+    await fs.writeFile(
+      path.join(worktree, '.qwen', 'tmp', 'notes.md'),
+      'session-edit\n',
+    );
+    await fs.writeFile(
+      path.join(worktree, '.qwen', 'tmp', 'cache.bin'),
+      'regenerable\n',
+    );
+
+    const captured = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(captured.checkoutMatchesCapture).toBe(true);
+
+    const members: string[] = [];
+    await tar.t({
+      file: captured.snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    });
+    expect(members).toContain('.qwen/tmp/notes.md');
+    expect(members).not.toContain('.qwen/tmp/cache.bin');
+
+    const restored = await restoreOverHead(
+      captured.snapshotPath,
+      captured.metaPath,
+      'restored-cache-note',
+    );
+    await expect(
+      fs.readFile(path.join(restored, '.qwen', 'tmp', 'notes.md'), 'utf8'),
+    ).resolves.toBe('session-edit\n');
+  });
+
+  it('waives an ignored .qwen/tmp cache file as work, as the archive excludes it', async () => {
+    await fs.writeFile(
+      path.join(worktree, '.gitignore'),
+      '.qwen/tmp/\n.qwen/logs/\n',
+    );
+    await fs.mkdir(path.join(worktree, '.qwen', 'tmp'), { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, '.qwen', 'tmp', 'cache.bin'),
+      'regenerable\n',
+    );
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore-qwen-cache', '--no-verify');
+    await fs.writeFile(
+      path.join(worktree, '.qwen', 'tmp', 'cache.bin'),
+      'regenerable-v2\n',
+    );
+    // The other half of the same invariant: content the archive skips must not
+    // make the gate demand a snapshot either, or a cache write blocks reaping.
+    await expect(worktreeHasWork(worktree)).resolves.toBe(false);
+  });
+
+  it('refuses to capture a checkout whose nested checkout holds work', async () => {
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner', inner, 'HEAD');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'inner-draft\n');
+    // Excluding it would delete uncommitted work with the parent directory;
+    // throwing makes every caller preserve the checkout instead.
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(/nested checkout \.qwen\/worktrees\/inner holds work/);
+  });
+
+  it('still excludes a nested checkout that holds no work of its own', async () => {
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-clean', inner, 'HEAD');
+    const captured = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(captured.checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: captured.snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path.replace(/^\.\//, '')),
+    });
+    expect(members.some((m) => m.startsWith('.qwen/worktrees/inner/'))).toBe(
+      false,
+    );
   });
 
   it.skipIf(process.platform === 'win32').each([
