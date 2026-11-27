@@ -45,6 +45,11 @@ import {
   TrustLevel,
 } from '../config/trustedFolders.js';
 import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
+import {
+  parseRelaunchEnvProvenance,
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  resetCredentialAliasesForTesting,
+} from '../utils/env-provenance.js';
 import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
@@ -1229,6 +1234,65 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it.each(['FAST_PATH_FIXTURE_TOKEN', 'FAST_PATH_PROVIDER_INPUT'])(
+    'preserves the credential origin of %s aliases for the ACP environment',
+    async (source) => {
+      const qwenHome = useTempQwenHome();
+      const alias = 'FAST_PATH_FIXTURE_LABEL';
+      const publicSource = 'FAST_PATH_PUBLIC_SOURCE';
+      const publicAlias = 'FAST_PATH_PUBLIC_LABEL';
+      const prior = 'fixture-before-overlay';
+      const active = 'fixture-after-overlay';
+      for (const key of [
+        source,
+        alias,
+        publicSource,
+        publicAlias,
+        PRIVATE_RELAUNCH_ENV_PROVENANCE,
+      ])
+        vi.stubEnv(key, undefined);
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-mod-env-')),
+      );
+      try {
+        writeFileSync(
+          join(qwenHome, '.env'),
+          `${source}=${prior}\n${publicSource}=public\n`,
+        );
+        writeFileSync(join(tempWorkspace, '.env'), `${source}=${active}\n`);
+        writeFileSync(
+          join(qwenHome, 'settings.json'),
+          JSON.stringify({
+            security: { folderTrust: { enabled: false } },
+            ...(source === 'FAST_PATH_PROVIDER_INPUT' && {
+              modelProviders: { openai: [{ id: 'fixture', envKey: source }] },
+            }),
+            env: {
+              [alias]: '$' + source,
+              [publicAlias]: '$' + publicSource,
+            },
+          }),
+        );
+
+        await bootstrapServeFastPathEnvironment(tempWorkspace);
+        expect(process.env[alias] === prior).toBe(true);
+        expect(process.env[source] === active).toBe(true);
+        expect(process.env[publicAlias]).toBe('public');
+        expect(
+          parseRelaunchEnvProvenance(
+            process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+          )?.credentialAliases,
+        ).toEqual([alias]);
+        expect(
+          process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]?.includes(prior),
+        ).toBe(false);
+      } finally {
+        resetCredentialAliasesForTesting();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it.each(['', '/persistent/Qwen Conversations '])(
     'preserves a user .env Conversations root %j despite a project .env',
     async (root) => {

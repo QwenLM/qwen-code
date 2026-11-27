@@ -61,7 +61,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 按名字判断凭据。把变量名或设置键按 `_`、`-` 和驼峰拆开，含有 `TOKEN`、`SECRET`、`API_KEY`、`ACCESS_KEY`、`PRIVATE_KEY`、`CREDENTIAL`、`PASSWORD`、`PASSPHRASE`、`AUTHORIZATION`、`DSN` 或 `CONNECTION_STRING` 等词的，就是凭据。完整列表就是 daemon 遮蔽 worker 诊断信息时已有的那条规则，这次抽出来共用。
   - 任一来源的设置里 `envKey`、`credentialEnv` 或 `apiKeyEnv` 指向的变量也算凭据，因为供应商的 key 可以放在任何名字下。
   - 对凭据以及值包含至少四个字符的已识别凭据的变量，`$.env.get` 都回答 `undefined`，包括通过设置复制凭据的别名。变量未设置时也得到同样的回答。
-  - 已写入进程环境的凭据别名会保持遮蔽，直到其环境变量值发生变化。仅重载设置或 CLI 以继承的环境重新启动时也保留此遮蔽。
+  - 已写入进程环境的凭据别名会保持遮蔽，直到其环境变量值发生变化。仅重载设置、CLI 以继承的环境重新启动，或 daemon 将工作区环境交给 ACP 子进程时也保留此遮蔽。
   - `$.settings.read` 去掉任意层级下凭据键对应的字符串，包括顶层 `env` 里的这些变量。每个 MCP 服务器的 `env` 和 `headers` 整个去掉，因为它们的名字没有规律可循。
   - 设置在加载时会解析 `$VAR` 和 `${VAR}`，所以凭据的值可能出现在普通键下，比如一条命令或 MCP 服务器的 `args`。因此 `$.settings.read` 还会去掉任意层级下包含被遮住变量的值（四个字符及以上）的字符串。宿主同时检查当前环境和展开时实际使用的值。加载工作区环境或重新加载设置时，两者可能不同。
   - 只去掉字符串。这类名字下的数字或开关（比如 `model.sessionTokenLimit`）是限额，不是秘密。

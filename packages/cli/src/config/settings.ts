@@ -42,7 +42,7 @@ import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   credentialNameFilter,
-  MIN_CREDENTIAL_VALUE_LENGTH,
+  findCredentialAliases,
 } from '../utils/credential-names.js';
 import {
   deleteNestedPropertySafe,
@@ -299,23 +299,14 @@ function registerEnvironmentAliases(
     ...(getSettingsEnvSubstitutions(scope) ?? []),
   ]);
   if (!substitutions.length) return;
-  const hidden = credentialNameFilter([merged, ...scopes]);
-  const secretValues = substitutions
-    .filter(
-      ([name, value]) =>
-        value.length >= MIN_CREDENTIAL_VALUE_LENGTH && hidden(name),
-    )
-    .map(([, value]) => value);
-  const aliases = new Set<string>();
-  for (const [key, value] of Object.entries(merged.env)) {
-    if (
-      typeof value === 'string' &&
-      secretValues.some((secret) => value.includes(secret))
-    ) {
-      aliases.add(key);
-    }
-  }
-  registerSettingsCredentialAliases(merged, aliases);
+  registerSettingsCredentialAliases(
+    merged,
+    findCredentialAliases(
+      merged.env,
+      substitutions,
+      credentialNameFilter([merged, ...scopes]),
+    ),
+  );
 }
 
 const REMOVED_MODEL_SETTINGS = ['loopProtection', 'skipLoopDetection'];

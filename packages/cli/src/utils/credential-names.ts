@@ -29,7 +29,7 @@ function collectCredentialVariables(value: unknown, names: Set<string>): void {
   } else if (value && typeof value === 'object') {
     for (const [key, item] of Object.entries(value)) {
       if (typeof item === 'string' && CREDENTIAL_VARIABLE_FIELD.test(key)) {
-        names.add(item.toUpperCase());
+        names.add(item);
       } else {
         collectCredentialVariables(item, names);
       }
@@ -37,10 +37,42 @@ function collectCredentialVariables(value: unknown, names: Set<string>): void {
   }
 }
 
+export function configuredCredentialVariables(settings: unknown): Set<string> {
+  const names = new Set<string>();
+  collectCredentialVariables(settings, names);
+  return names;
+}
+
 export function credentialNameFilter(
   scopes: unknown[],
 ): (name: string) => boolean {
-  const names = new Set<string>();
-  collectCredentialVariables(scopes, names);
+  const names = new Set(
+    [...configuredCredentialVariables(scopes)].map((name) =>
+      name.toUpperCase(),
+    ),
+  );
   return (name) => isCredentialName(name) || names.has(name.toUpperCase());
+}
+
+export function findCredentialAliases(
+  env: Readonly<Record<string, unknown>>,
+  substitutions: Iterable<readonly [string, string]>,
+  hidden: (name: string) => boolean,
+): Set<string> {
+  const secretValues = [...substitutions]
+    .filter(
+      ([name, value]) =>
+        value.length >= MIN_CREDENTIAL_VALUE_LENGTH && hidden(name),
+    )
+    .map(([, value]) => value);
+  const aliases = new Set<string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (
+      typeof value === 'string' &&
+      secretValues.some((secret) => value.includes(secret))
+    ) {
+      aliases.add(key);
+    }
+  }
+  return aliases;
 }

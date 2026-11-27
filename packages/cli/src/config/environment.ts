@@ -28,6 +28,16 @@ import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { MIN_CREDENTIAL_VALUE_LENGTH } from '../utils/credential-names.js';
 import {
+  isSettingsCredentialAlias,
+  liveCredentialAliases,
+  parseRelaunchEnvProvenance,
+  recordCredentialAliasWrite,
+  resetCredentialAliasesForTesting,
+  restoreCredentialAliases,
+  writeRelaunchCredentialAliases,
+} from '../utils/env-provenance.js';
+import { spawnedEnvironmentView } from './storage-paths-lite.js';
+import {
   captureEnvironmentBeforeLoad,
   resetEnvironmentSnapshotForTesting,
 } from './environment-snapshot.js';
@@ -37,6 +47,8 @@ export {
   ENV_WAS_RECOVERED,
 } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
+
+export { registerSettingsCredentialAliases } from '../utils/env-provenance.js';
 
 export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
@@ -82,77 +94,20 @@ const settingsEnvSourcedKeys = new Set<string>();
 // Inherited provenance marks trust, not ownership of this process's reload scope.
 const inheritedDotEnvKeys = new Set<string>();
 const inheritedSettingsEnvKeys = new Set<string>();
-const settingsCredentialAliases = new WeakMap<Settings, ReadonlySet<string>>();
-// Keep the credential classification for the value actually installed.
-const installedCredentialAliases = new Map<string, string>();
-
-function envKeyIdentity(key: string): string {
-  return process.platform === 'win32' ? key.toUpperCase() : key;
-}
-
-export function registerSettingsCredentialAliases(
-  settings: Settings,
-  aliases: ReadonlySet<string>,
-): void {
-  if (aliases.size) settingsCredentialAliases.set(settings, aliases);
-}
 
 export function getInstalledSettingsCredentialValues(): string[] {
-  const values: string[] = [];
-  for (const [key, value] of installedCredentialAliases) {
-    if (process.env[key] === value) values.push(value);
-    else installedCredentialAliases.delete(key);
-  }
-  return values;
-}
-
-function recordCredentialAliasWrite(key: string, settings?: Settings): void {
-  const identity = envKeyIdentity(key);
-  const value = process.env[key];
-  if (
-    value !== undefined &&
-    value.length >= MIN_CREDENTIAL_VALUE_LENGTH &&
-    settings &&
-    settingsCredentialAliases.get(settings)?.has(key)
-  ) {
-    installedCredentialAliases.set(identity, value);
-  } else if (installedCredentialAliases.get(identity) !== value) {
-    installedCredentialAliases.delete(identity);
-  }
+  return [...liveCredentialAliases().values()];
 }
 
 // Validate inherited metadata before loading files, then preserve it for child CLIs.
-const inheritedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+const encodedProvenance = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
 delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+const inheritedProvenance = parseRelaunchEnvProvenance(encodedProvenance);
 if (inheritedProvenance) {
-  const sources: unknown = JSON.parse(inheritedProvenance);
-  if (
-    !sources ||
-    typeof sources !== 'object' ||
-    !('dotEnv' in sources) ||
-    !('settingsEnv' in sources) ||
-    !Array.isArray(sources.dotEnv) ||
-    !Array.isArray(sources.settingsEnv) ||
-    !sources.dotEnv.every((key) => typeof key === 'string') ||
-    !sources.settingsEnv.every((key) => typeof key === 'string')
-  ) {
-    throw new Error('Invalid inherited environment provenance.');
-  }
-  for (const key of sources.dotEnv) inheritedDotEnvKeys.add(key);
-  for (const key of sources.settingsEnv) inheritedSettingsEnvKeys.add(key);
-  if ('credentialAliases' in sources) {
-    if (
-      !Array.isArray(sources.credentialAliases) ||
-      !sources.credentialAliases.every((key) => typeof key === 'string')
-    ) {
-      throw new Error('Invalid inherited environment provenance.');
-    }
-    for (const key of sources.credentialAliases) {
-      const value = process.env[key];
-      if (value && value.length >= MIN_CREDENTIAL_VALUE_LENGTH)
-        installedCredentialAliases.set(envKeyIdentity(key), value);
-    }
-  }
+  for (const key of inheritedProvenance.dotEnv) inheritedDotEnvKeys.add(key);
+  for (const key of inheritedProvenance.settingsEnv)
+    inheritedSettingsEnvKeys.add(key);
+  restoreCredentialAliases(inheritedProvenance.credentialAliases ?? []);
   Object.assign(process.env, getRelaunchEnvProvenance());
 }
 
@@ -216,9 +171,7 @@ export function hasLoadedEnvironmentValues(): boolean {
 }
 
 export function getRelaunchEnvProvenance(): Record<string, string> {
-  const credentialAliases = [...installedCredentialAliases].flatMap(
-    ([key, value]) => (process.env[key] === value ? [key] : []),
-  );
+  const credentialAliases = [...liveCredentialAliases().keys()];
   return {
     [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
       dotEnv: [...new Set([...inheritedDotEnvKeys, ...dotEnvSourcedKeys])],
@@ -331,7 +284,7 @@ export function resetEnvironmentTrackingForTesting(): void {
   settingsEnvSourcedKeys.clear();
   inheritedDotEnvKeys.clear();
   inheritedSettingsEnvKeys.clear();
-  installedCredentialAliases.clear();
+  resetCredentialAliasesForTesting();
   requestTimeEnvKeys.clear();
   delete process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
   lastReloadSnapshot.clear();
@@ -812,6 +765,7 @@ export function buildRuntimeEnvironment(
   );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
   const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
+  const credentialAliasValues = new Map<string, string>();
 
   if (baseEnv['CLOUD_SHELL'] === 'true') {
     setUpCloudShellEnvironmentInEnv(effectiveEnv, parsedEnvFiles.files);
@@ -844,7 +798,13 @@ export function buildRuntimeEnvironment(
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
       if (typeof value !== 'string') continue;
-      setRuntimeEnvIfUnset(effectiveEnv, key, value);
+      if (!isEffectivelyUnset(effectiveEnv, key)) continue;
+      effectiveEnv[key] = value;
+      if (
+        value.length >= MIN_CREDENTIAL_VALUE_LENGTH &&
+        isSettingsCredentialAlias(settings, key)
+      )
+        credentialAliasValues.set(key, value);
     }
     reportRejectedSettingsEnv(settings.env, startDir);
   }
@@ -852,6 +812,24 @@ export function buildRuntimeEnvironment(
   const overlayKeys = Object.keys(effectiveEnv)
     .filter((key) => effectiveEnv[key] !== baseEnv[key])
     .sort();
+  const inheritedAliases = parseRelaunchEnvProvenance(
+    baseEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+  )?.credentialAliases;
+  if (inheritedAliases?.length) {
+    const base = spawnedEnvironmentView(baseEnv);
+    for (const key of inheritedAliases) {
+      const value = base[key];
+      if (value !== undefined && !credentialAliasValues.has(key))
+        credentialAliasValues.set(key, value);
+    }
+  }
+  if (credentialAliasValues.size || inheritedAliases?.length) {
+    const childEnv = spawnedEnvironmentView(effectiveEnv);
+    const credentialAliases = [...credentialAliasValues]
+      .filter(([key, value]) => childEnv[key] === value)
+      .map(([key]) => key);
+    writeRelaunchCredentialAliases(effectiveEnv, credentialAliases);
+  }
   return {
     effectiveEnv: Object.freeze({ ...effectiveEnv }),
     overlayKeys: Object.freeze(overlayKeys),

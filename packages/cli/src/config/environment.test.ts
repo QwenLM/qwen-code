@@ -16,6 +16,7 @@ import {
   loadEnvironment,
   preResolveHomeEnvOverrides,
   readProjectEnvFiles,
+  registerSettingsCredentialAliases,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   resetHomeEnvBootstrapForTesting,
@@ -29,6 +30,7 @@ import {
 import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from './shared-env-keys.js';
 import {
   NPM_RUNTIME_CONTEXT,
+  parseRelaunchEnvProvenance,
   RELAUNCH_SUPERVISED_ENV,
 } from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
@@ -981,6 +983,82 @@ describe('Conversations root environment', () => {
 });
 
 describe('buildRuntimeEnvironment', () => {
+  it('passes installed credential aliases to the child without marking a launch override', async () => {
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: {
+        RUNTIME_SETTINGS: 'synthetic-overlay',
+        RUNTIME_PARENT: 'synthetic-shadowed',
+        RUNTIME_SETTINGS_ONLY: 'ordinary',
+      },
+    });
+    registerSettingsCredentialAliases(
+      settings,
+      new Set(['RUNTIME_SETTINGS', 'RUNTIME_PARENT']),
+    );
+    const base = {
+      RUNTIME_DOTENV: 'synthetic-parent',
+      RUNTIME_PARENT: 'launch-value',
+      RUNTIME_SOURCE_TOKEN: 'synthetic-current-value',
+      [PRIVATE_RELAUNCH_ENV_PROVENANCE]: JSON.stringify({
+        dotEnv: [],
+        settingsEnv: ['RUNTIME_DOTENV'],
+        credentialAliases: ['RUNTIME_DOTENV'],
+      }),
+    };
+    const before = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+    const { effectiveEnv, overlayKeys } = buildRuntimeEnvironment(
+      settings,
+      workspace,
+      base,
+      true,
+    );
+    expect(effectiveEnv['RUNTIME_SETTINGS'] === 'synthetic-overlay').toBe(true);
+    expect(effectiveEnv['RUNTIME_PARENT']).toBe('launch-value');
+    expect(effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe('ordinary');
+    const provenance = parseRelaunchEnvProvenance(
+      effectiveEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE],
+    );
+    expect(provenance).toEqual({
+      dotEnv: [],
+      settingsEnv: ['RUNTIME_DOTENV'],
+      credentialAliases: expect.arrayContaining([
+        'RUNTIME_SETTINGS',
+        'RUNTIME_DOTENV',
+      ]),
+    });
+    expect(provenance?.credentialAliases).toHaveLength(2);
+    expect(
+      effectiveEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE]?.includes('synthetic-'),
+    ).toBe(false);
+    expect(overlayKeys).not.toContain(PRIVATE_RELAUNCH_ENV_PROVENANCE);
+    expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).toBe(before);
+
+    for (const key of [
+      'RUNTIME_SETTINGS',
+      'RUNTIME_SOURCE_TOKEN',
+      'RUNTIME_SETTINGS_ONLY',
+      PRIVATE_RELAUNCH_ENV_PROVENANCE,
+    ])
+      vi.stubEnv(key, effectiveEnv[key]);
+    vi.resetModules();
+    const childEnvironment = await import('./environment.js');
+    try {
+      const { loadSettings } = await import('./settings.js');
+      const { modHostReads } = await import('../services/mod-host-reads.js');
+      const reads = modHostReads(
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+      );
+      expect(reads.env('RUNTIME_SETTINGS') === undefined).toBe(true);
+      expect(reads.env('RUNTIME_SOURCE_TOKEN') === undefined).toBe(true);
+      expect(reads.env('RUNTIME_SETTINGS_ONLY')).toBe('ordinary');
+      expect(reads.env(PRIVATE_RELAUNCH_ENV_PROVENANCE)).toBeUndefined();
+    } finally {
+      childEnvironment.resetEnvironmentTrackingForTesting();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([false, true])(
     'stops at a symlinked home (home env: %s)',
     (hasHomeEnv) => {
