@@ -136,7 +136,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 
 | 回复                                                                | Harness 的处理                                               |
 | ------------------------------------------------------------------- | ------------------------------------------------------------ |
-| 成功，`terminal: false`                                             | 从 `cursor` 继续                                             |
+| 成功，`terminal: false`                                             | 从 `cursor` 继续；若请求带了结束标记则停止                   |
 | `managed_event_ingest_cursor_mismatch`                              | 从返回的游标重新读 journal                                   |
 | `managed_event_ingest_not_ready`                                    | 退避重试，最长不超过租约时长                                 |
 | `terminal: true`、`managed_event_ingest_not_owner`、writer 校验被拒 | 停止为这次准入上报                                           |
@@ -151,7 +151,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
   - 投递方式按每次准入决定，所以同一个 Turn 可以先走上报，恢复之后改为拉流。
 - **准入与交接。** `recordAdmission` 增加一个交接版本，在同一事务中设置 `dispatch_owner = 'harness:' + bootId` 和 `dispatch_lease_until = now + lease`。派发者先停掉自己的续租再交接，然后不接流直接返回。`coordinate` 的 `finally` 里的 `releaseTurnLease` 此时什么也匹配不到。记录准入时 Turn 已是 `CANCELLING` 的，不做交接：派发者继续走现有的 cancel 路径，Harness 的上报会得到 `not_owner`。
 - **保持不变的路径。** 恢复准入、续跑、cancel 和 recovery blocked 的观察通道，都像现在一样拉流，这些 Turn 仍由派发者持有。
-- **cancel 收回。** `findDispatchable` 和 `claimTurn` 额外放行 `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'`。认领者成为 owner，执行现有的 cancel 路径，包括 `cancelOriginalTurn` 和拉流。游标是共用的，所以收回时事件既不丢失也不重复。
+- **cancel 收回。** `findDispatchable` 和 `claimTurn` 额外放行 `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'`，不论 `dispatch_lease_until` 和 `retry_after`。Harness 每 20 秒续一次这个租约，如果认领要等它过期，cancel 就永远送不到。认领者成为 owner，执行现有的 cancel 路径，包括 `cancelOriginalTurn` 和拉流。游标是共用的，所以收回时事件既不丢失也不重复。
 - **租约过期。** Harness 持有的租约过期后，就是一个普通的过期租约：扫描认领该 Turn，之后由现有的 attach、接管和恢复准入处理。
 
 ## 6. Harness 的改动
@@ -203,6 +203,8 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 - `persistence/.../AgentTurnExecution.java`：准入交接，`findDispatchable` 与 `claimTurn` 中 CANCELLING 收回的条件，以及无事件时推进游标。
 - `control-plane/.../HarnessCoordinator.java`：全新提交时请求上报并交接。`consumeStream` 中逐个 envelope 的逻辑移到一个共用类，供拉流和上报处理共同使用。
 - `adapters/.../QwenHostedHarnessConnector.java`、`contracts/.../HarnessConnector.java`：submit 携带 `eventDelivery`，以及 feature 检测。
+- `adapters/.../harness/HarnessFeature.java`：`event-ingest/1` 的定义。
+- `packages/sdk-java/qwencode/.../daemon/SubmitHarnessTurn.java`：submit 请求体中的 `eventDelivery` 字段。
 - `ManagedAgentProperties.java`、`application.yml`：`qwen.managed-agent.event-ingest.enabled`（默认 `false`）。
 
 ### Harness 与 Store 客户端
@@ -252,7 +254,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 ## 12. 风险与开放问题
 
 1. **请求速率。** 每个运行中的 Turn 在产生事件期间约每 250 毫秒一次请求，另加每 20 秒一次心跳。心跳取代了派发者的续租。默认开启前要与拉流对比测量。上报器从准入游标开始；按游标规则，它重发的 envelope 会被忽略。
-2. **两组锁。** Store 认证会锁 placement guard、Session 根和 head；写入调用保持 Session 根、Turn、事件流的顺序。认证必须在写入前完成，或者保持同样以 Session 根为先的顺序（[锁简化](2026-11-02-managed-agent-lock-simplification.zh-CN.md)）。
+2. **两组锁。** Store 认证会锁 placement guard、Session 根和 head；写入调用先取 Session 根，再取事件流（读取 Session 时一并加锁），最后取 Turn。认证必须在写入前完成，或者保持同样以 Session 根为先的顺序（[锁简化](2026-11-02-managed-agent-lock-simplification.zh-CN.md)）。
 3. **已 seal 实例的标记。** `parked` 是唯一接受已 seal 实例的请求。Harness 必须在释放 placement 之前发送它；实现时还要确认 seal 不会在最后一次补发之后再追加 journal 事件。如果确实追加了，或标记被拒、丢失，该 Turn 会一直由 Harness 持有到租约过期，之后由现有恢复处理这个已 seal 但未停靠的 Turn。
 4. **上报的范围。** 恢复准入和续跑仍然拉流，批准 Action 后的续跑也在其中。拉模型调度会取代它们，因为认领工作的 Harness 同时也投递其事件。
 5. **时钟。** Turn 租约仍使用 Java 实例的时钟（#14248），而上报扩大了这一暴露面：租约由一个实例写入，之后由处理请求的任意实例续租和校验。时钟偏快的实例可能拒绝一次正常的续租，Turn 随后因租约过期而恢复；时钟偏慢的实例可能接受一个刚过期的租约。默认开启前，要限定实例间的时钟偏差，或把租约改用数据库时间。
