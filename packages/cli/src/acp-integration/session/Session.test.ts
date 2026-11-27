@@ -2668,14 +2668,14 @@ describe('Session', () => {
         .map((hold) => hold.id);
     }
 
-    it('holds bound durable work for conditional close without blocking reload', () => {
+    it('does not block conditional close on idle bound durable tasks while holding in-flight scheduled work', () => {
       createReportingSession();
       const conditionalClose = { includeScheduledTasks: true };
       const scheduledHold = {
         category: 'session',
         id: 'scheduled-tasks',
       };
-      let jobs = [
+      const jobs = [
         { durable: true, boundSessionId: session.sessionId },
         { durable: true, boundSessionId: 'other-owner' },
         { durable: true },
@@ -2693,20 +2693,26 @@ describe('Session', () => {
         stop: vi.fn(),
       });
 
+      // Registered bound durable tasks are paused by archive/unarchive and must
+      // not block conditional close for an idle session.
+      expect(
+        session.collectActiveWorkHolds(conditionalClose),
+      ).not.toContainEqual(scheduledHold);
+      expect(session.collectActiveWorkHolds()).not.toContainEqual(
+        scheduledHold,
+      );
+      expect(session.isIdle()).toBe(true);
+
+      // Genuine in-flight scheduled work (gates) still holds conditional close.
+      hasGatesInFlight.mockReturnValue(true);
       expect(session.collectActiveWorkHolds(conditionalClose)).toContainEqual(
         scheduledHold,
       );
       expect(session.collectActiveWorkHolds()).not.toContainEqual(
         scheduledHold,
       );
-      expect(session.isIdle()).toBe(true);
+      expect(hasGatesInFlight).toHaveBeenCalledWith(session.sessionId);
 
-      jobs = jobs.filter((job) => job.boundSessionId !== session.sessionId);
-      expect(
-        session.collectActiveWorkHolds(conditionalClose),
-      ).not.toContainEqual(scheduledHold);
-
-      jobs = [{ durable: true, boundSessionId: session.sessionId }];
       schedulerDisabled = true;
       expect(
         session.collectActiveWorkHolds(conditionalClose),
@@ -2719,23 +2725,7 @@ describe('Session', () => {
       ).not.toContainEqual(scheduledHold);
 
       mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-      jobs = [{ durable: false, boundSessionId: session.sessionId }];
-      expect(
-        session.collectActiveWorkHolds(conditionalClose),
-      ).not.toContainEqual(scheduledHold);
-
-      jobs = [];
       hasGatesInFlight.mockReturnValue(true);
-      expect(session.collectActiveWorkHolds(conditionalClose)).toContainEqual(
-        scheduledHold,
-      );
-      expect(hasGatesInFlight).toHaveBeenCalledWith(session.sessionId);
-      hasGatesInFlight.mockReturnValue(false);
-      expect(
-        session.collectActiveWorkHolds(conditionalClose),
-      ).not.toContainEqual(scheduledHold);
-
-      jobs = [{ durable: true, boundSessionId: session.sessionId }];
       vi.spyOn(
         mockConfig.getBackgroundTaskRegistry(),
         'listUnfinalizedBackgroundAgentIds',

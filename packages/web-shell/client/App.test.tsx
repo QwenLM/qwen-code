@@ -7246,7 +7246,7 @@ describe('task activity key', () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({
-        '/tmp/project session-1': {
+        '/tmp/project\0session-1': {
           open: true,
           activeTabId: 'scheduled-task:legacy-primary-restore',
           tabs: [
@@ -7311,7 +7311,7 @@ describe('task activity key', () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({
-        '/tmp/project session-1': {
+        '/tmp/project\0session-1': {
           open: true,
           activeTabId: 'scheduled-task:replace-owner',
           tabs: [

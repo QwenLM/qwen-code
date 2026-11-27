@@ -430,11 +430,12 @@ describe('ChatContextHeader', () => {
       scheduledTaskNextRunAt: Date.parse('2026-06-01T08:00:00Z'),
       onOpenScheduledTasks,
     });
-    expect(
-      due
-        .querySelector('[data-web-shell-scheduled-tasks-entry]')
-        ?.getAttribute('title'),
-    ).not.toContain('Next in Due now');
+    const dueEntry = due.querySelector(
+      '[data-web-shell-scheduled-tasks-entry]',
+    );
+    expect(dueEntry?.getAttribute('aria-label')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).toContain('Due now');
+    expect(dueEntry?.getAttribute('title')).not.toContain('Next in Due now');
 
     const empty = mount({
       scheduledTaskCount: 0,

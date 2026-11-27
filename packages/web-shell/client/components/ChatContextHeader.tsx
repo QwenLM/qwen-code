@@ -112,16 +112,14 @@ export function ChatContextHeader({
       : null;
   const scheduledPausedOnly =
     (scheduledTaskCount ?? 0) > 0 && (scheduledTaskActiveCount ?? 0) === 0;
-  const scheduledCountdownText =
-    scheduledCountdown === t('scheduledTasks.dueNow')
-      ? null
-      : scheduledCountdown;
   const scheduledEntryLabel =
     scheduledTaskCount != null && scheduledTaskCount > 0
       ? scheduledPausedOnly
         ? t('chatHeader.scheduledTasksPaused', { count: scheduledTaskCount })
-        : scheduledCountdownText
-          ? `${t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })} · ${t('environment.scheduledTasks.nextRun', { when: scheduledCountdownText })}`
+        : scheduledCountdown
+          ? scheduledCountdown === t('scheduledTasks.dueNow')
+            ? `${t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })} · ${scheduledCountdown}`
+            : `${t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })} · ${t('environment.scheduledTasks.nextRun', { when: scheduledCountdown })}`
           : t('chatHeader.openScheduledTasks', { count: scheduledTaskCount })
       : undefined;
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');

@@ -25583,6 +25583,10 @@ export function App({
     liveDurableScheduledTasks: sessionScheduledTasks.tasks.filter(
       (entry) => entry.scope === 'durable',
     ),
+    liveDurableScheduledTasksWorkspaceId:
+      scheduledTaskWorkspaceTarget.resolvable
+        ? (scheduledTaskWorkspaceTarget.workspaceId ?? null)
+        : undefined,
     confirmedDeletedDurableTaskKeys:
       sessionScheduledTasks.confirmedDeletedDurableTaskKeys,
     confirmedCancelledSessionTaskIds:

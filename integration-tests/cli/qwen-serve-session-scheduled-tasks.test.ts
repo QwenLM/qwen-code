@@ -411,4 +411,47 @@ describe('real daemon session scheduled tasks', () => {
       ).toEqual([]);
     });
   }, 45_000);
+
+  it('archives an idle session that owns an enabled bound durable task and pauses the task', async () => {
+    const boundSession = await client.createOrAttachSession({
+      workspaceCwd: HOME,
+      approvalMode: 'yolo',
+    });
+    const accepted = await client.promptNonBlocking(boundSession.sessionId, {
+      prompt: [{ type: 'text', text: 'seed archive transcript' }],
+    });
+    await vi.waitFor(async () => {
+      const summary = await client.getSession(boundSession.sessionId);
+      expect(summary.hasActivePrompt).toBe(false);
+    });
+    expect(accepted.promptId).toBeTruthy();
+
+    const created = (await scheduledTaskRequest('/scheduled-tasks', {
+      method: 'POST',
+      body: {
+        cron: '0 0 1 1 *',
+        prompt: 'archive bound durable task',
+        recurring: true,
+        sessionId: boundSession.sessionId,
+      },
+    })) as DaemonScheduledTask;
+    expect(created.enabled).toBe(true);
+    expect(created.sessionId).toBe(boundSession.sessionId);
+
+    const archiveBody = (await scheduledTaskRequest('/sessions/archive', {
+      method: 'POST',
+      body: { sessionIds: [boundSession.sessionId] },
+    })) as {
+      archived: string[];
+      errors?: unknown[];
+    };
+    expect(archiveBody.archived).toEqual([boundSession.sessionId]);
+    expect(archiveBody.errors ?? []).toEqual([]);
+
+    const listed = (await scheduledTaskRequest('/scheduled-tasks')) as {
+      tasks: DaemonScheduledTask[];
+    };
+    const archivedTask = listed.tasks.find((task) => task.id === created.id);
+    expect(archivedTask?.enabled).toBe(false);
+  }, 45_000);
 });

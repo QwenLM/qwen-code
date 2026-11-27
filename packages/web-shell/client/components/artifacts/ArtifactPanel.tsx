@@ -626,6 +626,8 @@ interface ArtifactPanelProps {
   /** Owner of the live snapshot; other sessions must not borrow it. */
   liveSessionScheduledTasksOwnerSessionId?: string;
   liveDurableScheduledTasks?: readonly SessionDurableScheduledTask[];
+  /** Workspace covered by `hasLiveDurableScheduledSnapshot` (`null` = primary). */
+  liveDurableScheduledTasksWorkspaceId?: string | null;
   confirmedDeletedDurableTaskKeys?: ReadonlySet<string>;
   confirmedCancelledSessionTaskIds?: ReadonlySet<string>;
   hasLiveDurableScheduledSnapshot?: boolean;
@@ -827,6 +829,7 @@ export function ArtifactPanel({
   liveSessionScheduledTasks,
   liveSessionScheduledTasksOwnerSessionId,
   liveDurableScheduledTasks,
+  liveDurableScheduledTasksWorkspaceId,
   confirmedDeletedDurableTaskKeys,
   confirmedCancelledSessionTaskIds,
   hasLiveDurableScheduledSnapshot = false,
@@ -2009,7 +2012,11 @@ export function ArtifactPanel({
               hasLiveSessionScheduledSnapshot && liveSnapshotBelongsToActiveTask
             }
             hasLiveDurableScheduledSnapshot={
-              hasLiveDurableScheduledSnapshot && liveSnapshotBelongsToActiveTask
+              hasLiveDurableScheduledSnapshot &&
+              liveSnapshotBelongsToActiveTask &&
+              (liveDurableScheduledTasksWorkspaceId === undefined ||
+                (activeTab.task.workspaceId ?? null) ===
+                  liveDurableScheduledTasksWorkspaceId)
             }
             liveDurableTask={
               activeTab.task.durable && liveSnapshotBelongsToActiveTask

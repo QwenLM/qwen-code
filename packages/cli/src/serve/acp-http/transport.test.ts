@@ -10390,7 +10390,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
-    it('_qwen/session/tasks/cancel forwards an explicit wakeup source', async () => {
+    it.each(['wakeup', 'cron'] as const)(
+      '_qwen/session/tasks/cancel forwards an explicit %s source',
+      async (source) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 69,
+          method: '_qwen/session/tasks/cancel',
+          params: {
+            sessionId: 'sess-1',
+            taskId: 'shared-cron',
+            kind: 'cron',
+            source,
+            clientId: 'forged-client',
+          },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        expect(frames[1]).toMatchObject({ result: { cancelled: true } });
+        expect(bridge.lastCancelledTask).toEqual({
+          sessionId: 'sess-1',
+          taskId: 'shared-cron',
+          kind: 'cron',
+          context: { clientId: 'client-1', fromLoopback: true },
+          source,
+        });
+      },
+    );
+
+    it('_qwen/session/tasks/cancel rejects an unknown cron source without executing the bridge', async () => {
+      const cancel = vi.spyOn(bridge, 'cancelSessionTask');
       const connId = await initialize();
       const streamRes = openStream(connId);
       await new Promise((r) => setTimeout(r, 30));
@@ -10403,25 +10441,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       await new Promise((r) => setTimeout(r, 30));
       await post(connId, {
         jsonrpc: '2.0',
-        id: 69,
+        id: 71,
         method: '_qwen/session/tasks/cancel',
         params: {
           sessionId: 'sess-1',
           taskId: 'shared-cron',
           kind: 'cron',
-          source: 'wakeup',
-          clientId: 'forged-client',
+          source: 'bogus',
         },
       });
       const frames = await takeFrames(await streamRes, 2);
-      expect(frames[1]).toMatchObject({ result: { cancelled: true } });
-      expect(bridge.lastCancelledTask).toEqual({
-        sessionId: 'sess-1',
-        taskId: 'shared-cron',
-        kind: 'cron',
-        context: { clientId: 'client-1', fromLoopback: true },
-        source: 'wakeup',
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+        },
       });
+      expect(cancel).not.toHaveBeenCalled();
+      cancel.mockRestore();
     });
 
     it('_qwen/session/tasks/cancel rejects non-cron invalid source without executing the bridge', async () => {

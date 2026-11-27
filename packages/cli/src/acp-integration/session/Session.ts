@@ -5191,7 +5191,9 @@ export class Session implements SessionContext {
       holds.push({ category: 'session', id: 'session:active-turn' });
     }
     // Only conditional close needs this retention; idle/reload and active-work
-    // snapshots must keep their existing meaning.
+    // snapshots must keep their existing meaning. Registered durable tasks are
+    // paused/restored by session archive/unarchive and must not block archiving
+    // an idle session; only active/queued scheduled work holds the close.
     if (includeScheduledTasks && this.config.isCronEnabled?.() !== false) {
       const scheduler = this.config.getCronScheduler?.();
       const hasScheduledWork =
@@ -5199,12 +5201,7 @@ export class Session implements SessionContext {
         this.pendingCronChildren > 0 ||
         (scheduler !== undefined &&
           scheduler.disabled !== true &&
-          (scheduler
-            .list?.()
-            .some(
-              (job) => job.durable && job.boundSessionId === this.sessionId,
-            ) ||
-            scheduler.hasGatesInFlight?.(this.sessionId)));
+          Boolean(scheduler.hasGatesInFlight?.(this.sessionId)));
       if (hasScheduledWork) {
         holds.push({ category: 'session', id: 'scheduled-tasks' });
       }

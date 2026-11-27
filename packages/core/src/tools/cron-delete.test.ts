@@ -366,6 +366,44 @@ describe('CronDeleteTool', () => {
     expect(await readCronTasks(tmpDir)).toEqual([]);
   });
 
+  it('passes the matched owner sessionId to removeDurable for a single bound durable match', async () => {
+    const owned = {
+      id: 'owned-1',
+      cron: '0 */2 * * *',
+      prompt: 'owned durable task',
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+      sessionId: 'session-a',
+    };
+    const sibling = {
+      id: 'other-2',
+      cron: '0 */3 * * *',
+      prompt: 'sibling durable task',
+      recurring: true,
+      createdAt: Date.now(),
+      lastFiredAt: null,
+      sessionId: 'session-b',
+    };
+    await writeCronTasks(tmpDir, [owned, sibling]);
+    const removeDurableSpy = vi.spyOn(config._scheduler, 'removeDurable');
+
+    try {
+      const result = await tool
+        .build({ id: owned.id })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(`Cancelled job ${owned.id}`);
+      expect(removeDurableSpy).toHaveBeenCalledExactlyOnceWith(
+        owned.id,
+        'session-a',
+      );
+      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+    } finally {
+      removeDurableSpy.mockRestore();
+    }
+  });
+
   it('refuses an ambiguous same-id durable delete', async () => {
     const original = {
       id: 'shared',

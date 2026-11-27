@@ -1569,8 +1569,16 @@ describe('CronScheduler', () => {
       tickPastFirstFire(original);
 
       expect(r.fired.map((job) => job.boundSessionId)).toEqual(['session-1']);
-      await internals().pendingPersist;
-      expect(await readCronTasks(tmpDir)).toEqual([sibling]);
+      expect(await r.restoration).toBe(true);
+      expect(await readCronTasks(tmpDir)).toEqual([
+        expect.objectContaining({
+          id: 'shared-once',
+          sessionId: 'session-1',
+          prompt: 'selected owner task',
+          enabled: false,
+        }),
+        sibling,
+      ]);
     });
 
     it.each(['shared-once', 'other-once'])(
