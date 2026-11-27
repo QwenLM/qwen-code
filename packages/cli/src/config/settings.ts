@@ -41,6 +41,7 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  credentialFieldReferences,
   credentialNameFilter,
   findCredentialAliases,
 } from '../utils/credential-names.js';
@@ -265,15 +266,24 @@ export interface SettingsFile {
 }
 
 // Keep expansion values out of the settings objects that callers serialize.
-const settingsEnvSubstitutions = new WeakMap<
+const settingsEnvProvenance = new WeakMap<
   Settings,
-  ReadonlyMap<string, string>
+  {
+    substitutions: ReadonlyMap<string, string>;
+    credentialReferences: ReadonlySet<string>;
+  }
 >();
 
 export function getSettingsEnvSubstitutions(
   settings: Settings,
 ): ReadonlyMap<string, string> | undefined {
-  return settingsEnvSubstitutions.get(settings);
+  return settingsEnvProvenance.get(settings)?.substitutions;
+}
+
+export function getSettingsCredentialReferences(scopes: Settings[]): string[] {
+  return scopes.flatMap((scope) => [
+    ...(settingsEnvProvenance.get(scope)?.credentialReferences ?? []),
+  ]);
 }
 
 function resolveSettingsEnvironment(
@@ -286,7 +296,12 @@ function resolveSettingsEnvironment(
     processEnvFallback,
     onSubstitution: (name, value) => substitutions.set(name, value),
   });
-  if (substitutions.size) settingsEnvSubstitutions.set(resolved, substitutions);
+  const credentialReferences = credentialFieldReferences(settings);
+  if (substitutions.size || credentialReferences.size)
+    settingsEnvProvenance.set(resolved, {
+      substitutions,
+      credentialReferences,
+    });
   return resolved;
 }
 
@@ -304,7 +319,10 @@ function registerEnvironmentAliases(
     findCredentialAliases(
       merged.env,
       substitutions,
-      credentialNameFilter([merged, ...scopes]),
+      credentialNameFilter(
+        [merged, ...scopes],
+        getSettingsCredentialReferences(scopes),
+      ),
     ),
   );
 }
@@ -1049,7 +1067,7 @@ export class LoadedSettings {
       return {
         file,
         settings: structuredClone(file.settings),
-        envSubstitutions: settingsEnvSubstitutions.get(file.settings),
+        envProvenance: settingsEnvProvenance.get(file.settings),
         originalSettings: structuredClone(file.originalSettings),
         rawJson: file.rawJson,
       };
@@ -1059,11 +1077,8 @@ export class LoadedSettings {
 
     for (const snapshot of snapshots) {
       snapshot.file.settings = snapshot.settings;
-      if (snapshot.envSubstitutions)
-        settingsEnvSubstitutions.set(
-          snapshot.settings,
-          snapshot.envSubstitutions,
-        );
+      if (snapshot.envProvenance)
+        settingsEnvProvenance.set(snapshot.settings, snapshot.envProvenance);
       snapshot.file.originalSettings = snapshot.originalSettings;
       snapshot.file.rawJson = snapshot.rawJson;
     }

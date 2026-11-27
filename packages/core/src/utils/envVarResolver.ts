@@ -6,6 +6,15 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+const ENV_VAR_REFERENCE = /\$(?:(\w+)|{([^}]+)})/g;
+
+export function getEnvVarReferences(value: string): string[] {
+  return Array.from(
+    value.matchAll(ENV_VAR_REFERENCE),
+    (match) => match[1] ?? match[2]!,
+  );
+}
+
 export interface ResolveEnvVarsOptions {
   /**
    * Whether a variable that `customEnv` does not define is taken from
@@ -44,8 +53,7 @@ export function resolveEnvVarsInString(
   customEnv?: Record<string, string>,
   options: ResolveEnvVarsOptions = {},
 ): string {
-  const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
-  return value.replace(envVarRegex, (match, varName1, varName2) => {
+  return value.replace(ENV_VAR_REFERENCE, (match, varName1, varName2) => {
     const varName = varName1 || varName2;
     const normalizedVarName = varName.toUpperCase();
     if (

@@ -44,6 +44,7 @@ import {
 } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   configuredCredentialVariables,
+  credentialFieldReferences,
   findCredentialAliases,
   isCredentialName,
 } from '../utils/credential-names.js';
@@ -96,7 +97,7 @@ let cachedTrustedFoldersPath: string | undefined;
 let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
 const summaryCredentialVariables = new WeakMap<
   ServeFastPathSettings,
-  Set<string>
+  { configured: Set<string>; referenced: Set<string> }
 >();
 
 function getTrustedFoldersPathFastPath(): string {
@@ -528,10 +529,10 @@ function readSettingsSummary(
     includeServe,
     includeOperatorServe,
   );
-  summaryCredentialVariables.set(
-    summary,
-    configuredCredentialVariables(parsed),
-  );
+  summaryCredentialVariables.set(summary, {
+    configured: configuredCredentialVariables(parsed),
+    referenced: credentialFieldReferences(parsed),
+  });
   return summary;
 }
 
@@ -976,9 +977,12 @@ export function loadServeFastPathSettings(
   if (resolved.env && substitutions.size) {
     const names = new Set<string>();
     for (const scope of [systemDefaults, user, workspace, system]) {
-      for (const name of summaryCredentialVariables.get(scope) ?? []) {
+      const credentials = summaryCredentialVariables.get(scope);
+      if (!credentials) continue;
+      for (const name of credentials.configured) {
         names.add(resolveEnvVarsInString(name, fallback).toUpperCase());
       }
+      for (const name of credentials.referenced) names.add(name.toUpperCase());
     }
     registerSettingsCredentialAliases(
       resolved,

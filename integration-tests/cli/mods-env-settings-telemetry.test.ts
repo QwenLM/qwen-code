@@ -41,6 +41,8 @@ const MOD = `export function register(on) {
     return { text: JSON.stringify({
       home: await $.env.get('HOME'),
       key: (await $.env.get('OPENAI_API_KEY')) ?? null,
+      authValue: (await $.env.get('PROBE_AUTH_VALUE')) ?? null,
+      authAlias: (await $.env.get('PROBE_AUTH_ALIAS')) ?? null,
       alias: (await $.env.get('PROBE_ALIAS')) ?? null,
       priorAlias: (await $.env.get('PROBE_PRIOR_ALIAS')) ?? null,
       workspaceEnv: await $.env.get('PROBE_WORKSPACE_ACTIVE'),
@@ -91,11 +93,12 @@ describe('a Mod reading the environment and settings in headless runs', () => {
         EDITOR: 'vim',
         PROBE_TOKEN: 'settings-secret',
         PROBE_ALIAS: '${OPENAI_API_KEY}',
+        PROBE_AUTH_ALIAS: 'prefix ${PROBE_AUTH_VALUE}',
         PROBE_PRIOR_ALIAS: '${PROBE_SOURCE_TOKEN}',
       },
       security: {
         folderTrust: { enabled: false },
-        auth: { selectedType: 'openai', apiKey: 'settings-api-key' },
+        auth: { selectedType: 'openai', apiKey: '${PROBE_AUTH_VALUE}' },
       },
     });
     json(join(plugin, '.claude-plugin/plugin.json'), {
@@ -118,6 +121,7 @@ describe('a Mod reading the environment and settings in headless runs', () => {
       QWEN_CODE_DISABLE_UPDATE_CHECK: '1',
       QWEN_CODE_NO_RELAUNCH: '1',
       OPENAI_API_KEY: 'env-api-key',
+      PROBE_AUTH_VALUE: 'settings-api-key',
     };
     await run(
       process.execPath,
@@ -156,6 +160,8 @@ describe('a Mod reading the environment and settings in headless runs', () => {
     expect(JSON.parse(String(result['result']))).toEqual({
       home,
       key: null,
+      authValue: null,
+      authAlias: null,
       alias: null,
       priorAlias: null,
       workspaceEnv: 'loaded',

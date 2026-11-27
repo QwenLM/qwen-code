@@ -9,6 +9,7 @@ import type {
   ModSettingsLayer,
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import {
+  getSettingsCredentialReferences,
   getSettingsEnvSubstitutions,
   type LoadedSettings,
 } from '../config/settings.js';
@@ -74,10 +75,10 @@ export function modHostReads(
       settings.workspace.settings,
       settings.system.settings,
     ];
-    const matchesCredential = credentialNameFilter([
-      settings.merged,
-      ...scopes,
-    ]);
+    const matchesCredential = credentialNameFilter(
+      [settings.merged, ...scopes],
+      getSettingsCredentialReferences(scopes),
+    );
     const hidden = (name: string) =>
       matchesCredential(name) ||
       name.toUpperCase() === PRIVATE_RELAUNCH_ENV_PROVENANCE;

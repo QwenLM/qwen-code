@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getEnvVarReferences } from '@qwen-code/qwen-code-core/envVarResolver';
+
 const CREDENTIAL_WORDS =
   /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
 
@@ -23,15 +25,18 @@ export function isCredentialName(name: string): boolean {
 const CREDENTIAL_VARIABLE_FIELD = /^envKey$|Env$/;
 export const MIN_CREDENTIAL_VALUE_LENGTH = 4;
 
-function collectCredentialVariables(value: unknown, names: Set<string>): void {
+function collectStringSettings(
+  value: unknown,
+  visit: (key: string, value: string) => void,
+): void {
   if (Array.isArray(value)) {
-    for (const item of value) collectCredentialVariables(item, names);
+    for (const item of value) collectStringSettings(item, visit);
   } else if (value && typeof value === 'object') {
     for (const [key, item] of Object.entries(value)) {
-      if (typeof item === 'string' && CREDENTIAL_VARIABLE_FIELD.test(key)) {
-        names.add(item);
+      if (typeof item === 'string') {
+        visit(key, item);
       } else {
-        collectCredentialVariables(item, names);
+        collectStringSettings(item, visit);
       }
     }
   }
@@ -39,15 +44,28 @@ function collectCredentialVariables(value: unknown, names: Set<string>): void {
 
 export function configuredCredentialVariables(settings: unknown): Set<string> {
   const names = new Set<string>();
-  collectCredentialVariables(settings, names);
+  collectStringSettings(settings, (key, value) => {
+    if (CREDENTIAL_VARIABLE_FIELD.test(key)) names.add(value);
+  });
+  return names;
+}
+
+export function credentialFieldReferences(settings: unknown): Set<string> {
+  const names = new Set<string>();
+  collectStringSettings(settings, (key, value) => {
+    if (isCredentialName(key)) {
+      for (const name of getEnvVarReferences(value)) names.add(name);
+    }
+  });
   return names;
 }
 
 export function credentialNameFilter(
   scopes: unknown[],
+  references: Iterable<string>,
 ): (name: string) => boolean {
   const names = new Set(
-    [...configuredCredentialVariables(scopes)].map((name) =>
+    [...configuredCredentialVariables(scopes), ...references].map((name) =>
       name.toUpperCase(),
     ),
   );

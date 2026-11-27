@@ -5442,12 +5442,13 @@ describe('Settings Loading and Merging', () => {
       const homeEnv = path.join(path.dirname(USER_SETTINGS_PATH), '.env');
       const workspaceEnv = path.join(MOCK_WORKSPACE_DIR, QWEN_DIR, '.env');
       let userContent = JSON.stringify({
+        security: { auth: { apiKey: 'prefix ${REVIEW_AUTH_INPUT}' } },
         env: {
-          REVIEW_ALIAS: '${REVIEW_FIXTURE_TOKEN}',
+          REVIEW_ALIAS: '${REVIEW_AUTH_INPUT}',
           REVIEW_LABEL: 'public',
         },
       });
-      vi.stubEnv('REVIEW_FIXTURE_TOKEN', undefined);
+      vi.stubEnv('REVIEW_AUTH_INPUT', undefined);
       vi.stubEnv('REVIEW_ALIAS', undefined);
       vi.stubEnv('REVIEW_LABEL', undefined);
       onTestFinished(() => vi.unstubAllEnvs());
@@ -5462,9 +5463,8 @@ describe('Settings Loading and Merging', () => {
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH) return userContent;
-          if (p === homeEnv) return 'REVIEW_FIXTURE_TOKEN=synthetic-home';
-          if (p === workspaceEnv)
-            return 'REVIEW_FIXTURE_TOKEN=synthetic-project';
+          if (p === homeEnv) return 'REVIEW_AUTH_INPUT=synthetic-home';
+          if (p === workspaceEnv) return 'REVIEW_AUTH_INPUT=synthetic-project';
           return '{}';
         },
       );
@@ -5472,6 +5472,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       const reads = modHostReads(settings);
       expect(process.env['REVIEW_ALIAS']).toBe('synthetic-home');
+      expect(reads.env('REVIEW_AUTH_INPUT')).toBeUndefined();
       expect(reads.env('REVIEW_ALIAS')).toBeUndefined();
       expect(reads.env('REVIEW_LABEL')).toBe('public');
 

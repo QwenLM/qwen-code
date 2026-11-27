@@ -1234,7 +1234,11 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
-  it.each(['FAST_PATH_FIXTURE_TOKEN', 'FAST_PATH_PROVIDER_INPUT'])(
+  it.each([
+    'FAST_PATH_FIXTURE_TOKEN',
+    'FAST_PATH_PROVIDER_INPUT',
+    'FAST_PATH_AUTH_INPUT',
+  ])(
     'preserves the credential origin of %s aliases for the ACP environment',
     async (source) => {
       const qwenHome = useTempQwenHome();
@@ -1263,7 +1267,12 @@ describe('serve fast path environment bootstrap', () => {
         writeFileSync(
           join(qwenHome, 'settings.json'),
           JSON.stringify({
-            security: { folderTrust: { enabled: false } },
+            security: {
+              folderTrust: { enabled: false },
+              ...(source === 'FAST_PATH_AUTH_INPUT' && {
+                auth: { apiKey: '$' + source },
+              }),
+            },
             ...(source === 'FAST_PATH_PROVIDER_INPUT' && {
               modelProviders: { openai: [{ id: 'fixture', envKey: source }] },
             }),
