@@ -89,6 +89,7 @@ describe('auto-memory topic scanning', () => {
       description: 'Project context',
       body: '# Project Memory\n\n- Release freeze starts Friday.',
       mtimeMs: 0,
+      sourceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
 

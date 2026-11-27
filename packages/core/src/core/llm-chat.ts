@@ -3467,6 +3467,7 @@ export class LlmChat {
     const beforeEstimate = estimateContentTokens(this.history);
     const projectRoot = this.config.getProjectRoot();
     const targetDir = this.config.getTargetDir?.() ?? projectRoot;
+    const owner = this.config.getProjectMemoryOwner?.();
 
     // Step 1: force microcompaction (clear old tool results + media)
     const mcResult = microcompactHistory(
@@ -3476,7 +3477,7 @@ export class LlmChat {
       {
         force: true,
         preserveReadFileResult: (filePath) =>
-          isManagedMemoryPath(filePath, projectRoot, targetDir),
+          isManagedMemoryPath(filePath, projectRoot, targetDir, owner),
       },
     );
     const mcMeta = mcResult.meta;
