@@ -6637,7 +6637,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       const configure = mysql.steps.find(
         (s) =>
           s.name ===
-          'Configure the database packet budget for large-object tests',
+          'Configure the database packet budget and the managed OSS test database',
       );
       const verify = mysql.steps.find((s) =>
         s.run?.includes('-Pmysql-integration'),
@@ -6723,7 +6723,12 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
         }
         if (mode === 'ready') {
           expect(result.status, result.stderr).toBe(0);
-          expect(trace).toContain('CREATE DATABASE IF NOT EXISTS qwen_o4_ci');
+          expect(trace).toContain(
+            `exec ${container}-1 sh -c MYSQL_PWD="\${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE IF NOT EXISTS qwen_o4_ci"`,
+          );
+          expect(trace).not.toContain(
+            `${container}-2 sh -c MYSQL_PWD="\${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="CREATE DATABASE`,
+          );
           expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(
             'MYSQL_PORT_1=43219\nMYSQL_PORT_2=43220\n',
           );
@@ -6732,6 +6737,14 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
             'MAVEN<-Dmysql.url=jdbc:mysql://127.0.0.1:43219/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>',
           );
           expect(result.stdout).toContain('MAVEN<-Dmysql.integration.forks=2>');
+          expect(result.stdout).toContain(
+            'MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43219/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false>',
+          );
+          expect(result.stdout).toContain('MAVEN<-Dqwen.o4.mysql.user=root>');
+          expect(result.stdout).toContain('QWEN_O4_MYSQL_PASSWORD=runtime-broker');
+          expect(result.stdout).not.toContain(
+            `MAVEN<-Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:43220/qwen_o4_ci`,
+          );
           for (const fork of [1, 2]) {
             expect(result.stdout).toContain(
               `MAVEN<-Dmysql.url.${fork}=jdbc:mysql://127.0.0.1:${43218 + fork}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false>`,
