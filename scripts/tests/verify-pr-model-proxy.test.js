@@ -4359,7 +4359,7 @@ describe('local container recipe pins', () => {
         if (depth > 4) return true;
         if (
           !fenceBody &&
-          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|busybox|toybox|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
+          !/[;|&()$<>\\`{['"]|^!|(?:^|[\s;|&({])[.:](?=\s|$)|https?:\/\/|@[a-z0-9_.-]+\/|\s--?[A-Za-z0-9]|(?:^|[\s;|&({])(?:\/(?=\S)|~\/|\.\.?\/)|\.(?:sh|js|mjs|cjs|ts|py|rb|pl|exe)(?=$|\s)|\b(?:corepack|trap|case|coproc|select|for|if|while|until|gh|git|make|builtin|command|exec|eval|env|sudo|doas|nice|time|nohup|setsid|timeout|stdbuf|chrt|ionice|caffeinate|rlwrap|source|awk|find|xargs|node|alias|shopt|let|printf|declare|typeset|readonly|read|rm|mv|cp|chmod|chown|curl|wget|bash|sh|zsh|ksh|dash|python3?|ruby|perl|nc|dd|tee|truncate|kill|docker|qwen)\b/i.test(
             source,
           )
         ) {
@@ -4778,38 +4778,18 @@ describe('local container recipe pins', () => {
                 ) {
                   return remember(true);
                 }
-              } else if (
-                astWrappers.has(name) ||
-                /^(?:busybox|toybox)$/i.test(name)
-              ) {
+              } else if (astWrappers.has(name)) {
                 const firstClean = args[0] ? astCleanToken(args[0]) : '';
                 const evalLike = name === 'eval' || name === 'exec';
-                const multiCallWrapper = /^(?:busybox|toybox)$/i.test(name);
-                const proseCopula =
-                  rawLine &&
-                  !evalLike &&
-                  /^(?:is|are|was|were)$/i.test(args[0] ?? '');
-                // Prose is a sentence of plain words, or a copula followed by
-                // nothing runnable: `busybox is sh -c '…'` is an invocation
-                // wearing a copula, while `busybox provides many utilities.`
-                // is documentation and must stay admitted.
-                const words = args.map((arg) => astUnquoteArg(arg));
-                const proseSentence =
-                  words.length > 1 &&
-                  words.every((w) =>
-                    /^[A-Za-z][A-Za-z'-]*[.,;:!?]?$/.test(w),
-                  ) &&
-                  /[.!?]$/.test(words.at(-1));
-                const proseOnly =
-                  proseSentence ||
-                  (proseCopula &&
-                    !args.slice(1).some((arg) => astRealWrapperArg(arg)));
                 if (
                   hasRedir ||
                   (evalLike && args.length > 0) ||
-                  (multiCallWrapper && args.length > 0 && !proseOnly) ||
                   (!(name === 'command' && /^-[vV]$/.test(firstClean)) &&
-                    !proseCopula &&
+                    !(
+                      rawLine &&
+                      !evalLike &&
+                      /^(?:is|are|was|were)$/i.test(args[0] ?? '')
+                    ) &&
                     args.some((arg) => astRealWrapperArg(arg)))
                 ) {
                   return remember(true);
@@ -8639,70 +8619,9 @@ describe('local container recipe pins', () => {
       ['fenced unlabeled abs path no ext', '```\n/tmp/payload\n```'],
       ['fenced console extensionless path', '```console\n./payload\n```'],
       ['fenced text benign-path-name', '```text\n../escape\n```'],
-      ['bare null-builtin semicolon whoami (D1)', ':; whoami'],
-      ['inline null-builtin semicolon whoami (D1)', '`:; whoami`'],
-      [
-        'fenced text null-builtin semicolon whoami (D1)',
-        '```text\n:; whoami\n```',
-      ],
-      [
-        'inline busybox sh -c single-quoted (S11-1)',
-        "`busybox sh -c 'gh pr merge <n>'`",
-      ],
-      [
-        'inline busybox ash -c single-quoted (S11-1)',
-        "`busybox ash -c 'gh pr merge <n>'`",
-      ],
-      ['inline busybox env wrapper (S11-1)', '`busybox env gh pr merge <n>`'],
-      [
-        'inline busybox sh -c double-quoted (S11-1)',
-        '`busybox sh -c "gh pr merge <n>"`',
-      ],
-      [
-        'inline busybox sh -c backslash-escaped (S11-1)',
-        '`busybox sh -c gh\\ pr\\ merge\\ <n>`',
-      ],
-      [
-        'inline busybox nohup wrapper (S11-1)',
-        '`busybox nohup gh pr merge <n>`',
-      ],
-      ['inline busybox non-shell applet (S11-1)', '`busybox httpd -f`'],
-      ['inline busybox flagless applet (S11-1)', '`busybox id`'],
-      ['bare busybox flagless applet (S11-1)', 'busybox id'],
-      ['inline toybox sh -c (S11-1)', "`toybox sh -c 'gh pr merge <n>'`"],
-      ['inline direct ash -c (S11-1)', "`ash -c 'gh pr merge <n>'`"],
-      [
-        'bare busybox copula-wrapped sh -c (S11-1)',
-        "busybox is sh -c 'gh pr merge <n>'",
-      ],
-      [
-        'bare busybox copula-wrapped env (S11-1)',
-        'busybox is env gh pr merge <n>',
-      ],
-      [
-        'bare toybox copula-wrapped sh -c (S11-1)',
-        "toybox is sh -c 'gh pr merge <n>'",
-      ],
-      [
-        'bare busybox copula naming a merge command',
-        'busybox is gh pr merge <n>',
-      ],
-      ['inline uppercase BUSYBOX sh -c', "`BUSYBOX sh -c 'gh pr merge <n>'`"],
-      ['inline uppercase TOYBOX sh -c', "`TOYBOX sh -c 'gh pr merge <n>'`"],
-      ['bare uppercase Busybox id', 'Busybox id'],
-      ['bare busybox sh -c (S11-1)', "busybox sh -c 'gh pr merge <n>'"],
-      [
-        'bare quoted busybox sh -c (S11-1)',
-        "'busybox' sh -c 'gh pr merge <n>'",
-      ],
-      [
-        'fenced text busybox sh -c (S11-1)',
-        "```text\nbusybox sh -c 'gh pr merge <n>'\n```",
-      ],
-      [
-        'fenced console busybox env (S11-1)',
-        '```console\nbusybox env gh pr merge <n>\n```',
-      ],
+      ['bare null-builtin semicolon whoami', ':; whoami'],
+      ['inline null-builtin semicolon whoami', '`:; whoami`'],
+      ['fenced text null-builtin semicolon whoami', '```text\n:; whoami\n```'],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
@@ -8712,32 +8631,6 @@ describe('local container recipe pins', () => {
     for (const [label, block] of [
       ['inline benign marker citation', 'Check `/.dockerenv` before running.'],
       ['inline benign slash command', 'Invoke `/verify-pr <n>` locally.'],
-      ['bare busybox prose copula', 'busybox is not installed on macOS.'],
-      ['bare capitalized Busybox prose', 'Busybox is a multi-call binary.'],
-      ['bare toybox prose copula', 'toybox is a multi-call binary.'],
-      ['bare ash prose copula', 'ash is the Almquist shell.'],
-      ['bare busybox past-tense prose', 'busybox was removed from the image.'],
-      [
-        'bare busybox non-copula prose',
-        'busybox provides many small utilities.',
-      ],
-      [
-        'bare capitalized non-copula prose',
-        'Busybox ships applets for embedded systems.',
-      ],
-      ['bare toybox non-copula prose', 'toybox includes several applets.'],
-      ['bare busybox has prose', 'busybox has many applets.'],
-      ['bare busybox can prose', 'busybox can replace coreutils.'],
-      [
-        'bare multi-call conjunction prose',
-        'busybox and toybox are multi-call binaries.',
-      ],
-      ['bare ash non-copula prose', 'ash supports job control.'],
-      ['bare ash remains prose', 'ash remains the default shell.'],
-      [
-        'fenced text non-copula prose',
-        '```text\nbusybox provides many utilities.\n```',
-      ],
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(`${skill}\n${block}`),
