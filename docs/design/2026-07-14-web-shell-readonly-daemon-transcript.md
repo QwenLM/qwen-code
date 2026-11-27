@@ -1,5 +1,7 @@
 # Design for Read-only Daemon Transcript Rendering in WebShell
 
+[English](2026-07-14-web-shell-readonly-daemon-transcript.md) | [简体中文](2026-07-14-web-shell-readonly-daemon-transcript.zh-CN.md)
+
 ## Document Status
 
 - Status: Implemented
