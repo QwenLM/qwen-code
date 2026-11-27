@@ -4172,6 +4172,26 @@ export interface DaemonSessionWorkflowTaskStatus {
   error?: string;
 }
 
+export interface DaemonSessionScheduledTaskStatus {
+  id: string;
+  /** 'cron' for session-scoped cron_create jobs, 'wakeup' for self-paced loop_wakeup. */
+  source: 'cron' | 'wakeup';
+  cronExpr: string;
+  prompt: string;
+  recurring: boolean;
+  createdAt: number;
+  expiresAt: number | null;
+  lastFiredAt: number | null;
+  nextRunAt: number | null;
+  gate?: string;
+  /** False when the owning session's scheduler has been disabled. */
+  enabled?: boolean;
+}
+
+export type DaemonSessionCancelableTaskKind =
+  | DaemonSessionTaskWithWorkflowStatus['kind']
+  | 'cron';
+
 export type DaemonSessionTaskStatus =
   | DaemonSessionAgentTaskStatus
   | DaemonSessionShellTaskStatus
@@ -4188,6 +4208,8 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
   /** Present when requested with `includeSubSessions`. */
   subSessions?: DaemonSessionSubSessionTaskStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 /**
@@ -4274,6 +4296,8 @@ export interface DaemonSessionWorkflowTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskWithWorkflowStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 export interface DaemonLspServerStatus {

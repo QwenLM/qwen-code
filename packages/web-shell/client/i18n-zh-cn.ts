@@ -4154,6 +4154,28 @@ export const ZH: Messages = {
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
   'chatHeader.openArtifacts': (v) => `产物（${v?.count ?? 0}）`,
+  'chatHeader.openScheduledTasks': (v) => `定时任务（${v?.count ?? 0}）`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `定时任务（${v?.count ?? 0}，已暂停）`,
+  'environment.scheduledTasks': '定时任务',
+  'environment.scheduledTasks.scopeDurable': '持久化',
+  'environment.scheduledTasks.scopeSession': '仅当前会话',
+  'environment.scheduledTasks.scopeWakeup': '循环唤醒',
+  'environment.scheduledTasks.statusActive': '运行中',
+  'environment.scheduledTasks.statusPaused': '已暂停',
+  'environment.scheduledTasks.nextRun': (v) => `${v?.when ?? ''}后`,
+  'environment.scheduledTasks.stop': '停止',
+  'environment.scheduledTasks.viewAll': '管理全部',
+  'scheduledTasks.durableHistoricalSnapshot':
+    '这是持久定时任务；实时状态不可用，展示其创建时的快照。',
+  'scheduledTasks.sessionScopedActive':
+    '当前会话运行中，停止后会立即取消后续触发。',
+  'scheduledTasks.sessionScopedPaused':
+    '当前会话的定时任务已暂停。停止后会移除剩余调度。',
+  'scheduledTasks.sessionScopedCancelled': '该会话级定时任务已停止或已过期。',
+  'scheduledTasks.stopSessionTask': '停止任务',
+  'scheduledTasks.error.cancelFailed': '停止定时任务失败',
+  'tasks.pill.scheduled': (v) => `${v?.count ?? 0} 个定时任务`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,

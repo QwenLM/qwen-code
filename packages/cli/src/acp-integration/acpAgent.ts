@@ -5184,7 +5184,9 @@ class QwenAgent implements Agent {
     // into a new hold while the drain below is in progress, so this early read
     // is an optimization rather than the final authorization.
     if (opts?.onlyIfUnheld) {
-      const holds = session.collectActiveWorkHolds();
+      const holds = session.collectActiveWorkHolds({
+        includeScheduledTasks: true,
+      });
       if (holds.length > 0) {
         cancelClose();
         return { closed: false, holds };
@@ -5201,7 +5203,9 @@ class QwenAgent implements Agent {
           drainTimeoutMs,
           'close',
         );
-        const holds = session.collectActiveWorkHolds();
+        const holds = session.collectActiveWorkHolds({
+          includeScheduledTasks: true,
+        });
         if (holds.length > 0) {
           return { closed: false, holds };
         }
@@ -5290,7 +5294,9 @@ class QwenAgent implements Agent {
           // every active turn has settled, while both the close gate and the
           // history-mutation gate still block destructive races.
           if (opts?.onlyIfUnheld) {
-            const holds = session.collectActiveWorkHolds();
+            const holds = session.collectActiveWorkHolds({
+              includeScheduledTasks: true,
+            });
             if (holds.length > 0) {
               return { closed: false, holds };
             }
@@ -14558,16 +14564,30 @@ class QwenAgent implements Agent {
             'Invalid or missing taskId',
           );
         }
+        const source = params['source'];
+        if (source !== undefined && source !== 'cron' && source !== 'wakeup') {
+          throw RequestError.invalidParams(
+            undefined,
+            'source must be "cron" or "wakeup"',
+          );
+        }
         const taskKind = params['taskKind'];
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
           taskKind !== 'monitor' &&
-          taskKind !== 'workflow'
+          taskKind !== 'workflow' &&
+          taskKind !== 'cron'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", "monitor", or "workflow"',
+            'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
+          );
+        }
+        if (taskKind !== 'cron' && source !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'source is valid only for taskKind "cron"',
           );
         }
         debugLogger.info(
@@ -14672,6 +14692,52 @@ class QwenAgent implements Agent {
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );
             return { cancelled: true, status: task.status };
+          }
+          case 'cron': {
+            if (!config.isCronEnabled?.()) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const scheduler = config.getCronScheduler?.();
+            const candidates =
+              scheduler
+                ?.list?.()
+                .filter(
+                  (item) =>
+                    item.id === taskId &&
+                    (source === undefined ||
+                      (source === 'wakeup'
+                        ? item.cronExpr === '@wakeup'
+                        : item.cronExpr !== '@wakeup')),
+                ) ?? [];
+            const job =
+              candidates.find((item) => !item.durable) ??
+              candidates.find((item) => item.durable);
+            if (!job) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_found`,
+              );
+              return { cancelled: false, reason: 'not_found' };
+            }
+            if (job.durable) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} source=${source ?? 'legacy'} reason=not_session_scoped`,
+              );
+              return { cancelled: false, reason: 'not_session_scoped' };
+            }
+            if (
+              source === undefined &&
+              candidates.filter((item) => !item.durable).length > 1
+            ) {
+              return { cancelled: false, reason: 'ambiguous' };
+            }
+            const deleted =
+              job.cronExpr === '@wakeup'
+                ? scheduler!.cancelWakeup(taskId)
+                : scheduler!.cancelSessionCron(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
+            );
+            return { cancelled: deleted };
           }
           default: {
             const exhaustive: never = taskKind;
