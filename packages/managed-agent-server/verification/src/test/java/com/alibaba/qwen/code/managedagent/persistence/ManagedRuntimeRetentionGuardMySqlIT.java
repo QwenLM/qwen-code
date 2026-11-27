@@ -76,8 +76,9 @@ class ManagedRuntimeRetentionGuardMySqlIT {
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
         // The contract seeds and widens ma_session_record on the per-test
-        // schema; only re-seeding the identity column on that same schema can
-        // reproduce the index-length refusal and then drop the indexes.
+        // schema; only re-seeding the identity column there reproduces the
+        // index-length refusal, and only on that schema can the narrowed
+        // retry reach the contract with its tables and indexes intact.
         assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
                 .hasMessageContaining("Specified key was too long");
         contract.configureSessionRecordIdentity(VARCHAR_64_PERMISSIVE);
