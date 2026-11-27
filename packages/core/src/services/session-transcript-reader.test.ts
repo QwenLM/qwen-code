@@ -7593,31 +7593,45 @@ describe('SessionTranscriptReader', () => {
 
       let maxActive = 0;
       let maxQueued = 0;
+      let activeAtQueuedReject = -1;
+      let queuedAtQueuedReject = -1;
       const queuedAbort = new AbortController();
       let abortedQueued = false;
       setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
         const stats = getSessionTranscriptBuildSemaphoreStatsForTest();
         maxActive = Math.max(maxActive, stats.active);
         maxQueued = Math.max(maxQueued, stats.queued);
-        if (!abortedQueued && stats.queued > 0) {
+        if (!abortedQueued && stats.active === 2 && stats.queued >= 3) {
           abortedQueued = true;
           queuedAbort.abort(new DOMException('queued abort', 'AbortError'));
         }
       });
 
-      const promises = sessions.map((s, idx) =>
-        new SessionTranscriptReader(s.workspace).getLastUserPromptAt(
+      const promises = sessions.map((s, idx) => {
+        const p = new SessionTranscriptReader(s.workspace).getLastUserPromptAt(
           s.sid,
           'active',
           idx === 5 ? { signal: queuedAbort.signal } : {},
-        ),
-      );
+        );
+        return idx === 5
+          ? p.catch((err) => {
+              const stats = getSessionTranscriptBuildSemaphoreStatsForTest();
+              activeAtQueuedReject = stats.active;
+              queuedAtQueuedReject = stats.queued;
+              throw err;
+            })
+          : p;
+      });
       const results = await Promise.allSettled(promises);
 
       expect(abortedQueued).toBe(true);
       expect(maxActive).toBeLessThanOrEqual(2);
       expect(maxActive).toBe(2);
       expect(maxQueued).toBeGreaterThanOrEqual(1);
+      // Queued waiter #5 must reject immediately via its abort listener while
+      // both active slots are still occupied and earlier queued waiters remain.
+      expect(activeAtQueuedReject).toBe(2);
+      expect(queuedAtQueuedReject).toBeGreaterThanOrEqual(1);
       expect(getSessionTranscriptBuildSemaphoreStatsForTest()).toEqual({
         active: 0,
         queued: 0,
@@ -8425,6 +8439,176 @@ describe('SessionTranscriptReader', () => {
           startOffset: sizePostRewindPrompt,
         }),
       ]);
+
+      // N1 / M8: Saturated 256 B Bloom (count >= buffer.length) on a 300-record
+      // resumed session must resize (256 B -> 1024 B, count 301) and keep sidecar_tail.
+      const satSid = '770e8400-e29b-41d4-a716-446655440001';
+      const satFile = newReader().getSessionFilePath(satSid);
+      await fs.mkdir(path.dirname(satFile), { recursive: true });
+      const satRecords: ChatRecord[] = [];
+      let satPrev: string | null = null;
+      for (let i = 0; i < 300; i += 1) {
+        const rec: ChatRecord = {
+          ...record(
+            i === 0 ? 'u-sat-0' : `a-sat-${i}`,
+            satPrev,
+            i === 0 ? 'sat prompt' : `sat reply ${i}`,
+          ),
+          sessionId: satSid,
+          type: i === 0 ? 'user' : 'assistant',
+        };
+        satRecords.push(rec);
+        satPrev = rec.uuid;
+      }
+      await fs.writeFile(
+        satFile,
+        `${satRecords.map((r) => JSON.stringify(r)).join('\n')}\n`,
+        'utf8',
+      );
+      const satSidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(satFile),
+        satSid,
+      );
+      expect(await newReader().getLastUserPromptAt(satSid)).toBe(
+        satRecords[0]!.timestamp,
+      );
+      // Craft an exact-identity sidecar whose 256 B Bloom is already saturated (count = 300 >= 256).
+      const satSidecarRaw = JSON.parse(
+        await fs.readFile(satSidecarPath, 'utf8'),
+      );
+      satSidecarRaw.prefixUuidBloom = {
+        bits: Buffer.alloc(256, 0xff).toString('base64'),
+        hashes: 7,
+        count: 300,
+      };
+      await fs.writeFile(satSidecarPath, JSON.stringify(satSidecarRaw), 'utf8');
+
+      const satRecorder = new ChatRecordingService(
+        {
+          storage: new Storage(workspaceDir),
+          getTargetDir: () => workspaceDir,
+          getSessionId: () => satSid,
+          getProjectRoot: () => workspaceDir,
+          getCliVersion: () => 'test',
+          getModel: () => 'test',
+          getAuthType: () => undefined,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          getResumedSessionData: () => ({
+            conversation: {
+              sessionId: satSid,
+              projectHash: 'test',
+              startTime: satRecords[0]!.timestamp,
+              lastUpdated: satRecords.at(-1)!.timestamp,
+              messages: satRecords,
+            },
+            filePath: satFile,
+            lastRecordUuid: satPrev,
+          }),
+        } as unknown as Config,
+        undefined,
+        false,
+      );
+      satRecorder.recordUserMessage([
+        { text: 'prompt triggering bloom resize' },
+      ]);
+      await satRecorder.flush();
+      const resizedSidecar = JSON.parse(
+        await fs.readFile(satSidecarPath, 'utf8'),
+      );
+      expect(resizedSidecar.prefixUuidBloom).toBeDefined();
+      expect(
+        Buffer.from(resizedSidecar.prefixUuidBloom.bits, 'base64').length,
+      ).toBe(1024);
+      expect(resizedSidecar.prefixUuidBloom.count).toBe(301);
+      const satSizeAfterPrompt = (await fs.stat(satFile)).size;
+
+      satRecorder.recordAssistantTurn({
+        model: 'test',
+        message: [{ text: 'after resize reply' }],
+      });
+      await satRecorder.flush();
+      resetSessionTranscriptIndexCacheForTest();
+      const satTailScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        satTailScans.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(satSid)).toBe(
+        resizedSidecar.lastUserPromptAt,
+      );
+      expect(satTailScans).toEqual([
+        expect.objectContaining({
+          filePath: satFile,
+          mode: 'sidecar_tail',
+          startOffset: satSizeAfterPrompt,
+        }),
+      ]);
+
+      // N3 / M11: Writer-side adoption must refuse a same-identity/size/mtime
+      // sidecar whose prefixSha256 does not match the actual file bytes.
+      const badHashSid = '770e8400-e29b-41d4-a716-446655440002';
+      const badHashFile = newReader().getSessionFilePath(badHashSid);
+      const bhU1 = {
+        ...record('u-bh-1', null, 'bh prompt'),
+        sessionId: badHashSid,
+      };
+      const bhA1 = {
+        ...record('a-bh-1', bhU1.uuid, 'bh reply'),
+        sessionId: badHashSid,
+        type: 'assistant' as const,
+      };
+      await fs.writeFile(
+        badHashFile,
+        `${JSON.stringify(bhU1)}\n${JSON.stringify(bhA1)}\n`,
+        'utf8',
+      );
+      const bhSidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(badHashFile),
+        badHashSid,
+      );
+      expect(await newReader().getLastUserPromptAt(badHashSid)).toBe(
+        bhU1.timestamp,
+      );
+      const bhSidecarRaw = JSON.parse(await fs.readFile(bhSidecarPath, 'utf8'));
+      const mismatchedHash =
+        bhSidecarRaw.prefixSha256 === '0'.repeat(64)
+          ? '1'.repeat(64)
+          : '0'.repeat(64);
+      bhSidecarRaw.prefixSha256 = mismatchedHash;
+      await fs.writeFile(bhSidecarPath, JSON.stringify(bhSidecarRaw), 'utf8');
+
+      const bhRecorder = new ChatRecordingService(
+        {
+          storage: new Storage(workspaceDir),
+          getTargetDir: () => workspaceDir,
+          getSessionId: () => badHashSid,
+          getProjectRoot: () => workspaceDir,
+          getCliVersion: () => 'test',
+          getModel: () => 'test',
+          getAuthType: () => undefined,
+          getApprovalMode: () => ApprovalMode.DEFAULT,
+          getResumedSessionData: () => ({
+            conversation: {
+              sessionId: badHashSid,
+              projectHash: 'test',
+              startTime: bhU1.timestamp,
+              lastUpdated: bhA1.timestamp,
+              messages: [bhU1, bhA1],
+            },
+            filePath: badHashFile,
+            lastRecordUuid: bhA1.uuid,
+          }),
+        } as unknown as Config,
+        undefined,
+        false,
+      );
+      bhRecorder.recordUserMessage([{ text: 'prompt after mismatched hash' }]);
+      await bhRecorder.flush();
+      const bhAfterSidecar = JSON.parse(
+        await fs.readFile(bhSidecarPath, 'utf8'),
+      );
+      // Adoption was refused, so neither stale Bloom nor mismatched prefixSha256 was carried forward.
+      expect(bhAfterSidecar.prefixUuidBloom).toBeUndefined();
+      expect(bhAfterSidecar.prefixSha256).toBeUndefined();
     });
 
     it('handles custom_title and session_source metadata re-anchors, non-conversation tail records, tail cap, missing prefixSha256, and foreign tail records cleanly (R1-2, R1-11, R1-15)', async () => {
@@ -8483,6 +8667,62 @@ describe('SessionTranscriptReader', () => {
           filePath: file,
           mode: 'sidecar_tail',
           startOffset: size1,
+        }),
+      ]);
+
+      // N2 / M9: Cold scan of a transcript whose trailing record is a custom_title
+      // re-anchor must walk sidecar.leafUuid back to the active conversation tail (a1)
+      // so the next prompt anchored on a1 takes sidecar_tail (and does not point at
+      // an abandoned branch leaf when a metadata re-anchor jumps back).
+      const wbSid = '770e8400-e29b-41d4-a716-446655440003';
+      const wbFile = newReader().getSessionFilePath(wbSid);
+      const wbU1 = {
+        ...record('u-wb-1', null, 'wb prompt 1'),
+        sessionId: wbSid,
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const wbA1 = {
+        ...record('a-wb-1', wbU1.uuid, 'wb answer 1'),
+        sessionId: wbSid,
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      };
+      const wbTailTitle: ChatRecord = {
+        ...record('sys-title-tail', wbA1.uuid, ''),
+        sessionId: wbSid,
+        type: 'system',
+        subtype: 'custom_title',
+        message: undefined,
+      };
+      await fs.writeFile(
+        wbFile,
+        `${[wbU1, wbA1, wbTailTitle].map((r) => JSON.stringify(r)).join('\n')}\n`,
+        'utf8',
+      );
+      const wbSidecarPath = sessionPromptTimeSidecarPath(
+        path.dirname(wbFile),
+        wbSid,
+      );
+      expect(await newReader().getLastUserPromptAt(wbSid)).toBe(wbU1.timestamp);
+      const wbSidecar = JSON.parse(await fs.readFile(wbSidecarPath, 'utf8'));
+      expect(wbSidecar.leafUuid).toBe(wbA1.uuid);
+      const wbSize1 = (await fs.stat(wbFile)).size;
+
+      const wbU2 = {
+        ...record('u-wb-2', wbA1.uuid, 'wb prompt 2'),
+        sessionId: wbSid,
+        timestamp: '2026-01-01T00:00:08.000Z',
+      };
+      await appendRecords(wbFile, wbU2);
+      resetSessionTranscriptIndexCacheForTest();
+      const wbScans: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) => wbScans.push(e));
+      expect(await newReader().getLastUserPromptAt(wbSid)).toBe(wbU2.timestamp);
+      expect(wbScans).toEqual([
+        expect.objectContaining({
+          filePath: wbFile,
+          mode: 'sidecar_tail',
+          startOffset: wbSize1,
         }),
       ]);
 
