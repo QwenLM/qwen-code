@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createLoadAdmissionMonitor,
   DISABLED_LOAD_ADMISSION_SNAPSHOT,
   EVENT_LOOP_LAG_ENTER_MS,
   EVENT_LOOP_LAG_EXIT_MS,
+  hostLoadRatio,
   LOAD_ADMISSION_SAMPLE_MS,
   LOAD_ADMISSION_SUSTAIN_SAMPLES,
   LOAD_CORROBORATION_ENTER_MS,
@@ -901,5 +903,47 @@ describe('load admission real event-loop stall', () => {
     } finally {
       monitor.dispose();
     }
+  });
+});
+
+describe('load admission with an unreadable core count (Android/Termux)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hostLoadRatio never returns Infinity or NaN', () => {
+    expect(hostLoadRatio(42.85, 0)).toBe(0);
+    expect(hostLoadRatio(0, 0)).toBe(0);
+    expect(hostLoadRatio(Number.NaN, 8)).toBe(0);
+    expect(hostLoadRatio(4, 8)).toBe(0.5);
+  });
+
+  const sampleDefaultReader = async () => {
+    const monitor = createLoadAdmissionMonitor({ sampleMs: 20 });
+    try {
+      await new Promise((r) => setTimeout(r, 140));
+      return monitor.snapshot();
+    } finally {
+      monitor.dispose();
+    }
+  };
+
+  it('does not latch cpu_load when os.cpus() is empty but loadavg is high', async () => {
+    vi.spyOn(os, 'cpus').mockReturnValue([]);
+    vi.spyOn(os, 'loadavg').mockReturnValue([42.85, 40, 30]);
+    const snap = await sampleDefaultReader();
+    expect(snap.sampledAtMs).toBeGreaterThan(0);
+    expect(Number.isFinite(snap.loadRatio)).toBe(true);
+    expect(snap.overloaded).toBe(false);
+  });
+
+  it('still divides by the core count when it is readable', async () => {
+    vi.spyOn(os, 'cpus').mockReturnValue(
+      new Array(2).fill({}) as os.CpuInfo[],
+    );
+    vi.spyOn(os, 'loadavg').mockReturnValue([1, 1, 1]);
+    const snap = await sampleDefaultReader();
+    expect(snap.sampledAtMs).toBeGreaterThan(0);
+    expect(snap.loadRatio).toBe(0.5);
   });
 });

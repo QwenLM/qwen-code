@@ -103,6 +103,22 @@ function advanceSignal(
 }
 
 /**
+ * Host load per core, or 0 when the CPU signal is unreadable. `os.cpus()`
+ * returns an empty array on Android/Termux (libuv cannot read /proc/stat)
+ * while /proc/loadavg stays readable, so `loadavg / 0` is `Infinity`:
+ * `Infinity >= LOAD_RATIO_ENTER` holds on every sample and
+ * `Infinity < LOAD_RATIO_EXIT` never does, which latches `cpu_load`
+ * permanently. An unreadable core count is not evidence of overload, so the
+ * CPU signal reports 0 and the event-loop lag / observation-gap signals keep
+ * guarding admission. Core count stays host scope on purpose (see the note
+ * in createLoadAdmissionMonitor).
+ */
+export function hostLoadRatio(loadavg1m: number, cores: number): number {
+  if (!Number.isFinite(loadavg1m) || !(cores > 0)) return 0;
+  return loadavg1m / cores;
+}
+
+/**
  * Samples host load and daemon event-loop lag on an unref'd interval and
  * caches a synchronous snapshot for fresh-session admission. The admission
  * contract forbids async probes, so the reading is always the last tick's —
@@ -137,9 +153,11 @@ export function createLoadAdmissionMonitor(
     // availableParallelism() honours cgroup quota/affinity — dividing one by
     // the other latches a CPU-limited daemon into permanent refusals.
     // Container-level starvation is the event-loop-lag signal's job.
-    const cores = os.cpus().length;
+    // Read once, as before; keep retrying only while it is unreadable (0).
+    let cores = 0;
     readSignals = () => {
-      const loadRatio = os.loadavg()[0] / cores;
+      if (!(cores > 0)) cores = os.cpus().length;
+      const loadRatio = hostLoadRatio(os.loadavg()[0], cores);
       // Window-scoped p99: reset after each read so the figure describes
       // the last interval, not the since-start average.
       const eventLoopLagP99Ms = loopDelay.percentile(99) / 1_000_000;
