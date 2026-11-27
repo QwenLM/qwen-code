@@ -188,6 +188,8 @@ export function useSessionScheduledTasks(options: {
   durableSeeded?: boolean;
   /** Actual bound-session prompt admission, not the record-only /run route. */
   onRunPrompt: ScheduledTaskRunPrompt;
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
+  onOverloadRefused?: () => void;
   onError: ScheduledTaskActionErrorHandler;
   /**
    * App calls this hook above the `<I18nProvider>` it renders, where `useI18n()`
@@ -206,6 +208,8 @@ export function useSessionScheduledTasks(options: {
     activityKey,
     durableSeeded = false,
     onRunPrompt,
+    shouldRefuseManualRun,
+    onOverloadRefused,
     onError,
     translate,
     refreshTrigger = 0,
@@ -503,6 +507,8 @@ export function useSessionScheduledTasks(options: {
             onOneShotError: onError,
             isStale: () =>
               confirmedDeletedDurableTaskKeysRef.current.has(deletedTaskKey),
+            shouldRefuseManualRun,
+            onOverloadRefused,
           },
         );
       } finally {
@@ -516,9 +522,11 @@ export function useSessionScheduledTasks(options: {
     [
       markBusy,
       onError,
+      onOverloadRefused,
       onRunPrompt,
       owner,
       refresh,
+      shouldRefuseManualRun,
       t,
       workspaceActions,
       workspaceCwd,

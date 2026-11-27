@@ -2299,7 +2299,7 @@ describe('createDaemonSessionActions', () => {
       clientId: string;
     }>();
     source.client.branchSession.mockReturnValueOnce(first.promise);
-    const { actions } = createActionsHarness({
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
       session: source,
     });
 
@@ -2319,7 +2319,15 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-b',
       displayName: 'First',
       switchStarted: true,
+      switchCompleted: expect.any(Promise),
     });
+    const firstResult = await firstBranch;
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected the forwarded branch load');
+    clearTimeout(pendingLoad.timeout);
+    pendingLoad.resolve();
+    pendingSessionLoadRef.current = undefined;
+    await expect(firstResult.switchCompleted).resolves.toBe(true);
   });
 
   it('does not open a branch that resolves after its source is cleared', async () => {
@@ -2698,6 +2706,102 @@ describe('createDaemonSessionActions', () => {
       expect.objectContaining({
         operation: 'create_session',
         code: 'session_limit_exceeded',
+      }),
+    );
+  });
+
+  it('marks a load-admission create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.5,
+          eventLoopLagP99Ms: 20,
+        },
+        'System overloaded (cpu_load)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'system_overloaded',
+      }),
+    );
+  });
+
+  it('preserves a branch overload notice code and operation', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 42,
+        },
+        'System overloaded (cpu_load)',
+      );
+    });
+    const { actions } = createActionsHarness({ session, addNotice });
+
+    await expect(actions.branchSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'branch_session',
+        code: 'system_overloaded',
+      }),
+    );
+  });
+
+  it('preserves a fork overload notice code and operation', async () => {
+    const addNotice = vi.fn();
+    const session = Object.assign(createMockSession('source-session'), {
+      fork: vi.fn(async () => {
+        throw new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            reason: 'cpu_load',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 42,
+          },
+          'System overloaded (cpu_load)',
+        );
+      }),
+    });
+    const { actions } = createActionsHarness({ session, addNotice });
+
+    await expect(actions.forkSession('write tests')).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'fork_session',
+        code: 'system_overloaded',
       }),
     );
   });
@@ -4232,6 +4336,64 @@ describe('createDaemonSessionActions', () => {
     clearTimeout(pending?.timeout);
     pending?.resolve();
     await load;
+  });
+
+  it('dispatches a system_overloaded notice when restoreWorktreeSession fails with 503 overload', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      503,
+      {
+        error: 'System overloaded (cpu_load)',
+        code: 'system_overloaded',
+        reason: 'cpu_load',
+        loadRatio: 2.8,
+        eventLoopLagP99Ms: 310,
+      },
+      'System overloaded (cpu_load)',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        operation: 'load_session',
+        code: 'system_overloaded',
+        severity: 'warning',
+        message:
+          'Restore worktree session failed: System overloaded (cpu_load)',
+        recoverable: true,
+      }),
+    );
+    expect(error).toMatchObject({ _alreadyDispatched: true });
+  });
+
+  it('does not dispatch a notice when restoreWorktreeSession fails with a non-overload error', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const error = new DaemonHttpError(
+      500,
+      { error: 'snapshot corrupt' },
+      'snapshot corrupt',
+    );
+    const restoreDetachedWorktreeSession = vi.fn(async () => {
+      throw error;
+    });
+    const { actions } = createActionsHarness({
+      addNotice,
+      restoreDetachedWorktreeSession,
+    });
+
+    await expect(
+      actions.restoreWorktreeSession('session-b', { workspaceCwd: '/work/b' }),
+    ).rejects.toBe(error);
+    expect(addNotice).not.toHaveBeenCalled();
   });
 
   it('detaches only an unconsumed restored client when navigation supersedes it', async () => {
@@ -7406,6 +7568,141 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('preserves overload coding when deferred checkpoint load is refused after publication', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession.mockResolvedValue({
+      sessionId: 'checkpoint-child',
+      displayName: 'Historical branch',
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      addNotice,
+      session,
+    });
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
+    await vi.waitFor(() => {
+      expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 42,
+        },
+        'System overloaded (cpu_load)',
+      ),
+    );
+
+    await expect(branch).resolves.toMatchObject({
+      sessionId: 'checkpoint-child',
+      switchStarted: true,
+    });
+    const completion = (await branch).switchCompleted;
+    expect(completion).toBeInstanceOf(Promise);
+    await expect(completion).resolves.toBe(false);
+    await vi.waitFor(() => {
+      expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'branch_session',
+          code: 'system_overloaded',
+          severity: 'warning',
+          message: 'Branch session failed: System overloaded (cpu_load)',
+        }),
+      );
+    });
+  });
+
+  it('reports an aborted deferred checkpoint switch as incomplete', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('source-session');
+    session.client.branchSession.mockResolvedValue({
+      sessionId: 'checkpoint-child',
+      displayName: 'Historical branch',
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      addNotice,
+      session,
+    });
+    const branch = actions.branchSession({ atRecordId: 'checkpoint-1' });
+    await vi.waitFor(() => {
+      expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(new DOMException('Navigation changed', 'AbortError'));
+
+    await expect(branch).resolves.toMatchObject({
+      sessionId: 'checkpoint-child',
+      switchStarted: true,
+    });
+    await expect((await branch).switchCompleted).resolves.toBe(false);
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  describe('fresh-session load overload notices', () => {
+    it.each([
+      {
+        method: 'loadSession',
+        operation: 'load_session',
+        action: 'Load',
+      },
+      {
+        method: 'resumeSession',
+        operation: 'resume_session',
+        action: 'Resume',
+      },
+    ] as const)(
+      'preserves overload coding for $operation',
+      async ({ method, operation, action }) => {
+        const addNotice = vi.fn((notice) => notice);
+        const { actions, pendingSessionLoadRef } = createActionsHarness({
+          addNotice,
+        });
+        const pendingSession = actions[method]('cold-session');
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (!pendingLoad) throw new Error('Expected the pending session load');
+        const error = new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            reason: 'cpu_load',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 42,
+          },
+          'System overloaded (cpu_load)',
+        );
+        clearTimeout(pendingLoad.timeout);
+        pendingSessionLoadRef.current = undefined;
+        pendingLoad.reject(error);
+
+        await expect(pendingSession).rejects.toBe(error);
+        expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            operation,
+            code: 'system_overloaded',
+            severity: 'warning',
+            message: `${action} session failed: System overloaded (cpu_load)`,
+            recoverable: true,
+          }),
+        );
+        expect(error).toMatchObject({ _alreadyDispatched: true });
+      },
+    );
+  });
+
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {
@@ -7439,12 +7736,15 @@ describe('createDaemonSessionActions', () => {
         sessionId: 'session-b',
         displayName: 'Historical branch',
         switchStarted: true,
+        switchCompleted: expect.any(Promise),
       });
+      const completion = (await branch).switchCompleted;
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.resolve();
         pendingSessionLoadRef.current = undefined;
       }
+      await expect(completion).resolves.toBe(true);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();

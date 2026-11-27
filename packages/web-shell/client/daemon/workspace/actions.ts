@@ -7,6 +7,7 @@
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   DaemonClient,
+  DaemonHttpError,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -926,7 +927,15 @@ export function createDaemonWorkspaceActions({
         'Create scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },
@@ -982,7 +991,15 @@ export function createDaemonWorkspaceActions({
         'Run scheduled task timed out',
       );
       if (!res.ok) {
-        throw new Error(await readDaemonError(res, `POST ${path}`));
+        const body = (await res
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          await readDaemonError(res, `POST ${path}`),
+        );
       }
       return (await res.json()) as DaemonScheduledTask;
     },

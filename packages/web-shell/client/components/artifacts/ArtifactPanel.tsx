@@ -553,6 +553,8 @@ interface ArtifactPanelProps {
   sideTasks?: readonly SideTaskListItem[];
   archivedSideTasks?: readonly SideTaskListItem[];
   sideTasksLoading?: boolean;
+  /** Disables New side task controls while daemon load admission is paused. */
+  overloadPaused?: boolean;
   onCreateSideTask?: () => void;
   onOpenSideTask?: (sideTask: SideTaskListItem) => void;
   onArchiveSideTasks?: (
@@ -800,6 +802,7 @@ export function ArtifactPanel({
   sideTasks = [],
   archivedSideTasks = [],
   sideTasksLoading = false,
+  overloadPaused = false,
   onCreateSideTask,
   onOpenSideTask,
   onArchiveSideTasks,
@@ -1192,7 +1195,7 @@ export function ArtifactPanel({
                   showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
-                    disabled={sideTasksLoading}
+                    disabled={sideTasksLoading || overloadPaused}
                     onSelect={onCreateSideTask}
                   >
                     <MessageCirclePlusIcon
@@ -1472,7 +1475,7 @@ export function ArtifactPanel({
                 <button
                   type="button"
                   className={styles.emptyAction}
-                  disabled={sideTasksLoading}
+                  disabled={sideTasksLoading || overloadPaused}
                   aria-busy={sideTasksLoading}
                   onClick={onCreateSideTask}
                 >
@@ -1639,7 +1642,10 @@ export function ArtifactPanel({
                       </>
                     )}
                     {sideTasks.length > 0 && <DropdownMenuSeparator />}
-                    <DropdownMenuItem onSelect={onCreateSideTask}>
+                    <DropdownMenuItem
+                      disabled={sideTasksLoading || overloadPaused}
+                      onSelect={onCreateSideTask}
+                    >
                       <CirclePlusIcon
                         className={styles.sideTaskNewIcon}
                         strokeWidth={1.6}

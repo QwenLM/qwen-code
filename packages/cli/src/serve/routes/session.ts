@@ -5315,9 +5315,11 @@ export function registerSessionRoutes(
           storedSessionId,
         ]),
       ];
+      let liveOnBridge = false;
       for (const candidateId of busyCandidateIds) {
         try {
           const summary = runtime.bridge.getSessionSummary(candidateId);
+          liveOnBridge = true;
           busy =
             summary.hasActivePrompt ||
             (summary.pendingPromptCount ?? 0) > 0 ||
@@ -5348,6 +5350,19 @@ export function registerSessionRoutes(
         'conflict'
       ) {
         throw new SessionConflictError(storedSessionId);
+      }
+      if (!liveOnBridge) {
+        // Cold worktree restore always allocates a fresh child in the
+        // subsequent load. Refuse before mutating git/disk while overload
+        // admission is closed; already-live sessions remain warm and proceed.
+        const load = getLoadAdmissionSnapshot?.();
+        if (load?.overloaded) {
+          throw new SystemOverloadedError(
+            load.reason ?? 'cpu_load',
+            load.loadRatio,
+            load.eventLoopLagP99Ms,
+          );
+        }
       }
       await runOwnerRuntimeActivity(runtime, async () => {
         await restoreWorktreeFromSessionSnapshot({

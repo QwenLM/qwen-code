@@ -706,4 +706,48 @@ describe('runScheduledTaskManually owner matching', () => {
     expect(replayGuard?.()).toBe(true);
     expect(actions.runScheduledTask).toHaveBeenCalledOnce();
   });
+
+  it('refuses a manual run before consuming a one-shot when shouldRefuseManualRun returns true', async () => {
+    const task = makeTask({ recurring: false, sessionMode: 'per_run' });
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onRunPrompt = vi.fn();
+    const onOverloadRefused = vi.fn();
+    const onError = vi.fn();
+
+    await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+      reload: vi.fn(),
+      onError,
+      shouldRefuseManualRun: () => true,
+      onOverloadRefused,
+    });
+
+    expect(onOverloadRefused).toHaveBeenCalledOnce();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('proceeds with a manual run when shouldRefuseManualRun returns false', async () => {
+    const task = makeTask({ recurring: true, sessionMode: 'per_run' });
+    const actions = {
+      listScheduledTasks: vi.fn().mockResolvedValue([task]),
+      runScheduledTask: vi.fn().mockResolvedValue(task),
+      assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+    };
+    const onOverloadRefused = vi.fn();
+
+    await runScheduledTaskManually(task, actions, vi.fn(), (key) => key, {
+      reload: vi.fn(),
+      onError: vi.fn(),
+      shouldRefuseManualRun: () => false,
+      onOverloadRefused,
+    });
+
+    expect(onOverloadRefused).not.toHaveBeenCalled();
+    expect(actions.runScheduledTask).toHaveBeenCalledOnce();
+  });
 });
