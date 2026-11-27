@@ -647,15 +647,25 @@ describe('permission rules', () => {
     ).toMatch(/Takes the watch of PR #12 over/);
   });
 
-  it('says what an in-place start does', async () => {
-    const details = await invocation({
+  it('says what an in-place start and take-over do', async () => {
+    const start = await invocation({
       command: 'prepare',
       pr: 12,
       repo: 'o/r',
       in_place: true,
     }).getConfirmationDetails(signal());
-    expect((details as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+    expect((start as { warnings?: string[] }).warnings?.join(' ')).toMatch(
       /Starts an in-place watch of PR #12: the fix agent works in your own checkout/,
+    );
+    const takeOver = await invocation({
+      command: 'prepare',
+      pr: 12,
+      repo: 'o/r',
+      in_place: true,
+      take_over: true,
+    }).getConfirmationDetails(signal());
+    expect((takeOver as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+      /Takes the in-place watch of PR #12 over/,
     );
   });
 
@@ -1182,9 +1192,17 @@ describe('unattended', () => {
     expect(await granted()).toBe(false);
   });
 
-  it('refuses an in-place watch: its fixes always run attended', async () => {
+  it('refuses an in-place watch: its fixes always run attended, even when scheduled', async () => {
+    vi.stubEnv('FAKE_IN_PLACE', '1');
     await prepare();
     vi.stubEnv('FAKE_STATUS', status({ inPlace: true }));
+    const scheduled = await invocation({
+      command: 'schedule',
+      pr: 12,
+      every: 5,
+    }).execute(signal());
+    expect(scheduled.error).toBeUndefined();
+    expect(watchTask('session-a', 12)).toMatchObject({ task: 'feedc0ffee12' });
     const result = await confirmAndRun();
     expect(result.error?.message).toMatch(/in-place watch/);
     expect(await granted()).toBe(false);
