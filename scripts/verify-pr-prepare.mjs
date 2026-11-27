@@ -1052,6 +1052,125 @@ function hasCustomWorktreeConfig(root = null) {
   );
 }
 
+/**
+ * Probes whether the active `git` binary honours `--no-lazy-fetch` /
+ * `GIT_NO_LAZY_FETCH=1` (introduced in git 2.45.0). Invokes `--version` so no
+ * repository config or object database is touched.
+ */
+export function gitSupportsNoLazyFetch() {
+  return run('git', ['--no-lazy-fetch', '--version']).status === 0;
+}
+
+const EXTENSIONS_PARTIALCLONE_BYTES = Buffer.from(
+  'extensions.partialclone',
+  'ascii',
+);
+const REMOTE_PREFIX_BYTES = Buffer.from('remote.', 'ascii');
+const PROMISOR_SUFFIX_BYTES = Buffer.from('.promisor', 'ascii');
+const PARTIALCLONEFILTER_SUFFIX_BYTES = Buffer.from(
+  '.partialclonefilter',
+  'ascii',
+);
+
+function asciiEqualsIgnoreCase(buf, expectedLower) {
+  if (buf.length !== expectedLower.length) return false;
+  for (let i = 0; i < buf.length; i += 1) {
+    const b = buf[i];
+    const low = b >= 0x41 && b <= 0x5a ? b + 32 : b;
+    if (low !== expectedLower[i]) return false;
+  }
+  return true;
+}
+
+function isRawPromisorConfigKey(rawKey) {
+  if (asciiEqualsIgnoreCase(rawKey, EXTENSIONS_PARTIALCLONE_BYTES)) {
+    return true;
+  }
+  if (
+    rawKey.length < REMOTE_PREFIX_BYTES.length + PROMISOR_SUFFIX_BYTES.length ||
+    !asciiEqualsIgnoreCase(
+      rawKey.subarray(0, REMOTE_PREFIX_BYTES.length),
+      REMOTE_PREFIX_BYTES,
+    )
+  ) {
+    return false;
+  }
+  const matchSuffix = (suffix) =>
+    rawKey.length >= REMOTE_PREFIX_BYTES.length + suffix.length &&
+    asciiEqualsIgnoreCase(
+      rawKey.subarray(rawKey.length - suffix.length),
+      suffix,
+    );
+  return (
+    matchSuffix(PROMISOR_SUFFIX_BYTES) ||
+    matchSuffix(PARTIALCLONEFILTER_SUFFIX_BYTES)
+  );
+}
+
+/**
+ * Checks whether the clone declares promisor / partial-clone state (config
+ * keys across all included scopes or `.promisor` pack markers) without reading
+ * git objects. Fails closed (returns true) when config enumeration fails.
+ */
+export function hasPromisorCloneConfig(root = null) {
+  const prefix = [...GIT_HARDENING, ...(root ? ['-C', root] : [])];
+  const listed = run(
+    'git',
+    [...prefix, 'config', '--includes', '--null', '--list'],
+    {
+      encoding: null,
+    },
+  );
+  if (listed.status !== 0 && listed.status !== 1) return true;
+  if (listed.status === 0 && Buffer.isBuffer(listed.stdout)) {
+    const raw = listed.stdout;
+    let start = 0;
+    while (start < raw.length) {
+      let end = raw.indexOf(0, start);
+      if (end === -1) end = raw.length;
+      const entry = raw.subarray(start, end);
+      start = end + 1;
+      if (entry.length === 0) continue;
+      const nl = entry.indexOf(0x0a);
+      const rawKey = nl === -1 ? entry : entry.subarray(0, nl);
+      if (isRawPromisorConfigKey(rawKey)) return true;
+    }
+  }
+  const common = run('git', [...prefix, 'rev-parse', '--git-common-dir']);
+  const commonDir = singleLineOutput(common);
+  if (!commonDir) return true;
+  const resolvedCommon = isAbsolute(commonDir)
+    ? commonDir
+    : resolve(root ?? process.cwd(), commonDir);
+  const packDir = join(resolvedCommon, 'objects', 'pack');
+  try {
+    if (
+      existsSync(packDir) &&
+      readdirSync(packDir).some((entry) => entry.endsWith('.promisor'))
+    ) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * On git < 2.45 (where `GIT_NO_LAZY_FETCH=1` is ignored), refuses partial /
+ * promisor clones before any object-reading git call can trigger
+ * `remote.*.uploadpack`. Ordinary non-promisor clones on Debian 12 (git 2.39)
+ * continue to work.
+ */
+export function promisorLazyFetchHardeningError(root = null) {
+  if (gitSupportsNoLazyFetch()) return null;
+  if (!hasPromisorCloneConfig(root)) return null;
+  const verRes = run('git', ['--version']);
+  const verLabel =
+    singleLineOutput(verRes)?.replace(/^git version\s+/i, '') || 'unknown';
+  return `git (${verLabel}) does not support --no-lazy-fetch (requires git >= 2.45), so promisor lazy-fetch cannot be disabled on this partial/promisor clone — upgrade to git >= 2.45 or re-clone as a full non-promisor repository, then re-run prepare`;
+}
+
 export function gitStatusArgs(root) {
   return [
     ...localFilterOverrides(root),
@@ -1881,6 +2000,8 @@ function main(argv) {
         'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
       );
     }
+    const prePromisorError = promisorLazyFetchHardeningError(null);
+    if (prePromisorError) return fail(3, prePromisorError);
   } catch (error) {
     return fail(3, error.message);
   }
@@ -1915,6 +2036,8 @@ function main(argv) {
         'git config sets core.worktree, which redirects the working tree root — re-clone or clear core.worktree, then re-run prepare',
       );
     }
+    const rootPromisorError = promisorLazyFetchHardeningError(root);
+    if (rootPromisorError) return fail(3, rootPromisorError);
     rootFilterOverrides = localFilterOverrides(root);
   } catch (error) {
     return fail(3, error.message);

@@ -1960,11 +1960,16 @@ function main(argv) {
     process.stderr.write(`verify-pr check: ${dir} does not exist\n`);
     return 1;
   }
-  const dirTrimmed = /^[A-Za-z]:[\\/]+$/.test(dir)
-    ? `${dir.slice(0, 2)}${sep}`
-    : dir.length > 1 && !isFilesystemRoot(dir)
-      ? dir.replace(/[\\/]+$/, '') || dir
-      : dir;
+  const PATH_SEP_RE = process.platform === 'win32' ? /[\\/]+/ : /\/+/;
+  const TRAILING_PATH_SEP_RE =
+    process.platform === 'win32' ? /[\\/]+$/ : /\/+$/;
+  const ENDS_WITH_PATH_SEP_RE = process.platform === 'win32' ? /[\\/]$/ : /\/$/;
+  const dirTrimmed =
+    process.platform === 'win32' && /^[A-Za-z]:[\\/]+$/.test(dir)
+      ? `${dir.slice(0, 2)}${sep}`
+      : dir.length > 1 && !isFilesystemRoot(dir)
+        ? dir.replace(TRAILING_PATH_SEP_RE, '') || dir
+        : dir;
   let canonicalDir;
   try {
     canonicalDir = realPath(dirTrimmed);
@@ -2009,7 +2014,7 @@ function main(argv) {
         const rest = p.slice(parsed.root.length);
         return {
           root: parsed.root,
-          parts: rest.split(/[\\/]+/).filter((part) => part !== ''),
+          parts: rest.split(PATH_SEP_RE).filter((part) => part !== ''),
         };
       };
       const rawSpec = isAbsolute(dirTrimmed)
@@ -2017,7 +2022,7 @@ function main(argv) {
         : (() => {
             const cwdSpec = splitSegments(process.cwd());
             const relParts = dirTrimmed
-              .split(/[\\/]+/)
+              .split(PATH_SEP_RE)
               .filter((part) => part !== '');
             return {
               root: cwdSpec.root,
@@ -2095,7 +2100,9 @@ function main(argv) {
           if (isTmpName(cur)) anchorPaths.push(cur);
           cur = dirname(cur);
         } else {
-          cur = /[\\/]$/.test(cur) ? `${cur}${part}` : `${cur}${sep}${part}`;
+          cur = ENDS_WITH_PATH_SEP_RE.test(cur)
+            ? `${cur}${part}`
+            : `${cur}${sep}${part}`;
         }
         if (/^pr(\d+)-verify-/i.test(basename(cur))) {
           sawVerifyRoundSegment = true;
@@ -2127,7 +2134,7 @@ function main(argv) {
             queue.unshift(...targetSpec.parts);
           } else {
             cur = dirname(cur);
-            const relTarget = target.split(/[\\/]+/).filter((p) => p !== '');
+            const relTarget = target.split(PATH_SEP_RE).filter((p) => p !== '');
             queue.unshift(...relTarget);
           }
         }

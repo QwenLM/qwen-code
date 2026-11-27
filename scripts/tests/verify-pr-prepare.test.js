@@ -36,10 +36,13 @@ import {
   detectIsolation,
   detectMandatoryEscalations,
   gitStatusArgs,
+  gitSupportsNoLazyFetch,
+  hasPromisorCloneConfig,
   inspectInfoExclude,
   localFilterOverrides,
   parseArgs,
   parseRepo,
+  promisorLazyFetchHardeningError,
   requireBoundary,
   reviewState,
   untrackedIgnoreSourceError,
@@ -5488,5 +5491,136 @@ describe('trust classification and mandatory escalation (§4)', () => {
     const rootErr = untrackedIgnoreSourceError(dir2);
     expect(rootErr).toMatch(/untracked ignore files hide worktree entries/);
     expect(rootErr).toContain('.gitignore');
+  });
+
+  it('R7-2: probes --no-lazy-fetch capability and refuses promisor clones on git < 2.45 with upgrade remedy', () => {
+    const { dir: promDir, base: promBase, head: promHead } = makeRepo();
+    const marker = join(promDir, 'r72-uploadpack-fired');
+    execFileSync(
+      'git',
+      ['-C', promDir, 'config', '--local', 'core.repositoryformatversion', '1'],
+      { env: gitEnv, stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', promDir, 'config', '--local', 'extensions.partialclone', 'origin'],
+      { env: gitEnv, stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      ['-C', promDir, 'config', '--local', 'remote.origin.promisor', 'true'],
+      { env: gitEnv, stdio: 'pipe' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-C',
+        promDir,
+        'config',
+        '--local',
+        'remote.origin.uploadpack',
+        `touch ${marker}; false`,
+      ],
+      { env: gitEnv, stdio: 'pipe' },
+    );
+    expect(hasPromisorCloneConfig(promDir)).toBe(true);
+
+    // Stub git reporting 2.43.0 and rejecting --no-lazy-fetch (exit 129),
+    // delegating all other invocations to the real git binary.
+    const stubDir = mkdtempSync(join(tmpdir(), 'verify-pr-prepare-r72-'));
+    tmpDirs.push(stubDir);
+    const realGit = execFileSync(
+      process.platform === 'win32' ? 'where' : 'which',
+      ['git'],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split(/\r?\n/)[0];
+    const stubBin = join(stubDir, 'bin');
+    mkdirSync(stubBin, { recursive: true });
+    writeFileSync(
+      join(stubBin, 'git'),
+      [
+        '#!/bin/sh',
+        'for arg in "$@"; do',
+        '  if [ "$arg" = "--no-lazy-fetch" ]; then',
+        '    echo "unknown option: --no-lazy-fetch" >&2',
+        '    exit 129',
+        '  fi',
+        'done',
+        'if [ "$1" = "--version" ]; then',
+        '  echo "git version 2.43.0"',
+        '  exit 0',
+        'fi',
+        'unset GIT_NO_LAZY_FETCH',
+        'exec "$REAL_GIT" "$@"',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const fakeGhEnv = installFakeGh(
+      snapshotFor({ base: promBase, head: promHead }),
+    );
+    const envWithOldGit = {
+      ...fakeGhEnv,
+      ...gitEnv,
+      REAL_GIT: realGit,
+      PATH: `${stubBin}:${fakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+    };
+    const res = runPrepare(promDir, ['42', '--repo', REPO], envWithOldGit);
+    expect(res.status).toBe(3);
+    expect(res.stderr).toContain('2.43.0');
+    expect(res.stderr).toContain('git >= 2.45');
+    expect(existsSync(marker)).toBe(false);
+
+    // Non-UTF-8 remote subsection names (`[remote "a\xffb"] promisor = true`)
+    // must also be caught at the raw-byte level rather than failing open.
+    const {
+      dir: rawPromDir,
+      base: rawPromBase,
+      head: rawPromHead,
+    } = makeRepo();
+    const rawMarker = join(rawPromDir, 'r72-nonutf8-uploadpack-fired');
+    const rawCfgPath = join(rawPromDir, '.git', 'config');
+    writeFileSync(
+      rawCfgPath,
+      Buffer.concat([
+        readFileSync(rawCfgPath),
+        Buffer.from('\n[remote "a'),
+        Buffer.from([0xff]),
+        Buffer.from(
+          `b"]\n\turl = file:///nonexistent\n\tpromisor = true\n\tuploadpack = touch ${rawMarker}; false\n`,
+        ),
+      ]),
+    );
+    expect(hasPromisorCloneConfig(rawPromDir)).toBe(true);
+    const rawFakeGhEnv = installFakeGh(
+      snapshotFor({ base: rawPromBase, head: rawPromHead }),
+    );
+    const rawRes = runPrepare(rawPromDir, ['42', '--repo', REPO], {
+      ...rawFakeGhEnv,
+      ...gitEnv,
+      REAL_GIT: realGit,
+      PATH: `${stubBin}:${rawFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+    });
+    expect(rawRes.status).toBe(3);
+    expect(rawRes.stderr).toContain('git >= 2.45');
+    expect(existsSync(rawMarker)).toBe(false);
+
+    // Ordinary non-promisor clones remain allowed end-to-end even when git < 2.45.
+    const { dir: fullDir, base: fullBase, head: fullHead } = makeRepo();
+    expect(hasPromisorCloneConfig(fullDir)).toBe(false);
+    expect(typeof gitSupportsNoLazyFetch()).toBe('boolean');
+    expect(promisorLazyFetchHardeningError(fullDir)).toBeNull();
+    const fullFakeGhEnv = installFakeGh(
+      snapshotFor({ base: fullBase, head: fullHead }),
+    );
+    const fullRes = runPrepare(fullDir, ['42', '--repo', REPO], {
+      ...fullFakeGhEnv,
+      ...gitEnv,
+      REAL_GIT: realGit,
+      PATH: `${stubBin}:${fullFakeGhEnv.PATH ?? process.env.PATH ?? ''}`,
+    });
+    expect(fullRes.status).toBe(0);
   });
 });
