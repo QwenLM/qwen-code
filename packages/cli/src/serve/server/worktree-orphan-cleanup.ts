@@ -244,6 +244,29 @@ export async function withWorktreeArchiveMove<T>(
   sourceState: 'active' | 'archived',
   move: () => Promise<T>,
 ): Promise<T> {
+  // Keep no-sidecar work on the caller's synchronous prefix so the next batch
+  // item cannot acquire its coordinator first.
+  const sidecarAbsent = (sidecarPath: string): boolean => {
+    try {
+      fs.lstatSync(sidecarPath);
+      return false;
+    } catch (error) {
+      // Only a genuinely missing entry skips the strict sidecar read. A
+      // dangling symlink, unreadable parent or other stat error stays on the
+      // fail-closed path below.
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+  };
+  if (
+    sidecarAbsent(
+      service.getWorktreeSessionPathForArchiveState(sessionId, 'active'),
+    ) &&
+    sidecarAbsent(
+      service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+    )
+  ) {
+    return move();
+  }
   const otherState: 'active' | 'archived' =
     sourceState === 'active' ? 'archived' : 'active';
   const lockKeys = new Set<string>();

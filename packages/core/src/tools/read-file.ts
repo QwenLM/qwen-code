@@ -201,7 +201,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // These files are small; re-emit them on every read.
     const isAutoMem =
       !this.config.getFileSystemService().textFileIo &&
-      isAnyAutoMemPath(absPath, projectRoot);
+      isAnyAutoMemPath(
+        absPath,
+        projectRoot,
+        this.config.getProjectMemoryOwner?.(),
+      );
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
