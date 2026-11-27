@@ -13,6 +13,7 @@ import {
   type Ref,
 } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
+import type { MessageListHandle } from '../components/MessageList.js';
 import {
   TranscriptViewport,
   type TranscriptViewportProps,
@@ -35,12 +36,12 @@ import styles from './ChatSurface.module.css';
 const EMPTY_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [];
 
 type SurfaceOwnedTranscriptKeys =
+  | 'ref'
   | 'messages'
   | 'pendingApproval'
   | 'approvalOverlayActive'
   | 'sessionViewportEnabled'
   | 'loadingTranscript'
-  | 'isResponding'
   | 'sessionKey'
   | 'hasOlderHistory'
   | 'onLoadOlderHistory'
@@ -78,7 +79,9 @@ export interface ChatSurfaceProps {
   // surface owns only the chat column. Slots keep the kernel backend-neutral.
   readonly header?: ReactNode;
   readonly panels?: ReactNode;
+  readonly footerClassName?: string;
   readonly transcriptClassName?: string;
+  readonly transcriptRef?: Ref<MessageListHandle>;
   readonly transcriptProps?: ChatSurfaceTranscriptProps;
   // The composer status stack / usage stats need richer facts than the current
   // conservative statusFacts; the owning page supplies them until parity lands.
@@ -136,10 +139,12 @@ export interface ChatSurfaceProps {
   readonly composerSubmitBlocked?: boolean;
   readonly composerClassName?: string;
   readonly composerVisible?: boolean;
+  readonly composerEditorVisible?: boolean;
   readonly composerKey?: string;
   readonly composerRef?: Ref<EditorHandle>;
   readonly composerContainerRef?: Ref<HTMLDivElement>;
   readonly composerCancelEnabled?: boolean;
+  readonly onComposerCancel?: () => void;
   readonly onComposerSubmit?: ChatEditorComponentProps['onSubmit'];
   readonly composerProps?: ChatSurfaceComposerProps;
   // Opt-in flags for host-context integrations (historical turn-navigation /
@@ -165,7 +170,9 @@ export function ChatSurface({
   className,
   header,
   panels,
+  footerClassName,
   transcriptClassName,
+  transcriptRef,
   transcriptProps,
   composerStatus,
   composerFooter,
@@ -201,10 +208,12 @@ export function ChatSurface({
   composerSubmitBlocked,
   composerClassName,
   composerVisible = true,
+  composerEditorVisible = true,
   composerKey,
   composerRef,
   composerContainerRef,
   composerCancelEnabled = true,
+  onComposerCancel,
   onComposerSubmit,
   composerProps,
   sessionViewportEnabled = false,
@@ -330,6 +339,8 @@ export function ChatSurface({
             generateContent={generateContent}
             extraDescriptionId={approvalExtraDescriptionId}
             onConfirm={async (id, optionId) => {
+              const confirmSessionId = controller.sessionId;
+              const token = committedTokenRef.current;
               const result = await controller.respondApproval(id, optionId);
               if (result.admission !== 'accepted') {
                 // ToolApproval re-arms only through rejection; a non-accepted
@@ -338,7 +349,13 @@ export function ChatSurface({
                 // displays error.message, so the fallback alone never shows.
                 const message = t('chat.approvalNotAccepted');
                 const error = new Error(message);
-                reportError(error, message);
+                const sameSession =
+                  confirmSessionId !== ''
+                    ? committedSessionIdRef.current === confirmSessionId
+                    : committedTokenRef.current === token;
+                if (mountedRef.current && sameSession) {
+                  reportError(error, message);
+                }
                 throw error;
               }
             }}
@@ -506,47 +523,8 @@ export function ChatSurface({
 
   const hideComposer = hideComposerWhenCardActive && cardActive;
 
-  return (
-    <div
-      className={className ? `${styles.root} ${className}` : styles.root}
-      data-testid="chat-surface"
-    >
-      {header}
-      <div
-        className={
-          transcriptClassName
-            ? `${styles.transcript} ${transcriptClassName}`
-            : styles.transcript
-        }
-      >
-        {controller.transcriptState === 'error' ? (
-          transcriptError
-        ) : (
-          <TranscriptViewport
-            {...transcriptProps}
-            messages={[...controller.messages]}
-            pendingApproval={
-              activeApproval?.request ?? activeQuestion?.request ?? null
-            }
-            approvalOverlayActive={cardActive}
-            sessionViewportEnabled={sessionViewportEnabled}
-            loadingTranscript={controller.transcriptState === 'loading'}
-            isResponding={isRunning}
-            sessionKey={controller.sessionId}
-            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
-            onLoadOlderHistory={loadOlder}
-            historyPaginationError={
-              historyPaginationError ?? controller.historyPaginationError
-            }
-            loadingOlderHistory={
-              loadingOlderHistory ?? controller.loadingOlderHistory
-            }
-            historyCapacityReached={
-              historyCapacityReached ?? controller.historyCapacityReached
-            }
-          />
-        )}
-      </div>
+  const bottomContent = (
+    <>
       {/* In-flow bottom sheets: a decision card replaces the hidden composer so
           the transcript shrinks above it instead of being covered by a floating
           overlay, and each card keeps its own container so an approval and a
@@ -591,48 +569,108 @@ export function ChatSurface({
           }
         >
           {composerStatus}
-          <ChatEditor
-            {...composerProps}
-            key={composerKey}
-            ref={composerRef}
-            commands={[...commands]}
-            sessionId={
-              composerProps && 'sessionId' in composerProps
-                ? composerProps.sessionId
-                : controller.sessionId
-            }
-            atWorkspaceCwd={atWorkspaceCwd}
-            composerScopeKey={composerScopeKey}
-            workspaceFeaturesEnabled={workspaceFeaturesEnabled}
-            visibleToolbarActions={visibleToolbarActions}
-            isRunning={
-              composerCancelEnabled
-                ? composerProps && 'isRunning' in composerProps
-                  ? Boolean(composerProps.isRunning)
-                  : isRunning
-                : false
-            }
-            dialogOpen={
-              hideComposerWhenCardActive
-                ? cardActive
-                : Boolean(composerProps?.dialogOpen)
-            }
-            // The deferred commit keeps the draft, so the send button would stay
-            // enabled over it; reject every submit path while a submit is in
-            // flight, while the transcript is still loading, or while the page
-            // blocks writes (the editor stays editable).
-            submitDisabled={
-              composerSubmitBlocked ||
-              controller.transcriptState === 'loading' ||
-              submitInFlight ||
-              admissionLocked ||
-              controller.phase === 'submitting'
-            }
-            onCancel={composerCancelEnabled ? handleCancel : undefined}
-            onSubmit={onComposerSubmit ?? handleSurfaceSubmit}
-          />
-          {composerFooter}
+          {composerEditorVisible && (
+            <>
+              <ChatEditor
+                {...composerProps}
+                key={composerKey}
+                ref={composerRef}
+                commands={[...commands]}
+                sessionId={
+                  composerProps && 'sessionId' in composerProps
+                    ? composerProps.sessionId
+                    : controller.sessionId
+                }
+                atWorkspaceCwd={atWorkspaceCwd}
+                composerScopeKey={composerScopeKey}
+                workspaceFeaturesEnabled={workspaceFeaturesEnabled}
+                visibleToolbarActions={visibleToolbarActions}
+                isRunning={
+                  composerCancelEnabled
+                    ? composerProps && 'isRunning' in composerProps
+                      ? Boolean(composerProps.isRunning)
+                      : isRunning
+                    : false
+                }
+                dialogOpen={
+                  hideComposerWhenCardActive
+                    ? cardActive
+                    : Boolean(composerProps?.dialogOpen)
+                }
+                // The deferred commit keeps the draft, so the send button would
+                // stay enabled over it; reject every submit path while a submit
+                // is in flight, while the transcript is still loading, or while
+                // the page blocks writes (the editor stays editable).
+                submitDisabled={
+                  composerSubmitBlocked ||
+                  controller.transcriptState === 'loading' ||
+                  submitInFlight ||
+                  admissionLocked ||
+                  controller.phase === 'submitting'
+                }
+                onCancel={
+                  composerCancelEnabled
+                    ? (onComposerCancel ?? handleCancel)
+                    : undefined
+                }
+                onSubmit={onComposerSubmit ?? handleSurfaceSubmit}
+              />
+              {composerFooter}
+            </>
+          )}
         </div>
+      )}
+    </>
+  );
+
+  return (
+    <div
+      className={className ? `${styles.root} ${className}` : styles.root}
+      data-testid="chat-surface"
+    >
+      {header}
+      <div
+        className={
+          transcriptClassName
+            ? `${styles.transcript} ${transcriptClassName}`
+            : styles.transcript
+        }
+      >
+        {controller.transcriptState === 'error' ? (
+          transcriptError
+        ) : (
+          <TranscriptViewport
+            {...transcriptProps}
+            ref={transcriptRef}
+            messages={[...controller.messages]}
+            pendingApproval={activeApproval?.request ?? null}
+            approvalOverlayActive={cardActive}
+            sessionViewportEnabled={sessionViewportEnabled}
+            loadingTranscript={controller.transcriptState === 'loading'}
+            isResponding={
+              transcriptProps && 'isResponding' in transcriptProps
+                ? Boolean(transcriptProps.isResponding)
+                : isRunning
+            }
+            sessionKey={controller.sessionId}
+            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
+            onLoadOlderHistory={loadOlder}
+            historyPaginationError={
+              historyPaginationError ?? controller.historyPaginationError
+            }
+            loadingOlderHistory={
+              loadingOlderHistory ?? controller.loadingOlderHistory
+            }
+            historyCapacityReached={
+              historyCapacityReached ?? controller.historyCapacityReached
+            }
+          />
+        )}
+      </div>
+      {footerClassName ? (
+        <div className={footerClassName}>{bottomContent}</div>
+      ) : (
+        bottomContent
       )}
     </div>
   );

@@ -69,14 +69,28 @@ describe('Chat layout relayout boundary CSS contracts', () => {
     expect(rules.some((decls) => decls.get('flex') === '1 1 auto')).toBe(false);
   });
 
-  it('pins flex: 1 1 0% on ChatPane .body', () => {
-    const bodyRules = findRules(chatPaneCss, '.body');
+  it('pins flex: 1 1 0% on ChatPane .pane .body', () => {
+    const bodyRules = findRules(chatPaneCss, '.pane .body');
     expect(bodyRules.length).toBeGreaterThan(0);
     expect(bodyRules.some((decls) => decls.get('flex') === '1 1 0%')).toBe(
       true,
     );
     expect(bodyRules.some((decls) => decls.get('flex') === '1 1 auto')).toBe(
       false,
+    );
+  });
+
+  it('pins flex: 1 1 0%, min-height: 0, and height: auto on ChatPane .pane .surface', () => {
+    const surfaceRules = findRules(chatPaneCss, '.pane .surface');
+    expect(surfaceRules.length).toBeGreaterThan(0);
+    expect(surfaceRules.some((decls) => decls.get('flex') === '1 1 0%')).toBe(
+      true,
+    );
+    expect(surfaceRules.some((decls) => decls.get('min-height') === '0')).toBe(
+      true,
+    );
+    expect(surfaceRules.some((decls) => decls.get('height') === 'auto')).toBe(
+      true,
     );
   });
 
