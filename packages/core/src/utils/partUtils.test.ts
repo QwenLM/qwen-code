@@ -12,6 +12,11 @@ import {
   appendToLastTextPart,
   prependToFirstTextPart,
 } from './partUtils.js';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+  typedPromptPrefix,
+} from './typed-prompt.js';
 import { createOpenAIReasoningThoughtPart } from './thoughtUtils.js';
 import type { GenerateContentResponse, Part, PartUnion } from '@google/genai';
 
@@ -359,6 +364,36 @@ describe('partUtils', () => {
       const prompt: PartUnion[] = ['first part'];
 
       expect(prependToFirstTextPart(prompt, '')).toBe(prompt);
+    });
+
+    it('records what it puts in front of a marked part (#9455)', () => {
+      const [once] = prependToFirstTextPart(
+        [markTypedPrompt({ text: 'typed' })],
+        'ctx',
+      ) as Part[];
+      expect(once.text).toBe('ctx\n\ntyped');
+      expect(isTypedPrompt(once)).toBe(true);
+      expect(typedPromptPrefix(once)).toBe('ctx\n\n'.length);
+      const [twice] = prependToFirstTextPart([once], 'outer', '\n') as Part[];
+      expect(twice.text).toBe('outer\nctx\n\ntyped');
+      expect(twice.text!.slice(typedPromptPrefix(twice))).toBe('typed');
+    });
+
+    it('records nothing on an unmarked part, or on a marked part it does not reach', () => {
+      const [unmarked] = prependToFirstTextPart(
+        [{ text: 'typed' }],
+        'ctx',
+      ) as Part[];
+      expect(unmarked).toEqual({ text: 'ctx\n\ntyped' });
+      // ACP puts what the person attached first and marks the instruction
+      // it ends with.
+      const marked = markTypedPrompt({ text: 'instruction' });
+      const result = prependToFirstTextPart(
+        [{ text: 'attached' }, marked],
+        'ctx',
+      ) as Part[];
+      expect(result[0]).toEqual({ text: 'ctx\n\nattached' });
+      expect(result[1]).toBe(marked);
     });
 
     it('should use a custom separator', () => {

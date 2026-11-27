@@ -10,6 +10,7 @@ import type {
   Part,
   PartUnion,
 } from '@google/genai';
+import { withTypedPromptPrefix } from './typed-prompt.js';
 
 /**
  * Converts a PartListUnion into a string.
@@ -206,10 +207,13 @@ export function prependToFirstTextPart(
   if (typeof textPart === 'string') {
     newPrompt[textPartIndex] = `${textToPrepend}${separator}${textPart}`;
   } else {
-    newPrompt[textPartIndex] = {
-      ...textPart,
-      text: `${textToPrepend}${separator}${textPart.text ?? ''}`,
-    };
+    // A part marked as what the user typed records what was put in front of
+    // it, so a compaction can tell the two apart (#9455).
+    const prefix = `${textToPrepend}${separator}`;
+    newPrompt[textPartIndex] = withTypedPromptPrefix(
+      { ...textPart, text: `${prefix}${textPart.text ?? ''}` },
+      prefix.length,
+    );
   }
 
   return newPrompt;

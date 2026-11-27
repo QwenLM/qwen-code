@@ -18,6 +18,17 @@ import type { Part, PartListUnion, PartUnion } from '@google/genai';
  */
 export const TYPED_PROMPT_METADATA = 'qwen-code:typed-prompt';
 
+/**
+ * `partMetadata` key on a marked part: how many characters at the start of
+ * its text the client put in front of it after it was marked, such as the
+ * IDE context. It is set where that text is put in front, so a compaction
+ * that cuts the part reads where the user's words begin instead of working
+ * it out from the text, where a prompt that itself opens with a reminder
+ * block would pass for the client's (#9455). Absent, nothing was put in
+ * front after the mark.
+ */
+export const TYPED_PROMPT_PREFIX_METADATA = 'qwen-code:typed-prompt-prefix';
+
 /** A copy of `part` marked as the text the user typed. */
 export function markTypedPrompt(part: Part): Part {
   return {
@@ -31,6 +42,30 @@ export function isTypedPrompt(part: Part): boolean {
   return (
     part.partMetadata?.[TYPED_PROMPT_METADATA] === true && isPlainTextPart(part)
   );
+}
+
+/**
+ * `part`, whose text now starts with `added` characters put in front of what
+ * it held, with them added to its recorded prefix when it is marked. An
+ * unmarked part is returned as it is.
+ */
+export function withTypedPromptPrefix(part: Part, added: number): Part {
+  if (added <= 0 || !isTypedPrompt(part)) return part;
+  return {
+    ...part,
+    partMetadata: {
+      ...part.partMetadata,
+      [TYPED_PROMPT_PREFIX_METADATA]: (typedPromptPrefix(part) ?? 0) + added,
+    },
+  };
+}
+
+/** The prefix recorded on `part` by `withTypedPromptPrefix`, if any. */
+export function typedPromptPrefix(part: Part): number | undefined {
+  const prefix = part.partMetadata?.[TYPED_PROMPT_PREFIX_METADATA];
+  return Number.isSafeInteger(prefix) && (prefix as number) > 0
+    ? (prefix as number)
+    : undefined;
 }
 
 /** Whether `part` can hold what the user typed: plain text, not a call or thought. */
@@ -47,8 +82,9 @@ function isPlainTextPart(part: PartUnion): boolean {
 /**
  * `request` with its first text part marked as what the user typed. The
  * front ends that send a person's prompt put the text they submitted first,
- * ahead of what they attached; leading reminders spliced into that part are
- * set apart by compaction, which reads them as blocks. A request whose
+ * ahead of what they attached; what the client puts in front of that part
+ * later, such as the IDE context, is recorded with `withTypedPromptPrefix`
+ * and set apart by compaction. A request whose
  * first text part is empty, or that has none, is returned as it is: a later
  * part is never taken in its place.
  */

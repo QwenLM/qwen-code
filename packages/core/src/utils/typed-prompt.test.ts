@@ -14,6 +14,9 @@ import {
   markFirstTextPartUnlessMarked,
   markTypedPrompt,
   TYPED_PROMPT_METADATA,
+  TYPED_PROMPT_PREFIX_METADATA,
+  typedPromptPrefix,
+  withTypedPromptPrefix,
 } from './typed-prompt.js';
 import { OpenAIContentConverter } from '../core/openaiContentGenerator/converter.js';
 import { AnthropicContentConverter } from '../core/anthropicContentGenerator/converter.js';
@@ -125,6 +128,31 @@ describe('markFirstTextPart', () => {
     markFirstTextPart(request);
     expect(request).toEqual([{ text: 'typed' }, header]);
   });
+});
+
+describe('the typed-prompt prefix (#9455 R3-1)', () => {
+  it('records what was put in front of a marked part and adds to it', () => {
+    const once = withTypedPromptPrefix(markTypedPrompt({ text: 'abc' }), 5);
+    expect(typedPromptPrefix(once)).toBe(5);
+    expect(isTypedPrompt(once)).toBe(true);
+    expect(typedPromptPrefix(withTypedPromptPrefix(once, 7))).toBe(12);
+  });
+
+  it('leaves an unmarked part, or a part nothing was put in front of, as it is', () => {
+    const plain: Part = { text: 'abc' };
+    expect(withTypedPromptPrefix(plain, 5)).toBe(plain);
+    const marked = markTypedPrompt({ text: 'abc' });
+    expect(withTypedPromptPrefix(marked, 0)).toBe(marked);
+  });
+
+  it.each([0, -3, 2.5, Number.NaN, '7', null])(
+    'reads no prefix from %s',
+    (value) => {
+      const part = markTypedPrompt({ text: 'abc' });
+      part.partMetadata![TYPED_PROMPT_PREFIX_METADATA] = value;
+      expect(typedPromptPrefix(part)).toBeUndefined();
+    },
+  );
 });
 
 describe('markFirstTextPartUnlessMarked', () => {

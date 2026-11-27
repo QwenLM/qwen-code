@@ -18,7 +18,7 @@ import {
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN,
 } from '../utils/transcript-records.js';
-import { isTypedPrompt } from '../utils/typed-prompt.js';
+import { isTypedPrompt, typedPromptPrefix } from '../utils/typed-prompt.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -318,8 +318,8 @@ export interface SlimOptions {
   maxTextChars?: number;
   /**
    * With `maxTextChars`, a user part marked as what the person typed keeps
-   * that text up to TYPED_TEXT_MAX_CHARS instead. The envelopes leading the
-   * part, such as the IDE context prepended to the prompt, are cut to
+   * that text up to TYPED_TEXT_MAX_CHARS instead. What the client recorded
+   * putting in front of it, such as the IDE context, is cut to
    * `maxTextChars` like other text. Unmarked parts are cut as before.
    */
   keepTypedText?: boolean;
@@ -653,12 +653,37 @@ function leadingEnvelopes(value: string): EnvelopeSpan[] {
 }
 
 /**
+ * Where what the person typed begins in a marked part: after the prefix the
+ * client recorded putting in front of it, such as the IDE context (#9455
+ * R3-1). A part with no prefix recorded is all theirs, so a prompt that
+ * itself opens with a reminder block is kept as typed. A recorded prefix the
+ * text does not bear out, one that is not a run of whole envelopes and the
+ * whitespace after them, is not trusted: the start is then read from the
+ * envelopes leading the text, as it was before the prefix was recorded.
+ */
+function typedTextStart(part: Part, value: string): number {
+  const prefix = typedPromptPrefix(part);
+  if (prefix === undefined) return 0;
+  const head = value.slice(0, prefix);
+  const lastInHead = leadingEnvelopes(head).at(-1);
+  const headEnd = lastInHead
+    ? lastInHead.closeAt + lastInHead.close.length
+    : undefined;
+  // The whitespace closing the prefix stays with the typed text, as the cut
+  // read from the text left it.
+  if (headEnd !== undefined && head.slice(headEnd).trim() === '') {
+    return headEnd;
+  }
+  const lastLeading = leadingEnvelopes(value).at(-1);
+  return lastLeading ? lastLeading.closeAt + lastLeading.close.length : 0;
+}
+
+/**
  * A marked part in a reduced request: what the person typed is kept up to
- * TYPED_TEXT_MAX_CHARS. The envelopes leading the part are not theirs, such
- * as the IDE context the CLI prepends to the prompt, so that run is cut to
- * `maxTextChars` like other text first. Both cuts follow
- * `truncateKeepingEnvelopes`, so every block open where either one ends is
- * closed there.
+ * TYPED_TEXT_MAX_CHARS. What the client put in front of it is not theirs,
+ * so that run is cut to `maxTextChars` like other text first. Both cuts
+ * follow `truncateKeepingEnvelopes`, so every block open where either one
+ * ends is closed there.
  */
 function keepTypedPart(
   part: Part,
@@ -666,10 +691,7 @@ function keepTypedPart(
   stats: SlimStats,
 ): Part {
   const value = part.text ?? '';
-  const lastLeading = leadingEnvelopes(value).at(-1);
-  const typedAt = lastLeading
-    ? lastLeading.closeAt + lastLeading.close.length
-    : 0;
+  const typedAt = typedTextStart(part, value);
   const leading = value.slice(0, typedAt);
   const typed = value.slice(typedAt);
   const text =

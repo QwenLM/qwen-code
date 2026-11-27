@@ -40,7 +40,11 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
-import { isTypedPrompt, markTypedPrompt } from '../utils/typed-prompt.js';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+  typedPromptPrefix,
+} from '../utils/typed-prompt.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -7556,6 +7560,42 @@ Active file:
 \`\`\`
 hello
 \`\`\``;
+
+    it("keeps the typed-prompt mark on the person's prompt the editor context is merged into, and records the context's length (#9455)", async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordCronPrompt: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      vi.mocked(ideContextStore.get).mockReturnValue(
+        ideContext([activeIdeFile()]),
+      );
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+      await run([{ text: 'port the parser' }], 'prompt-id-ide-typed', {
+        type: SendMessageType.UserQuery,
+        humanInput: { text: 'port the parser' },
+      });
+      const marked = (
+        (mockTurnRunFn.mock.lastCall?.[1] ?? []) as Array<string | Part>
+      ).filter(
+        (part): part is Part => typeof part !== 'string' && isTypedPrompt(part),
+      );
+      expect(marked).toHaveLength(1);
+      expect(marked[0]!.text).toContain(activeContextText);
+      expect(marked[0]!.text!.slice(typedPromptPrefix(marked[0]!))).toBe(
+        'port the parser',
+      );
+      // The session file keeps the prompt as the person sent it, before the
+      // context is merged in, so a resumed session has no prefix to set
+      // apart.
+      const [recorded] = recordUserMessage.mock.calls[0]![0] as Part[];
+      expect(recorded!.text).toBe('port the parser');
+      expect(isTypedPrompt(recorded!)).toBe(true);
+      expect(typedPromptPrefix(recorded!)).toBeUndefined();
+    });
 
     it('should merge editor context into the user request when ideMode is enabled', async () => {
       const mockChat = await ideTurn(

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -26,7 +26,12 @@ import {
   slimCompactionInput,
   TYPED_TEXT_MAX_CHARS,
 } from './compactionInputSlimming.js';
-import { isTypedPrompt, markTypedPrompt } from '../utils/typed-prompt.js';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+  withTypedPromptPrefix,
+} from '../utils/typed-prompt.js';
+import { prependToFirstTextPart } from '../utils/partUtils.js';
 
 const COMPACTION_ENV_KEYS = [
   'QWEN_IMAGE_TOKEN_ESTIMATE',
@@ -1523,6 +1528,18 @@ describe('keepTypedText (#9455)', () => {
     result.slimmedHistory[0]!.parts!.map((part) => part.text ?? '');
 
   const typed = 'port the parser. '.repeat(1_000); // 17,000 characters
+  /** `typedText` marked, with `prefix` put in front of it as the client does. */
+  const prefixed = (prefix: string, typedText: string): Part =>
+    prependToFirstTextPart(
+      [markTypedPrompt({ text: typedText })],
+      prefix,
+    )[0] as Part;
+  /** Two envelopes in a row, 6,000 characters in all. */
+  const run =
+    `${OPEN}\n${'a'.repeat(3_000)}\n${CLOSE}\n` +
+    `${NOTE_OPEN}\n${'b'.repeat(3_000)}\n${NOTE_CLOSE}`;
+  /** A prompt that itself opens with a whole reminder block (#9455 R3-1). */
+  const opensWithReminder = `${OPEN}\n${'r'.repeat(9_000)}\n${CLOSE}\nnow port the parser.`;
 
   it('keeps a marked user part whole and cuts the rest to the cap', () => {
     const result = slimOne(
@@ -1571,9 +1588,7 @@ describe('keepTypedText (#9455)', () => {
 
   it('cuts a long IDE reminder leading the part to the cap and keeps the typed text', () => {
     const ide = `${OPEN}\nActive file: a.ts\n${'s'.repeat(10_000)}\n${CLOSE}`;
-    const [text] = textsOf(
-      slimOne('user', markTypedPrompt({ text: `${ide}\n\n${typed}` })),
-    );
+    const [text] = textsOf(slimOne('user', prefixed(ide, typed)));
     expect(text.startsWith(OPEN)).toBe(true);
     expect(text.endsWith(`\n\n${typed}`)).toBe(true);
     expect(text.length).toBeLessThan(CAP + 100 + 2 + typed.length);
@@ -1582,20 +1597,77 @@ describe('keepTypedText (#9455)', () => {
   });
 
   it('keeps a short reminder leading the part as it is', () => {
-    const value = `${OPEN}\nworktree notice\n${CLOSE}\n\n${typed}`;
-    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
-    expect(text).toBe(value);
+    const notice = `${OPEN}\nworktree notice\n${CLOSE}`;
+    const [text] = textsOf(slimOne('user', prefixed(notice, typed)));
+    expect(text).toBe(`${notice}\n\n${typed}`);
   });
 
   it('cuts a run of leading envelopes as one, closing the one the cut lands in', () => {
-    const value =
-      `${OPEN}\n${'a'.repeat(3_000)}\n${CLOSE}\n` +
-      `${NOTE_OPEN}\n${'b'.repeat(3_000)}\n${NOTE_CLOSE}\n\n${typed}`;
-    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
+    const [text] = textsOf(slimOne('user', prefixed(run, typed)));
     expect(text.endsWith(`\n\n${typed}`)).toBe(true);
+    // The run is cut as one: what is left of it is within the cap and the
+    // marker and closing tags, not the 6,000 characters of the run.
+    expect(text.length).toBeLessThan(CAP + 100 + 2 + typed.length);
     expect([count(text, OPEN), count(text, CLOSE)]).toEqual([1, 1]);
     expect([count(text, NOTE_OPEN), count(text, NOTE_CLOSE)]).toEqual([1, 1]);
   });
+
+  it('keeps a prompt that opens with a reminder block whole when nothing was put in front of it', () => {
+    // ACP sends the person's text blocks as they wrote them (#9455 R3-1).
+    const [text] = textsOf(
+      slimOne('user', markTypedPrompt({ text: opensWithReminder })),
+    );
+    expect(text).toBe(opensWithReminder);
+  });
+
+  it('keeps a typed reminder block after the IDE context put in front of it', () => {
+    const ide = `${OPEN}\nActive file: a.ts\n${'s'.repeat(10_000)}\n${CLOSE}`;
+    const [text] = textsOf(slimOne('user', prefixed(ide, opensWithReminder)));
+    expect(text.endsWith(`\n\n${opensWithReminder}`)).toBe(true);
+    expect(text.length).toBeLessThan(CAP + 100 + 2 + opensWithReminder.length);
+    expect(count(text, SLIM_TEXT_TRUNCATION_MARKER)).toBe(1);
+  });
+
+  it('reads what was put in front twice as one prefix', () => {
+    const ide = `${OPEN}\nActive file: a.ts\n${CLOSE}`;
+    const note = `${NOTE_OPEN}\nnote\n${NOTE_CLOSE}`;
+    const [twice] = prependToFirstTextPart(
+      [prefixed(ide, opensWithReminder)],
+      note,
+    ) as Part[];
+    const [text] = textsOf(slimOne('user', twice));
+    expect(text).toBe(`${note}\n\n${ide}\n\n${opensWithReminder}`);
+  });
+
+  it('reads the start from the leading envelopes when text was put in front unrecorded', () => {
+    // Text put in front of the part without its length added leaves the
+    // recorded prefix ending inside the IDE context: the prefix is not
+    // trusted, and the run in front, IDE context included, is cut as one.
+    const ide = `${OPEN}\nActive file: a.ts\n${'s'.repeat(10_000)}\n${CLOSE}`;
+    const note = `${NOTE_OPEN}\nnote\n${NOTE_CLOSE}`;
+    const recorded = prefixed(ide, typed);
+    const [text] = textsOf(
+      slimOne('user', { ...recorded, text: `${note}\n\n${recorded.text}` }),
+    );
+    expect(text.endsWith(`\n\n${typed}`)).toBe(true);
+    expect(text.length).toBeLessThan(CAP + 100 + 2 + typed.length);
+  });
+
+  it.each([
+    ['ends inside a block', 10],
+    ['runs past the text', 1_000_000],
+  ])(
+    'reads the start from the leading envelopes when the recorded prefix %s',
+    (_label, prefix) => {
+      const part = withTypedPromptPrefix(
+        markTypedPrompt({ text: `${run}\n\n${typed}` }),
+        prefix,
+      );
+      const [text] = textsOf(slimOne('user', part));
+      expect(text.endsWith(`\n\n${typed}`)).toBe(true);
+      expect(text.length).toBeLessThan(CAP + 100 + 2 + typed.length);
+    },
+  );
 
   it('reads an opening tag the person typed with no close after it as typed text', () => {
     const value = `${OPEN} is the tag I mean. ${typed}`;
