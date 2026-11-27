@@ -69,9 +69,14 @@ export interface PreToolUseHookResult {
  * Result of PostToolUse hook execution
  */
 export interface PostToolUseHookResult {
-  /** Whether execution should stop */
+  /**
+   * A blocking output that also set `continue: false`: the result is replaced
+   * by an error carrying `stopReason`, and the turn goes on.
+   */
   shouldStop: boolean;
-  /** Stop reason if applicable */
+  /** `continue: false` without a blocking decision: the turn ends. */
+  endsTurn?: boolean;
+  /** The reason of either stop */
   stopReason?: string;
   /** Additional context to append to tool response */
   additionalContext?: string;
@@ -85,6 +90,9 @@ export interface PostToolUseHookResult {
  * Result of PostToolUseFailure hook execution
  */
 export interface PostToolUseFailureHookResult {
+  /** `continue: false` without a blocking decision: the turn ends. */
+  endsTurn?: boolean;
+  stopReason?: string;
   /** Additional context about the failure */
   additionalContext?: string;
   /** Structured artifacts returned by failure hooks. */
@@ -97,9 +105,11 @@ export interface PostToolUseFailureHookResult {
  * Result of PostToolBatch hook execution
  */
 export interface PostToolBatchHookResult {
-  /** Whether execution should stop before the next model request */
+  /** A blocking output: the last result is replaced by an error. */
   shouldStop: boolean;
-  /** Stop reason if applicable */
+  /** `continue: false` without a blocking decision: the turn ends. */
+  endsTurn?: boolean;
+  /** The reason of either stop */
   stopReason?: string;
   /** Additional context to append once for the whole batch */
   additionalContext?: string;
@@ -186,37 +196,28 @@ export async function firePreToolUseHook(
     // Read once so every decision branch carries the same sanitized value.
     const additionalContext = preToolOutput.getAdditionalContext();
 
-    // Check if execution was denied
-    if (preToolOutput.isDenied()) {
+    const denied = preToolOutput.isDenied();
+    if (denied || preToolOutput.shouldStopExecution()) {
       return {
         shouldProceed: false,
         blockReason:
-          preToolOutput.getPermissionDecisionReason() ||
+          (denied && preToolOutput.getPermissionDecisionReason()) ||
           preToolOutput.getEffectiveReason(),
-        blockType: 'denied',
+        blockType:
+          denied || preToolOutput.isBlockingDecision() ? 'denied' : 'stop',
         additionalContext,
       };
     }
 
-    const stopResult = (): PreToolUseHookResult => ({
-      shouldProceed: false,
-      blockReason: preToolOutput.getEffectiveReason(),
-      blockType: 'stop',
-      additionalContext,
-    });
-
-    // An explicit but unusable replacement must not fall back to the
-    // original input; a stop still stops.
+    // An explicit but unusable replacement must not fall back to the original input.
     const updatedInput = preToolOutput.getUpdatedInput();
     if (updatedInput === null) {
-      return preToolOutput.shouldStopExecution()
-        ? stopResult()
-        : {
-            shouldProceed: false,
-            blockReason: INVALID_UPDATED_INPUT_REASON,
-            blockType: 'denied',
-            additionalContext,
-          };
+      return {
+        shouldProceed: false,
+        blockReason: INVALID_UPDATED_INPUT_REASON,
+        blockType: 'denied',
+        additionalContext,
+      };
     }
 
     // Check if user confirmation is required
@@ -230,11 +231,6 @@ export async function firePreToolUseHook(
         additionalContext,
         ...(updatedInput && { updatedInput }),
       };
-    }
-
-    // Check if execution should stop
-    if (preToolOutput.shouldStopExecution()) {
-      return stopResult();
     }
 
     return {
@@ -324,10 +320,13 @@ export async function firePostToolUseHook(
     const additionalContext = postToolOutput.getAdditionalContext();
     const artifacts = postToolOutput.getArtifacts();
 
-    // Check if execution should stop
+    // A blocking output wins over `continue: false`, as on Stop: the prompt
+    // and function runners write both when they block.
     if (postToolOutput.shouldStopExecution()) {
+      const blocking = postToolOutput.isBlockingDecision();
       return {
-        shouldStop: true,
+        shouldStop: blocking,
+        ...(blocking ? {} : { endsTurn: true }),
         stopReason: postToolOutput.getEffectiveReason(),
         ...(additionalContext !== undefined ? { additionalContext } : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
@@ -422,8 +421,14 @@ export async function firePostToolUseFailureHook(
     ) as PostToolUseFailureHookOutput;
     const additionalContext = failureOutput.getAdditionalContext();
     const artifacts = failureOutput.getArtifacts();
+    const endsTurn =
+      failureOutput.shouldStopExecution() &&
+      !failureOutput.isBlockingDecision();
 
     return {
+      ...(endsTurn
+        ? { endsTurn, stopReason: failureOutput.getEffectiveReason() }
+        : {}),
       ...(additionalContext !== undefined ? { additionalContext } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
     };
@@ -484,12 +489,15 @@ export async function firePostToolBatchHook(
     }
 
     const batchOutput = createHookOutput('PostToolBatch', response.output);
-    const shouldStop = batchOutput.shouldStopExecution();
+    const shouldStop = batchOutput.isBlockingDecision();
+    const endsTurn = !shouldStop && batchOutput.shouldStopExecution();
     const artifacts = batchOutput.getArtifacts();
 
     return {
       shouldStop,
-      stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
+      ...(endsTurn ? { endsTurn } : {}),
+      stopReason:
+        shouldStop || endsTurn ? batchOutput.getEffectiveReason() : undefined,
       additionalContext: batchOutput.getAdditionalContext(),
       ...(artifacts.length > 0 ? { artifacts } : {}),
     };

@@ -350,7 +350,8 @@ public class ManagedAgentService implements UserMessagePolicy {
         var options = store.workspaceSessionOptions(tenantId, agentId);
         if (externalFilesConfiguration) {
             return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
-                    false, false, false, "qwen-code".equals(agentId) && workspaces.externalFilesAvailable()
+                    false, false, harness.supportsSessionSkills(),
+                    "qwen-code".equals(agentId) && workspaces.externalFilesAvailable()
                             && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
         }
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {

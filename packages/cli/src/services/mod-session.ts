@@ -554,6 +554,7 @@ export class ModSession implements ICommandLoader {
       this.runtime!.getCommands(mod.id).map(
         (command): SlashCommand => ({
           name: command.name,
+          ...(command.aliases?.length && { altNames: command.aliases }),
           description: this.terminal
             ? sanitizeTerminalLine(command.description)
             : command.description,
@@ -562,7 +563,12 @@ export class ModSession implements ICommandLoader {
           extensionName: this.terminal
             ? sanitizeTerminalLine(mod.name)
             : mod.name,
-          supportedModes: [this.terminal ? 'interactive' : 'non_interactive'],
+          // A headless run knows a terminal-only command and refuses it.
+          supportedModes: [
+            this.terminal || command.isTerminalOnly
+              ? 'interactive'
+              : 'non_interactive',
+          ],
           argumentHint:
             this.terminal && command.argumentHint !== undefined
               ? sanitizeTerminalLine(command.argumentHint)

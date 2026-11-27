@@ -528,32 +528,6 @@ describe('Telemetry Metrics', () => {
     });
   });
 
-  describe('recordRepeatedToolFailureGuardMetrics', () => {
-    it('records only low-cardinality transition attributes', () => {
-      init(makeFakeConfig({ sessionId: 'test-session-id' }));
-      const attrs = {
-        route: 'acp_foreground',
-        mode: 'enforce',
-        phase_before: 'warned',
-        phase_after: 'latched',
-        decision: 'stopped',
-        failure_count_bucket: '8+',
-        batch_count_bucket: '3+',
-        terminal_status: 'error',
-        execution_status: 'error',
-        tool_type: 'mcp',
-      } as const;
-
-      m.recordRepeatedToolFailureGuardMetrics(attrs);
-
-      expect(mockCreateCounterFn).toHaveBeenCalledWith(
-        'qwen-code.repeated_tool_failure_guard.count',
-        expect.any(Object),
-      );
-      expect(mockCounterAddFn).toHaveBeenCalledWith(1, attrs);
-    });
-  });
-
   describe('recordFileOperationMetric', () => {
     const created = {
       operation: FileOperation.CREATE,

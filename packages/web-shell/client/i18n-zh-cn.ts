@@ -24,6 +24,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_ZH } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -326,7 +327,6 @@ export const ZH: Messages = {
   'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
-  'managed.question.title': '请回答以下问题',
   'managed.actions.title': '待处理请求',
   'managed.actions.root': '当前会话',
   'managed.actions.child': (v) => `子会话 · ${v?.session}`,
@@ -2564,6 +2564,8 @@ export const ZH: Messages = {
   'sidebar.openWorkspaceTerminalFailed': '打开终端失败',
   'sidebar.openWorkspaceTerminalOpened': '已在工作区打开终端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作区',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
@@ -2596,6 +2598,13 @@ export const ZH: Messages = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在加载 hooks…',
+  'workspaceHooks.empty': '此工作区尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已启用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -4442,6 +4451,11 @@ export const ZH: Messages = {
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
+  'sessionsOverview.restoreWorktree': '恢复快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '当前工作区没有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '恢复中…',
+  'sessionsOverview.restoreWorktreeFailed': '恢复快照失败',
   'sessionsOverview.selectAll': '全选',
   'sessionsOverview.titleColumn': '标题',
   'sessionsOverview.actions': '操作',
@@ -5132,4 +5146,5 @@ export const ZH: Messages = {
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
+  ...ARCHIVED_SESSIONS_MESSAGES_ZH,
 };

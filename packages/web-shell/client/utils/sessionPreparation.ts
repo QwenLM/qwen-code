@@ -66,6 +66,7 @@ export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
   startupConfig,
+  supportsSessionStartupConfig,
   reasoningEffort,
   modeId,
   planMode = false,
@@ -85,6 +86,7 @@ export async function createAndAttachSessionForPrompt({
   sessionActions: PromptSessionActions;
   modelId?: string;
   startupConfig?: SessionStartupConfig;
+  supportsSessionStartupConfig?: boolean;
   reasoningEffort?: ReasoningSelection;
   modeId?: string;
   planMode?: boolean;
@@ -136,11 +138,24 @@ export async function createAndAttachSessionForPrompt({
     sourceVersion !== undefined
       ? { sourceVersion, getCurrentSourceVersion }
       : {};
+  // The SDK verifies that startupConfig was applied before returning. Older
+  // backends keep the existing post-create reasoning setter.
+  const standaloneStartupConfig =
+    sessionContext?.kind === 'standalone' &&
+    supportsSessionStartupConfig &&
+    modelId &&
+    reasoningEffort !== undefined
+      ? { modelServiceId: modelId, reasoningEffort }
+      : undefined;
   const created = await sessionActions.createSession(
     sessionContext?.kind === 'standalone'
       ? {
           sessionContext,
-          ...(modelId ? { modelServiceId: modelId } : {}),
+          ...(standaloneStartupConfig
+            ? { startupConfig: standaloneStartupConfig }
+            : modelId
+              ? { modelServiceId: modelId }
+              : {}),
           ...(approvalMode ? { approvalMode } : {}),
           keepOnNavigation: true,
           navigationOutcome,
@@ -235,7 +250,7 @@ export async function createAndAttachSessionForPrompt({
           throw new Error('Daemon did not confirm Plan mode.');
         }
       }
-      if (reasoningEffort) {
+      if (reasoningEffort && !standaloneStartupConfig) {
         preparationStep = 'set reasoning effort';
         await detachedSession.setConfigOption(
           'reasoning_effort',
@@ -326,7 +341,7 @@ export async function createAndAttachSessionForPrompt({
         throw new Error('Daemon did not confirm Plan mode.');
       }
     }
-    if (reasoningEffort) {
+    if (reasoningEffort && !standaloneStartupConfig) {
       preparationStep = 'set reasoning effort';
       await sessionActions.setReasoningEffort(reasoningEffort, {
         persist: sessionContext?.kind !== 'standalone',

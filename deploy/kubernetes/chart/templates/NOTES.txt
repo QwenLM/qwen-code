@@ -1,4 +1,5 @@
 Managed Agent exposes a signed API.
+The application Pod runs a private two-member Harness pool.
 {{ if .Values.runtime.enabled }}
 Trusted single-node Workspace files and foreground Shell are enabled.
 Close every tool Session and confirm physical holders are clear before replacing the Pod.

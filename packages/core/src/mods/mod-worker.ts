@@ -509,6 +509,22 @@ async function bounded(
   }
 }
 
+// Accepted from a hook and dropped: `by` is the engine's own, and Qwen Code
+// names the plugin on each note itself; a Mod command's text is display-only
+// here already.
+function withoutDroppedFields(event: ModEvent, value: unknown): unknown {
+  if (!record(value)) return value;
+  if (event === 'turn.complete' && 'by' in value) {
+    const { by: _by, ...rest } = value;
+    return rest;
+  }
+  if (event === 'command.run' && 'isTextDisplayOnly' in value) {
+    const { isTextDisplayOnly: _only, ...rest } = value;
+    return rest;
+  }
+  return value;
+}
+
 // The engine names the plugin behind an ask it made or reworded; an answer
 // passed up as heard keeps the owner it had, and a hook cannot write one.
 // `setting` names a host option's own check, which Qwen Code does not report,
@@ -604,7 +620,7 @@ async function dispatch(
         );
       return notice(event) && record(value) && !('deny' in value)
         ? { value: value['value'] }
-        : value;
+        : withoutDroppedFields(event, value);
     } catch (error) {
       assertLive(call);
       await call.last?.catch(() => {});
@@ -644,7 +660,7 @@ async function dispatch(
             );
           return notice(event) && record(value) && !('deny' in value)
             ? { value: value['value'] }
-            : value;
+            : withoutDroppedFields(event, value);
         }
       } catch {
         assertLive(call);
@@ -811,12 +827,40 @@ async function hostCall(
         if (method === 'command.register') {
           if (!starting)
             throw new Error('Register Mod commands during session.start.');
-          const spec = e as unknown as ModCommand;
+          const {
+            immediate: _immediate,
+            isHidden: _isHidden,
+            isWorkspaceFree: _isWorkspaceFree,
+            ...spec
+          } = e as unknown as ModCommand & {
+            immediate?: true;
+            isHidden?: true;
+            isWorkspaceFree?: true;
+          };
           const existing = commands.get(spec.name);
           if (existing && existing.plugin !== plugin.id)
             throw new Error('Mod command already registered: ' + spec.name);
           if (!existing && commands.size >= 64)
             throw new Error('Too many Mod commands.');
+          // Another command's name or alias, in any case, refuses an alias,
+          // and its alias refuses a name.
+          const names = new Set<string>();
+          const aliases = new Set<string>();
+          for (const other of commands.values()) {
+            if (other === existing) continue;
+            names.add(other.name.toLowerCase());
+            for (const alias of other.aliases ?? [])
+              aliases.add(alias.toLowerCase());
+          }
+          const taken = aliases.has(spec.name.toLowerCase())
+            ? spec.name
+            : spec.aliases?.find(
+                (alias) =>
+                  names.has(alias.toLowerCase()) ||
+                  aliases.has(alias.toLowerCase()),
+              );
+          if (taken)
+            throw new Error('Mod command name already registered: ' + taken);
           commands.set(spec.name, { ...spec, plugin: plugin.id });
           return { value: { command: spec.name } };
         }

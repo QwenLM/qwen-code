@@ -424,8 +424,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: true,
         description:
           'Refuse new sessions with 503 system_overloaded while host load ' +
-          'or daemon event-loop lag stays saturated. Live sessions and the ' +
-          'control plane are never gated. Use --no-load-admission to disable.',
+          'stays saturated corroborated by daemon event-loop lag, or while ' +
+          'event-loop lag alone is severe. Live sessions and the control ' +
+          'plane are never gated. Use --no-load-admission to disable.',
       })
       .option('max-pending-prompts-per-session', {
         type: 'number',

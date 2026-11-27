@@ -39,6 +39,8 @@ class ExecutionObservationCooldownTest {
     private static ToolExecutionRecord record(ToolExecutionRecord.State state, long version) {
         ToolExecutionRecord record = mock(ToolExecutionRecord.class);
         when(record.getState()).thenReturn(state);
+        when(record.isTerminal()).thenReturn(state == ToolExecutionRecord.State.SETTLED
+                || state == ToolExecutionRecord.State.ABANDONED);
         when(record.getVersion()).thenReturn(version);
         return record;
     }
@@ -73,6 +75,15 @@ class ExecutionObservationCooldownTest {
         assertThat(fresherCached.getRuntimeState()).isEqualTo("executing");
         ToolExecutionRecord newerCaller = record(ToolExecutionRecord.State.UNKNOWN, 7);
         assertThat(cooldown.cooled("exec-1", newerCaller).getRecord()).isSameAs(newerCaller);
+    }
+
+    @Test
+    void anExecutingObservationKeepsTheNewerLedgerState() {
+        ExecutionObservationCooldown cooldown = new ExecutionObservationCooldown(clock, scheduler);
+        cooldown.stamp("exec-1", new ExecutionReconciliation(record(ToolExecutionRecord.State.EXECUTING, 5),
+                ExecutionReconciliation.Outcome.IN_FLIGHT, "executing"));
+        ToolExecutionRecord cancelled = record(ToolExecutionRecord.State.CANCEL_REQUESTED, 6);
+        assertThat(cooldown.cooled("exec-1", cancelled).getRecord()).isSameAs(cancelled);
     }
 
     @Test

@@ -268,7 +268,6 @@ export const ZH_TW: Record<string, MessageValue> = {
   'managed.discarded': '已丟棄本次請求。草稿已放回輸入框。',
   'managed.newRequired': '請新建任務後傳送訊息。',
   'managed.truncated': '[詳情已截斷]',
-  'managed.question.title': '請回答以下問題',
   'managed.actions.title': '待處理請求',
   'managed.actions.root': '當前會話',
   'managed.actions.child': (v) => `子會話 · ${v?.session}`,
@@ -2344,6 +2343,13 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.channelEvents': '頻道事件',
   'sidebar.sessionSource': '會話來源',
   'sidebar.archiveSessionSource': '歸檔會話來源',
+  'sidebar.archiveFilterAndSort': '篩選與排序已歸檔對話',
+  'sidebar.archiveType': '類型',
+  'sidebar.archiveTypeAll': '全部對話',
+  'sidebar.archiveTypeLocal': '本機',
+  'sidebar.archiveTypeCloud': '雲端',
+  'sidebar.archivedSearchPlaceholder': '搜尋已歸檔對話',
+  'sidebar.clearSearch': '清除搜尋',
   'sidebar.sessionSource.tasks': '任務',
   'sidebar.sessionSource.channels': '頻道',
   'sidebar.channelType.other': '其他頻道',
@@ -2355,8 +2361,12 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.sessionDisplay': '顯示選項',
   'sidebar.sortBy': '排序方式',
   'sidebar.sortActivity': '最近活動',
+  'sidebar.sortUpdated': '更新時間',
   'sidebar.sortQuestion': '最後提問時間',
+  'sidebar.sortCreated': '建立時間',
+  'sidebar.sortAlphabetical': '按名稱排序',
   'sidebar.workspaceFilter': '工作區',
+  'sidebar.allWorkspaces': '全部工作區',
   'sidebar.filterAll': '全部',
   'sidebar.restoreDefaults': '恢復預設',
   'sidebar.recentSessions': '最近',
@@ -2481,6 +2491,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.openWorkspaceTerminalFailed': '開啟終端失敗',
   'sidebar.openWorkspaceTerminalOpened': '已在工作區開啟終端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作區',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新載入執行時',
   'sidebar.reloadWorkspaceFailed': '重新載入工作區執行時失敗',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 個工作區`,
@@ -2513,6 +2525,13 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 個 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 個 hook，${v?.untrusted ?? 0} 個未載入（目錄未受信任）。請啟用 security.folderTrust.enabled 並信任該目錄，或在互動式終端中執行 qwen 審查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在載入 hooks…',
+  'workspaceHooks.empty': '此工作區尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已啟用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '強制移除',
   'sidebar.removeWorkspaceTitle': '移除工作區',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2590,6 +2609,15 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.standaloneCleanupPending':
     '會話已刪除，私有檔案清理將在後臺自動完成。',
   'sidebar.archivedEmpty': '沒有已歸檔的會話。',
+  'sidebar.archivedCount': (v) => `${v?.['count'] ?? 0} 個對話`,
+  'sidebar.archivedCountMore': (v) => `${v?.['count'] ?? 0}+ 個對話`,
+  'sidebar.archivedLoadMore': '載入更多',
+  'sidebar.archivedFilteredEmpty': '找不到符合條件的已歸檔對話。',
+  'sidebar.archivedWorkspaceEmpty': '此工作區沒有已歸檔對話。',
+  'sidebar.clearFilters': '清除篩選',
+  'sidebar.showAllWorkspaces': '顯示全部工作區',
+  'sidebar.archivedPaginationHint':
+    '排序僅套用於各工作區目前已載入的對話，點選「載入更多」以包含更早的項目。',
   'sidebar.archiveFailed': '歸檔會話失敗',
   'sidebar.unarchiveFailed': '恢復會話失敗',
   'sidebar.loadFailed': '會話載入失敗，點選重試。',
@@ -4466,6 +4494,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sessionsOverview.popupBlocked':
     '彈出視窗被攔截。請允許本站彈窗，以便在新標籤頁中開啟會話。',
   'sessionsOverview.refresh': '重新整理',
+  'sessionsOverview.restoreWorktree': '復原快照',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    '此工作區沒有可用的 Worktree 快照',
+  'sessionsOverview.restoringWorktree': '復原中…',
+  'sessionsOverview.restoreWorktreeFailed': '復原快照失敗',
   'sessionsOverview.selectAll': '全選',
   'sessionsOverview.titleColumn': '標題',
   'sessionsOverview.actions': '操作',
@@ -5857,6 +5890,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.ui.chatWidth': '屏寬',
   'settings.description.ui.chatWidth':
     '純前端的聊天內容寬度設定，儲存在當前瀏覽器中。',
+  'settings.arrowKeyHistory.label': '用上下鍵取回歷史訊息',
+  'settings.arrowKeyHistory.description':
+    '在訊息輸入框中按 ↑ 或 ↓ 可取回歷史訊息。此設定儲存在目前的瀏覽器中。',
+  'settings.arrowKeyHistory.disabledByHost':
+    '宿主應用程式已關閉方向鍵歷史尋回。',
   'settings.option.ui.chatWidth.1000': '常規',
   'settings.option.ui.chatWidth.wide': '超寬',
   'settings.category.General': '通用',
@@ -6115,6 +6153,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.omni.enabled': '啟用 Omni 媒體投遞',
   'settings.description.omni.enabled':
     '啟用 omni 媒體管線。用 @ 引用的媒體檔案（影片、圖片、音訊）以及 @https:// URL 提供的媒體會被識別（ffprobe）、以內容定址儲存在 .qwen/omni/objects/ 下，經 DashScope 臨時上傳通道上傳，並以 oss:// URL 投遞，而不是內聯 base64。僅對 DashScope 相容端點生效。也可透過 QWEN_CODE_ENABLE_OMNI=1 啟用。',
+  'settings.label.worktree.maxRetained': '保留的會話 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每個歸屬唯一的管理根保留最近相應數量的合規會話 worktree，預設 15。活躍及置頂會話不佔刪除候選配額。設為 0 只關閉自動清掃，不禁止明確復原快照。歸屬不明、根重疊或設定不可讀時保留；不順帶刪除孤立快照。不影響工具/agent worktree。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 產物',
   'settings.description.agents.arena.preserveArtifacts':
     '啟用後，Arena worktree 和會話狀態檔案會在會話結束或主智慧體退出後保留。',
