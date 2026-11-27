@@ -792,6 +792,8 @@ export const RU_PART3: Record<
   'sidebar.openWorkspaceTerminalFailed': 'Не удалось открыть терминал',
   'sidebar.openWorkspaceTerminalOpened': 'Терминал открыт в рабочей области',
   'sidebar.manageWorkspace': 'Управление',
+  'sidebar.trustWorkspace': 'Доверять рабочей области',
+  'sidebar.trustingWorkspace': 'Установка доверия…',
   'sidebar.reloadWorkspace': 'Перезагрузить среду',
   'sidebar.reloadWorkspaceFailed':
     'Не удалось перезагрузить среду рабочей области',
@@ -835,6 +837,13 @@ export const RU_PART3: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')} (отключено)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')}, ${v?.untrusted ?? 0} не загружено (папка без доверия). Включите security.folderTrust.enabled и доверьтесь папке или запустите qwen интерактивно для проверки.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Управление «${v?.facet ?? ''}» для ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Загрузка хуков…',
+  'workspaceHooks.empty': 'Для этой рабочей области хуки не настроены.',
+  'workspaceHooks.enabled': 'Включено',
+  'workspaceHooks.disabled': 'Отключено',
   'sidebar.forceRemoveWorkspace': 'Принудительно удалить',
   'sidebar.removeWorkspaceTitle': 'Удалить рабочую область',
   'sidebar.removeWorkspaceConfirm': (v) =>

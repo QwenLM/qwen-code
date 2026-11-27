@@ -74,6 +74,7 @@ import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 import type { Part } from '@google/genai';
 import { getToolCallFingerprint } from '@qwen-code/qwen-code-core/core/toolCallIdUtils.js';
+import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
 import * as sessionTracing from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
@@ -4385,6 +4386,40 @@ describe.each([false, true])(
         .map((args) =>
           (args[0] as Part[]).map((part) => part.functionResponse?.id),
         );
+
+    it('binds the prompt ID for tool hooks on both scheduling paths', async () => {
+      const scheduledPromptIds: Array<string | undefined> = [];
+      const schedule = CoreToolScheduler.prototype.schedule;
+      const spy = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler, ...args) {
+          await Promise.resolve();
+          scheduledPromptIds.push(promptIdContext.getStore());
+          return schedule.apply(this, args);
+        });
+      try {
+        for (const onShared of [false, true]) {
+          const promptId = onShared ? 'shared-prompt' : 'legacy-prompt';
+          const request = {
+            ...call('tool-call').value,
+            prompt_id: promptId,
+          };
+          const config = createFakeConfig(oneToolBatchStream(request));
+          await drain(
+            livePromptEvents(
+              onShared ? shared(config) : config,
+              'read',
+              undefined,
+              { promptId },
+            ),
+          );
+        }
+        expect(scheduledPromptIds).toEqual(['legacy-prompt', 'shared-prompt']);
+        expect(promptIdContext.getStore()).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
 
     it('sends the same requests and yields the same events as the current path', async () => {
       const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');

@@ -376,6 +376,7 @@ jobs:
       ${{
         always() &&
         needs.build.result == 'success' &&
+        needs.build.outputs.should_publish == 'true' &&
         needs.publish.result == 'success'
       }}
     runs-on: 'ubuntu-latest'

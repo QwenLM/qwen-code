@@ -43,6 +43,7 @@ import type {
   ContextUsageControls,
   RegisterContextUsageControls,
 } from './hooks/useContextUsageControls';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import * as browserNotifications from './browser-turn-notifications';
 import {
@@ -53,12 +54,14 @@ import {
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
+  type DaemonSessionClient,
   type DaemonSessionSummary,
   type DaemonSessionContextStatus,
   type DaemonSessionContextUsageStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
   type DaemonBrand,
+  type DaemonCapabilities,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
   type DaemonSessionTaskWithWorkflowStatus,
@@ -102,6 +105,7 @@ import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import { DaemonAvailabilityContext } from './daemon/availability-context.js';
+import type { DaemonProductSessionContext } from './daemon/session/types';
 import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import { HotkeySetter } from './live/HotkeySetter';
@@ -285,7 +289,6 @@ type StreamingState = 'idle' | 'responding';
 type MockConnection = {
   status: 'connected' | 'connecting' | 'disconnected' | 'error';
   sessionId: string | undefined;
-  sessionContext?: { kind: 'standalone' };
   context?: DaemonSessionContextStatus;
   clientId: string;
   displayName: string | undefined;
@@ -853,6 +856,7 @@ const {
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
+      workspaceCwd: undefined as string | undefined,
       brand: undefined as DaemonBrand | undefined,
       brandSettled: false,
       status: 'connected' as 'connected' | 'error',
@@ -1058,7 +1062,12 @@ const {
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
-        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+        onOpenSession?: (
+          sessionId: string,
+          workspaceCwd?: string,
+          sessionContext?: DaemonProductSessionContext,
+          restoredSession?: DaemonSessionClient,
+        ) => void;
         onOpenSplit?: (sessionIds: string[]) => void;
         onCurrentSessionRemoved?: (session: {
           sessionId: string;
@@ -1067,10 +1076,28 @@ const {
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
       } | null,
+      latestPluginManagerProps: null as React.ComponentProps<
+        typeof import('./components/plugins/PluginManagerPage').PluginManagerPage
+      > | null,
       latestChannelsManagerProps: null as {
         clientId?: string;
         sessionWorkspaceCwd?: string;
+        initialWorkspaceCwd?: string;
+        navigationRequest?: number;
       } | null,
+      onOpenWorkspaceManagement: undefined as
+        | ((
+            target:
+              | 'mcp'
+              | 'skills'
+              | 'extensions'
+              | 'channels'
+              | 'settings'
+              | 'context'
+              | 'hooks',
+            workspaceCwd: string,
+          ) => void)
+        | undefined,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
@@ -1113,7 +1140,11 @@ const {
       settingsReloading: false,
       settingsError: undefined as Error | undefined,
       latestSettingsHookOptions: undefined as
-        | { autoLoad?: boolean; enabled?: boolean }
+        | {
+            workspaceCwd?: string;
+            autoLoad?: boolean;
+            enabled?: boolean;
+          }
         | undefined,
       latestProvidersHookOptions: undefined as
         | { autoLoad?: boolean; enabled?: boolean }
@@ -1136,6 +1167,8 @@ const {
           value: unknown,
         ) => Promise<unknown>;
       } | null,
+      latestSettingsWorkspaceControl: null as ReactNode,
+      latestSettingsWorkspaceDirectoriesSection: null as ReactNode,
       artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
       latestArtifactPanelProps: null as React.ComponentProps<
@@ -1325,7 +1358,11 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       refreshHead: vi.fn(),
       loadOrdinal: vi.fn(),
     }),
-    useSettings: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
+    useSettings: (options?: {
+      workspaceCwd?: string;
+      autoLoad?: boolean;
+      enabled?: boolean;
+    }) => {
       testState.latestSettingsHookOptions = options;
       return {
         settings: testState.settings,
@@ -1802,6 +1839,8 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       settingsState: NonNullable<typeof testState.latestSettingsState>;
       initialCategory?: string;
       presentation?: WebShellSettingsOptions;
+      workspaceControl?: ReactNode;
+      workspaceDirectoriesSection?: ReactNode;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
       onLanguageChange?: (
         language: string,
@@ -1823,6 +1862,9 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       testState.latestSettingsState = props.settingsState;
       testState.latestSettingsInitialCategory = props.initialCategory;
       testState.latestSettingsPresentation = props.presentation;
+      testState.latestSettingsWorkspaceControl = props.workspaceControl ?? null;
+      testState.latestSettingsWorkspaceDirectoriesSection =
+        props.workspaceDirectoriesSection ?? null;
       testState.latestModelManagement =
         props.modelManagementSectionProps ?? null;
       return React.createElement(
@@ -2054,6 +2096,17 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
+      onOpenWorkspaceManagement?: (
+        target:
+          | 'mcp'
+          | 'skills'
+          | 'extensions'
+          | 'channels'
+          | 'settings'
+          | 'context'
+          | 'hooks',
+        workspaceCwd: string,
+      ) => void;
       onLoadSession?: (
         sessionId: string,
         workspaceCwd?: string,
@@ -2083,6 +2136,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSearchQueryChange?: (query: string) => void;
       currentSessionActive?: boolean;
     }) => {
+      testState.onOpenWorkspaceManagement = props.onOpenWorkspaceManagement;
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
       return React.createElement(
@@ -2602,7 +2656,12 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
   const React = await import('react');
   return {
     SessionOverviewPanel: (props: {
-      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      onOpenSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        sessionContext?: DaemonProductSessionContext,
+        restoredSession?: DaemonSessionClient,
+      ) => void;
       onOpenSplit?: (sessionIds: string[]) => void;
       onCurrentSessionRemoved?: (session: {
         sessionId: string;
@@ -2618,12 +2677,30 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
     },
   };
 });
+vi.doMock('./components/plugins/PluginManagerPage', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./components/plugins/PluginManagerPage')
+    >();
+  const React = await import('react');
+  return {
+    ...actual,
+    PluginManagerPage: (
+      props: React.ComponentProps<typeof actual.PluginManagerPage>,
+    ) => {
+      testState.latestPluginManagerProps = props;
+      return React.createElement(actual.PluginManagerPage, props);
+    },
+  };
+});
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
     ChannelsManagerPage: (props: {
       clientId?: string;
       sessionWorkspaceCwd?: string;
+      initialWorkspaceCwd?: string;
+      navigationRequest?: number;
     }) => {
       testState.latestChannelsManagerProps = props;
       return React.createElement('div', {
@@ -13634,6 +13711,7 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockWorkspace.baseUrl = '';
+  mockWorkspace.workspaceCwd = undefined;
   mockUseWorkspaceSessionLiveState.mockClear();
   mockUseDaemonSessionActivityBridge.mockReset();
   mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
@@ -13835,7 +13913,9 @@ beforeEach(() => {
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestPluginManagerProps = null;
   testState.latestChannelsManagerProps = null;
+  testState.onOpenWorkspaceManagement = undefined;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -13858,6 +13938,8 @@ beforeEach(() => {
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
   testState.latestSettingsState = null;
+  testState.latestSettingsWorkspaceControl = null;
+  testState.latestSettingsWorkspaceDirectoriesSection = null;
   testState.latestSettingsInitialCategory = undefined;
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
@@ -37061,6 +37143,67 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it.each(['none', 'low', undefined] as const)(
+    'uses startup configuration for standalone welcome reasoning %s',
+    async (selection) => {
+      const modelId = 'qwen3.8-max';
+      mockConnection.sessionId = undefined;
+      mockConnection.workspaceCwd = undefined;
+      mockConnection.sessionContext = { kind: 'standalone' };
+      mockConnection.capabilities = {
+        qwenCodeVersion: 'test',
+        features: ['standalone_sessions_v1', 'session_startup_config'],
+      };
+      mockConnection.currentModel = modelId;
+      mockConnection.models = [
+        {
+          id: modelId,
+          label: 'Qwen',
+          reasoningPreview: {
+            enabled: true,
+            effort: 'high',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+            canDisable: true,
+          },
+        },
+      ];
+      mockSessionActions.createSession.mockImplementation(async () => {
+        mockConnection.sessionId = 'session-created';
+        return { sessionId: 'session-created' };
+      });
+
+      renderApp();
+      await flush();
+      if (selection !== undefined) {
+        act(() => {
+          testState.latestChatEditorProps?.onSelectReasoningEffort?.(selection);
+        });
+      }
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first prompt');
+        await vi.waitFor(() =>
+          expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce(),
+        );
+      });
+
+      const createOptions = mockSessionActions.createSession.mock.calls[0][0];
+      expect(createOptions).toMatchObject({
+        sessionContext: { kind: 'standalone' },
+      });
+      if (selection === undefined) {
+        expect(createOptions).not.toHaveProperty('startupConfig');
+      } else {
+        expect(createOptions).toHaveProperty('startupConfig', {
+          modelServiceId: modelId,
+          reasoningEffort: selection,
+        });
+        expect(createOptions).not.toHaveProperty('modelServiceId');
+      }
+      expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    },
+  );
+
   it('clears a stale welcome disable after reasoning becomes mandatory', async () => {
     const reasoningPreview = (canDisable: boolean) => ({
       enabled: true,
@@ -49199,6 +49342,45 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('hands a restored worktree client to the existing session load', async () => {
+    const restoredSession = {
+      sessionId: 'removed-session',
+      workspaceCwd: '/work/secondary',
+      clientId: 'restore-client',
+    } as unknown as DaemonSessionClient;
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSession?.(
+        'removed-session',
+        '/work/secondary',
+        undefined,
+        restoredSession,
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'removed-session',
+      {
+        workspaceCwd: '/work/secondary',
+        sessionContext: { kind: 'workspace', cwd: '/work/secondary' },
+        artifactCountHint: undefined,
+        restoredSession,
+      },
+    );
+  });
+
   it('does not restore a folded split when opening a session from the Session Overview', async () => {
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
@@ -52262,6 +52444,182 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockSessionActions.refreshCommands).toHaveBeenCalledOnce();
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('aligns the Settings workspace switcher with a secondary session and an explicit primary selection', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      features: ['workspace_settings', 'workspace_directories'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+
+    const workspaceSelect = () =>
+      testState.latestSettingsWorkspaceControl as React.ReactElement<{
+        value: string;
+        onValueChange: (cwd: string) => void;
+      }>;
+    const directories = () =>
+      testState.latestSettingsWorkspaceDirectoriesSection as React.ReactElement<{
+        workspaceCwd?: string;
+      }>;
+
+    // The default Settings surface reads the session workspace, not primary.
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+
+    act(() => workspaceSelect().props.onValueChange('/work/primary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/primary');
+    expect(directories().props.workspaceCwd).toBe('/work/primary');
+    expect(testState.latestSettingsHookOptions).toEqual({
+      workspaceCwd: '/work/primary',
+      autoLoad: true,
+      enabled: true,
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenLastCalledWith(
+      'en',
+      'workspace',
+      '/work/primary',
+    );
+
+    act(() => workspaceSelect().props.onValueChange('/work/secondary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+    // Selecting the session workspace again unmounts the secondary bridge.
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+  });
+
+  it('routes every workspace management selection to its clicked workspace', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/primary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/primary',
+    } as DaemonProductSessionContext;
+    Object.assign(mockWorkspace.capabilities, {
+      v: 1,
+      mode: 'native',
+      workspaceCwd: '/work/primary',
+      modelServices: [],
+      features: [
+        'workspace_settings',
+        'workspace_skills_config_runtime',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as DaemonCapabilities);
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+    expect(testState.onOpenWorkspaceManagement).toBeTypeOf('function');
+
+    for (const [index, target] of (
+      ['mcp', 'skills', 'extensions'] as const
+    ).entries()) {
+      await act(async () => {
+        testState.onOpenWorkspaceManagement?.(target, '/work/secondary');
+      });
+      await flush();
+      expect(testState.latestPluginManagerProps).toMatchObject({
+        initialTab: target,
+        initialWorkspaceCwd: '/work/secondary',
+        navigationRequest: index + 1,
+      });
+    }
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('channels', '/work/secondary');
+    });
+    await flush();
+    expect(testState.latestChannelsManagerProps).toMatchObject({
+      initialWorkspaceCwd: '/work/secondary',
+      navigationRequest: 1,
+      sessionWorkspaceCwd: '/work/primary',
+    });
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('settings', '/work/secondary');
+    });
+    await flush();
+    expect(
+      (
+        testState.latestSettingsWorkspaceControl as React.ReactElement<{
+          value: string;
+        }>
+      ).props.value,
+    ).toBe('/work/secondary');
+
+    const dialogTitles = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>('[data-dialog-title]'),
+      ).map((node) => node.getAttribute('data-dialog-title'));
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('context', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Memory · secondary');
+
+    await act(async () => {
+      testState.onOpenWorkspaceManagement?.('hooks', '/work/secondary');
+    });
+    await flush();
+    expect(dialogTitles()).toContain('Hooks · secondary');
   });
 
   it('maps a Chinese UI language choice to the daemon language code', async () => {

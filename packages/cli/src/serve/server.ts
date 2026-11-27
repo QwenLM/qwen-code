@@ -207,6 +207,10 @@ import {
   type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
+  startWorktreeRetention,
+  type WorktreeRetentionController,
+} from './server/worktree-retention.js';
+import {
   registerWorkspaceDiagnosticStatusRoutes,
   registerWorkspaceQualifiedDiagnosticStatusRoutes,
   registerWorkspaceQualifiedStatusRoutes,
@@ -988,6 +992,8 @@ export function createServeApp(
   let runtimeStopReady = false;
   let runtimeStopsClosing = false;
   const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
+  const retentionStops = new Set<Promise<void>>();
+  const retentionStopFailures = new Set<unknown>();
   const rehydratingWorkspaces = new Set<WorkspaceRuntime>();
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
@@ -4279,7 +4285,29 @@ export function createServeApp(
     // Every trusted workspace gets its own keepalive + rehydration against its
     // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
+    const retentions = new Map<string, WorktreeRetentionController>();
+    const stopRetentionForWorkspace = (
+      workspaceCwd: string,
+    ): Promise<void> | undefined => {
+      const controller = retentions.get(workspaceCwd);
+      if (!controller) return undefined;
+      const stopped = controller.stop();
+      retentionStops.add(stopped);
+      void stopped
+        .finally(() => retentionStops.delete(stopped))
+        .catch((error: unknown) => {
+          retentionStopFailures.add(error);
+        });
+      const remove = () => {
+        if (retentions.get(workspaceCwd) === controller) {
+          retentions.delete(workspaceCwd);
+        }
+      };
+      void stopped.then(remove, remove);
+      return stopped;
+    };
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      if (runtimeStopsClosing) return;
       const trusted = runtime.primary
         ? isPrimaryWorkspaceTrusted()
         : runtime.trusted;
@@ -4296,7 +4324,16 @@ export function createServeApp(
         onTasksRead: (tasks) =>
           registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
-      scheduledActivity.set(runtime, () => keepalive.activeWork);
+      retentions.set(
+        runtime.workspaceCwd,
+        startWorktreeRetention(runtime, workspaceRegistry, archiveCoordinator),
+      );
+      scheduledActivity.set(
+        runtime,
+        () =>
+          keepalive.activeWork ||
+          retentions.get(runtime.workspaceCwd)?.activeWork === true,
+      );
       rehydrateWorkspace(runtime);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
     };
@@ -4312,16 +4349,23 @@ export function createServeApp(
       app.locals as { stopScheduledTaskKeepalive?: () => void }
     ).stopScheduledTaskKeepalive = () => {
       runtimeStopsClosing = true;
+      for (const workspaceCwd of retentions.keys()) {
+        void stopRetentionForWorkspace(workspaceCwd);
+      }
       for (const stop of keepaliveStops.values()) stop();
       keepaliveStops.clear();
     };
     (
       app.locals as {
-        stopScheduledTaskKeepaliveForWorkspace?: (workspaceCwd: string) => void;
+        stopScheduledTaskKeepaliveForWorkspace?: (
+          workspaceCwd: string,
+        ) => Promise<void> | undefined;
       }
     ).stopScheduledTaskKeepaliveForWorkspace = (workspaceCwd) => {
+      const stopped = stopRetentionForWorkspace(workspaceCwd);
       keepaliveStops.get(workspaceCwd)?.();
       keepaliveStops.delete(workspaceCwd);
+      return stopped;
     };
     (
       app.locals as {
@@ -4668,6 +4712,29 @@ export function createServeApp(
   }
   if (stopHostedPackagePreparation)
     serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
+  serveAppLifecycle.addAppDrain(async () => {
+    (
+      app.locals as { stopScheduledTaskKeepalive?: () => void }
+    ).stopScheduledTaskKeepalive?.();
+    const drains = await Promise.allSettled([...retentionStops]);
+    const errors = [
+      ...new Set([
+        ...retentionStopFailures,
+        ...drains
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          )
+          .map((result) => result.reason as unknown),
+      ]),
+    ];
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        'Worktree retention drain is incomplete.',
+      );
+    }
+  });
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
@@ -4715,6 +4782,7 @@ export function createServeApp(
           .stopAgentHostRestore,
       );
       stopAppResource(() => webTerminalRegistry.dispose());
+      pendingDrains.push(...retentionStops);
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
       const bridgeDrains = await Promise.allSettled(

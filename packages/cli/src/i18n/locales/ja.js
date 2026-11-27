@@ -431,7 +431,6 @@ export default {
   'Screen Reader Mode': 'スクリーンリーダーモード',
   'Max Session Turns': '最大セッションターン数',
   'Skip Next Speaker Check': '次の発言者チェックをスキップ',
-  'Skip Loop Detection': 'ループ検出をスキップ',
   'Skip Startup Context': '起動時コンテキストをスキップ',
   'Enable OpenAI Logging': 'OpenAI ログを有効化',
   'OpenAI Logging Directory': 'OpenAI ログディレクトリ',

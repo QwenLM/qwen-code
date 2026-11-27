@@ -4277,7 +4277,7 @@ class ManagedAgentApiContractTest {
                     new WorkspaceTerminalRelayService(sessions,
                             mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
                             settings),
-                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+                    mock(TerminalTicketStore.class));
         }
     }
 }

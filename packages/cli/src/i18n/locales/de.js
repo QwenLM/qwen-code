@@ -478,7 +478,6 @@ export default {
   'Screen Reader Mode': 'Bildschirmleser-Modus',
   'Max Session Turns': 'Maximale Sitzungsrunden',
   'Skip Next Speaker Check': 'Nächste-Sprecher-Prüfung überspringen',
-  'Skip Loop Detection': 'Schleifenerkennung überspringen',
   'Skip Startup Context': 'Startkontext überspringen',
   'Enable OpenAI Logging': 'OpenAI-Protokollierung aktivieren',
   'OpenAI Logging Directory': 'OpenAI-Protokollierungsverzeichnis',
