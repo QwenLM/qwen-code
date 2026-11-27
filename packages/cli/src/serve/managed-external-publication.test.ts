@@ -238,6 +238,19 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     ).rejects.toThrow('admission failed');
   });
 
+  it('rejects the reserved publication port before opening the external control listener', async () => {
+    await descriptor();
+    const parsed = await readManagedExternalBoot(
+      boot,
+      path.join(root, 'boot.json'),
+    );
+    const listen = vi.spyOn(Server.prototype, 'listen');
+    await expect(
+      startManagedRuntimeAttestationWorker(parsed, undefined, undefined, 43191),
+    ).rejects.toThrow('boot payload is invalid');
+    expect(listen).not.toHaveBeenCalled();
+  });
+
   it('rejects writable-by-others and symlinked mount roots', async () => {
     const parsed = await admitted();
     await fs.mkdir(boot.mountRoot, { mode: 0o755 });
@@ -266,10 +279,10 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       parsed,
       undefined,
       undefined,
-      true,
+      4096,
     );
     closers.push(worker.close);
-    expect(listen).toHaveBeenNthCalledWith(1, 43190, '0.0.0.0');
+    expect(listen).toHaveBeenNthCalledWith(1, 4096, '0.0.0.0');
     expect(listen).toHaveBeenNthCalledWith(
       2,
       43191,

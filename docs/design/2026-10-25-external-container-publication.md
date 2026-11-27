@@ -32,7 +32,7 @@ The trust chain is central registration → broker storage provision → adapter
 
 ## Publication contract
 
-Successful external admission starts the ordinary worker listener on port `43190` and a separate publication listener on `43191`, both inside the container. The ready receipt adds `publication: { url, paths }`. The adapter must forward the publication port explicitly. It is not a public HTTP service. Publication paths are absent from the ordinary listener and from v1, local v2 and CSI workers.
+Successful external admission starts the ordinary worker listener on the configured control port (default `43190`) and a separate publication listener on reserved port `43191`, both inside the container. The ready receipt adds `publication: { url, paths }`. The adapter must forward the publication port explicitly. It is not a public HTTP service. Publication paths are absent from the ordinary listener and from v1, local v2 and CSI workers.
 
 All publication routes are POST, use `Cache-Control: no-store`, the existing bearer token and lease ID/epoch headers, and additionally require `X-Qwen-Managed-Runtime-Incarnation` and `X-Qwen-Managed-Storage-Revision`. Bodies are closed JSON and bounded to 64 KiB; responses also remain within 64 KiB. Authentication, revision and incarnation failures do not return storage identity or raw error details.
 

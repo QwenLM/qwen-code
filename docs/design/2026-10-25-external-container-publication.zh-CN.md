@@ -32,7 +32,7 @@ boot 不能通过字段自比证明注册。adapter 必须在启动 worker 前�
 
 ## Publication 契约
 
-external 准入成功后，在容器内启动普通 worker 监听端口 `43190` 和独立 publication 端口 `43191`。ready 回执增加 `publication: { url, paths }`。adapter 必须显式转发 publication 端口，它不是公开 HTTP 服务。普通监听器以及 v1、本地 v2 和 CSI worker 均不提供 publication 路径。
+external 准入成功后，在容器内启动普通 worker 监听器（控制端口默认 `43190`）和独立 publication 监听器。该模式专用端口 `43191`，控制监听器须选择其他端口。ready 回执增加 `publication: { url, paths }`。adapter 必须显式转发 publication 端口，它不是公开 HTTP 服务。普通监听器以及 v1、本地 v2 和 CSI worker 均不提供 publication 路径。
 
 所有 publication 路由均为 POST，要求 `Cache-Control: no-store`、现有 bearer token 和 lease ID/epoch 请求头，并额外要求 `X-Qwen-Managed-Runtime-Incarnation` 与 `X-Qwen-Managed-Storage-Revision`。请求体为 closed JSON，上限 64 KiB；响应也保持在 64 KiB 以内。认证、revision 和 incarnation 失败不会返回存储身份或原始错误详情。
 

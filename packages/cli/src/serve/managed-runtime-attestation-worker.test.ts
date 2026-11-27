@@ -191,7 +191,7 @@ describe('Managed Runtime attestation worker', () => {
           csi,
           undefined,
           undefined,
-          true,
+          43190,
           sshRuntime,
         ),
       ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
@@ -777,7 +777,7 @@ describe('CSI root descriptor ownership in worker startup', () => {
     vi.stubEnv('QWEN_NODE_NAME', 'not/a/node');
     const listen = vi.spyOn(Server.prototype, 'listen');
     await expect(
-      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, 43190),
     ).rejects.toThrow();
     expect(observe).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
@@ -793,7 +793,7 @@ describe('CSI root descriptor ownership in worker startup', () => {
       return this;
     });
     await expect(
-      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, 43190),
     ).rejects.toThrow('listener failed');
     expect(close).toHaveBeenCalledTimes(1);
   });
@@ -826,7 +826,7 @@ describe('CSI root descriptor ownership in worker startup', () => {
         });
       }
       await expect(
-        startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+        startManagedRuntimeAttestationWorker(boot, undefined, undefined, 43190),
       ).rejects.toMatchObject({
         message: primary,
         cause: expect.objectContaining({ message: primary }),
@@ -848,7 +848,7 @@ describe('CSI root descriptor ownership in worker startup', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     vi.spyOn(ManagedToolExecutor.prototype, 'close').mockRejectedValue(
       new Error('executor close failed'),
@@ -871,7 +871,7 @@ describe('CSI root descriptor ownership in worker startup', () => {
       boot,
       undefined,
       undefined,
-      true,
+      43190,
     );
     const executorFailure = new Error('executor close failed');
     const listenerFailure = new Error('listener close failed');
@@ -935,7 +935,7 @@ describe('boot-v3 original-worker ACK ownership', () => {
           boot,
           publisher,
           undefined,
-          true,
+          43190,
         );
         openWorkers.add(worker);
         expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');

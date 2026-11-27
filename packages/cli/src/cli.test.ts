@@ -869,6 +869,23 @@ describe('runCliEntry', () => {
   it.each([
     ['managed-runtime-worker', '--help'],
     ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--port', '4096'],
+    ...['0', '-1', '65536', '4.5', '1e3', ''].map((port) => [
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+      '--port',
+      port,
+    ]),
+    [
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+      '--port',
+      '4096',
+      '--port',
+      '4097',
+    ],
     ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
     ['managed-runtime-worker', '/boot.json', '--container-boot'],
   ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
@@ -890,9 +907,25 @@ describe('runCliEntry', () => {
     ]);
     expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
       '/boot.json',
+      undefined,
     );
     expect(mocks.main).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['--container-boot', '/boot.json', '--port', '4096'],
+    ['--port=4096', '--container-boot', '/boot.json'],
+  ])(
+    'passes an explicit control port to the container worker',
+    async (...args) => {
+      await runCliEntry(['managed-runtime-worker', ...args]);
+      expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+        '/boot.json',
+        4096,
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    },
+  );
 
   it('runs a managed update worker without starting the CLI', async () => {
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';

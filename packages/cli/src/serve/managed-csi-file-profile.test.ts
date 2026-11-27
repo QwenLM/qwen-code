@@ -182,7 +182,7 @@ describe('reserved private CSI file profile', () => {
           boot,
           undefined,
           undefined,
-          boot.version === 3,
+          boot.version === 3 ? 43190 : undefined,
         ).then((worker) => {
           workers.add(worker);
           return worker;

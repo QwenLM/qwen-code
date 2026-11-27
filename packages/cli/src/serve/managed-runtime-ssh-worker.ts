@@ -173,7 +173,7 @@ export async function runManagedRuntimeBootstrapWorker(
     record.boot,
     undefined,
     new ManagedShellPublisherRegistry(),
-    false,
+    undefined,
     runtime,
   );
   if (await closing()) {

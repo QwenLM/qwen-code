@@ -35,6 +35,7 @@ import {
   managedRuntimeLedgerFromEnvironment,
 } from './managed-runtime-ledger.js';
 import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import { DEFAULT_MANAGED_WORKER_CONTAINER_PORT } from './managed-runtime-worker-options.js';
 import {
   isWorkspaceToolCapability,
   MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
@@ -79,6 +80,7 @@ import {
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
+const EXTERNAL_PUBLICATION_PORT = 43191;
 const INVALID_BOOT_MESSAGE = 'Managed Runtime worker boot payload is invalid.';
 const BOOT_KEYS = Object.freeze([
   'capabilityDigest',
@@ -208,14 +210,14 @@ export function startManagedRuntimeAttestationWorker(
   bootDocument: ManagedCsiFileBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
-  containerMode?: boolean,
+  containerPort?: number,
   sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedCsiFileWorkerHandle>;
 export function startManagedRuntimeAttestationWorker(
   bootDocument: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
-  containerMode?: boolean,
+  containerPort?: number,
   sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle>;
 export function startManagedRuntimeAttestationWorker(
@@ -226,7 +228,7 @@ export function startManagedRuntimeAttestationWorker(
     | ManagedCsiFileBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
-  containerMode?: boolean,
+  containerPort?: number,
   sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle>;
 export async function startManagedRuntimeAttestationWorker(
@@ -237,9 +239,10 @@ export async function startManagedRuntimeAttestationWorker(
     | ManagedCsiFileBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
-  containerMode = false,
+  containerPort?: number,
   sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle> {
+  const containerMode = containerPort !== undefined;
   if (
     bootDocument.version === 4 ||
     bootDocument.version === 5 ||
@@ -247,7 +250,7 @@ export async function startManagedRuntimeAttestationWorker(
   ) {
     if (!containerMode || capturePublisher || remotePublishers || sshRuntime)
       throw new Error(INVALID_BOOT_MESSAGE);
-    return startManagedCsiFileWorker(bootDocument);
+    return startManagedCsiFileWorker(bootDocument, containerPort);
   }
   const resolved =
     bootDocument.version === 3
@@ -269,7 +272,11 @@ export async function startManagedRuntimeAttestationWorker(
       : resolved;
   if (
     externalBoot &&
-    (!containerMode || capturePublisher || remotePublishers || sshRuntime)
+    (!containerMode ||
+      containerPort === EXTERNAL_PUBLICATION_PORT ||
+      capturePublisher ||
+      remotePublishers ||
+      sshRuntime)
   )
     throw new Error(INVALID_BOOT_MESSAGE);
   if (
@@ -421,7 +428,7 @@ export async function startManagedRuntimeAttestationWorker(
       server.once('error', onError);
       server.once('listening', onListening);
       server.listen(
-        containerMode ? 43190 : 0,
+        containerPort ?? 0,
         containerMode ? '0.0.0.0' : '127.0.0.1',
       );
     });
@@ -463,7 +470,7 @@ export async function startManagedRuntimeAttestationWorker(
     try {
       await new Promise<void>((resolve, reject) => {
         publicationServer.once('error', reject);
-        publicationServer.listen(43191, '0.0.0.0', resolve);
+        publicationServer.listen(EXTERNAL_PUBLICATION_PORT, '0.0.0.0', resolve);
       });
     } catch {
       server.closeAllConnections();
@@ -620,6 +627,7 @@ export async function readManagedRuntimeContainerBoot(
 
 export async function runManagedRuntimeAttestationWorker(
   containerBootPath?: string,
+  containerPort = DEFAULT_MANAGED_WORKER_CONTAINER_PORT,
 ): Promise<void> {
   // A Managed session's host starts its worker over an IPC channel, with the
   // loader vars that only boot this process; the commands it runs must not
@@ -669,7 +677,7 @@ export async function runManagedRuntimeAttestationWorker(
           workspaceId: (contextBoot as { workspaceId?: string }).workspaceId,
         })
       : undefined,
-    containerBootPath !== undefined,
+    containerBootPath === undefined ? undefined : containerPort,
   ).catch((error: unknown) => {
     if ('storage' in contextBoot) throw new Error(INVALID_BOOT_MESSAGE);
     throw error;

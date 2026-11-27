@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DEFAULT_MANAGED_WORKER_CONTAINER_PORT } from './managed-runtime-worker-options.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createServer } from 'node:http';
@@ -137,6 +138,7 @@ function historyFits(
 
 export async function startManagedCsiFileWorker(
   bootDocument: ManagedCsiFileBoot,
+  containerPort = DEFAULT_MANAGED_WORKER_CONTAINER_PORT,
 ): Promise<ManagedCsiFileWorkerHandle> {
   const boot = parseManagedCsiFileBoot(bootDocument);
   const pod = {
@@ -990,7 +992,7 @@ export async function startManagedCsiFileWorker(
       };
       server.once('error', onError);
       server.once('listening', onListening);
-      server.listen(43190, '0.0.0.0');
+      server.listen(containerPort, '0.0.0.0');
     });
     const address = server.address() as AddressInfo | null;
     if (!address)
