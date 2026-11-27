@@ -400,10 +400,15 @@ class ManagedRuntimeRetentionGuardTest {
                                         "argsDigest",
                                         "digest")));
         try (var connection = source.getConnection()) {
+            // MySQL refuses a 512-wide identity column here: the wide composite
+            // keys on these tables exceed InnoDB's 3072-byte index limit, which
+            // ManagedRuntimeRetentionGuardMySqlIT asserts directly. Both columns
+            // are declared VARCHAR(64), so the permissive collation is expressed
+            // at that width on MySQL and at 512 code units on H2.
             String ddl =
                     connection.getMetaData().getDatabaseProductName().equals("H2")
                             ? "ALTER TABLE %s ALTER COLUMN %s VARCHAR_IGNORECASE(512)"
-                            : "ALTER TABLE %s MODIFY %s VARCHAR(512) CHARACTER SET utf8mb4 COLLATE"
+                            : "ALTER TABLE %s MODIFY %s VARCHAR(64) CHARACTER SET utf8mb4 COLLATE"
                                   + " utf8mb4_general_ci NOT NULL";
             jdbc.execute(String.format(ddl, "ma_tool_execution", "harness_session_id"));
             jdbc.execute(String.format(ddl, "ma_session_record", "session_id"));

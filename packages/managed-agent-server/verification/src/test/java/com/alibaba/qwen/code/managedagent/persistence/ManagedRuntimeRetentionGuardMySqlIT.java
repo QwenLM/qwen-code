@@ -16,9 +16,6 @@ class ManagedRuntimeRetentionGuardMySqlIT {
     private static final String VARCHAR_512_PERMISSIVE =
             "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(512)"
                     + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
-    private static final String VARCHAR_64_PERMISSIVE =
-            "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(64)"
-                    + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
 
     private JdbcTemplate admin;
     private String schema;
@@ -75,13 +72,11 @@ class ManagedRuntimeRetentionGuardMySqlIT {
 
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
-        // The contract seeds and widens ma_session_record on the per-test
-        // schema; only re-seeding the identity column there reproduces the
-        // index-length refusal, and only on that schema can the narrowed
-        // retry reach the contract with its tables and indexes intact.
+        // The contract then applies the same collation at the declared width,
+        // which is the only legal form here: a 512-wide identity column would
+        // push these tables' composite keys past InnoDB's 3072-byte limit.
         assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
                 .hasMessageContaining("Specified key was too long");
-        contract.configureSessionRecordIdentity(VARCHAR_64_PERMISSIVE);
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 
