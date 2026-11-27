@@ -171,9 +171,15 @@ implementation of the write path for both CI and local use. It:
    `stage=1-pre`, `stage=1b`); every published comment body is guaranteed to
    start with the exact `<!-- qwen-triage <marker> -->` line (the publisher
    owns the prefix — it prepends the marker when omitted, normalizes harmless
-   leading blank lines or whitespace on a matching marker, and rejects empty
-   bodies or any mismatched/malformed leading `<!-- qwen-triage ... -->`
-   comment); bodies over GitHub's 65,536-character
+   leading blank lines or whitespace on a matching marker, emits a
+   `::warning::` annotation on Actions or a plain `note:` locally when it
+   repairs a draft, and rejects empty bodies or any mismatched/malformed
+   leading `<!-- qwen-triage ... -->` comment; stamping an omitted marker is
+   a rendering robustness measure rather than a security barrier against the
+   same agent that writes `actions.jsonl`, while the security boundary for
+   `qwen-triage-finalize.yml` remains bot authorship plus isolating triage
+   comments from other bot lanes such as `serve-ab` / `visuals`); bodies over
+   GitHub's 65,536-character
    limit (including after marker prefixing) are rejected, not truncated
    (truncation could cut the CI-region or
    approve-on-green markers); review events are limited to `APPROVE` and

@@ -272,43 +272,128 @@ describe('preflight fail-closed', () => {
   );
 
   it.each([
-    ['empty body', ''],
-    ['whitespace-only body', '   \n\t\r\n'],
-    ['wrong marker value', stageBody('stage=2')],
-    ['leading blank line with wrong marker', `\n${stageBody('stage=2')}`],
-    ['leading BOM with wrong marker', `\uFEFF${stageBody('stage=2')}`],
-    ['unlisted stage marker', stageBody('stage=4')],
+    ['empty body', '', 'comment body is empty'],
+    ['whitespace-only body', '   \n\t\r\n', 'comment body is empty'],
+    [
+      'invisible format-only body (ZWSP/WJ)',
+      '\u200B\n\u2060\n',
+      'comment body is empty',
+    ],
+    ['wrong marker value', stageBody('stage=2'), 'mismatched marker'],
+    [
+      'leading blank line with wrong marker',
+      `\n${stageBody('stage=2')}`,
+      'mismatched marker',
+    ],
+    [
+      'leading BOM with wrong marker',
+      `\uFEFF${stageBody('stage=2')}`,
+      'mismatched marker',
+    ],
+    [
+      'leading ZWSP before wrong marker',
+      `\u200B${stageBody('stage=2')}`,
+      'mismatched marker',
+    ],
+    [
+      'ZWSP between <!-- and qwen-triage',
+      '<!--\u200Bqwen-triage stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'word joiner between <!-- and qwen-triage',
+      '<!--\u2060qwen-triage stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'RLM between <!-- and qwen-triage',
+      '<!--\u200Fqwen-triage stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'ZWSP inside qwen-triage token',
+      '<!-- qwen-\u200Btriage stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'ZWSP-spoofed qwen-triage-ci comment',
+      `<!--\u200Bqwen-triage-ci sha=${HEAD} -->\nbody\n`,
+      'mismatched marker',
+    ],
+    [
+      'NUL control char between <!-- and qwen-triage',
+      '<!--\x00qwen-triage stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    ['control-char-only body (NUL)', '\x00\n', 'comment body is empty'],
+    ['unlisted stage marker', stageBody('stage=4'), 'mismatched marker'],
     [
       'lifecycle marker on stage upsert',
       '<!-- qwen-triage lifecycle -->\nbody\n',
+      'mismatched marker',
     ],
-    ['verify marker on stage upsert', '<!-- qwen-triage:verify -->\nbody\n'],
+    [
+      'verify marker on stage upsert',
+      '<!-- qwen-triage:verify -->\nbody\n',
+      'mismatched marker',
+    ],
     [
       'approve-on-green marker on line 1',
       `<!-- qwen-triage approve-on-green sha=${HEAD} -->\nbody\n`,
+      'mismatched marker',
     ],
-    ['text appended to marker line', `${markerLine('stage=1')} extra\nbody\n`],
-    ['wrong case on marker line', '<!-- QWEN-TRIAGE stage=1 -->\nbody\n'],
+    [
+      'text appended to marker line',
+      `${markerLine('stage=1')} extra\nbody\n`,
+      'mismatched marker',
+    ],
+    [
+      'wrong case on marker line',
+      '<!-- QWEN-TRIAGE stage=1 -->\nbody\n',
+      'mismatched marker',
+    ],
     [
       'extra internal spacing on marker',
       '<!--  qwen-triage  stage=1  -->\nbody\n',
+      'mismatched marker',
     ],
-    ['unclosed triage comment', '<!-- qwen-triage stage=1\nbody\n'],
-    ['multiline triage comment', '<!--\nqwen-triage stage=2\n-->\nbody\n'],
-    ['hyphenated typo stage marker', '<!-- qwen-triage-stage=2 -->\nbody\n'],
-    ['equals-sign typo marker', '<!-- qwen-triage=stage=2 -->\nbody\n'],
-    ['non-ci hyphenated suffix', '<!-- qwen-triage-ci-extra -->\nbody\n'],
+    [
+      'unclosed triage comment',
+      '<!-- qwen-triage stage=1\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'multiline triage comment',
+      '<!--\nqwen-triage stage=2\n-->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'hyphenated typo stage marker',
+      '<!-- qwen-triage-stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'equals-sign typo marker',
+      '<!-- qwen-triage=stage=2 -->\nbody\n',
+      'mismatched marker',
+    ],
+    [
+      'non-ci hyphenated suffix',
+      '<!-- qwen-triage-ci-extra -->\nbody\n',
+      'mismatched marker',
+    ],
   ])(
     'rejects empty or mismatched/malformed leading triage marker (%s)',
-    (_name, text) => {
+    (_name, text, expectedError) => {
       const dir = makeDraft(
         [{ action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s.md' }],
         { 's.md': text },
       );
       const gh = fakeGh();
-      const { code, writes } = runPublish(dir, gh);
+      const { code, writes, err } = runPublish(dir, gh);
       expect(code).toBe(2);
       expect(writes).toHaveLength(0);
+      expect(err.text()).toContain(expectedError);
     },
   );
 
@@ -322,8 +407,58 @@ describe('preflight fail-closed', () => {
     const { code, postedBodies, err } = runPublish(dir, gh);
     expect(code).toBe(0);
     expect(postedBodies).toEqual([`${markerLine('stage=2')}\n\n${raw}`]);
-    expect(err.text()).toContain('prepended missing');
+    expect(err.text()).toContain(
+      'note: actions.jsonl line 1: prepended missing',
+    );
+    expect(err.text()).not.toContain('::warning::');
     expect(readFileSync(join(dir, 'bodies', 's2.md'), 'utf8')).toBe(raw);
+  });
+
+  it('emits GitHub Actions ::warning:: annotations for prepend and normalize repairs when GITHUB_ACTIONS=true', () => {
+    const dir = makeDraft(
+      [
+        { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s1.md' },
+        { action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' },
+      ],
+      {
+        's1.md': `\n${stageBody('stage=1')}`,
+        's2.md': '## Code review\n',
+      },
+    );
+    const gh = fakeGh();
+    const { code, err } = runPublish(dir, gh, {
+      env: { GITHUB_ACTIONS: 'true' },
+    });
+    expect(code).toBe(0);
+    expect(err.text()).toContain(
+      `::warning::actions.jsonl line 1: normalized leading "${markerLine('stage=1')}" marker line`,
+    );
+    expect(err.text()).toContain(
+      `::warning::actions.jsonl line 2: prepended missing "${markerLine('stage=2')}" marker`,
+    );
+    expect(err.text()).not.toContain('note:');
+  });
+
+  it('does not emit repair warnings when a later line fails preflight', () => {
+    const dir = makeDraft(
+      [
+        { action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' },
+        { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/bad.md' },
+      ],
+      {
+        's2.md': '## Code review\n',
+        'bad.md': stageBody('stage=3'),
+      },
+    );
+    const gh = fakeGh();
+    const { code, writes, err } = runPublish(dir, gh, {
+      env: { GITHUB_ACTIONS: 'true' },
+    });
+    expect(code).toBe(2);
+    expect(writes).toHaveLength(0);
+    expect(err.text()).toContain('mismatched marker');
+    expect(err.text()).not.toContain('::warning::');
+    expect(err.text()).not.toContain('prepended missing');
   });
 
   it('strips leading blank lines while preserving first-line indentation when prepending a missing marker', () => {
@@ -401,6 +536,11 @@ describe('preflight fail-closed', () => {
       `  ${markerLine('stage=1')}  `,
       markerLine('stage=1'),
     ],
+    [
+      'indented marker followed by duplicate exact marker',
+      `  ${markerLine('stage=1')}\n${markerLine('stage=1')}\nbody\n`,
+      `${markerLine('stage=1')}\nbody\n`,
+    ],
   ])(
     'normalizes harmless whitespace on a matching leading marker (%s) without duplicating it',
     (_name, raw, expected) => {
@@ -413,7 +553,10 @@ describe('preflight fail-closed', () => {
       expect(code).toBe(0);
       expect(postedBodies).toEqual([expected]);
       expect(postedBodies[0].split(markerLine('stage=1')).length - 1).toBe(1);
-      expect(err.text()).toContain('normalized leading');
+      expect(err.text()).toContain(
+        'note: actions.jsonl line 1: normalized leading',
+      );
+      expect(err.text()).not.toContain('::warning::');
       expect(readFileSync(join(dir, 'bodies', 's.md'), 'utf8')).toBe(raw);
     },
   );
@@ -1410,5 +1553,29 @@ describe('validateDrafts / executeUnits exports', () => {
     expect(results).toEqual([
       { action: 'upsert-comment', status: 'published', detail: 'POST comment' },
     ]);
+  });
+
+  it('executeActions fails closed on an unvalidated upsert-comment missing bodyText', () => {
+    const dir = makeDraft([], { 'raw.md': 'no marker at all\n' });
+    const gh = fakeGh();
+    const results = executeActions({
+      actions: [
+        {
+          action: 'upsert-comment',
+          marker: 'stage=2',
+          bodyFile: join(dir, 'bodies', 'raw.md'),
+        },
+      ],
+      repo: REPO,
+      number: NUMBER,
+      botLogin: BOT,
+      exec: gh.exec,
+      env: {},
+      err: collector(),
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe('failed');
+    expect(results[0].detail).toContain('validated bodyText');
+    expect(gh.calls.filter(isWriteCall)).toHaveLength(0);
   });
 });

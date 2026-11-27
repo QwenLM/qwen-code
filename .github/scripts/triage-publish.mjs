@@ -77,29 +77,46 @@ function markerLine(marker) {
 }
 
 // Matches any leading qwen-triage HTML comment (stage/lifecycle/verify/typo/
-// malformed) while leaving `<!-- qwen-triage-ci ... -->` regions untouched.
-const LEADING_TRIAGE_COMMENT = /^<!--\s*qwen-triage(?!-ci(?:\s|-->|$))/i;
+// malformed) after stripping invisible Unicode format/control chars (`\p{Cf}`,
+// non-whitespace `\p{Cc}`).
+const LEADING_TRIAGE_COMMENT = /^<!--\s*qwen-triage/i;
+// Exact opening of a `qwen-triage-ci` region (fixed-string matched by finalize).
+const LEADING_CI_REGION = /^<!-- qwen-triage-ci(?:\s|-->|$)/;
 
-function normalizeUpsertBody(text, marker, where, err) {
+function stripInvisible(text) {
+  return text.replace(/(?:\p{Cf}|(?!\t|\r|\n)\p{Cc})/gu, '');
+}
+
+function emitRepairNotice(err, message, githubActions) {
+  err?.write(githubActions ? `::warning::${message}\n` : `note: ${message}\n`);
+}
+
+function normalizeUpsertBody(text, marker, where, notices) {
   const expected = markerLine(marker);
   const lines = text.split('\n');
   if (lines[0] === expected) {
     return text;
   }
-  const firstNonEmptyIdx = lines.findIndex((line) => line.trim() !== '');
+  const firstNonEmptyIdx = lines.findIndex(
+    (line) => stripInvisible(line).trim() !== '',
+  );
   if (firstNonEmptyIdx === -1) {
     throw new Error(`${where}: comment body is empty`);
   }
   const firstNonEmpty = lines[firstNonEmptyIdx].trim();
   if (firstNonEmpty === expected) {
     const rest = lines.slice(firstNonEmptyIdx + 1);
-    err?.write(
-      `note: ${where}: normalized leading "${expected}" marker line\n`,
-    );
+    while (rest.length > 0 && rest[0].trim() === expected) {
+      rest.shift();
+    }
+    notices.push(`${where}: normalized leading "${expected}" marker line`);
     return rest.length > 0 ? `${expected}\n${rest.join('\n')}` : expected;
   }
   const bodyFromFirstNonEmpty = lines.slice(firstNonEmptyIdx).join('\n');
-  if (LEADING_TRIAGE_COMMENT.test(bodyFromFirstNonEmpty.trimStart())) {
+  const rawStart = bodyFromFirstNonEmpty.trimStart();
+  const isLeadingCiRegion = LEADING_CI_REGION.test(rawStart);
+  const header = stripInvisible(rawStart).trimStart();
+  if (!isLeadingCiRegion && LEADING_TRIAGE_COMMENT.test(header)) {
     throw new Error(
       `${where}: body starts with mismatched marker; expected "${expected}"`,
     );
@@ -110,7 +127,7 @@ function normalizeUpsertBody(text, marker, where, err) {
       `${where}: body exceeds ${MAX_BODY_LENGTH} characters (${prefixed.length})`,
     );
   }
-  err?.write(`note: ${where}: prepended missing "${expected}" marker\n`);
+  notices.push(`${where}: prepended missing "${expected}" marker`);
   return prefixed;
 }
 
@@ -145,7 +162,12 @@ function readBodyFile(draftDir, bodiesDir, rel, where) {
   return { file: resolved, text };
 }
 
-export function validateDrafts({ dir, targetKind, err = null }) {
+export function validateDrafts({
+  dir,
+  targetKind,
+  err = null,
+  githubActions = false,
+}) {
   const draftDir = path.resolve(dir);
   const bodiesDir = path.join(draftDir, 'bodies');
   // lstat the containers themselves: a symlinked bodies/ would redirect the
@@ -159,6 +181,7 @@ export function validateDrafts({ dir, targetKind, err = null }) {
   }
   const raw = readFileSync(path.join(draftDir, 'actions.jsonl'), 'utf8');
   const actions = [];
+  const notices = [];
   const lines = raw.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -243,12 +266,20 @@ export function validateDrafts({ dir, targetKind, err = null }) {
         // match on: stamp it when omitted, canonicalize harmless whitespace on
         // a matching marker, and fail closed on empty bodies or mismatched
         // leading triage markers.
-        bodyText = normalizeUpsertBody(body.text, action.marker, where, err);
+        bodyText = normalizeUpsertBody(
+          body.text,
+          action.marker,
+          where,
+          notices,
+        );
       }
       action.bodyFile = body.file;
       action.bodyText = bodyText;
     }
     actions.push(action);
+  }
+  for (const notice of notices) {
+    emitRepairNotice(err, notice, githubActions);
   }
   return actions;
 }
@@ -408,8 +439,8 @@ function upsertComment(action, { repo, number, botLogin, exec }) {
         : 'POST comment (identity unresolved; PATCH disabled)',
     };
   };
-  if (action.bodyText === undefined) {
-    return postOrPatch(action.bodyFile);
+  if (typeof action.bodyText !== 'string') {
+    throw new Error('upsert-comment requires validated bodyText');
   }
   const tempDir = mkdtempSync(path.join(tmpdir(), 'triage-publish-'));
   const bodyFile = path.join(tempDir, 'comment.md');
@@ -672,7 +703,12 @@ export function run({
 
   let actions;
   try {
-    actions = validateDrafts({ dir, targetKind, err });
+    actions = validateDrafts({
+      dir,
+      targetKind,
+      err,
+      githubActions: env.GITHUB_ACTIONS === 'true',
+    });
   } catch (error) {
     err.write(`preflight rejected: ${error.message}\n`);
     return 2;
