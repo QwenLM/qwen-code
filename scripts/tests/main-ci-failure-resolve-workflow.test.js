@@ -260,7 +260,7 @@ describe('main CI failure resolver', () => {
   );
 
   it.skipIf(!replayable)(
-    'retries a pre-merge gate failure only on the same PR and commit',
+    'retires a PR gate failure only on the same PR and commit',
     () => {
       const sha = 'ec948cf2cdc1';
       const body = `[Run 45591376211](https://github.example/run/45591376211) · commit \`${sha}\`\n\n- [\`SDK Java (full) / MySQL / Java 21\`](https://github.example/job/1)`;
@@ -313,7 +313,7 @@ describe('main CI failure resolver', () => {
       expect(rebuiltCommit.result.status, rebuiltCommit.result.stderr).toBe(0);
       expect(rebuiltCommit.calls).not.toContain('issue close 503');
 
-      const unmergedPr = runResolver({
+      const rebuiltPr = runResolver({
         issues: [gateIssue(504)],
         views: { 504: gateView(504) },
         greenJobs,
@@ -321,8 +321,8 @@ describe('main CI failure resolver', () => {
         runHeadSha: headSha,
         prAssociation: false,
       });
-      expect(unmergedPr.result.status, unmergedPr.result.stderr).toBe(0);
-      expect(unmergedPr.calls).not.toContain('issue close 504');
+      expect(rebuiltPr.result.status, rebuiltPr.result.stderr).toBe(0);
+      expect(rebuiltPr.calls).not.toContain('issue close 504');
     },
   );
 

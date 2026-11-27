@@ -201,7 +201,7 @@ jobs:
               fi
               associated_pr="${work}/associated-pr-${number}.json"
               if ! gh api "repos/${REPO}/commits/${RUN_HEAD_SHA}/pulls" \
-                --jq 'map(select(.base.ref == "main" and .head.sha == "'"${RUN_HEAD_SHA}"'" and .merged_at != null)) | length == 1' \
+                --jq 'map(select(.base.ref == "main" and .head.sha == "'"${RUN_HEAD_SHA}"'")) | length == 1' \
                 > "${associated_pr}"; then
                 echo "::warning::Could not verify the PR behind #${number}; leaving it open."
                 continue
