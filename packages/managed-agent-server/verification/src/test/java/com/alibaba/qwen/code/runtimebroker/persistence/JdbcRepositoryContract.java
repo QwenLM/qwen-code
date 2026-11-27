@@ -1130,7 +1130,8 @@ public final class JdbcRepositoryContract {
         // Forge a session-identity near-match: the full-id comparison must
         // still exclude a row whose stored session differs from the queried
         // one, even by a trailing space.
-        tamper(dataSource, "runtime_session_id", sticky.getExecutionCallId(),
+        tamper(dataSource, "runtime_session_id", "execution_call_id",
+                sticky.getExecutionCallId(),
                 prefix + "-collision-runtime-session ");
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-collision-runtime-session"));
@@ -1379,7 +1380,7 @@ public final class JdbcRepositoryContract {
         // reading the record validates it before the reference guard runs. A
         // valid identity that disagrees with the reference still trips the
         // guard, and the raw exact lookup now finds the active row under it.
-        tamper(dataSource, "runtime_session_id", id,
+        tamper(dataSource, "runtime_session_id", "execution_call_id", id,
                 prefix + "-other-session");
         assertEquals("reference identity does not match execution identity",
                 assertThrows(IllegalArgumentException.class,
