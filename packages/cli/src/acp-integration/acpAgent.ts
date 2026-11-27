@@ -242,6 +242,7 @@ import {
   DAEMON_ACP_NDJSON_LIMITS,
   ndJsonStream,
 } from '@qwen-code/acp-bridge/ndJsonStream';
+import { createPromptLedgerWitness } from './session/prompt-ledger-witness.js';
 import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
@@ -18501,6 +18502,13 @@ class QwenAgent implements Agent {
       undefined,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
       (deliveries) => this.expireHostedPeerDeliveries(deliveries),
+      // Recovery classification witness: the bounded tail of this
+      // session's prompt terminal ledger, so a turn that settled `end_turn`
+      // on a closed tool pair — or a tail inherited from a forked source
+      // session — is not reported as an interruption of this session. The
+      // ledger is advisory evidence — any read failure maps to "no
+      // evidence" and the classification stays conservative.
+      createPromptLedgerWitness(config, sessionId),
       acpModRowSites(this.clientCapabilities),
     );
     if (options.deferAutomaticWorkUntilCwdRestore) {
