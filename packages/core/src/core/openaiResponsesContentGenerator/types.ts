@@ -14,7 +14,12 @@ export type ResponsesApiVerbosity = 'low' | 'medium' | 'high';
 // tier we expose maps straight through with no clamping.
 export type ResponsesApiReasoningEffort = ReasoningEffort;
 export type ResponsesApiReasoningSummary = 'auto' | 'concise' | 'detailed';
-export type ResponsesApiServiceTier = 'auto' | 'priority';
+export type ResponsesApiServiceTier =
+  | 'auto'
+  | 'default'
+  | 'flex'
+  | 'priority'
+  | string;
 
 export interface ResponsesApiTextControls {
   format?: ResponsesApiTextFormat;

@@ -5,11 +5,13 @@
  */
 
 import type { Application, RequestHandler } from 'express';
+import type { Dispatcher } from 'undici';
 import {
   ALL_PROVIDERS,
   ProviderInstallError,
   resolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
+import { loadUndici } from '../../utils/load-undici.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -134,6 +136,86 @@ function toDeviceFlowStateBody(
     }
   }
   return body;
+}
+
+let cachedDeepInfraModels: unknown[] | null = null;
+let cachedDeepInfraModelsAt = 0;
+let inFlightDeepInfraFetch: Promise<unknown[]> | null = null;
+const DEEPINFRA_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export function resetDeepinfraModelsCacheForTest(): void {
+  cachedDeepInfraModels = null;
+  cachedDeepInfraModelsAt = 0;
+  inFlightDeepInfraFetch = null;
+}
+
+async function fetchDeepInfraModelsFromUpstream(): Promise<unknown[]> {
+  if (inFlightDeepInfraFetch) {
+    return inFlightDeepInfraFetch;
+  }
+
+  inFlightDeepInfraFetch = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    let dispatcher: Dispatcher | undefined;
+    try {
+      const { fetch: undiciFetch, EnvHttpProxyAgent } = await loadUndici();
+      dispatcher = new EnvHttpProxyAgent();
+      const response = await undiciFetch(
+        'https://api.deepinfra.com/models/list',
+        {
+          signal: controller.signal,
+          dispatcher,
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'qwen-code',
+          },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`DeepInfra API returned HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data)) {
+        throw new Error('Invalid response from DeepInfra API');
+      }
+
+      const now = Date.now();
+      const filtered = data.filter(
+        (m: {
+          model_name?: string;
+          type?: string;
+          deprecated?: boolean | number | null;
+        }) => {
+          if (!m || typeof m.model_name !== 'string') return false;
+          if (m.model_name.toLowerCase().startsWith('anthropic/')) return false;
+          if (m.type && m.type !== 'text-generation') return false;
+          if (m.deprecated === true) return false;
+          if (
+            typeof m.deprecated === 'number' &&
+            (m.deprecated < 1e11 ? m.deprecated * 1000 : m.deprecated) <= now
+          ) {
+            return false;
+          }
+          return true;
+        },
+      );
+
+      cachedDeepInfraModels = filtered;
+      cachedDeepInfraModelsAt = Date.now();
+      return filtered;
+    } finally {
+      clearTimeout(timer);
+      if (dispatcher && typeof dispatcher.close === 'function') {
+        void dispatcher.close();
+      }
+      inFlightDeepInfraFetch = null;
+    }
+  })();
+
+  return inFlightDeepInfraFetch;
 }
 
 export function registerWorkspaceAuthRoutes(
@@ -298,6 +380,31 @@ export function registerWorkspaceAuthRoutes(
 
   app.get('/workspace/auth/providers', (_req, res) => {
     res.status(200).json(buildAuthProviderCatalog(boundWorkspace));
+  });
+
+  app.get('/workspace/auth/deepinfra-models', async (_req, res) => {
+    const now = Date.now();
+    if (
+      cachedDeepInfraModels &&
+      now - cachedDeepInfraModelsAt < DEEPINFRA_CACHE_TTL_MS
+    ) {
+      res.status(200).json(cachedDeepInfraModels);
+      return;
+    }
+
+    try {
+      const models = await fetchDeepInfraModelsFromUpstream();
+      res.status(200).json(models);
+    } catch (err) {
+      if (cachedDeepInfraModels) {
+        res.status(200).json(cachedDeepInfraModels);
+        return;
+      }
+      res.status(502).json({
+        error: err instanceof Error ? err.message : String(err),
+        code: 'upstream_error',
+      });
+    }
   });
 
   app.post(

@@ -16,6 +16,7 @@ import type {
   ResponsesApiInputItem,
   ResponsesApiRequest,
   ResponsesApiReasoning,
+  ResponsesApiServiceTier,
   ResponsesSSEEvent,
   ResponsesSSEEventType,
 } from './types.js';
@@ -506,6 +507,14 @@ export class ResponsesPipeline {
     }
 
     const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
+    const effectiveServiceTier =
+      (extraBody?.['service_tier'] as ResponsesApiServiceTier | undefined) ??
+      (this.config.service_tier as ResponsesApiServiceTier | undefined);
+
+    if (effectiveServiceTier !== undefined) {
+      apiRequest.service_tier = effectiveServiceTier;
+    }
+
     if (extraBody) {
       const thinkingOptOut =
         request.config?.thinkingConfig?.includeThoughts === false;

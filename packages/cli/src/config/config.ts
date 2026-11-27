@@ -208,6 +208,7 @@ export interface CliArgs {
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
   openaiLoggingDir: string | undefined;
+  serviceTier?: string | undefined;
   proxy: string | undefined;
   insecure?: boolean | undefined;
   includeDirectories: string[] | undefined;
@@ -725,6 +726,7 @@ export async function parseArguments(): Promise<CliArgs> {
         )
         .option('openai-api-key', DEFAULT_COMMAND_OPTIONS['openai-api-key'])
         .option('openai-base-url', DEFAULT_COMMAND_OPTIONS['openai-base-url'])
+        .option('service-tier', DEFAULT_COMMAND_OPTIONS['service-tier'])
         .option('screen-reader', DEFAULT_COMMAND_OPTIONS['screen-reader'])
         .option('input-format', DEFAULT_COMMAND_OPTIONS['input-format'])
         .option('output-format', DEFAULT_COMMAND_OPTIONS['output-format'])
@@ -2322,6 +2324,7 @@ export async function loadCliConfig(
             openaiBaseUrl: argv.openaiBaseUrl,
             openaiLogging: argv.openaiLogging,
             openaiLoggingDir: argv.openaiLoggingDir,
+            serviceTier: argv.serviceTier,
           },
           settings,
           selectedAuthType,

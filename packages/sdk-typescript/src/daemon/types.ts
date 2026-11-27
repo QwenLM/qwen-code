@@ -6184,6 +6184,7 @@ export interface DaemonAuthProviderInstallRequest {
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];
+  modelSpecs?: Array<{ id: string; contextWindowSize?: number }>;
   advancedConfig?: {
     /** Replace all advanced form controls; omitted fields otherwise stay unchanged. */
     replaceExisting?: boolean;
@@ -6197,6 +6198,7 @@ export interface DaemonAuthProviderInstallRequest {
     };
     contextWindowSize?: number;
     maxTokens?: number;
+    service_tier?: string;
   };
 }
 

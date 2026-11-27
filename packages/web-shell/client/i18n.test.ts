@@ -1232,3 +1232,75 @@ describe('archived conversations catalog parity', () => {
     }
   });
 });
+
+const MODEL_SELECTION_KEYS = [
+  'auth.modelSelection.searchPlaceholder',
+  'auth.modelSelection.allTypes',
+  'auth.modelSelection.textGeneration',
+  'auth.modelSelection.allQuant',
+  'auth.modelSelection.anyContext',
+  'auth.modelSelection.featured',
+  'auth.modelSelection.discount',
+  'auth.modelSelection.priority',
+  'auth.modelSelection.flex',
+  'auth.modelSelection.loading',
+  'auth.modelSelection.failed',
+  'auth.modelSelection.retry',
+  'auth.modelSelection.noMatches',
+  'auth.modelSelection.selectAll',
+  'auth.modelSelection.deselectAll',
+  'auth.modelSelection.selectedCount',
+  'auth.modelSelection.customPrompt',
+  'auth.modelSelection.thName',
+  'auth.modelSelection.thContext',
+  'auth.modelSelection.thQuant',
+  'auth.modelSelection.thInPrice',
+  'auth.modelSelection.thOutPrice',
+  'auth.modelSelection.filterByType',
+  'auth.modelSelection.filterByQuant',
+  'auth.modelSelection.filterByContext',
+  'auth.modelSelection.minContextTokens',
+  'auth.modelSelection.filterFeaturedTitle',
+  'auth.modelSelection.filterDiscountTitle',
+  'auth.modelSelection.filterPriorityTitle',
+  'auth.modelSelection.filterFlexTitle',
+  'auth.modelSelection.sortInPriceTitle',
+  'auth.modelSelection.sortOutPriceTitle',
+  'auth.modelSelection.selectModel',
+  'auth.modelSelection.removeModel',
+  'auth.modelSelection.featuredBadge',
+  'auth.modelSelection.discountAvailable',
+  'auth.modelSelection.discountedPercentTitle',
+  'auth.modelSelection.discountedPricingTitle',
+  'auth.modelSelection.priorityBadge',
+  'auth.modelSelection.priorityTitle',
+  'auth.modelSelection.flexBadge',
+  'auth.modelSelection.flexTitle',
+] as const;
+
+describe('model selection catalog parity', () => {
+  it('carries every auth.modelSelection.* key across all shipped locales', () => {
+    const params = {
+      count: 2,
+      error: 'err',
+      tokens: '32k',
+      name: 'm',
+      id: 'm',
+      percent: 20,
+    };
+    for (const key of MODEL_SELECTION_KEYS) {
+      const en = getTranslator('en')(key, params);
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key, params);
+        expect(translated).not.toBe(key);
+        if (
+          key !== 'auth.modelSelection.priority' &&
+          key !== 'auth.modelSelection.flex'
+        ) {
+          expect(translated).not.toBe(en);
+        }
+      }
+    }
+  });
+});

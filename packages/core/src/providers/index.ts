@@ -45,6 +45,7 @@ export {
   codingPlanProvider,
   CUSTOM_API_KEY_ENV_PREFIX,
   customProvider,
+  deepinfraProvider,
   deepseekProvider,
   findProviderByCredentials,
   findProviderById,
@@ -98,6 +99,7 @@ export {
   OPENROUTER_ENV_KEY,
 } from './presets/openrouter.js';
 export { REQUESTY_BASE_URL, REQUESTY_ENV_KEY } from './presets/requesty.js';
+export { DEEPINFRA_BASE_URL, DEEPINFRA_ENV_KEY } from './presets/deepinfra.js';
 
 // Install logic
 export {

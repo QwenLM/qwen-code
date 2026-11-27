@@ -28,6 +28,7 @@ const PROVIDER_BY_ENV_KEY: Readonly<Record<string, string>> = {
   BAILIAN_CODING_PLAN_API_KEY: 'dashscope',
   BAILIAN_TOKEN_PLAN_API_KEY: 'dashscope',
   DASHSCOPE_API_KEY: 'dashscope',
+  DEEPINFRA_API_KEY: 'deepinfra',
   DEEPSEEK_API_KEY: 'deepseek',
   IDEALAB_API_KEY: 'dashscope',
   MINIMAX_API_KEY: 'minimax',
@@ -99,6 +100,7 @@ function providerFromHostname(hostname: string): string | undefined {
   if (isHostOrSubdomain(hostname, 'xiaomimimo.com')) return 'mimo';
   if (isHostOrSubdomain(hostname, 'openrouter.ai')) return 'openrouter';
   if (isHostOrSubdomain(hostname, 'requesty.ai')) return 'requesty';
+  if (isHostOrSubdomain(hostname, 'deepinfra.com')) return 'deepinfra';
   if (isHostOrSubdomain(hostname, 'anthropic.com')) return 'anthropic';
   if (isHostOrSubdomain(hostname, 'openai.com')) return 'openai';
   return undefined;

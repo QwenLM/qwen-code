@@ -2176,6 +2176,7 @@ function buildProviderSetupInputs(
       provider,
       helpers.getDefaultModelIds,
     ),
+    ...(req.modelSpecs ? { modelSpecs: req.modelSpecs } : {}),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
 }

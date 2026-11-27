@@ -86,9 +86,11 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // scheduled-task branch transcript renderer at 2,160,446 bytes locally;
 // merging the overload-indicator slice (#18054) adds the EN/ZH-CN overload
 // catalog entries (+483 bytes), bringing the merged tree to 2,160,929 bytes
-// (component CSS 1,911,270 bytes). Retain the house warning and hard-ceiling
-// margins of 713 and 1,713 bytes (2,161,642 / 2,162,642).
-const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_160_929;
+// (component CSS 1,911,270 bytes). Adding all 42 auth.modelSelection.* keys
+// across EN and ZH-CN brings the merged tree to 2,163,261 JS bytes (component
+// CSS 1,911,385 bytes). Retain the house warning and hard-ceiling margins of
+// 713 and 1,713 bytes (2,163,974 / 2,164,974).
+const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_163_261;
 const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
@@ -222,8 +224,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured merged tree re-tracks this ceiling to 2,162,642,
-// which is 1,713 bytes above its 2,160,929-byte measurement, and stays coupled
+// The latest measured merged tree re-tracks this ceiling to 2,164,974,
+// which is 1,713 bytes above its 2,163,261-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 

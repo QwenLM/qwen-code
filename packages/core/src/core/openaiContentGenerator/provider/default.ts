@@ -253,10 +253,18 @@ export class DefaultOpenAICompatibleProvider
     const result = {
       ...requestWithTokenLimits,
       messages,
+      ...(this.contentGeneratorConfig.service_tier !== undefined &&
+      (requestWithTokenLimits as unknown as Record<string, unknown>)[
+        'service_tier'
+      ] === undefined
+        ? { service_tier: this.contentGeneratorConfig.service_tier }
+        : {}),
       ...(extraBody ? extraBody : {}),
     };
     this.flattenGptReasoningEffort(result);
-    return this.flattenDeepSeekReasoningEffort(result);
+    return this.flattenDeepSeekReasoningEffort(
+      result,
+    ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {

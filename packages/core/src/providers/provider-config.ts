@@ -72,7 +72,11 @@ export function resolveOwnsModel(
 function buildGenerationConfig(
   spec: Pick<
     ModelSpec,
-    'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
+    | 'enableThinking'
+    | 'thinkingMandatory'
+    | 'contextWindowSize'
+    | 'modalities'
+    | 'service_tier'
   >,
   protocol: AuthType,
 ): ProviderModelConfig['generationConfig'] | undefined {
@@ -98,6 +102,10 @@ function buildGenerationConfig(
   }
   if (spec.modalities && Object.values(spec.modalities).some(Boolean)) {
     parts.modalities = spec.modalities;
+    hasAny = true;
+  }
+  if (spec.service_tier) {
+    parts.service_tier = spec.service_tier;
     hasAny = true;
   }
   return hasAny ? parts : undefined;
@@ -133,6 +141,10 @@ function buildAdvancedGenerationConfig(
   }
   if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
     cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+    hasAny = true;
+  }
+  if (advCfg?.service_tier) {
+    cfg.service_tier = advCfg.service_tier;
     hasAny = true;
   }
   return hasAny ? cfg : undefined;
@@ -179,6 +191,24 @@ function applyProviderCustomHeaders(
   });
 }
 
+function applyProviderServiceTier(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.service_tier) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    if (existing.service_tier !== undefined) return model;
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        service_tier: config.service_tier,
+      },
+    };
+  });
+}
+
 function buildModelConfigs(
   config: ProviderConfig,
   inputs: ProviderSetupInputs,
@@ -200,6 +230,9 @@ function buildModelConfigs(
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id.toLowerCase(), s]));
+    const inputSpecMap = new Map(
+      inputs.modelSpecs?.map((s) => [s.id.toLowerCase(), s]) ?? [],
+    );
     models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id.toLowerCase());
       if (spec) {
@@ -211,6 +244,7 @@ function buildModelConfigs(
           protocol,
         );
       }
+      const inputSpec = inputSpecMap.get(id.toLowerCase());
       const genConfig = buildAdvancedGenerationConfig(
         inputs.advancedConfig,
         protocol,
@@ -220,15 +254,28 @@ function buildModelConfigs(
         name: prefix ? `[${prefix}] ${id}` : id,
         baseUrl: inputs.baseUrl,
         envKey,
-        ...(genConfig ? { generationConfig: genConfig } : {}),
+        ...(genConfig || inputSpec?.contextWindowSize
+          ? {
+              generationConfig: {
+                ...genConfig,
+                ...(inputSpec?.contextWindowSize
+                  ? { contextWindowSize: inputSpec.contextWindowSize }
+                  : {}),
+              },
+            }
+          : {}),
       };
     });
   } else {
     // No predefined models (custom provider) — use advancedConfig
     const advCfg = inputs.advancedConfig;
+    const inputSpecMap = new Map(
+      inputs.modelSpecs?.map((s) => [s.id.toLowerCase(), s]) ?? [],
+    );
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
       const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
+      const inputSpec = inputSpecMap.get(id.toLowerCase());
       return {
         id,
         name: displayName(id),
@@ -239,12 +286,24 @@ function buildModelConfigs(
           : advCfg?.purpose === 'voice'
             ? { voiceOnly: true }
             : {}),
-        ...(genConfig ? { generationConfig: genConfig } : {}),
+        ...(genConfig || inputSpec?.contextWindowSize
+          ? {
+              generationConfig: {
+                ...genConfig,
+                ...(inputSpec?.contextWindowSize
+                  ? { contextWindowSize: inputSpec.contextWindowSize }
+                  : {}),
+              },
+            }
+          : {}),
       };
     });
   }
 
-  return applyProviderCustomHeaders(models, config);
+  return applyProviderCustomHeaders(
+    applyProviderServiceTier(models, config),
+    config,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +467,11 @@ export function buildInstallPlan(
       if (!existing) return model;
       const preservedGeneration = { ...existing.generationConfig };
       const advanced = inputs.advancedConfig;
+      if (advanced) {
+        if (advanced.replaceExisting || advanced.service_tier !== undefined) {
+          delete preservedGeneration.service_tier;
+        }
+      }
       if (!config.models && advanced) {
         if (advanced.replaceExisting) {
           delete preservedGeneration.contextWindowSize;
@@ -475,6 +539,19 @@ export function buildInstallPlan(
                 : {}),
             }
           : undefined;
+      if (
+        generationConfig &&
+        preservedGeneration.service_tier !== undefined &&
+        inputs.advancedConfig?.service_tier === undefined
+      ) {
+        generationConfig.service_tier = preservedGeneration.service_tier;
+      } else if (
+        generationConfig &&
+        inputs.advancedConfig?.replaceExisting &&
+        inputs.advancedConfig?.service_tier === undefined
+      ) {
+        delete generationConfig.service_tier;
+      }
       return {
         ...existing,
         ...model,

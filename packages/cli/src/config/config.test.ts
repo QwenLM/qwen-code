@@ -8930,6 +8930,17 @@ describe('loadCliConfig goals.modelProposed', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getModelProposedGoals()).toBe('alwaysAsk');
   });
+
+  it('flows --service-tier from yargs through loadCliConfig to Config generationConfig', async () => {
+    process.argv = ['node', 'script.js', '--service-tier', 'flex'];
+    const argv = await parseArguments();
+    expect(argv.serviceTier).toBe('flex');
+
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getModelsConfig().getGenerationConfig().service_tier).toBe(
+      'flex',
+    );
+  });
 });
 
 describe('normalizeModelProposedGoals', () => {

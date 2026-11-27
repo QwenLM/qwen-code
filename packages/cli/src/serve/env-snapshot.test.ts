@@ -84,6 +84,17 @@ describe('buildEnvStatusFromProcess', () => {
     expect(process.env['DASHSCOPE_API_KEY']).toBeUndefined();
   });
 
+  it('reports DEEPINFRA_API_KEY presence in secret env vars (R1-27)', () => {
+    expect(ENV_SECRET_VARS).toContain('DEEPINFRA_API_KEY');
+    const status = buildEnvStatusFromEnv('/ws', false, {
+      DEEPINFRA_API_KEY: 'test-key',
+    });
+    const cell = status.cells.find(
+      (c) => c.kind === 'env_var' && c.name === 'DEEPINFRA_API_KEY',
+    );
+    expect(cell).toMatchObject({ present: true, status: 'ok' });
+  });
+
   it('emits a runtime cell whose value matches the actual runtime version', () => {
     const status = buildEnvStatusFromProcess('/ws', false);
     const runtime = status.cells.find((c) => c.kind === 'runtime');

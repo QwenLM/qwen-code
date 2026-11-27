@@ -670,6 +670,216 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('service_tier reaches the provider through configuration', () => {
+    it('carries a settings generationConfig value onto the resolved config', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: {
+          apiKey: 'key',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          model: 'deepseek-ai/DeepSeek-V3',
+          generationConfig: {
+            service_tier: 'flex',
+          },
+        },
+      });
+
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('settings');
+    });
+
+    it('lets modelProvider generationConfig set service_tier', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+          generationConfig: { service_tier: 'flex' },
+        },
+        env: { DEEPINFRA_API_KEY: 'test-key' },
+      });
+
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('modelProviders');
+    });
+
+    it('resolves service_tier from OPENAI_SERVICE_TIER for general providers', () => {
+      const fromOpenAi = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: { apiKey: 'key', model: 'gpt-4' },
+        env: { OPENAI_SERVICE_TIER: 'flex' },
+      });
+      expect(fromOpenAi.config.service_tier).toBe('flex');
+      expect(fromOpenAi.sources['service_tier'].kind).toBe('env');
+      expect(fromOpenAi.sources['service_tier'].envKey).toBe(
+        'OPENAI_SERVICE_TIER',
+      );
+    });
+
+    it('resolves service_tier from DEEPINFRA_SERVICE_TIER when provider is verified as DeepInfra', () => {
+      const fromDeepinfra = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+        },
+        env: {
+          DEEPINFRA_API_KEY: 'test-key',
+          DEEPINFRA_SERVICE_TIER: 'flex',
+        },
+      });
+      expect(fromDeepinfra.config.service_tier).toBe('flex');
+      expect(fromDeepinfra.sources['service_tier'].kind).toBe('env');
+      expect(fromDeepinfra.sources['service_tier'].envKey).toBe(
+        'DEEPINFRA_SERVICE_TIER',
+      );
+    });
+
+    it('ignores DEEPINFRA_SERVICE_TIER for non-DeepInfra providers (R1-5)', () => {
+      const nonDeepInfra = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: {
+          apiKey: 'key',
+          model: 'deepseek-chat',
+          baseUrl: 'https://api.deepseek.com',
+        },
+        env: { DEEPINFRA_SERVICE_TIER: 'flex' },
+      });
+      expect(nonDeepInfra.config.service_tier).toBeUndefined();
+      expect(nonDeepInfra.sources['service_tier']).toBeUndefined();
+    });
+
+    it('prioritizes DEEPINFRA_SERVICE_TIER over OPENAI_SERVICE_TIER for DeepInfra (R1-7)', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+        },
+        env: {
+          DEEPINFRA_API_KEY: 'test-key',
+          OPENAI_SERVICE_TIER: 'priority',
+          DEEPINFRA_SERVICE_TIER: 'flex',
+        },
+      });
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('env');
+      expect(result.sources['service_tier'].envKey).toBe(
+        'DEEPINFRA_SERVICE_TIER',
+      );
+    });
+
+    it('strictly enforces resolution priority: modelProvider > CLI > env > settings (R1-3)', () => {
+      // 1. modelProvider beats CLI, env, settings
+      const modelProviderWins = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+          generationConfig: { service_tier: 'priority' },
+        },
+        cli: { serviceTier: 'flex' },
+        env: {
+          DEEPINFRA_API_KEY: 'test-key',
+          DEEPINFRA_SERVICE_TIER: 'auto',
+        },
+        settings: {
+          generationConfig: { service_tier: 'scale' },
+        },
+      });
+      expect(modelProviderWins.config.service_tier).toBe('priority');
+      expect(modelProviderWins.sources['service_tier'].kind).toBe(
+        'modelProviders',
+      );
+
+      // 2. CLI beats env, settings
+      const cliWins = resolve({
+        authType: AuthType.USE_OPENAI,
+        cli: { serviceTier: 'flex' },
+        settings: {
+          apiKey: 'key',
+          generationConfig: { service_tier: 'priority' },
+        },
+        env: { OPENAI_SERVICE_TIER: 'auto' },
+      });
+      expect(cliWins.config.service_tier).toBe('flex');
+      expect(cliWins.sources['service_tier'].kind).toBe('cli');
+
+      // 3. Env beats settings
+      const envWins = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: {
+          apiKey: 'key',
+          generationConfig: { service_tier: 'priority' },
+        },
+        env: { OPENAI_SERVICE_TIER: 'flex' },
+      });
+      expect(envWins.config.service_tier).toBe('flex');
+      expect(envWins.sources['service_tier'].kind).toBe('env');
+    });
+
+    it('defaults DeepInfra flex queue timeout to 10 minutes when unset (R1-31)', () => {
+      const flexResult = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+          generationConfig: { service_tier: 'flex' },
+        },
+        env: { DEEPINFRA_API_KEY: 'test-key' },
+      });
+      expect(flexResult.config.service_tier).toBe('flex');
+      expect(flexResult.config.timeout).toBe(600000);
+      expect(flexResult.sources['timeout'].kind).toBe('default');
+
+      // Explicit user timeout is preserved and not overwritten
+      const explicitTimeout = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+          generationConfig: { service_tier: 'flex', timeout: 30000 },
+        },
+        env: { DEEPINFRA_API_KEY: 'test-key' },
+      });
+      expect(explicitTimeout.config.timeout).toBe(30000);
+      expect(explicitTimeout.sources['timeout'].kind).toBe('modelProviders');
+
+      // Non-flex DeepInfra request does not receive the 10m default
+      const nonFlexResult = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+        },
+        env: { DEEPINFRA_API_KEY: 'test-key' },
+      });
+      expect(nonFlexResult.config.timeout).toBeUndefined();
+
+      // Hand-written DeepInfra endpoint entry without DEEPINFRA_API_KEY still receives
+      // 10m timeout when service_tier is explicitly flex
+      const handWrittenFlex = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          generationConfig: { service_tier: 'flex' },
+        },
+        settings: { apiKey: 'sk-custom' },
+      });
+      expect(handWrittenFlex.config.service_tier).toBe('flex');
+      expect(handWrittenFlex.config.timeout).toBe(600000);
+      expect(handWrittenFlex.sources['timeout'].kind).toBe('default');
+    });
+  });
+
   describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
     it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
       // REPRODUCES issue-4219: with the model supplied only via OPENAI_MODEL

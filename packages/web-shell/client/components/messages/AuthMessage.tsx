@@ -41,6 +41,7 @@ import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
 import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
+import { ModelSelectionPanel } from './ModelSelectionPanel';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -257,6 +258,9 @@ export function AuthMessage({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
+  const [modelSpecs, setModelSpecs] = useState<
+    Array<{ id: string; contextWindowSize?: number }>
+  >([]);
   const [thinking, setThinking] = useState(false);
   const [modality, setModality] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -390,7 +394,8 @@ export function AuthMessage({
         setBaseUrl(defaultBaseUrl(nextProtocol, nextWireApi));
       }
       setApiKey('');
-      setModels(modelIds(nextProvider));
+      setModels(nextProvider.id === 'deepinfra' ? '' : modelIds(nextProvider));
+      setModelSpecs([]);
       setThinking(false);
       setModality(false);
       setModalityImage(true);
@@ -556,6 +561,7 @@ export function AuthMessage({
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
         modelIds: normalizeModelIds(models),
+        ...(modelSpecs.length > 0 ? { modelSpecs } : {}),
         advancedConfig,
       })
       .then(async (result) => {
@@ -595,6 +601,7 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    modelSpecs,
     onChatProviderConfigured,
     onClose,
     onMessage,
@@ -966,32 +973,19 @@ export function AuthMessage({
     if (currentStep === 'models') {
       const defaultIds = modelIds(provider);
       return (
-        <>
-          {defaultIds && (
-            <div className={styles.muted}>
-              {t('auth.modelsPrompt', { modelIds: defaultIds })}
-            </div>
-          )}
-          <input
-            className={styles.input}
-            value={models}
-            aria-label={t('auth.step.models')}
-            disabled={saving}
-            placeholder={defaultIds || t('auth.modelsPlaceholder')}
-            onChange={(event) => {
-              setModels(event.target.value);
-              setError(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                event.stopPropagation();
-                goNext();
-              }
-            }}
-            autoFocus
-          />
-        </>
+        <ModelSelectionPanel
+          provider={provider}
+          value={models}
+          onChange={(newModels) => {
+            setModels(newModels);
+            setError(null);
+          }}
+          onModelSpecsChange={setModelSpecs}
+          autoFocus
+          disabled={saving}
+          onEnterPress={goNext}
+          defaultModelIds={defaultIds}
+        />
       );
     }
     return (

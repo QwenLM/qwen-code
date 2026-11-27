@@ -33,6 +33,7 @@ export const buildRemovalNotice = (): string =>
     `                     ${t('International: https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1')}`,
     `  ${cyan(t('OpenRouter'))}    →  ${t('set OPENROUTER_API_KEY and OPENAI_BASE_URL=https://openrouter.ai/api/v1')}`,
     `  ${cyan(t('Requesty'))}      →  ${t('set REQUESTY_API_KEY and OPENAI_BASE_URL=https://router.requesty.ai/v1')}`,
+    `  ${cyan(t('DeepInfra'))}     →  ${t('set DEEPINFRA_API_KEY and OPENAI_BASE_URL=https://api.deepinfra.com/v1/openai')}`,
     `  ${cyan(t('Qwen OAuth'))}    →  ${t('run qwen interactively and use /auth; OAuth cannot be configured with env vars alone')}`,
     `  ${cyan(t('Scripted'))}      →  ${t('edit ~/.qwen/settings.json, or run qwen interactively once')}`,
     '',
@@ -49,6 +50,7 @@ const legacySubcommands = [
   'coding-plan',
   'openrouter',
   'requesty',
+  'deepinfra',
   'api-key',
   'qwen-oauth',
 ];

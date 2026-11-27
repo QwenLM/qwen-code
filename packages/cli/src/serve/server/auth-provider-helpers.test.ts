@@ -98,6 +98,53 @@ describe('advanced form replacement', () => {
   );
 });
 
+describe('advancedConfig.service_tier parsing (R1-28)', () => {
+  it('parses valid service_tier and forwards it on advancedConfig', () => {
+    const parsed = parseAuthProviderInstallRequest({
+      ...request,
+      advancedConfig: { service_tier: 'flex' },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error('Expected ok');
+    expect(parsed.value.advancedConfig?.service_tier).toBe('flex');
+  });
+
+  it('omits empty or whitespace service_tier', () => {
+    const parsed = parseAuthProviderInstallRequest({
+      ...request,
+      advancedConfig: { service_tier: '   ' },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error('Expected ok');
+    expect(parsed.value.advancedConfig?.service_tier).toBeUndefined();
+  });
+});
+
+describe('modelSpecs parsing (R1-34)', () => {
+  it('parses modelSpecs with contextWindowSize and forwards them', () => {
+    const parsed = parseAuthProviderInstallRequest({
+      ...request,
+      modelSpecs: [
+        { id: 'deepseek-ai/DeepSeek-V3', max_tokens: 163840 },
+        {
+          id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+          contextWindowSize: 131072,
+        },
+        { id: '  ' },
+      ],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error('Expected ok');
+    expect(parsed.value.modelSpecs).toEqual([
+      { id: 'deepseek-ai/DeepSeek-V3', contextWindowSize: 163840 },
+      {
+        id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+        contextWindowSize: 131072,
+      },
+    ]);
+  });
+});
+
 describe('buildAuthProviderCatalog', () => {
   it('lists QwenCloud first and pins every group membership', () => {
     const catalog = buildAuthProviderCatalog('/tmp/workspace');
@@ -129,6 +176,7 @@ describe('buildAuthProviderCatalog', () => {
         'modelscope',
         'openrouter',
         'requesty',
+        'deepinfra',
       ],
     });
     expect(catalog.groups[3]).toMatchObject({

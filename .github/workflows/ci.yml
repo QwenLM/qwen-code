@@ -3440,6 +3440,7 @@ jobs:
           MOONSHOT_API_KEY: ''
           OPENROUTER_API_KEY: ''
           REQUESTY_API_KEY: ''
+          DEEPINFRA_API_KEY: ''
           XAI_API_KEY: ''
           ZAI_API_KEY: ''
           QWENCLOUD_API_KEY: ''

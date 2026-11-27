@@ -26742,6 +26742,119 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/list includes existing provider service_tier and advancedConfig', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              baseUrl: 'https://api.deepseek.com/v1',
+              envKey: 'DEEPSEEK_API_KEY',
+              generationConfig: {
+                service_tier: 'priority',
+                contextWindowSize: 64000,
+              },
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const providers = await agent.extMethod('qwen/providers/list', {});
+    expect(providers).toEqual({
+      providers: [
+        expect.objectContaining({
+          id: 'deepseek',
+          existingConfig: expect.objectContaining({
+            advancedConfig: {
+              service_tier: 'priority',
+              contextWindowSize: 64000,
+            },
+          }),
+        }),
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect parses and forwards service_tier in advancedConfig and modelSpecs', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: {},
+        modelProviders: {},
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        modelIds: ['deepseek-chat'],
+        advancedConfig: {
+          service_tier: 'flex',
+        },
+        modelSpecs: [{ id: 'deepseek-chat', contextWindowSize: 64000 }],
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        success: true,
+        providerId: 'deepseek',
+      }),
+    );
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        advancedConfig: expect.objectContaining({
+          service_tier: 'flex',
+        }),
+        modelSpecs: [{ id: 'deepseek-chat', contextWindowSize: 64000 }],
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        modelIds: ['deepseek-chat'],
+        advancedConfig: {
+          service_tier: '',
+        },
+      }),
+    ).rejects.toThrow();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {
     mockConfig.getSkillManager = vi.fn().mockReturnValue({
       parseSkillContent: vi.fn(),

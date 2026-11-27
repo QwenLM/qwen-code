@@ -60,6 +60,7 @@ describe('GenAI provider resolution', () => {
     ['https://api.xiaomimimo.com/v1', 'mimo'],
     ['https://openrouter.ai/api/v1', 'openrouter'],
     ['https://router.requesty.ai/v1', 'requesty'],
+    ['https://api.deepinfra.com/v1/openai', 'deepinfra'],
     ['https://api.openai.com/v1', 'openai'],
     ['https://api.anthropic.com/v1', 'anthropic'],
   ])('recognizes %s as %s', (baseUrl, expected) => {
@@ -182,6 +183,7 @@ describe('GenAI provider resolution', () => {
     ['QWENCLOUD_API_KEY', 'dashscope'],
     ['QWENCLOUD_TOKEN_PLAN_API_KEY', 'dashscope'],
     ['REQUESTY_API_KEY', 'requesty'],
+    ['DEEPINFRA_API_KEY', 'deepinfra'],
   ])('uses %s as a provider hint for an unknown endpoint', (key, expected) => {
     expect(
       resolveGenAiProviderName({
