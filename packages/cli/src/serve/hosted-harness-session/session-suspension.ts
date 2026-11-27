@@ -19,7 +19,10 @@ import {
   hostedCommandStepResumeShapeRefusal,
 } from '../hosted-action-parking.js';
 import { findHostedApprovalContinuation } from '../hosted-approval-continuation.js';
-import { detachBackgroundPublishers } from '../hosted-background-delivery-recovery.js';
+import {
+  detachBackgroundPublishers,
+  resolveBackgroundRuntimeSessions,
+} from '../hosted-background-delivery-recovery.js';
 import type { HostedHarnessInstance } from '../hosted-harness-instance.js';
 import { wakeHasPriorAttempt } from '../hosted-monitor-wake.js';
 import {
@@ -40,12 +43,18 @@ import {
   hasHostedCleanupDebtExcluding,
 } from '../hosted-turn-cleanup.js';
 import { pendingSessionInputs } from '../hosted-wake-intake.js';
-import type { HostedWorkspaceBrokerOptions } from '../hosted-workspace-broker.js';
+import {
+  HostedWorkspaceBroker,
+  hostedRuntimeSessionId,
+  type HostedWorkspaceBrokerOptions,
+} from '../hosted-workspace-broker.js';
 import { isHostedWorkspacePublicShellProfile } from '../hosted-workspace-profiles.js';
 import { compressionBusy } from './lifecycle-routes.js';
 import {
   type HostedRuntimeOwnership,
+  releaseIsSatisfied,
   retryHostedCleanup,
+  sessionReloadStableOwnerIds,
 } from './runtime-ownership.js';
 import type {
   HostedHarnessSessionOptions,
@@ -455,6 +464,46 @@ export function createHostedSessionSuspension({
       isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2);
 
+  const releaseSettledMonitorHold = async (
+    session: HostedSession,
+    broker: HostedWorkspaceBrokerOptions,
+    promptId: string,
+  ): Promise<void> => {
+    const separator = promptId.lastIndexOf(':notify:');
+    if (separator < 0 || session.heldRuntimeTurns.size === 0) return;
+    const monitorId = promptId.slice(0, separator);
+    const run = session.monitors?.record(monitorId)?.run;
+    if (run?.execution !== 'settled' || !run.runtime) return;
+    const runtimeIds = await resolveBackgroundRuntimeSessions(
+      session.managed,
+      new Set([monitorId]),
+    );
+    const stableOwners = sessionReloadStableOwnerIds(session);
+    const currentRuntimeId = hostedRuntimeSessionId(promptId);
+    for (const held of session.heldRuntimeTurns) {
+      const runtimeId = hostedRuntimeSessionId(held);
+      if (
+        runtimeId === currentRuntimeId ||
+        !runtimeIds.has(runtimeId) ||
+        stableOwners.has(runtimeId)
+      )
+        continue;
+      try {
+        await new HostedWorkspaceBroker(
+          broker,
+          session.managed.authority.sessionHeader.sessionKey,
+          runtimeId,
+        ).release({
+          bindingId: run.runtime.runtimeBindingId,
+          generation: run.runtime.generation,
+        });
+      } catch (cause) {
+        if (!releaseIsSatisfied(cause)) continue;
+      }
+      session.heldRuntimeTurns.delete(held);
+    }
+  };
+
   const attemptSuspend = async (sessionId: string): Promise<void> => {
     const session = sessions.get(sessionId);
     const suspension = suspensions.get(sessionId);
@@ -540,6 +589,17 @@ export function createHostedSessionSuspension({
             hostedActionParkRegistration(session.managed) !==
               park.registration ||
             pending.some((input) => input.turnId !== park.promptId);
+          // A Monitor may exit after emitting this wake. Its terminal no longer
+          // certifies a background hold, but the originating Runtime still needs
+          // a confirmed release before the wake's approval can park.
+          if (
+            !marked &&
+            !blocked &&
+            !backgroundCertified &&
+            broker &&
+            pending.some((input) => input.source === 'monitor')
+          )
+            await releaseSettledMonitorHold(session, broker, park.promptId);
           if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
           return blocked;
         }

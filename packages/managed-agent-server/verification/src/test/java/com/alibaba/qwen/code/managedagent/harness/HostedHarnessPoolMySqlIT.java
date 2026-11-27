@@ -119,6 +119,15 @@ class HostedHarnessPoolMySqlIT {
         var credentials = new WriterCredentialPolicy(settings);
         String oldGrant = credentials.issue(tenantA, WORKSPACE, a1, original.instanceId(), original.bootId(), original.epoch());
         HostedHarnessClient firstClient = client(first);
+        var attachedEvidence = pool.inspectRecovery(tenantA, a1, null);
+        assertThat(attachedEvidence).isNotNull();
+        var unattachedEvidence = firstClient.getUnattachedStatus(a1, null).getRecovery();
+        assertThat(unattachedEvidence.getState()).isEqualTo(attachedEvidence.state());
+        assertThat(unattachedEvidence.isNextTurnAllowed()).isEqualTo(attachedEvidence.nextTurnAllowed());
+        assertThat(placements.get(tenantA, a1)).isEqualTo(original);
+        assertThat(http.send(HttpRequest.newBuilder(first.resolve("/session/" + a1 + "/status"))
+                .timeout(Duration.ofSeconds(2)).build(), HttpResponse.BodyHandlers.discarding()).statusCode())
+                .isEqualTo(401);
         assertThat(firstClient.readInstance().get("state")).isEqualTo("ACCEPTING");
         pool.drainInstance("pool-a", UUID.randomUUID().toString());
         await(() -> "DRAINED".equals(firstClient.readInstance().get("state")), 30);

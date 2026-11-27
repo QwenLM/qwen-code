@@ -6459,6 +6459,22 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  it('keeps the retention limit out of the static worktree config', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-config-'));
+    try {
+      const argv = await parseArguments();
+      await loadCliConfig(
+        { worktree: { maxRetained: 0 } } as Settings,
+        argv,
+        cwd,
+      );
+      const forwarded = mockConfigConstructorParams.mock.lastCall?.[0];
+      expect(forwarded.worktree).not.toHaveProperty('maxRetained');
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   describe('project hooks approval gate', () => {
     const projectHooks = { SessionStart: [{ hooks: [] }] };
     const cwd = path.resolve(path.sep, 'home', 'user', 'project');
@@ -7412,47 +7428,25 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
-  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+  it('leaves the per-turn tool-call cap off unless maxToolCallsPerTurn is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const load = (loopProtection?: unknown) =>
-      loadCliConfig(
-        { model: { loopProtection } } as Settings,
-        argv,
-        undefined,
-        [],
-      );
-    expect((await load('stop')).getLoopProtection()).toBe('stop');
-    expect((await load('off')).getLoopProtection()).toBe('off');
-    expect((await load()).getLoopProtection()).toBe('warn');
-    expect((await load('never')).getLoopProtection()).toBe('warn');
-  });
-
-  it('warns once about an invalid model.loopProtection value', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      for (let i = 0; i < 2; i++) {
-        const config = await loadCliConfig(
-          { model: { loopProtection: 'Stop' } } as unknown as Settings,
-          argv,
-          undefined,
-          [],
-        );
-        expect(config.getLoopProtection()).toBe('warn');
-      }
-      const warnings = errorSpy.mock.calls.filter(([message]) =>
-        String(message).includes('model.loopProtection'),
-      );
-      expect(warnings).toEqual([
-        [
-          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
-        ],
-      ]);
-    } finally {
-      errorSpy.mockRestore();
-    }
+    const load = (model: Settings['model']) =>
+      loadCliConfig({ model } as Settings, argv, undefined, []);
+    expect((await load({})).getMaxToolCallsPerTurn()).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+    expect(
+      (await load({ maxToolCallsPerTurn: 100 })).getMaxToolCallsPerTurn(),
+    ).toBe(100);
+    expect(
+      (
+        await load({
+          loopProtection: 'stop',
+          skipLoopDetection: false,
+        } as unknown as Settings['model'])
+      ).getMaxToolCallsPerTurn(),
+    ).toBe(Number.POSITIVE_INFINITY);
   });
 
   it('should have undefined chatCompression if not in settings', async () => {

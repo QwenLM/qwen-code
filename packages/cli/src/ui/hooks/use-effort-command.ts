@@ -7,9 +7,9 @@
 import { useState, useCallback } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
-import { applyReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { applyModelReasoningEffort } from '../../config/model-preferences.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { formatEffortChangeMessage } from '../commands/effort-utils.js';
 
@@ -37,14 +37,7 @@ export const useEffortCommand = (
           // User cancelled the dialog — leave the current effort unchanged.
           return;
         }
-        // Apply at runtime (next turn) and persist for future sessions; provider
-        // adapters clamp the tier to what the active model supports.
-        applyReasoningEffort(config, effort);
-        loadedSettings.setValue(
-          getPersistScopeForModelSelection(loadedSettings),
-          'model.reasoningEffort',
-          effort,
-        );
+        applyModelReasoningEffort(config, loadedSettings, effort);
         // Report the outcome in-chat instead of silently closing (the status
         // line is the only other signal). The setter no-ops when thinking is
         // explicitly disabled (`reasoning: false`): the tier is still persisted
@@ -62,6 +55,11 @@ export const useEffortCommand = (
             outputHistoryItems: [feedbackItem],
           });
         }
+      } catch (error) {
+        addItem?.(
+          { type: MessageType.ERROR, text: getErrorMessage(error) },
+          Date.now(),
+        );
       } finally {
         setIsEffortDialogOpen(false);
       }

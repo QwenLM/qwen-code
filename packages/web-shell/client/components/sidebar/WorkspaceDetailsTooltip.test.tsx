@@ -690,6 +690,55 @@ describe('WorkspaceDetailsTooltip menu suppression', () => {
     });
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   });
+
+  it('does not hand focus back to the row when suppression closes the card under a focused facet', async () => {
+    const content = (suppressed: boolean) => (
+      <SidebarHoverSuppressionContext.Provider value={suppressed}>
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="qwen-code"
+            cwd="/work/qwen-code"
+            overview={snapshot}
+            items={['mcp']}
+            onOpenOverviewItem={() => {}}
+            manageableItems={new Set(['mcp'])}
+          >
+            <div>
+              <button type="button">qwen-code</button>
+            </div>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>
+      </SidebarHoverSuppressionContext.Provider>
+    );
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(content(false));
+    });
+    const trigger = container.querySelector<HTMLButtonElement>('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+    });
+    const facet = facetRow(
+      document.querySelector<HTMLElement>('[role="dialog"]')!,
+      'mcp',
+    )!;
+    await act(async () => {
+      facet.focus();
+    });
+    expect(document.activeElement).toBe(facet);
+
+    await act(async () => {
+      root.render(content(true));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    // The focused facet unmounts with the card. Suppression owns the close,
+    // so it must not pull focus onto the row beneath the menu that took over.
+    expect(document.activeElement).not.toBe(trigger);
+    expect(document.activeElement).toBe(document.body);
+  });
 });
 
 describe('WorkspaceDetailsTooltip git branch row', () => {
@@ -923,5 +972,48 @@ describe('WorkspaceDetailsTooltip git branch row', () => {
     );
     expect(gitDot(details)).toBeNull();
     expect(details.textContent).toContain('Working tree clean');
+  });
+});
+
+describe('WorkspaceDetailsTooltip interactive overview facets', () => {
+  it('renders manageable facets as buttons, closes without stealing focus, and keeps non-manageable facets read-only', async () => {
+    const onOpenOverviewItem = vi.fn();
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={snapshot}
+        items={['mcp', 'skills', 'context']}
+        onOpenOverviewItem={onOpenOverviewItem}
+        manageableItems={new Set(['mcp', 'context'])}
+      >
+        <div>
+          <button type="button">qwen-code</button>
+        </div>
+      </WorkspaceDetailsTooltip>,
+    );
+
+    const mcpRow = facetRow(details, 'mcp')!;
+    const skillsRow = facetRow(details, 'skills')!;
+    const contextRow = facetRow(details, 'context')!;
+    expect(mcpRow.tagName).toBe('BUTTON');
+    expect(mcpRow.getAttribute('aria-label')).toBe(
+      'Manage MCP for qwen-code: 1 of 3 connected, 1 failed, 1 disabled',
+    );
+    expect(skillsRow.tagName).toBe('DIV');
+    expect(contextRow.tagName).toBe('BUTTON');
+
+    const trigger = container.querySelector<HTMLButtonElement>('button')!;
+    mcpRow.focus();
+    await act(async () => {
+      mcpRow.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenOverviewItem).toHaveBeenCalledWith('mcp');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    // The production anchor contains a button. This distinguishes
+    // close(false) from close(), which restores focus to that button.
+    expect(trigger).toBe(container.querySelector<HTMLElement>('button'));
+    expect(document.activeElement).toBe(document.body);
+    expect(document.activeElement).not.toBe(trigger);
   });
 });

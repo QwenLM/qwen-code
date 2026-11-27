@@ -22,13 +22,11 @@ import {
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
-import {
-  applyReasoningEffort,
-  REASONING_EFFORT_TIERS,
-} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { applyModelReasoningEffort } from '../../config/model-preferences.js';
 import {
   getScopeItems,
   getScopeMessageForSetting,
@@ -632,7 +630,7 @@ export function OpenTuiEffortDialog(props: {
   const effortContentWidth = dialogContentWidth(width);
   const effortTitleRows = dialogTitleRows(
     t('Reasoning Effort'),
-    t('(applied across all providers; clamped per model)'),
+    t('(for the current model, within provider limits)'),
     effortContentWidth,
   );
   const noteText = currentEffort
@@ -664,22 +662,12 @@ export function OpenTuiEffortDialog(props: {
     maxItemsToShow: tierWindow.maxItemsToShow,
     onSelect: (effort) => {
       try {
-        // Apply at runtime (next turn) and persist for future sessions;
-        // provider adapters clamp the tier per model (ink useEffortCommand
-        // parity — the request pipeline reads the live config per request).
-        if (config) {
-          applyReasoningEffort(config, effort);
-        }
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.reasoningEffort',
-          effort,
-        );
+        applyModelReasoningEffort(config, settings, effort);
         // Read back after the apply: the message names what the provider
         // actually clamped the tier to, not what the row asked for.
         if (config) notify?.(formatEffortChangeMessage(config, effort));
-      } catch {
-        /* ignore */
+      } catch (error) {
+        notify?.(getErrorMessage(error), 'error');
       }
       onClose();
     },
@@ -690,7 +678,7 @@ export function OpenTuiEffortDialog(props: {
     <DialogFrame>
       <DialogTitle
         title={t('Reasoning Effort')}
-        subtitle={t('(applied across all providers; clamped per model)')}
+        subtitle={t('(for the current model, within provider limits)')}
       />
       <LabeledRows
         list={list}
