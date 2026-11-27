@@ -10,10 +10,6 @@
  * API allows, following the harness contract in `cases.ts` (element IDs). The
  * replay then measures what the runtime and host can do today, independent of
  * any model's generation quality.
- *
- * Where the API has no mechanism (clipboard, download), the document still
- * provides the contract's control, so the check observes the missing
- * capability instead of a missing element.
  */
 
 export interface GeneratedUiDocument {
@@ -43,8 +39,7 @@ export const billSplitterDocument: GeneratedUiDocument = {
     '<p role="alert" id="error" class="danger"></p>' +
     '<p>Total: <output id="total"></output></p>' +
     '<ul id="shares"></ul><div id="chart" role="img" aria-label="Share per person"></div>' +
-    '<button id="reset" type="button">Reset</button> <button id="copy" type="button">Copy current values</button>' +
-    '<p id="copy-status" class="muted"></p>',
+    '<button id="reset" type="button">Reset</button> <button id="copy" type="button">Copy current values</button>',
   css: '#chart svg{width:100%;height:auto}',
   javascript:
     MONEY_JS +
@@ -78,7 +73,11 @@ function render(){
 }
 ['subtotal','people','discount','service-rate'].forEach(function(id){ui.on(id,'input',render);});
 ui.on('reset','click',function(){Object.keys(DEFAULTS).forEach(function(id){ui.value(id,DEFAULTS[id]);});render();});
-ui.on('copy','click',function(){ui.text('copy-status','Copying is not available in this view.');});
+ui.on('copy','click',function(){
+  var r=read();
+  if(r.error) return;
+  ui.copy(['Total: CNY '+money(r.total)].concat(r.shares.map(function(share,i){return 'Person '+(i+1)+': CNY '+money(share);})).join('\\n'));
+});
 render();
 `,
 };
@@ -212,28 +211,39 @@ export function comparatorDocument(options: {
       row('pro', 'Pro') +
       row('team', 'Team') +
       '</tbody></table><p id="selected"></p>' +
-      '<button id="export" type="button">Export CSV</button><p id="export-status" class="muted"></p>',
+      '<button id="export" type="button">Export CSV</button>',
     css: '',
     javascript:
       MONEY_JS +
       `
 var PRICES={basic:3900,pro:6900,team:9900}, SUPPORT=1200, DISCOUNT=20;
 function checked(name, values){for(var i=0;i<values.length;i++){if(ui.input(name+'-'+values[i]).checked)return values[i];}return values[0];}
-function render(){
+function payments(){
   var seats=Number(ui.input('seats').value);
-  if(!(Number.isInteger(seats)&&seats>=1)){ui.text('selected','Seats must be a whole number of at least 1.');return;}
-  var billing=checked('billing',['monthly','annual']), plan=checked('plan',['basic','pro','team']);
+  if(!(Number.isInteger(seats)&&seats>=1)) return null;
+  var billing=checked('billing',['monthly','annual']);
   var support=${options.withSupport ? "ui.input('support').checked" : 'false'};
-  var months=billing==='annual'?12:1;
+  var months=billing==='annual'?12:1, result={seats:seats,billing:billing,months:months,plans:{}};
   Object.keys(PRICES).forEach(function(p){
-    var payment=Math.round(PRICES[p]*seats*months*(billing==='annual'?100-DISCOUNT:100)/100+(support?SUPPORT*seats*months:0));
-    ui.text(p+'-payment','CNY '+money(payment)+(billing==='annual'?' per year':' per month'));
-    ui.text(p+'-monthly','CNY '+money(Math.round(payment/months)));
+    result.plans[p]=Math.round(PRICES[p]*seats*months*(billing==='annual'?100-DISCOUNT:100)/100+(support?SUPPORT*seats*months:0));
   });
-  ui.text('selected','Selected: '+plan+', '+billing+', '+seats+' seats');
+  return result;
+}
+function render(){
+  var r=payments();
+  if(!r){ui.text('selected','Seats must be a whole number of at least 1.');return;}
+  Object.keys(r.plans).forEach(function(p){
+    ui.text(p+'-payment','CNY '+money(r.plans[p])+(r.billing==='annual'?' per year':' per month'));
+    ui.text(p+'-monthly','CNY '+money(Math.round(r.plans[p]/r.months)));
+  });
+  ui.text('selected','Selected: '+checked('plan',['basic','pro','team'])+', '+r.billing+', '+r.seats+' seats');
 }
 ['seats','billing-monthly','billing-annual','plan-basic','plan-pro','plan-team'${options.withSupport ? ",'support'" : ''}].forEach(function(id){ui.on(id,'input',render);ui.on(id,'change',render);});
-ui.on('export','click',function(){ui.text('export-status','Exporting is not available in this view.');});
+ui.on('export','click',function(){
+  var r=payments();
+  if(!r) return;
+  ui.download('plans','text/csv','plan,payment\\n'+Object.keys(r.plans).map(function(p){return p+','+money(r.plans[p]);}).join('\\n')+'\\n');
+});
 render();
 `,
   };

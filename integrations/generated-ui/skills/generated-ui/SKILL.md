@@ -17,7 +17,7 @@ Do not use it in these cases:
 - The user asks for a file, a web page, a component or code in their project: write the files they asked for.
 - The answer needs live data, network access or more than a small local calculation.
 
-When the user wants to interact and has not asked for a file, show the view here instead of writing a standalone HTML file to the workspace. If the user needs edits to survive a reload, use a bundled card with a state-capable host and daemon. When persistence is unavailable or support is unknown, explain the limitation before relying on the card for saved work. This tool creates a new complete card; it cannot update an older card, open files, fetch data, send messages or perform actions on the user's behalf.
+When the user wants to interact and has not asked for a file, show the view here instead of writing a standalone HTML file to the workspace. If the user needs edits to survive a reload, use a bundled card with a state-capable host and daemon. When persistence is unavailable or support is unknown, explain the limitation before relying on the card for saved work. This tool creates a new complete card; it cannot update an older card, open files, fetch data, send messages or perform actions on the user's behalf. A bundled card can copy or download its current result only when the user clicks for it (see Copy and download below).
 
 1. Establish the actual question, supplied data, units and assumptions from the conversation. Label illustrative data and uncertain inputs. Do not turn model guesses into measured facts.
 2. Produce one complete set of `title`, `summary`, `html`, `css`, and `javascript` strings for `generated_ui_show`. The summary must remain useful without the interface: include the initial result, the assumptions, and what can be varied.
@@ -80,6 +80,31 @@ ui.state.set({ items: items, history: history });
 - The value must be plain data: objects, arrays without holes, strings, finite numbers, booleans and `null`. Functions, `undefined` fields, `NaN`, dates, maps and objects with getters or `toJSON` throw a `TypeError`, and a value whose JSON exceeds 16 KiB (UTF-8) throws a `RangeError`. Unlike other `ui` failures, both can be caught without ending the activation. Cap lists such as undo history, and when `set` throws a `RangeError`, drop the oldest entries and set again.
 - The saved value comes back after a reload, when the conversation is reopened, and in a fork of it. Rewinding the conversation to before a change brings back the earlier value. Other conversations and other cards never see it, even an identical card shown again.
 - Rely on the host bar for persistence outcomes. Do not add your own save confirmation. You do not see the saved value, and Continue analysis sends only control values, so keep the summary about the initial view.
+
+## Copy and download
+
+When the user wants to take the view's current result elsewhere, such as "copy the split" or "export the plans as CSV", give the view a button whose click handler calls one of these with text built from the current values:
+
+```js
+ui.on('copy', 'click', function () {
+  var r = calculate(); // the view's own calculation from ui.input()
+  if (r.error) return;
+  ui.copy(
+    'Total: CNY ' + r.total.toFixed(2) + '\nEach: CNY ' + r.share.toFixed(2),
+  );
+});
+ui.on('export', 'click', function () {
+  var r = calculate();
+  if (r.error) return;
+  ui.download('plans', 'text/csv', 'plan,payment\n' + r.rows.join('\n'));
+});
+```
+
+- Call them only in a `click` handler, at most once per click, and recompute the text from `ui.input()` in that handler. A call during initialization or from an `input` or `change` handler throws an `Error`; uncaught during initialization it is a `VIEW_ERROR`. When the inputs are invalid, show the error and do not copy or download.
+- `text` is non-empty: at most 16 KiB for `ui.copy` and 64 KiB for `ui.download`. `mimeType` is `text/csv`, `text/plain`, `application/json` or `text/markdown`; the host cleans the file name (at most 100 characters) and adds the extension of the type. Other arguments throw a `TypeError` or `RangeError` the card can catch.
+- For CSV, write a header row and one record per line; quote a field that contains a comma, a quote or a line break, and keep numbers plain, such as `1234.50`, without currency signs or thousands separators.
+- The host performs the copy or download and reports it outside your generated content: its bar shows that the text was copied, that the download started, or that the browser blocked the copy (then the bar offers its own Copy button), and the card's frame says when the values changed before the click finished. Do not add your own "Copied" message, and do not show the text in a field for the user to copy instead.
+- Web Shell performs neither for the manually installed extension, and other hosts may not support them; the card then says that it cannot copy or download. Keep the result itself visible in the view.
 
 ## Styling
 

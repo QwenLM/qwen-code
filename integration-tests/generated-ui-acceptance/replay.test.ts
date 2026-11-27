@@ -140,10 +140,10 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
 });
 
 /**
- * Baseline on main, 2026-11. `fail` entries are the gaps later stages close:
- * copy and export need host-mediated clipboard/download (stage 8), extension
- * needs card revisions (stage 8). The checklist keeps its items through saved
- * view state (stage 6).
+ * Baseline on main, 2026-11. The one `fail` entry is the gap a later stage
+ * closes: extension needs card revisions (stage 8). The checklist keeps its
+ * items through saved view state (stage 6), and the bill splitter's copy and
+ * the comparator's export go through the host (stage 8).
  */
 const EXPECTED: Record<string, Record<string, string>> = {
   bill: {
@@ -154,7 +154,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'bill.fair-rounding': 'pass',
     'bill.chart-updates': 'pass',
     'bill.rejects-invalid': 'pass',
-    'bill.copies-current': 'fail',
+    'bill.copies-current': 'pass',
     'bill.reset': 'pass',
     'bill.edits-start-no-turn': 'pass',
   },
@@ -186,7 +186,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'comparator.support-totals': 'pass',
     'comparator.keeps-choices': 'pass',
     'comparator.extends-existing-card': 'fail',
-    'comparator.exports-current-csv': 'fail',
+    'comparator.exports-current-csv': 'pass',
     'comparator.reset-via-follow-up': 'pass',
   },
 };
