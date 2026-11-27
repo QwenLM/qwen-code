@@ -2487,6 +2487,42 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
+  it('reports the path of a blanked read_file call that named it `path`', () => {
+    const call: Content = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'c0',
+            name: 'read_file',
+            args: { path: '/proj/old.ts' },
+          },
+        },
+      ],
+    };
+    const history: Content[] = [
+      call,
+      fileResult('c0', 'read_file', 'old long content '.repeat(50)),
+      fileCall('c1', 'read_file', '/proj/recent.ts'),
+      fileResult('c1', 'read_file', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
+    // The history keeps the model's own argument name.
+    expect(call.parts?.[0]?.functionCall?.args).toEqual({
+      path: '/proj/old.ts',
+    });
+  });
+
   it('reports the inner file path of a blanked bridged read_file result', () => {
     const history: Content[] = [
       makeBridgedToolCall('c0', 'read_file', {

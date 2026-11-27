@@ -87,6 +87,18 @@ describe('extractRecentFilePaths', () => {
     expect(extractRecentFilePaths(history, 5)).toEqual(['/real.ts']);
   });
 
+  it('reads a file path the model named `path`', () => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { path: '/a.ts' } } },
+        ],
+      },
+    ];
+    expect(extractRecentFilePaths(history, 5)).toEqual(['/a.ts']);
+  });
+
   it('recognizes edit and replace tools too', () => {
     const history: Content[] = [
       {

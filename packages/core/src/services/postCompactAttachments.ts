@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { applyToolArgAliases } from '../tools/tool-arg-aliases.js';
 import {
   RESUME_TRAILER,
   stripCompactionTranscriptHint,
@@ -153,11 +154,16 @@ export function extractRecentFilePaths(
       ) {
         continue;
       }
-      const args = (bridged ? call.args?.['arguments'] : call.args) as
-        | { file_path?: unknown }
-        | undefined;
+      // A copy with the canonical names the tool ran with; history keeps
+      // the model's own (`path` for `file_path`).
+      const args = {
+        ...((bridged ? call.args?.['arguments'] : call.args) as
+          | Record<string, unknown>
+          | undefined),
+      };
+      applyToolArgAliases(name, args);
       const filePath =
-        typeof args?.file_path === 'string' ? args.file_path : undefined;
+        typeof args['file_path'] === 'string' ? args['file_path'] : undefined;
       if (!filePath || seen.has(filePath)) continue;
       seen.add(filePath);
       if (seen.size >= maxFiles) return [...seen];

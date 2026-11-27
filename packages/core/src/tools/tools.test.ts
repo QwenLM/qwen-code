@@ -164,6 +164,8 @@ describe('BaseDeclarativeTool.validateToolParams', () => {
   it.each([
     ['additionalProperties', { additionalProperties: { type: 'string' } }],
     ['patternProperties', { patternProperties: { '^x': {} } }],
+    ['anyOf', { anyOf: [{ properties: { query: { type: 'string' } } }] }],
+    ['$ref', { $ref: '#/definitions/x', definitions: { x: {} } }],
   ])('adds nothing for a schema with %s', (_name, extra) => {
     expect(
       tool({ ...schema, ...extra }).validateToolParams({ query: 'x' }),

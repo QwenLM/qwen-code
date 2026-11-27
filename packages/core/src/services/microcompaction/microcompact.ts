@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
+import { applyToolArgAliases } from '../../tools/tool-arg-aliases.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
 import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
 
@@ -200,14 +201,29 @@ export function getFunctionCallIdentity(
   const name = resolveTrackedToolName(call.name);
   const args = asRecord(call.args);
   if (name !== ToolNames.TOOL_CALL) {
-    return { name, args };
+    return { name, args: canonicalArgs(name, args) };
   }
   const targetName = args['name'];
   if (typeof targetName !== 'string') return undefined;
+  const target = resolveTrackedToolName(targetName);
   return {
-    name: resolveTrackedToolName(targetName),
-    args: asRecord(args['arguments']),
+    name: target,
+    args: canonicalArgs(target, asRecord(args['arguments'])),
   };
+}
+
+/**
+ * The history keeps the model's own argument names; the tool ran with the
+ * scheduler's canonical ones (`applyToolArgAliases`), so a read that said
+ * `path` is keyed by its `file_path` here too. Copies: history is not changed.
+ */
+function canonicalArgs(
+  name: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy = { ...args };
+  applyToolArgAliases(name, copy);
+  return copy;
 }
 
 /**
