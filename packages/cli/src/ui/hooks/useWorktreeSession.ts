@@ -44,16 +44,25 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
       return;
     }
     let cancelled = false;
+    let readSequence = 0;
 
     const safeLoad = async () => {
+      const sequence = ++readSequence;
       try {
         const filePath = config
           .getSessionService()
           .getWorktreeSessionPath(sessionId);
         const ws = await readWorktreeSession(filePath);
-        if (!cancelled) setLoaded({ sessionId, session: ws });
+        if (!cancelled && sequence === readSequence) {
+          setLoaded({
+            sessionId,
+            session: ws?.worktreeRemoved === undefined ? ws : null,
+          });
+        }
       } catch {
-        if (!cancelled) setLoaded({ sessionId, session: null });
+        if (!cancelled && sequence === readSequence) {
+          setLoaded({ sessionId, session: null });
+        }
       }
     };
 
@@ -76,6 +85,7 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
             void safeLoad();
           }
         });
+        await safeLoad();
       } catch {
         // Watcher setup is best-effort
       }

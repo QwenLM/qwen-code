@@ -23,7 +23,10 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
-import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
+import {
+  outputIncludesThoughts,
+  outputTokenCount,
+} from '../telemetry/gen-ai-usage.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -55,6 +58,11 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import {
+  buildCompactionTranscriptHint,
+  stripCompactionTranscriptHint,
+  withoutCompactionTranscriptHint,
+} from './compaction-transcript-hint.js';
 
 import {
   markCompressedHistory,
@@ -379,6 +387,7 @@ export interface CompressOptions {
   config: Config;
   onPreparedCompaction?: (candidate: ChatCompressionCandidate) => Promise<void>;
   restoreRecentFiles?: boolean;
+  getExistingTranscriptPath?: () => Promise<string | undefined>;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
    * MAX_CONSECUTIVE_FAILURES, the cheap-gate stops trying until a successful
@@ -961,9 +970,12 @@ export class ChatCompressionService {
     const originalHistoryTokenCount =
       originalTokenCount +
       (preserveTail ? (opts.unaccountedOutputTokens ?? 0) : 0);
-    const sideQueryHistory = preserveTail
+    const historyToSummarize = preserveTail
       ? curatedHistory.slice(0, candidateTailStart)
       : [...sideQueryBase, ...visiblePendingHistory];
+    const sideQueryHistory =
+      withoutCompactionTranscriptHint(historyToSummarize);
+    const summaryHistoryChanged = historyToSummarize !== sideQueryHistory;
     const pendingToolResultTokenCount = estimateContentTokens(
       visiblePendingHistory,
       slimmingConfig.imageTokenEstimate,
@@ -979,8 +991,11 @@ export class ChatCompressionService {
         sideQueryHistory,
         undefined,
         opts.requestPayloadTooLarge
-          ? { maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP }
-          : undefined,
+          ? {
+              maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+              stripUnsignedThoughts: true,
+            }
+          : { stripUnsignedThoughts: true },
       );
       return coldInput;
     };
@@ -1168,6 +1183,7 @@ export class ChatCompressionService {
         ? getColdInput().slimmedHistory
         : slimCompactionInput(sideQueryHistory, undefined, {
             maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+            stripUnsignedThoughts: true,
           }).slimmedHistory;
     // A context-length rejection means the estimate ran low for this request.
     // The one retry is sized from the local estimate alone. The rejection's
@@ -1296,6 +1312,8 @@ export class ChatCompressionService {
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
+      // Removing the previous hint also changes this request's warmed prefix.
+      !summaryHistoryChanged &&
       // The shared request is built from the UNSLIMMED history. A
       // payload-overflow compaction exists because that exact payload was
       // just rejected at the gateway's byte limit — re-uploading it would
@@ -1316,7 +1334,9 @@ export class ChatCompressionService {
                 `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
                 `effectiveLimit=${reactiveContextCeiling}, window=${contextLimit}, ` +
                 `ceiling=${opts.observedServerCeiling ?? 'none'}`
-              : 'payload-overflow recovery ships the slimmed cold path only';
+              : summaryHistoryChanged
+                ? 'removed a prior transcript hint from the warmed prefix'
+                : 'payload-overflow recovery ships the slimmed cold path only';
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
@@ -1406,22 +1426,76 @@ export class ChatCompressionService {
       }
     }
 
+    const computeReportedOutputSpent = (
+      usage:
+        | {
+            promptTokenCount?: number;
+            candidatesTokenCount?: number;
+            thoughtsTokenCount?: number;
+            totalTokenCount?: number;
+          }
+        | undefined,
+    ): number | undefined => {
+      const prompt = usage?.promptTokenCount;
+      const reportedCandidates = usage?.candidatesTokenCount;
+      const thoughts = Math.max(0, usage?.thoughtsTokenCount ?? 0);
+      if (
+        typeof reportedCandidates === 'number' &&
+        typeof prompt === 'number'
+      ) {
+        return Math.max(
+          outputTokenCount(
+            {
+              input: prompt,
+              output: reportedCandidates,
+              thoughts,
+              total: usage?.totalTokenCount ?? 0,
+            },
+            compactionAuthType,
+          ),
+          thoughts,
+        );
+      }
+      if (
+        typeof usage?.totalTokenCount === 'number' &&
+        typeof prompt === 'number'
+      ) {
+        return Math.max(0, usage.totalTokenCount - prompt);
+      }
+      if (typeof reportedCandidates === 'number') {
+        return outputIncludesThoughts(compactionAuthType)
+          ? Math.max(reportedCandidates, thoughts)
+          : reportedCandidates + thoughts;
+      }
+      if (typeof usage?.thoughtsTokenCount === 'number') {
+        return thoughts;
+      }
+      return undefined;
+    };
+
     if (!summaryResult) {
       abortSignal.throwIfAborted();
       const slim = getColdInput();
       if (
         slim.stats.imagesStripped > 0 ||
         slim.stats.documentsStripped > 0 ||
-        slim.stats.textPartsTruncated > 0
+        slim.stats.textPartsTruncated > 0 ||
+        slim.stats.thoughtsStripped > 0
       ) {
         config
           .getDebugLogger()
           .debug(
             `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
-              `${slim.stats.documentsStripped} document(s), and truncated ` +
-              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
+              `${slim.stats.documentsStripped} document(s), stripped ` +
+              `${slim.stats.thoughtsStripped} unsigned thought part(s), and ` +
+              `truncated ${slim.stats.textPartsTruncated} text part(s) in ` +
+              `side-query payload`,
           );
       }
+      if (slim.stats.thoughtsStripped > 0) {
+        coldInputReduced = true;
+      }
+      let coldTextReduced = Boolean(opts.requestPayloadTooLarge);
       let coldHistory = slim.slimmedHistory;
       let coldSizing = initialSizing;
       // A request that leaves its summary less than the minimum is reduced
@@ -1435,6 +1509,7 @@ export class ChatCompressionService {
         coldBudgetFor(coldHistory) < minCompactionOutputTokens(budgetWindow)
       ) {
         const reduced = reduceColdInput();
+        coldTextReduced = true;
         if (estimateColdRequest(reduced) < estimateColdRequest(coldHistory)) {
           coldInputReduced = true;
           coldHistory = reduced;
@@ -1508,10 +1583,51 @@ export class ChatCompressionService {
           if (!sameInput) coldInputReduced = true;
           coldHistory = retry.history;
           coldSizing = retry.sizing;
+          continue;
+        }
+        // When a clamped output budget was exhausted, the truncation guard
+        // below drops the summary regardless of its visible shape (it keys off
+        // the same reported spend >= budget). Retrying once with the reduced
+        // input frees headroom up to the full output reserve instead of
+        // deadlocking at the same clamped cap on every /compress attempt —
+        // whether the cut landed in thinking, an unclosed <analysis>, a
+        // started <state_snapshot>, or plain prose. `coldTextReduced` is set
+        // when this fires, so it runs at most once; the budget-growth guard
+        // below also blocks it after a same-input overflow retry, whose
+        // smaller window leaves no extra room to free.
+        if (
+          !coldTextReduced &&
+          coldOutputBudget < compactionOutputReserve(coldWindow)
+        ) {
+          const spent = computeReportedOutputSpent(summaryResult.usage);
+          if (typeof spent === 'number' && spent >= coldOutputBudget) {
+            const reduced = reduceColdInput();
+            coldTextReduced = true;
+            const reducedBudget = computeCompactionOutputBudget(
+              estimateColdRequest(reduced),
+              coldWindow,
+            );
+            if (
+              estimateColdRequest(reduced) < estimateColdRequest(coldHistory) &&
+              reducedBudget > coldOutputBudget
+            ) {
+              config
+                .getDebugLogger()
+                .warn(
+                  `[chat-compression] clamped output budget (${coldOutputBudget}) ` +
+                    `was exhausted before producing a summary; retrying once ` +
+                    `with reduced input (budget ${reducedBudget}).`,
+                );
+              coldInputReduced = true;
+              coldHistory = reduced;
+              coldSizing = { window: coldWindow };
+              summaryResult = undefined;
+            }
+          }
         }
       }
     }
-    const summary = summaryResult.text;
+    const summary = stripCompactionTranscriptHint(summaryResult.text ?? '');
     // Check the PROCESSED summary: postProcessSummary strips <analysis>
     // blocks, so a response that is ONLY <analysis>...</analysis> (no
     // <state_snapshot>) has a non-empty RAW body but strips to nothing. If
@@ -1594,38 +1710,33 @@ export class ChatCompressionService {
     // once: where the output count already holds it, it is not added again.
     // This check and the room check below read the same count (#15936 R8-2,
     // R11-2).
-    const reportedOutputTokenCount =
-      compressionUsageMetadata?.candidatesTokenCount;
-    const outputSpentTokenCount =
-      typeof reportedOutputTokenCount === 'number' &&
-      typeof compressionInputTokenCount === 'number'
-        ? outputTokenCount(
-            {
-              input: compressionInputTokenCount,
-              output: reportedOutputTokenCount,
-              thoughts: Math.max(
-                0,
-                compressionUsageMetadata?.thoughtsTokenCount ?? 0,
-              ),
-              total: compressionUsageMetadata?.totalTokenCount ?? 0,
-            },
-            compactionAuthType,
-          )
-        : compressionOutputTokenCount;
+    const reportedOutputSpent = computeReportedOutputSpent(
+      compressionUsageMetadata,
+    );
+    const reportedOutputExhausted =
+      typeof reportedOutputSpent === 'number' &&
+      reportedOutputSpent >= coldOutputBudget;
+    const outputSpentTokenCount = outputCountIsEstimated
+      ? compressionOutputTokenCount
+      : reportedOutputSpent;
     const truncationThreshold = outputCountIsEstimated
       ? COMPACT_MAX_OUTPUT_TOKENS
       : coldOutputBudget;
     if (
       !usedCacheSharing &&
-      !isSummaryEmpty &&
-      typeof outputSpentTokenCount === 'number' &&
-      outputSpentTokenCount >= truncationThreshold
+      (reportedOutputExhausted ||
+        (!isSummaryEmpty &&
+          typeof outputSpentTokenCount === 'number' &&
+          outputSpentTokenCount >= truncationThreshold))
     ) {
+      const hitThreshold = reportedOutputExhausted
+        ? coldOutputBudget
+        : truncationThreshold;
       config
         .getDebugLogger()
         .warn(
           `[chat-compression] summary output reached the truncation ` +
-            `threshold (${truncationThreshold}); ` +
+            `threshold (${hitThreshold}); ` +
             `dropping potentially-truncated result. This counts as a ` +
             `compression failure for the per-chat circuit breaker.`,
         );
@@ -1717,6 +1828,10 @@ export class ChatCompressionService {
     let restorationTokenCount = 0;
 
     if (!isSummaryEmpty) {
+      const transcriptPath = await opts.getExistingTranscriptPath?.();
+      const transcriptHint = transcriptPath
+        ? buildCompactionTranscriptHint(transcriptPath)
+        : undefined;
       // Manual /compress has no pending functionResponse, so a trailing
       // model+functionCall is an ORPHAN (e.g. an interrupted/cancelled tool
       // call). Preserving it emits model[functionCall] immediately followed
@@ -1741,6 +1856,7 @@ export class ChatCompressionService {
           summary,
           {
             workspaceRoot: config.getTargetDir(),
+            transcriptHint,
             signal,
             // A payload-overflow compaction (#10380) exists because the
             // serialized request exceeded the gateway's BYTE limit while
@@ -1802,7 +1918,10 @@ export class ChatCompressionService {
         extraHistory = [
           {
             role: 'user',
-            parts: [{ text: postProcessSummary(summary) }, ...reminderParts],
+            parts: [
+              { text: postProcessSummary(summary, transcriptHint) },
+              ...reminderParts,
+            ],
           },
           {
             role: 'model',
@@ -1818,6 +1937,11 @@ export class ChatCompressionService {
         extraHistory.slice(2),
         slimmingConfig.imageTokenEstimate,
       );
+      if (transcriptHint) {
+        restorationTokenCount += Math.ceil(
+          (transcriptHint.length + 2) / CHARS_PER_TOKEN,
+        );
+      }
       if (retainedTail.length > 0) {
         const temporalReminder = RETAINED_COMPACTION_TAIL_REMINDER;
         restorationTokenCount += Math.ceil(
@@ -1888,6 +2012,22 @@ export class ChatCompressionService {
             compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
+        if (summaryHistoryChanged) {
+          // Provider usage excludes the old hint stripped from the side
+          // query. It still lived in the original prompt token count.
+          newTokenCount = Math.max(
+            0,
+            newTokenCount -
+              (estimateContentTokens(
+                historyToSummarize.slice(0, 2),
+                slimmingConfig.imageTokenEstimate,
+              ) -
+                estimateContentTokens(
+                  sideQueryHistory.slice(0, 2),
+                  slimmingConfig.imageTokenEstimate,
+                )),
+          );
+        }
         // The composer injects file-restoration blocks (up to
         // maxRecentFiles × 5K tokens) and an image-restoration block (up to
         // maxRecentImages images) that are NOT in

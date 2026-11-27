@@ -365,9 +365,17 @@ describe('WorkflowRunner', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await Promise.all(
-      storageRoots
-        .splice(0)
-        .map((root) => fs.rm(root, { recursive: true, force: true })),
+      storageRoots.splice(0).map((root) =>
+        fs.rm(root, {
+          recursive: true,
+          force: true,
+          // The launch record is appended fire-and-forget, so a run that
+          // settled just before this hook can still be flushing its journal.
+          // The recursive rm then races that write and fails with ENOTEMPTY.
+          maxRetries: 10,
+          retryDelay: 100,
+        }),
+      ),
     );
   });
 
@@ -1215,8 +1223,14 @@ describe('WorkflowRunner', () => {
         }
       } finally {
         finishLoad?.(saved);
-        await start.catch(() => undefined);
+        const handle = await start.catch(() => undefined);
         registry.abortAll();
+        // The background=false arm starts a real run whose checkpoint write
+        // is still in flight after `start` resolves. Wait for the settlement
+        // (it drains the journal and the checkpoint write) before afterEach
+        // removes the storage root, or the recursive rm races the late write
+        // and fails with ENOTEMPTY under load.
+        await handle?.completion.catch(() => undefined);
       }
     },
   );

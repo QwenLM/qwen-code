@@ -9,6 +9,7 @@ import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/m
 import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
 import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
+import { managedCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-command-id.js';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -72,7 +73,7 @@ async function commitCleanup(
   await authority.appendExecutionEvent(
     {
       operation: 'hostedCleanup',
-      commandId: eventId,
+      commandId: managedCommandId(eventId),
       sessionKey: authority.sessionHeader.sessionKey,
       contentDigest: createHash('sha256')
         .update(`${descriptorRef.digest}:${state}`)

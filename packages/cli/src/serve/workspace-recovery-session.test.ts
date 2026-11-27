@@ -993,6 +993,11 @@ function hostedHistoryFixture(
   return { ...f, historyRef };
 }
 
+const HOSTED_PROFILES = [
+  'hosted-workspace-files/1',
+  'hosted-workspace-external-files/1',
+];
+
 describe('migration profile evidence', () => {
   it('refuses absolute Hosted history during migration', async () => {
     const f = hostedHistoryFixture({}, '/original/cwd/absent.txt');
@@ -1949,7 +1954,6 @@ describe('verifyRecoverySession', () => {
   it.each([
     { hookCatalog: {} },
     { agentDefinition: {} },
-    { sessionSkillsRef: {} },
     { initialSelection: {} },
     { lineage: {} },
     { childWorkspaces: true },
@@ -1963,6 +1967,44 @@ describe('verifyRecoverySession', () => {
       'unsupported Hosted profile',
     );
   });
+
+  it.each(HOSTED_PROFILES)(
+    'admits a well-formed Session Skills ref on a %s definition',
+    async (toolProfile) => {
+      const bytes = Buffer.from(
+        JSON.stringify([{ name: 'added', description: 'Added', body: 'BODY' }]),
+      );
+      const sessionSkillsRef: ManagedSessionDurableRef = {
+        resourceId: 'session-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      f.resources.set(sessionSkillsRef.resourceId, bytes);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: 'not_captured',
+      });
+      expect(f.complete.has(sessionSkillsRef.resourceId)).toBe(true);
+    },
+  );
+
+  it.each(
+    HOSTED_PROFILES.flatMap((toolProfile) =>
+      [{}, { resourceId: 'session-skills', kind: 'managed-agent-skills' }].map(
+        (sessionSkillsRef) => ({ toolProfile, sessionSkillsRef }),
+      ),
+    ),
+  )(
+    'refuses a malformed Session Skills ref on a %j definition',
+    async ({ toolProfile, sessionSkillsRef }) => {
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+        'unsupported Hosted profile',
+      );
+    },
+  );
 
   it('does not admit external files into migration', async () => {
     const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });

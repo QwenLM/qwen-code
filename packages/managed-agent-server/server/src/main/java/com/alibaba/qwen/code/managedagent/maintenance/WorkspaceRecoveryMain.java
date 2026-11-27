@@ -1,11 +1,15 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
+import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient;
+import com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
@@ -33,8 +37,8 @@ public final class WorkspaceRecoveryMain {
         check(Files.isRegularFile(input, LinkOption.NOFOLLOW_LINKS) && Files.size(input) <= 1024 * 1024,
                 "invalid_request_file");
         byte[] bytes = Files.readAllBytes(input);
-        JsonNode request = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(bytes);
-        com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient oss = null;
+        JsonNode request = WorkspaceRecoveryProtocol.parse(bytes);
+        AliyunObjectStoreClient oss = null;
         // The private RPC loop is single-threaded; transactions still commit separately.
         try (var source = new SingleConnectionDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
                 requiredPresent("W1_JDBC_PASSWORD"), true)) {
@@ -53,17 +57,17 @@ public final class WorkspaceRecoveryMain {
                 check("https".equals(endpoint.getScheme()) && ("oss-" + region + ".aliyuncs.com").equals(endpoint.getHost())
                         && (endpoint.getRawPath() == null || endpoint.getRawPath().isEmpty())
                         && endpoint.getRawQuery() == null && endpoint.getRawUserInfo() == null, "invalid_oss_endpoint");
-                oss = com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient.regional(endpoint, region);
+                oss = AliyunObjectStoreClient.regional(endpoint, region);
                 objects = oss.objects(required("W1_OSS_BUCKET"));
             }
-            var store = new WorkspaceRecoveryStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()),
+            var store = new WorkspaceRecoveryStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new NativeStorageIdentityReader()),
                     objects, args[0], bytes);
             JsonNode existing = store.inspect();
             if ("inspect".equals(args[0]) || Set.of("SEALED", "VERIFIED").contains(existing.path("state").asText())) {
                 System.out.println(existing);
                 return;
             }
-            new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker().execute(request, store, store::call);
+            new LocalRecoveryWorker().execute(request, store, store::call);
             System.out.println(store.inspect());
         } finally {
             if (oss != null) {

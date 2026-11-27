@@ -110,7 +110,7 @@ class ManagedExtensionTransportTest {
         var configuration = ManagedExtensionExecutionProfile.configuration(SCOPE.getCapabilityDigest(), directory.toString(), null);
         var boot = ManagedContextProtocol.boot(request, seed, configuration);
         AtomicReference<byte[]> captured = new AtomicReference<>();
-        AtomicReference<Map<String, Object>> response = new AtomicReference<>(ManagedContextProtocol.attestationResponse(boot));
+        AtomicReference<Map<String, Object>> response = new AtomicReference<>(ManagedContextProtocol.attestationResponse(boot.toWire()));
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/internal/managed-runtime/v3/attest", exchange -> {
             assertEquals("Bearer " + seed.getToken(), exchange.getRequestHeaders().getFirst("Authorization"));
@@ -129,8 +129,8 @@ class ManagedExtensionTransportTest {
             assertThrows(IllegalArgumentException.class, () -> new HttpRuntimeTransport().attest(lease, request, seed));
             var transport = new HttpRuntimeTransport().withManagedExtensionCacheDirectory(directory.toString(), null);
             assertEquals(SCOPE, transport.attest(lease, request, seed).toCompletableFuture().get(5, TimeUnit.SECONDS).getScope());
-            assertEquals(JSON.readTree(JsonCodec.encode(ManagedContextProtocol.attestationRequest(boot))), JSON.readTree(captured.get()));
-            var changed = new LinkedHashMap<>(ManagedContextProtocol.attestationResponse(boot));
+            assertEquals(JSON.readTree(JsonCodec.encode(ManagedContextProtocol.attestationRequest(boot.toWire()))), JSON.readTree(captured.get()));
+            var changed = new LinkedHashMap<>(ManagedContextProtocol.attestationResponse(boot.toWire()));
             changed.put("managedExtensions", ManagedExtensionExecutionProfile.configuration(SCOPE.getCapabilityDigest(), directory.resolve("other").toString(), null));
             response.set(changed);
             assertThrows(java.util.concurrent.ExecutionException.class,

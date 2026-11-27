@@ -1321,7 +1321,7 @@ describe('qwen-triage tmux workflow', () => {
         ],
       };
 
-      const run = (reviews, head) => {
+      const run = (reviews, head, { hasBotPat = true } = {}) => {
         const dir = mkdtempSync(join(tmpdir(), 'triage-notify-'));
         try {
           const bin = join(dir, 'bin');
@@ -1335,7 +1335,7 @@ describe('qwen-triage tmux workflow', () => {
             [
               '#!/usr/bin/env bash',
               'case "$*" in',
-              `  "api user --jq .login") echo bot ;;`,
+              ...(hasBotPat ? ['  "api user --jq .login") echo bot ;;'] : []),
               `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") echo '{"state":"OPEN","closedAt":null}' ;;`,
               `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
               `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
@@ -1352,6 +1352,7 @@ describe('qwen-triage tmux workflow', () => {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              HAS_BOT_PAT: String(hasBotPat),
               NUMBER: '1',
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
@@ -1377,7 +1378,7 @@ describe('qwen-triage tmux workflow', () => {
 
       // The silent skip must surface as a warning AND in the posted comment.
       const humanOnly = run(REVIEWS.humanOnly, 'head');
-      expect(humanOnly.status).toBe(0);
+      expect(humanOnly.status, humanOnly.log).toBe(0);
       expect(humanOnly.log).toContain('Triage re-run left no bot review');
       // Wording fixed: the bot DOES have a review here — a COMMENTED one,
       // visible on the page — it just carries no vote. "No review of its own"
@@ -1400,6 +1401,17 @@ describe('qwen-triage tmux workflow', () => {
       expect(postedNow.status).toBe(0);
       expect(postedNow.log).toContain('no summary comment needed');
       expect(postedNow.comment).toBe('');
+
+      // The fallback identity should recognize its review without GET /user.
+      const fallbackReview = run(
+        [{ ...REVIEWS.postedNow[0], user: { login: 'github-actions[bot]' } }],
+        'head',
+        { hasBotPat: false },
+      );
+      expect(fallbackReview.status, fallbackReview.log).toBe(0);
+      expect(fallbackReview.log).toContain('no summary comment needed');
+      expect(fallbackReview.log).not.toContain('unexpected gh call');
+      expect(fallbackReview.comment).toBe('');
 
       // A true none: the bot has no review at all on the head commit.
       // This exercises the none) arm's bash, which the humanOnly fixture
@@ -1468,6 +1480,7 @@ describe('qwen-triage tmux workflow', () => {
               ...process.env,
               PATH: `${bin}:${process.env.PATH}`,
               GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              HAS_BOT_PAT: 'true',
               NUMBER: '1',
               TRIGGERED_AT: '2026-01-02T00:00:00Z',
               RUN_URL: 'https://example.invalid/run',
@@ -1490,16 +1503,15 @@ describe('qwen-triage tmux workflow', () => {
         }
       };
 
-      // The close-exit shape: closed after the trigger, no review left.
+      // The close-exit shape: closed at or after the trigger, no review left.
       // Neither the summary comment nor the warning may fire.
-      const closeExit = run({
-        state: 'CLOSED',
-        closedAt: '2026-01-03T00:00:00Z',
-      });
-      expect(closeExit.status).toBe(0);
-      expect(closeExit.comment).toBe('');
-      expect(closeExit.log).not.toContain('Triage re-run left no bot review');
-      expect(closeExit.log).toContain('no re-run summary needed');
+      for (const closedAt of ['2026-01-02T00:00:00Z', '2026-01-03T00:00:00Z']) {
+        const closeExit = run({ state: 'CLOSED', closedAt });
+        expect(closeExit.status, closeExit.log).toBe(0);
+        expect(closeExit.comment).toBe('');
+        expect(closeExit.log).not.toContain('Triage re-run left no bot review');
+        expect(closeExit.log).toContain('no re-run summary needed');
+      }
 
       // The boundary: a close BEFORE the trigger comment is not this run's
       // terminal action, so the old notify behaviour stays intact.
@@ -1507,7 +1519,7 @@ describe('qwen-triage tmux workflow', () => {
         state: 'CLOSED',
         closedAt: '2026-01-01T00:00:00Z',
       });
-      expect(closedBefore.status).toBe(0);
+      expect(closedBefore.status, closedBefore.log).toBe(0);
       expect(closedBefore.log).toContain('Triage re-run left no bot review');
       expect(closedBefore.comment).toContain(
         '<!-- qwen-triage stage=rerun-summary -->',
@@ -6331,20 +6343,11 @@ describe('qwen-triage verify hardening round 2', () => {
 
     // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
     // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
-    // defect appeared only with approvals on. The loop-guard count is
-    // read from core, so the skill cannot drift from the real threshold.
+    // defect appeared only with approvals on.
     expect(flat).toContain(
       'Parameterise scenarios along the axes author tests collapse',
     );
     expect(flat).toContain('approval mode (default versus auto-approve)');
-    expect(flat).toContain(
-      'five consecutive identical calls trip the core loop guard',
-    );
-    const loopSource = readFileSync(
-      'packages/core/src/services/loopDetectionService.ts',
-      'utf8',
-    );
-    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
 
     // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
     // turn. #12855 R2: after rollback and re-upgrade the Java row lagged

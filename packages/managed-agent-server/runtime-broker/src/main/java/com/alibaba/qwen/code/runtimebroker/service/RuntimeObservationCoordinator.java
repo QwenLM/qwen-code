@@ -167,8 +167,8 @@ final class RuntimeObservationCoordinator {
 
     CompletionStage<SessionContext> requireOrAdoptReadySession(
             String harnessSessionId, String runtimeSessionId) {
-        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId");
         if (bindingRegistry.session(runtimeId) != null) {
             return bindingRegistry.requireReadySession(harnessId, runtimeId);
         }
@@ -261,7 +261,7 @@ final class RuntimeObservationCoordinator {
     CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
             String harnessSessionId, String writerId, long writerGeneration) {
         requireOpen(closed);
-        String sessionId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String sessionId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         String validWriter = BrokerValues.requireId(writerId, "writerId");
         if (writerGeneration < 1) {
             throw new IllegalArgumentException("writerGeneration must be positive");
@@ -281,7 +281,7 @@ final class RuntimeObservationCoordinator {
             String executionCallId,
             long throughSeq) {
         requireOpen(closed);
-        String sessionId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String sessionId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         String validWriter = BrokerValues.requireId(writerId, "writerId");
         String validCallId = BrokerValues.requireId(executionCallId, "executionCallId");
         if (writerGeneration < 1 || throughSeq < 0) {

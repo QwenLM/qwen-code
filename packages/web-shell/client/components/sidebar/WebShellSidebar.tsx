@@ -131,6 +131,7 @@ import {
 } from '../dialogs/BindSessionPrDialog';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import { useWorkspaceTrustGrant } from '../workspaces/use-workspace-trust-grant';
 import {
   OtherHostProjects,
   WorkspaceHostHeading,
@@ -152,6 +153,7 @@ import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
   summarizeSessions,
   type WorkspaceManagementTarget,
+  type WorkspaceMenuManagementTarget,
   type WorkspaceOverviewItem,
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
@@ -706,10 +708,8 @@ interface WebShellSidebarProps {
    */
   workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
   /**
-   * Open a management page (MCP, skills, …) for a workspace. Offered on the
-   * daemon's primary workspace only: the management pages read the
-   * connection's bound workspace, so another workspace's row cannot open its
-   * own view yet (#10399, layer B1).
+   * Open a management page (MCP, skills, extensions, channels, settings,
+   * context, hooks) scoped to the clicked workspace.
    */
   onOpenWorkspaceManagement?: (
     target: WorkspaceManagementTarget,
@@ -2300,6 +2300,18 @@ export function WebShellSidebar({
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
   );
+  const workspaceTrustGrantEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_trust_grant') ||
+      workspace.capabilities?.features?.includes('workspace_trust_grant'),
+  );
+  const workspaceSplitSkillsEnabled = Boolean(
+    connection.capabilities?.features?.includes(
+      'workspace_skills_config_runtime',
+    ) ||
+      workspace.capabilities?.features?.includes(
+        'workspace_skills_config_runtime',
+      ),
+  );
   const workspaceRenameEnabled = Boolean(
     connection.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -3771,6 +3783,14 @@ export function WebShellSidebar({
     blockForce: (candidate) =>
       Boolean(connection.sessionId) &&
       connection.workspaceCwd === candidate.cwd,
+  });
+
+  const workspaceTrustGrant = useWorkspaceTrustGrant({
+    client: workspace.client,
+    workspaces,
+    refreshCapabilities: workspace.refreshCapabilities,
+    onError,
+    errorMessage: t('workspacesOverview.trustFailed'),
   });
 
   const requestWorkspaceRename = useCallback(
@@ -9023,6 +9043,31 @@ export function WebShellSidebar({
                             }
                             overviewMenuOpen={openWorkspaceMenuId === ws.id}
                             overviewItems={workspaceOverviewItems}
+                            onOpenOverviewItem={
+                              projectFeaturesEnabled &&
+                              ws.trusted &&
+                              isAbsolutePath(ws.cwd) &&
+                              !ws.ssh &&
+                              onOpenWorkspaceManagement
+                                ? (item, cwd) =>
+                                    onOpenWorkspaceManagement(item, cwd)
+                                : undefined
+                            }
+                            manageableOverviewItems={(() => {
+                              const items = new Set<WorkspaceOverviewItem>([
+                                'mcp',
+                                'extensions',
+                                'context',
+                                'hooks',
+                              ]);
+                              if (ws.primary || workspaceSplitSkillsEnabled) {
+                                items.add('skills');
+                              }
+                              if (ws.primary || channelManagementEnabled) {
+                                items.add('channels');
+                              }
+                              return items;
+                            })()}
                             onOpenPathLocally={
                               localOpenEnabled
                                 ? openWorkspaceFolderLocally
@@ -9052,14 +9097,21 @@ export function WebShellSidebar({
                                 lockedWorkspaceOptions?.render)
                                 ? undefined
                                 : (visible, { overview, gitBranch }) => {
+                                    const wsCwd = ws.cwd;
+                                    const realPath = isAbsolutePath(ws.cwd);
                                     const canRemove =
                                       !lockedWorkspaceCwd &&
                                       workspaceRemovalEnabled &&
                                       !ws.primary &&
                                       ws.removable === true;
-                                    if (!ws.trusted && !canRemove) return null;
-                                    const wsCwd = ws.cwd;
-                                    const realPath = isAbsolutePath(ws.cwd);
+                                    const canTrust =
+                                      !lockedWorkspaceCwd &&
+                                      workspaceTrustGrantEnabled &&
+                                      !ws.trusted &&
+                                      realPath &&
+                                      !ws.ssh;
+                                    if (!ws.trusted && !canRemove && !canTrust)
+                                      return null;
                                     // A display name persists only for registration-backed
                                     // rows; the daemon's bound (primary) workspace has no
                                     // registration id, so a rename there would live in
@@ -9070,14 +9122,31 @@ export function WebShellSidebar({
                                       workspaceRenameEnabled &&
                                       realPath &&
                                       !ws.primary;
-                                    // Management pages read the connection's bound
-                                    // workspace, so only the primary row can open
-                                    // its own view today (#10399, layer B1).
                                     const canManage =
                                       projectFeaturesEnabled &&
-                                      ws.primary &&
                                       ws.trusted &&
-                                      Boolean(onOpenWorkspaceManagement);
+                                      Boolean(onOpenWorkspaceManagement) &&
+                                      (ws.primary || (realPath && !ws.ssh));
+                                    const managementTargets: WorkspaceMenuManagementTarget[] =
+                                      ws.primary
+                                        ? [
+                                            'mcp',
+                                            'skills',
+                                            'extensions',
+                                            'channels',
+                                            'settings',
+                                          ]
+                                        : [
+                                            'mcp',
+                                            ...(workspaceSplitSkillsEnabled
+                                              ? (['skills'] as const)
+                                              : []),
+                                            'extensions',
+                                            ...(channelManagementEnabled
+                                              ? (['channels'] as const)
+                                              : []),
+                                            'settings',
+                                          ];
                                     const workspaceIndex =
                                       orderedProjectWorkspaces.findIndex(
                                         (entry) => entry.cwd === ws.cwd,
@@ -9089,6 +9158,17 @@ export function WebShellSidebar({
                                       workspaceIndex >= 0 &&
                                       orderedProjectWorkspaces.length > 1;
                                     const menuActions: WorkspaceMenuActions = {
+                                      ...(canTrust
+                                        ? {
+                                            trust: () =>
+                                              workspaceTrustGrant.grantTrust(
+                                                ws,
+                                              ),
+                                            trustPending:
+                                              workspaceTrustGrant.trustPendingCwd !==
+                                              null,
+                                          }
+                                        : {}),
                                       ...(canRename
                                         ? {
                                             rename: () =>
@@ -9174,12 +9254,13 @@ export function WebShellSidebar({
                                       ...(canManage
                                         ? {
                                             openManagement: (
-                                              target: WorkspaceManagementTarget,
+                                              target: WorkspaceMenuManagementTarget,
                                             ) =>
                                               onOpenWorkspaceManagement?.(
                                                 target,
                                                 ws.cwd,
                                               ),
+                                            managementTargets,
                                           }
                                         : {}),
                                       ...(ws.trusted && realPath

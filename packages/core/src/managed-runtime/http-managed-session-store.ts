@@ -195,6 +195,12 @@ export interface HttpManagedSessionStores {
   /** Whether this control plane lets a background Session suspend behind the pull. */
   supportsRuntimeObservation(): boolean;
   supportsActionParking(): boolean;
+  /** Whether a park certificate may share its seal with a background hold. */
+  supportsBackgroundActionParking(): boolean;
+  /** Whether a wake-started Turn's approval wait may park. */
+  supportsWakeActionParking(): boolean;
+  /** Whether a clean wake-sealed suspension may release its placement. */
+  supportsSuspensionPlacementRelease(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -441,6 +447,11 @@ export function createHttpManagedSessionStores(
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
     supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
     supportsActionParking: () => client.supportsActionParking(),
+    supportsBackgroundActionParking: () =>
+      client.supportsBackgroundActionParking(),
+    supportsWakeActionParking: () => client.supportsWakeActionParking(),
+    supportsSuspensionPlacementRelease: () =>
+      client.supportsSuspensionPlacementRelease(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -994,6 +1005,9 @@ interface WriterGrant {
   readonly wakeDispatch: boolean;
   readonly runtimeObservation: boolean;
   readonly actionParking: boolean;
+  readonly backgroundActionParking: boolean;
+  readonly wakeActionParking: boolean;
+  readonly suspensionPlacementRelease: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1071,6 +1085,19 @@ class ManagedSessionStoreHttpClient {
   supportsActionParking(): boolean {
     return this.grant?.actionParking === true;
   }
+
+  supportsBackgroundActionParking(): boolean {
+    return this.grant?.backgroundActionParking === true;
+  }
+
+  supportsWakeActionParking(): boolean {
+    return this.grant?.wakeActionParking === true;
+  }
+
+  supportsSuspensionPlacementRelease(): boolean {
+    return this.grant?.suspensionPlacementRelease === true;
+  }
+
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -2904,7 +2931,12 @@ class ManagedSessionStoreHttpClient {
     )
       throw corrupt('ownership release does not match the writer.');
     if (!this.ownershipRelease) {
-      const grant = this.requireGrant();
+      const grant = this.grant;
+      if (grant === undefined || this.locallyStopped) {
+        throw new ManagedSessionRecordError(
+          'the HTTP Managed Session writer is not active.',
+        );
+      }
       if (
         request.commitProof.lastCommitSequence !== grant.committedSequence ||
         request.commitProof.committedPrefixHash !== grant.lastCommitDigest
@@ -3147,6 +3179,9 @@ class ManagedSessionStoreHttpClient {
         wakeDispatch: renewed.wakeDispatch,
         runtimeObservation: renewed.runtimeObservation,
         actionParking: renewed.actionParking,
+        backgroundActionParking: renewed.backgroundActionParking,
+        wakeActionParking: renewed.wakeActionParking,
+        suspensionPlacementRelease: renewed.suspensionPlacementRelease,
       };
       this.scheduleRenewal();
     })();
@@ -3792,6 +3827,9 @@ function parseWriterGrant(value: unknown): WriterGrant {
     wakeDispatch: record['wakeDispatch'] === true,
     runtimeObservation: record['runtimeObservation'] === true,
     actionParking: record['actionParking'] === true,
+    backgroundActionParking: record['backgroundActionParking'] === true,
+    wakeActionParking: record['wakeActionParking'] === true,
+    suspensionPlacementRelease: record['suspensionPlacementRelease'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

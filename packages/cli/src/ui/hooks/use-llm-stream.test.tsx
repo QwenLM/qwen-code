@@ -11,7 +11,11 @@ import type {
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
-import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  getStructuredErrorCause,
+  type ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import { StreamInactivityTimeoutError } from '@qwen-code/qwen-code-core/core/stream-guards.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -70,7 +74,11 @@ import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
-import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import type {
+  DirectUserAdmission,
+  QueuedGoalTurn,
+  QueuedMessage,
+} from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import {
@@ -83,7 +91,21 @@ import {
   REWRITE_CHANGED_PASTE,
 } from '../utils/paste-placeholders.js';
 
+const queuedSteers = (...texts: string[]): QueuedMessage[] =>
+  texts.map((text) => ({ text, key: text, deferUntilIdle: false }));
+
 // --- MOCKS ---
+vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/core/turn.js')
+    >();
+  return {
+    ...actual,
+    getStructuredErrorCause: vi.fn(actual.getStructuredErrorCause),
+  };
+});
+
 const pendingToolPersistence = vi.hoisted(() => ({
   directory: '',
   wait: undefined as Promise<void> | undefined,
@@ -5921,6 +5943,7 @@ describe('useLlmStream', () => {
     mockConfig.getGoalRuntime = vi.fn(() => runtime);
     mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
     const makeCompletedTool = (
       callId: string,
       goalContext?: GoalTurnPermit,
@@ -7177,18 +7200,26 @@ describe('useLlmStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
 
+    const request = vi.fn().mockResolvedValue({
+      output: { hookSpecificOutput: { additionalContext: 'steer context' } },
+    });
+    mockConfig.getMessageBus = vi.fn().mockReturnValue({ request });
+    mockConfig.hasHooksForEvent = vi.fn(
+      (event) => event === 'UserPromptSubmit',
+    );
+
     // A plain steer resolved before the delayed command is both appended to the
     // pending submission and eligible for restoration when Esc aborts the drain.
-    let queuedSteerMessages: string[] = [];
+    let queuedSteerMessages: QueuedMessage[] = [];
     const midTurnDrainRef = {
-      current: vi.fn<() => string[]>(() => {
+      current: vi.fn<() => QueuedMessage[]>(() => {
         const drained = queuedSteerMessages;
         queuedSteerMessages = [];
         return drained;
       }),
     };
     const midTurnRestoreRef = {
-      current: vi.fn<(messages: string[]) => void>(),
+      current: vi.fn<(messages: QueuedMessage[]) => void>(),
     };
     let releaseSlashCommand: (() => void) | undefined;
     mockHandleSlashCommand.mockImplementation(
@@ -7280,7 +7311,7 @@ describe('useLlmStream', () => {
     );
     rerender();
     client.addHistory.mockClear();
-    queuedSteerMessages = ['steer it this way', '/goal pause'];
+    queuedSteerMessages = queuedSteers('steer it this way', '/goal pause');
     const batch = act(async () => {
       await capturedOnComplete?.([
         completedTool('done-tool'),
@@ -7318,8 +7349,12 @@ describe('useLlmStream', () => {
       }),
     );
     expect(midTurnRestoreRef.current).toHaveBeenCalledWith([
-      'steer it this way',
+      expect.objectContaining({
+        text: 'steer it this way',
+        promptHook: { additionalContext: 'steer context' },
+      }),
     ]);
+    expect(request).toHaveBeenCalledOnce();
     // The only second model call is the explicit Steer; the cancelled batch
     // itself never reached the model.
     expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
@@ -8190,8 +8225,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -8281,8 +8316,8 @@ describe('useLlmStream', () => {
     });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([steeredPrompt])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(steeredPrompt))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8348,8 +8383,8 @@ describe('useLlmStream', () => {
 
   it('does not expose the main steer queue to detached tool continuations', async () => {
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValue(['keep this follow-up on the main turn']);
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValue(queuedSteers('keep this follow-up on the main turn'));
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const detachedController = new AbortController();
 
@@ -8416,8 +8451,8 @@ describe('useLlmStream', () => {
     mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([goalCommand])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(goalCommand))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8478,8 +8513,8 @@ describe('useLlmStream', () => {
     });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([goalCommand])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(goalCommand))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8542,13 +8577,15 @@ describe('useLlmStream', () => {
       });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([
-        '/goal first',
-        'plain before final goal',
-        '/goal final',
-        'plain after final goal',
-      ])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(
+        queuedSteers(
+          '/goal first',
+          'plain before final goal',
+          '/goal final',
+          'plain after final goal',
+        ),
+      )
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8603,8 +8640,8 @@ describe('useLlmStream', () => {
       .mockResolvedValueOnce({ type: 'handled' });
     mockSendMessageStream.mockImplementation(() => (async function* () {})());
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce(['/goal first', '/goal clear'])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers('/goal first', '/goal clear'))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8653,8 +8690,8 @@ describe('useLlmStream', () => {
       () => new Promise(() => {}),
     );
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce([steeredPrompt])
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(steeredPrompt))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8701,7 +8738,7 @@ describe('useLlmStream', () => {
     });
 
     expect(steerInput).toBeUndefined();
-    expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
+    expect(restoreSteer).toHaveBeenCalledWith(queuedSteers(steeredPrompt));
     expect(mockAddItem).not.toHaveBeenCalledWith(
       { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
@@ -8727,8 +8764,8 @@ describe('useLlmStream', () => {
         }),
     );
     const drainSteer = vi
-      .fn<() => string[]>()
-      .mockReturnValueOnce(messages)
+      .fn<() => QueuedMessage[]>()
+      .mockReturnValueOnce(queuedSteers(...messages))
       .mockReturnValue([]);
 
     const { result } = renderHook(() =>
@@ -8780,7 +8817,7 @@ describe('useLlmStream', () => {
     });
 
     expect(steerInput).toBeUndefined();
-    expect(restoreSteer).toHaveBeenCalledWith(messages);
+    expect(restoreSteer).toHaveBeenCalledWith(queuedSteers(...messages));
   });
 
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
@@ -8860,8 +8897,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9032,8 +9069,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9152,8 +9189,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9275,8 +9312,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9403,8 +9440,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9516,8 +9553,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9626,8 +9663,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -9733,8 +9770,8 @@ describe('useLlmStream', () => {
     ];
     const midTurnDrainRef = {
       current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
+        .fn<() => QueuedMessage[]>()
+        .mockReturnValueOnce(queuedSteers(queuedPrompt))
         .mockReturnValue([]),
     };
 
@@ -10964,9 +11001,15 @@ describe('useLlmStream', () => {
       'Duplicate provider tool call id "tool-history"',
     );
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
-    // The breaker stops through the loop dialog, which names the replay.
-    expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-      'the provider replayed a tool call id that had already run',
+    // The breaker's stop message names the replay.
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(
+          'the provider replayed a tool call id that had already run',
+        ),
+      }),
+      expect.any(Number),
     );
   });
 
@@ -22508,6 +22551,39 @@ describe('useLlmStream', () => {
       });
     });
 
+    it('uses the stream timeout cause to classify StopFailure', async () => {
+      const timeout = new StreamInactivityTimeoutError(
+        1000,
+        2,
+        1000,
+        'check_quota',
+      );
+      const error = { message: timeout.message };
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        fireStopFailureEvent,
+      });
+      vi.mocked(getStructuredErrorCause).mockImplementationOnce((value) =>
+        value === error ? timeout : undefined,
+      );
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Error, value: { error } };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Check model response');
+      });
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'unknown',
+        timeout.message,
+        expect.any(String),
+      );
+    });
+
     it('omits the Ctrl+Y retry hint for stream errors during a Goal turn', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -24541,19 +24617,8 @@ describe('useLlmStream', () => {
   });
 
   // --- New tests focused on recent modifications ---
-  describe('Loop Detection Confirmation', () => {
-    beforeEach(() => {
-      // Add mock for getLoopDetectionService to the config
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue({
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      });
-    });
-
-    it('should set loopDetectionConfirmationRequest when LoopDetected event is received', async () => {
+  describe('Loop stops', () => {
+    it('shows the stop as an info item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -24572,12 +24637,15 @@ describe('useLlmStream', () => {
         await result.current.submitQuery('test query');
       });
 
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-        expect(
-          typeof result.current.loopDetectionConfirmationRequest?.onComplete,
-        ).toBe('function');
-      });
+      await waitFor(() =>
+        expect(mockAddItem).toHaveBeenCalledWith(
+          {
+            type: 'info',
+            text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
+          },
+          expect.any(Number),
+        ),
+      );
       await waitFor(() =>
         expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
@@ -24587,122 +24655,7 @@ describe('useLlmStream', () => {
       );
     });
 
-    it('should disable loop detection and show message when user selects "disable"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook([], mockClient);
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Wait for confirmation request to be set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "disable"
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'disable',
-        });
-      });
-
-      // Verify loop detection was disabled
-      expect(mockLoopDetectionService.disableForSession).toHaveBeenCalledTimes(
-        1,
-      );
-
-      // Verify confirmation request was cleared
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify appropriate message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection has been disabled for this session. Please try your request again.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should keep loop detection enabled and show message when user selects "keep"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Wait for confirmation request to be set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "keep"
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      // Verify loop detection was NOT disabled
-      expect(mockLoopDetectionService.disableForSession).not.toHaveBeenCalled();
-
-      // Verify confirmation request was cleared
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify appropriate message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('names the cause of the stop in the dialog and the message after "keep"', async () => {
-      const mockLoopDetectionService = {
-        disableForSession: vi.fn(),
-      };
-      const mockClient = {
-        ...new MockedLlmClientClass(mockConfig),
-        getLoopDetectionService: () => mockLoopDetectionService,
-      };
-      mockConfig.getLlmClient = vi.fn().mockReturnValue(mockClient);
-
+    it('names the cause of the stop', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -24723,137 +24676,15 @@ describe('useLlmStream', () => {
         await result.current.submitQuery('test query');
       });
 
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-          'the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
-        );
-      });
-
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection halted the run (turn_tool_call_cap: the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)). Raise `model.maxToolCallsPerTurn`, or set it to 0 to disable the cap.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should handle multiple loop detection events properly', async () => {
-      const { result } = renderTestHook();
-
-      // First loop detection - set up fresh mock for first call
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      // First loop detection
-      await act(async () => {
-        await result.current.submitQuery('first query');
-      });
-
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "keep" for first request
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'keep',
-        });
-      });
-
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify first message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.',
-        },
-        expect.any(Number),
-      );
-
-      // Second loop detection - set up fresh mock for second call
-      mockSendMessageStream.mockReturnValueOnce(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      // Second loop detection
-      await act(async () => {
-        await result.current.submitQuery('second query');
-      });
-
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
-
-      // Simulate user selecting "disable" for second request
-      await act(async () => {
-        result.current.loopDetectionConfirmationRequest?.onComplete({
-          userSelection: 'disable',
-        });
-      });
-
-      expect(result.current.loopDetectionConfirmationRequest).toBeNull();
-
-      // Verify second message was added
-      expect(mockAddItem).toHaveBeenCalledWith(
-        {
-          type: 'info',
-          text: 'Loop detection has been disabled for this session. Please try your request again.',
-        },
-        expect.any(Number),
-      );
-    });
-
-    it('should process LoopDetected event after moving pending history to history', async () => {
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.Content,
-            value: 'Some response content',
-          };
-          yield {
-            type: ServerLlmEventType.LoopDetected,
-          };
-        })(),
-      );
-
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('test query');
-      });
-
-      // Verify that the content was added to history before the loop detection dialog
-      await waitFor(() => {
+      await waitFor(() =>
         expect(mockAddItem).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'gemini',
-            text: 'Some response content',
-          }),
+          {
+            type: 'info',
+            text: 'Loop detection halted the run (turn_tool_call_cap: the turn reached the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)). Raise `model.maxToolCallsPerTurn`, or set it to 0 to disable the cap.',
+          },
           expect.any(Number),
-        );
-      });
-
-      // Then verify loop detection confirmation request was set
-      await waitFor(() => {
-        expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
-      });
+        ),
+      );
     });
   });
 
@@ -25865,8 +25696,14 @@ describe('useLlmStream', () => {
         });
 
         expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
-        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
-          'the provider replayed a tool call id that had already run',
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining(
+              'the provider replayed a tool call id that had already run',
+            ),
+          }),
+          expect.any(Number),
         );
       });
 
@@ -25937,8 +25774,11 @@ describe('useLlmStream', () => {
           },
         );
 
-      it('ends the turn on a tool that ends it, outside a Goal turn too, with its results in history', async () => {
-        completeBatchesWith(() => ({ terminateTurn: true }));
+      it('gives a turn-ending tool priority over a hook stop', async () => {
+        completeBatchesWith(() => ({
+          terminateTurn: true,
+          hookStopReason: 'budget spent',
+        }));
         rounds([toolRequest('read_a')]);
         const client = mockConfig.getLlmClient();
         const { result } = renderTestHook([], client);
@@ -25959,10 +25799,41 @@ describe('useLlmStream', () => {
         });
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['read_a']);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          { type: 'info', text: 'A hook stopped the turn: budget spent' },
+          expect.any(Number),
+        );
       });
 
-      it('stops without a continuation when the model was switched after a quota error', async () => {
-        completeBatches();
+      it('ends the turn on a tool hook stop, with its results in history and the reason shown', async () => {
+        completeBatchesWith(() => ({ hookStopReason: 'budget spent' }));
+        rounds([toolRequest('read_a')]);
+        const client = mockConfig.getLlmClient();
+        const { result } = renderTestHook([], client);
+
+        await act(async () => {
+          await result.current.submitQuery('Read the file.');
+        });
+
+        await waitFor(() => {
+          expect(mockAddItem).toHaveBeenCalledWith(
+            { type: 'info', text: 'A hook stopped the turn: budget spent' },
+            expect.any(Number),
+          );
+        });
+        expect(client.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({ id: 'read_a' }),
+            }),
+          ],
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('gives a quota-driven model switch priority over a hook stop', async () => {
+        completeBatchesWith(() => ({ hookStopReason: 'budget spent' }));
         rounds([toolRequest('read_a')]);
         const client = mockConfig.getLlmClient();
         const { result } = renderTestHook(
@@ -25984,6 +25855,10 @@ describe('useLlmStream', () => {
         });
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          { type: 'info', text: 'A hook stopped the turn: budget spent' },
+          expect.any(Number),
+        );
         // The results answer the calls in history, outside a Goal turn too.
         expect(client.addHistory).toHaveBeenCalledWith({
           role: 'user',
@@ -26065,6 +25940,109 @@ describe('useLlmStream', () => {
           mockBackgroundTaskRegistry.canStartBackgroundAgent,
         ).toHaveBeenCalledTimes(2);
       });
+
+      it.each([false, true])(
+        'settles a hook-stopped Goal against current background capacity (slot freed: %s)',
+        async (slotFreed) => {
+          const permit: GoalTurnPermit = {
+            goalId: 'goal-background-capacity',
+            revision: 1,
+            turnId: 'turn-background-capacity',
+          };
+          let currentPermit: GoalTurnPermit | undefined = permit;
+          let goalActive = false;
+          const dispatch = vi.fn(async () => {
+            currentPermit = undefined;
+          });
+          const finishTurn = vi.fn(async () => {
+            currentPermit = undefined;
+          });
+          const runtime = {
+            permitForTurn: () => currentPermit,
+            dispatch,
+            finishTurn,
+            getSnapshot: () => ({
+              goal: goalActive ? { ...permit, status: 'active' } : null,
+            }),
+          } as unknown as ReturnType<Config['getGoalRuntime']>;
+          mockConfig.getGoalRuntime = vi.fn(() => runtime);
+          mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+          mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+            flush: vi.fn().mockResolvedValue(undefined),
+          });
+          mockBackgroundTaskRegistry.getMaxConcurrentBackgroundAgents.mockReturnValue(
+            1,
+          );
+          mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(
+            false,
+          );
+          const runAgentLoop = mockRunAgentLoop.getMockImplementation()!;
+          mockRunAgentLoop.mockImplementationOnce(async (options) => {
+            const result = await runAgentLoop(options);
+            mockBackgroundTaskRegistry.canStartBackgroundAgent.mockReturnValue(
+              slotFreed,
+            );
+            return result;
+          });
+          const pending = holdBatches((request) => {
+            const call = completedCall(request);
+            return {
+              ...call,
+              response: {
+                ...call.response,
+                resultDisplay: { type: 'task_execution', status: 'background' },
+                hookStopReason: 'budget spent',
+              },
+            };
+          });
+          const request = toolRequest('agent_a');
+          rounds([
+            {
+              ...request,
+              value: { ...request.value, name: 'agent', goalContext: permit },
+            },
+          ]);
+          const { result } = renderTestHook();
+
+          let prompt!: Promise<void>;
+          await act(async () => {
+            prompt = result.current.submitQuery(
+              'Start the agent.',
+              SendMessageType.UserQuery,
+              request.value.prompt_id,
+            );
+          });
+          expect(pending).toHaveLength(1);
+          await act(async () => {
+            goalActive = true;
+            pending[0]();
+            await prompt;
+          });
+
+          await expect(
+            mockRunAgentLoop.mock.results[0].value,
+          ).resolves.toMatchObject({ reason: 'surface_ended' });
+          if (slotFreed) {
+            expect(dispatch).not.toHaveBeenCalled();
+          } else {
+            expect(dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: permit.goalId,
+              expectedRevision: permit.revision,
+              reason: goalPauseReasonForFailure(''),
+            });
+          }
+          expect(finishTurn).toHaveBeenCalledTimes(slotFreed ? 1 : 0);
+          expect(
+            mockAddItem.mock.calls.filter(
+              ([item]) =>
+                item.type === 'info' &&
+                item.text === 'A hook stopped the turn: budget spent',
+            ),
+          ).toHaveLength(slotFreed ? 1 : 0);
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        },
+      );
 
       it('continues past a background agent launch while background slots remain', async () => {
         completeBatchesWith(() => ({
@@ -26556,7 +26534,7 @@ describe('useLlmStream', () => {
           [toolRequest('read_a')],
           [{ type: ServerLlmEventType.Content, value: 'Read.' }],
         );
-        let queued = ['Also check b.'];
+        let queued = queuedSteers('Also check b.');
         const midTurnDrainRef = {
           current: vi.fn(() => {
             const drained = queued;
@@ -26617,7 +26595,7 @@ describe('useLlmStream', () => {
               releaseCommand = () => resolve(false);
             }),
         );
-        let queued = ['/goal status', 'Also check b.'];
+        let queued = queuedSteers('/goal status', 'Also check b.');
         const midTurnDrainRef = {
           current: vi.fn(() => {
             const drained = queued;

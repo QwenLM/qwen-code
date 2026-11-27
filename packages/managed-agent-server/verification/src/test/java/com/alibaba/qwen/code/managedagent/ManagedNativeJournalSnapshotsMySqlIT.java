@@ -202,13 +202,13 @@ class ManagedNativeJournalSnapshotsMySqlIT extends ManagedNativeJournalSnapshots
     }
 
     /**
-     * These cases rely on pages falling in the gap just below the manifest key
-     * in uk_ma_resource_business_key: those are the inserts a queued next-key
-     * lock blocks. The keys are digests of fixed content, so a change to the
+     * These cases rely on pages falling in the gap just below the manifest id
+     * in uk_ma_resource_id: those are the inserts a queued next-key
+     * lock blocks. The ids are digests of fixed content, so a change to the
      * fixture or the snapshot id can move them apart.
      */
     private void requirePagesJustBelowTheManifest(int count) {
-        var kinds = jdbc.queryForList("SELECT kind FROM ma_resource ORDER BY resource_key", String.class);
+        var kinds = jdbc.queryForList("SELECT kind FROM ma_resource ORDER BY resource_id", String.class);
         int manifest = kinds.indexOf("managed-native-journal-snapshot");
         assertThat(manifest).as("resources below the manifest in key order: %s", kinds).isGreaterThanOrEqualTo(count);
         assertThat(kinds.subList(manifest - count, manifest)).as("the resources just below the manifest: %s", kinds)
@@ -226,7 +226,7 @@ class ManagedNativeJournalSnapshotsMySqlIT extends ManagedNativeJournalSnapshots
                 + " JOIN performance_schema.data_locks requested ON requested.ENGINE = waits.ENGINE"
                 + " AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
                 + " WHERE requested.OBJECT_SCHEMA = DATABASE() AND requested.OBJECT_NAME = 'ma_resource'"
-                + " AND requested.INDEX_NAME = 'uk_ma_resource_business_key'", Integer.class) == 0) {
+                + " AND requested.INDEX_NAME = 'uk_ma_resource_id'", Integer.class) == 0) {
             if (System.nanoTime() > deadline) {
                 throw new AssertionError("Timed out waiting for " + what + " to queue on the manifest row; "
                         + MySqlLockProbe.describeLockWaits(jdbc, jdbc.queryForObject("SELECT DATABASE()", String.class)));

@@ -16,6 +16,7 @@ import {
   ExtensionDirectoryLockedError,
   ExtensionStore,
   ExtensionStoreCorruptError,
+  withExtensionTurnDrainWait,
   type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
@@ -112,6 +113,155 @@ describe('ExtensionStore', () => {
     const initial = await store.ensureInitialized([identity]);
     return { store, identity, initial };
   };
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'ignores uncommitted journal temp files but still rejects an unrecoverable transaction',
+    async () => {
+      const { store, initial } = await initStore('4'.repeat(64));
+      const transactions = path.join(storeDir, 'transactions');
+      const journal = '00000000-0000-4000-8000-000000000001.json';
+      await fsp.writeFile(
+        path.join(transactions, journal + '.001122334455.tmp'),
+        'partial',
+      );
+      await fsp.writeFile(path.join(transactions, '.DS_Store'), 'metadata');
+      const release = await store.acquireTurnReader(initial.generation);
+      await release();
+      await fsp.writeFile(path.join(transactions, journal), 'broken');
+      await expect(store.acquireTurnReader(initial.generation)).rejects.toThrow(
+        'Extension store generation unavailable',
+      );
+      expect(await fsp.readdir(transactions)).toContainEqual(
+        expect.stringContaining(journal + '.corrupt-'),
+      );
+    },
+  );
+
+  it('cancels before writing if ownership expires while it checks native readers', async () => {
+    const { store, identity, initial } = await initStore('6'.repeat(64));
+    const controller = new AbortController();
+    const expired = new Error('operation owner expired');
+    await expect(
+      withExtensionTurnDrainWait(
+        1000,
+        controller.signal,
+        () => queueMicrotask(() => controller.abort(expired)),
+        () => store.setDefaultActivation(identity, 'disabled'),
+      ),
+    ).rejects.toBe(expired);
+    expect((await store.readSnapshot()).generation).toBe(initial.generation);
+  });
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'ignores directory metadata without dropping an active socket reader',
+    async () => {
+      const { store, identity, initial } = await initStore('5'.repeat(64));
+      const release = await store.acquireTurnReader(initial.generation);
+      const metadata = path.join(storeDir, '.turn-readers', '.DS_Store');
+      await fsp.writeFile(metadata, 'metadata');
+      const change = () => store.setDefaultActivation(identity, 'disabled');
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await release();
+      await expect(change()).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+      expect(await fsp.readFile(metadata, 'utf-8')).toBe('metadata');
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'holds the verified generation across store clients until the last turn drains',
+    async () => {
+      const { store, identity, initial } = await initStore('a'.repeat(64));
+      const writer = makeStore();
+      await expect(
+        store.acquireTurnReader(initial.generation + 1),
+      ).rejects.toThrow();
+      const [one, two] = await Promise.all([
+        store.acquireTurnReader(initial.generation),
+        writer.acquireTurnReader(initial.generation),
+      ]);
+      const change = () => writer.setDefaultActivation(identity, 'disabled');
+      const uninstall = () =>
+        writer.commitArtifact({
+          operation: 'uninstall',
+          identity,
+          destinationDirectory: path.join(extensionsDir, identity.name),
+        });
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await expect(uninstall()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      await one();
+      await one();
+      await expect(change()).rejects.toMatchObject({
+        code: 'extension_store_in_use',
+      });
+      expect((await writer.readSnapshot()).generation).toBe(initial.generation);
+      await two();
+      expect((await change()).generation).toBeGreaterThan(initial.generation);
+      await expect(
+        store.acquireTurnReader(initial.generation),
+      ).rejects.toThrow();
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'reclaims a reader after its process exits without running cleanup',
+    async () => {
+      const { store, identity, initial } = await initStore('c'.repeat(64));
+      const { spawnSync } = await import('node:child_process');
+      const directory = path.join(storeDir, '.turn-readers');
+      await fsp.mkdir(directory);
+      // The process working directory keeps the AF_UNIX path short on macOS.
+      const marker = '00000000-0000-4000-8000-000000000000';
+      const owner = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          `require('node:net').createServer().listen('${marker}', () => process.kill(process.pid, 'SIGKILL'))`,
+        ],
+        { cwd: directory, timeout: 3000 },
+      );
+      expect(owner.signal).toBe('SIGKILL');
+      expect(await fsp.readdir(directory)).toEqual([marker]);
+      expect(
+        (await store.setDefaultActivation(identity, 'disabled')).generation,
+      ).toBe(initial.generation + 1);
+      expect(await fsp.readdir(directory)).toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'commits a waiting mutation once without blocking readers or refreshing its budget',
+    async () => {
+      const { store, identity, initial } = await initStore('e'.repeat(64));
+      const release = await store.acquireTurnReader(initial.generation);
+      const signal = new AbortController().signal;
+      const change = () => store.setDefaultActivation(identity, 'disabled');
+      await expect(
+        withExtensionTurnDrainWait(5, signal, undefined, change),
+      ).rejects.toMatchObject({ code: 'extension_store_in_use' });
+      const waiting = withExtensionTurnDrainWait(
+        2000,
+        signal,
+        undefined,
+        change,
+      );
+      expect((await store.readSnapshot()).generation).toBe(initial.generation);
+      await release();
+      await expect(waiting).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+      await expect(store.readSnapshot()).resolves.toMatchObject({
+        generation: initial.generation + 1,
+      });
+    },
+  );
 
   const firstAndSecond = (
     a: string,

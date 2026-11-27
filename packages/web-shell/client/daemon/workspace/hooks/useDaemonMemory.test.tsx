@@ -16,8 +16,17 @@ const actions = vi.hoisted(() => ({
   readWorkspaceFile: vi.fn(),
   writeMemory: vi.fn(),
 }));
+const scopedHandle = vi.hoisted(() => ({
+  workspaceMemory: vi.fn(),
+  readWorkspaceFile: vi.fn(),
+  writeWorkspaceMemory: vi.fn(),
+}));
+const client = vi.hoisted(() => ({
+  workspaceByCwd: vi.fn(() => scopedHandle),
+}));
 
 vi.mock('../DaemonWorkspaceProvider.js', () => ({
+  useDaemonWorkspace: () => ({ actions, client }),
   useDaemonWorkspaceActions: () => actions,
 }));
 vi.mock('../../session/DaemonSessionProvider.js', () => ({
@@ -29,16 +38,20 @@ const { useDaemonMemory } = await import('./useDaemonMemory.js');
 const GLOBAL_PATH = '/home/u/.qwen/QWEN.md';
 const WORKSPACE_PATH = '/w/QWEN.md';
 
-function captureReadMemoryFile() {
-  let read: ReturnType<typeof useDaemonMemory>['readMemoryFile'] | undefined;
+function captureMemoryHook(options?: { workspaceCwd?: string }) {
+  let hook: ReturnType<typeof useDaemonMemory> | undefined;
   function Probe() {
-    read = useDaemonMemory().readMemoryFile;
+    hook = useDaemonMemory(options);
     return null;
   }
   const root = createRoot(document.createElement('div'));
   act(() => root.render(<Probe />));
   act(() => root.unmount());
-  return read!;
+  return hook!;
+}
+
+function captureReadMemoryFile(options?: { workspaceCwd?: string }) {
+  return captureMemoryHook(options).readMemoryFile;
 }
 
 function statusWith(file: Record<string, unknown>) {
@@ -142,5 +155,97 @@ describe('useDaemonMemory.readMemoryFile', () => {
       truncated: false,
     });
     expect(actions.readWorkspaceFile).toHaveBeenCalledWith(WORKSPACE_PATH);
+  });
+
+  it('keeps global fallback reads on the unscoped client inside a workspace-scoped memory dialog', async () => {
+    scopedHandle.workspaceMemory.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/secondary',
+      initialized: true,
+      files: [
+        {
+          kind: 'memory_file',
+          path: GLOBAL_PATH,
+          scope: 'global',
+          bytes: 7,
+        },
+      ],
+    });
+    actions.readWorkspaceFile.mockResolvedValue({
+      content: 'global\n',
+      truncated: false,
+    });
+
+    const hook = captureMemoryHook({ workspaceCwd: '/secondary' });
+    await expect(hook.readMemoryFile(GLOBAL_PATH)).resolves.toEqual({
+      content: 'global\n',
+      truncated: false,
+    });
+    expect(actions.readWorkspaceFile).toHaveBeenCalledWith(GLOBAL_PATH);
+    expect(scopedHandle.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('routes workspace-scoped reads and writes through workspaceByCwd while keeping global writes unscoped', async () => {
+    client.workspaceByCwd.mockClear();
+    actions.writeMemory.mockClear();
+    scopedHandle.workspaceMemory.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/secondary',
+      initialized: true,
+      files: [
+        {
+          kind: 'memory_file',
+          path: '/secondary/QWEN.md',
+          scope: 'workspace',
+          bytes: 5,
+          content: 'hello',
+        },
+      ],
+    });
+    scopedHandle.writeWorkspaceMemory.mockResolvedValue({
+      ok: true,
+      filePath: '/secondary/QWEN.md',
+      bytesWritten: 5,
+      mode: 'replace',
+    });
+    actions.writeMemory.mockResolvedValue({
+      ok: true,
+      filePath: GLOBAL_PATH,
+      bytesWritten: 6,
+      mode: 'replace',
+    });
+
+    const hook = captureMemoryHook({ workspaceCwd: '/secondary' });
+    await expect(hook.readMemoryFile('/secondary/QWEN.md')).resolves.toEqual({
+      content: 'hello',
+      truncated: false,
+    });
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(scopedHandle.workspaceMemory).toHaveBeenCalledWith({
+      includeContent: true,
+    });
+
+    await hook.writeMemory({
+      scope: 'workspace',
+      mode: 'replace',
+      content: 'hello',
+    });
+    expect(scopedHandle.writeWorkspaceMemory).toHaveBeenCalledWith({
+      scope: 'workspace',
+      mode: 'replace',
+      content: 'hello',
+    });
+    expect(actions.writeMemory).not.toHaveBeenCalled();
+
+    await hook.writeMemory({
+      scope: 'global',
+      mode: 'replace',
+      content: 'global',
+    });
+    expect(actions.writeMemory).toHaveBeenCalledWith({
+      scope: 'global',
+      mode: 'replace',
+      content: 'global',
+    });
   });
 });
