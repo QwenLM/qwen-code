@@ -51,7 +51,10 @@ An external storage alias can include the optional `isolationClass` value
 `session` or `workspace`. The operator registers it with the alias, and the
 registration receipt covers it for idempotency. Omitted values follow the
 Broker's configured isolation. It is excluded from physical storage identity
-and the worker's boot storage descriptor.
+and the worker's boot storage descriptor. Upgrade every registrar and Broker
+that reads the shared database before writing the first registration with
+`isolationClass`. Registrars scan existing registrations when creating another
+alias. After that first write, any rollback version must also read this field.
 
 With an explicit `workspace` placement, an authorized external Files Session
 can select an existing directory below the mount. The Session stores its

@@ -43,7 +43,8 @@ registration。可选的可见 ASCII `requestId`（1–128 字符）只设置 HT
 
 管理员可随外部存储别名登记可选的 `isolationClass`，取值为 `session` 或 `workspace`。
 注册回执将该值计入幂等输入。省略时沿用当前 Broker 的放置配置。物理存储身份和
-Worker boot 的 storage 描述仍使用原有字段。
+Worker boot 的 storage 描述仍使用原有字段。先升级同库所有注册服务与 Broker，再写第一条带
+`isolationClass` 的注册。注册服务创建别名时会扫描已有记录。首次写入后的回退版本也须能读取该字段。
 
 显式登记为 `workspace` 的外部 Files 会话可选择挂载根下已存在的目录。会话保存规范化的相对工作目录。
 Broker 以挂载根、Workspace 代次与能力摘要识别运行绑定，因此不同目录下的会话可以共用一台 Worker。
