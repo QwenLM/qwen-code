@@ -2445,6 +2445,29 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.serve?.tokenQr).toBe('true');
   });
 
+  it('passes a malformed dead folder-trust key through without discarding the summary', () => {
+    const qwenHome = useTempQwenHome();
+    const workspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-dead-trust-malformed-')),
+    );
+    tempWorkspace = workspace;
+    // A raw (unmigrated) file keeps the string form the migration would have
+    // tolerated. Throwing here would land in the serve boot's
+    // "falling back to defaults" branch and drop policy.* with it.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        security: { folderTrust: { featureEnabled: 'true' } },
+        policy: { permissionStrategy: 'local-only' },
+        serve: { maxSessions: 3 },
+      }),
+    );
+    const settings = loadServeFastPathSettings(workspace);
+    expect(settings.security).toBeUndefined();
+    expect(settings.policy?.permissionStrategy).toBe('local-only');
+    expect(settings.serve?.maxSessions).toBe(3);
+  });
+
   it.each([
     {
       label: 'unknown',

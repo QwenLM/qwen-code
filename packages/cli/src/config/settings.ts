@@ -1014,13 +1014,24 @@ export class LoadedSettings {
       }
 
       const content = fs.readFileSync(file.path, 'utf-8');
-      const parsed = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        // The load path repairs the dead folder-trust key right after parsing;
-        // re-reads of the same file must agree with it, or a repair that could
-        // not be persisted is lost on the first reload. Stays in-memory: the
-        // reload must not write, and workspace settings are never repaired.
+      const parsedValue: unknown = JSON.parse(
+        stripJsonComments(stripUtf8Bom(content)),
+      );
+      if (
+        parsedValue &&
+        typeof parsedValue === 'object' &&
+        !Array.isArray(parsedValue)
+      ) {
+        let parsed = parsedValue as Settings;
+        // The load path migrates and then repairs, and re-reads of the same
+        // file must agree with it, or a repair that could not be persisted is
+        // lost on the first reload. The migration runs in memory only: the
+        // reload must not write, and it keeps the V1 shape (which produces
+        // the dead key) reachable for the repair below.
         if (scope !== SettingScope.Workspace) {
+          if (needsMigration(parsed)) {
+            parsed = runMigrations(parsed, scope).settings as Settings;
+          }
           repairDeadFolderTrustKey(parsed as Record<string, unknown>);
           parseExecutionSandboxSettings(parsed.tools?.executionSandbox);
         }

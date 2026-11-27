@@ -598,13 +598,13 @@ function pickFastPathSettings(
         // so the version-gated chain never rewrites it. Read the leftover key
         // here too: this reader runs before `loadSettings` repairs the file,
         // and treating a missing `enabled` as off admits every workspace.
+        // A non-boolean value is left unset and stays with the loader and the
+        // daemon validator, as the `serve.*` values above are: throwing here
+        // would land in the boot catch that falls back to defaults, so one
+        // malformed field would drop `policy.*` and `serve.*` with it.
         const legacy = folderTrust['featureEnabled'];
         if (typeof legacy === 'boolean') {
           out.security = { folderTrust: { enabled: legacy } };
-        } else if (legacy !== undefined) {
-          throw new Error(
-            'Serve fast path settings security.folderTrust.featureEnabled must be a boolean.',
-          );
         }
       }
     }

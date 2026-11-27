@@ -922,6 +922,34 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it('keeps a V1-shaped repair through a reload when the write failed', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // A pre-V2 file: the load migrates it in memory, the repair turns the
+      // migrated dead key into `enabled`, and the read-only home keeps the
+      // original bytes on disk. The reload has to migrate before repairing,
+      // or it reads a shape the repair cannot match and drops the gate.
+      const staleContent = JSON.stringify({ folderTrustFeature: true });
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? staleContent : '{}',
+      );
+      (fs.writeFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: read-only file system');
+      });
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+    });
+
     it('replaces a non-boolean canonical value with the dead-key boolean', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
