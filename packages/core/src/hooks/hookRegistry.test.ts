@@ -404,6 +404,48 @@ describe('HookRegistry', () => {
       );
     });
 
+    it('does not warn about a Mod-only extension', async () => {
+      const registry = await init(
+        { extensions: [ext({ modules: ['./register.js'] } as HooksMap)] },
+        mockFeedbackEmitter,
+      );
+
+      expect(registry.getAllHooks()).toHaveLength(0);
+      expect(mockFeedbackEmitter.emitFeedback).not.toHaveBeenCalled();
+    });
+
+    it('registers classic extension hooks and warns about unsupported events alongside Mod modules', async () => {
+      const registry = await init(
+        {
+          user: { modules: ['./register.js'] } as HooksMap,
+          extensions: [
+            ext({
+              modules: ['./register.js'],
+              UnknownEvent: [],
+              ...pre(cmd('echo test', 'extension-hook')),
+            } as HooksMap),
+          ],
+        },
+        mockFeedbackEmitter,
+      );
+
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].source).toBe(
+        HooksConfigSource.Extensions,
+      );
+      expect(registry.getAllHooks()[0].config.name).toBe('extension-hook');
+      expect(vi.mocked(mockFeedbackEmitter.emitFeedback).mock.calls).toEqual([
+        [
+          'warning',
+          'Hook event "modules" from user config is not supported and was skipped.',
+        ],
+        [
+          'warning',
+          'Hook event "UnknownEvent" from extension config #1 is not supported and was skipped.',
+        ],
+      ]);
+    });
+
     describe('unsupported configuration', () => {
       const warnings = () =>
         vi
