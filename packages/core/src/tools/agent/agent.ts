@@ -104,6 +104,7 @@ import type {
   AgentFinishEvent,
   AgentErrorEvent,
   AgentApprovalRequestEvent,
+  AgentApprovalResolvedEvent,
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
 import {
@@ -1770,7 +1771,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     captureWorkflowDetails = false,
     eventEmitter = this.eventEmitter,
   ): void {
-    let pendingConfirmationCallId: string | undefined;
+    // A batch can park several calls at once; show them one at a time, in
+    // arrival order, so none is left without a prompt.
+    const pendingConfirmations = new Map<string, ToolCallConfirmationDetails>();
+    const nextPendingConfirmation = () =>
+      pendingConfirmations.values().next().value;
     const preserveProtocolPayloads = !this.config.isInteractive();
 
     eventEmitter.on(AgentEventType.START, () => {
@@ -1835,18 +1840,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // confirmation, clear the stale prompt. This handles the case where
         // the IDE diff-tab accept resolved the tool via CoreToolScheduler's
         // IDE confirmation handler, which bypasses the UI's onConfirm wrapper.
-        const clearPending =
-          pendingConfirmationCallId === event.callId
-            ? { pendingConfirmation: undefined }
-            : {};
-        if (pendingConfirmationCallId === event.callId) {
-          pendingConfirmationCallId = undefined;
-        }
+        pendingConfirmations.delete(event.callId);
 
         this.updateDisplay(
           {
             toolCalls: [...this.currentToolCalls!],
-            ...clearPending,
+            pendingConfirmation: nextPendingConfirmation(),
           },
           updateOutput,
         );
@@ -1915,7 +1914,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
 
         // Bridge scheduler confirmation details to UI inline prompt
-        pendingConfirmationCallId = event.callId;
         const details: ToolCallConfirmationDetails = {
           ...(event.confirmationDetails as Omit<
             ToolCallConfirmationDetails,
@@ -1927,7 +1925,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ) => {
             // Clear the inline prompt immediately
             // and optimistically mark the tool as executing for proceed outcomes.
-            pendingConfirmationCallId = undefined;
+            pendingConfirmations.delete(event.callId);
             this.onInlineApprovalAnswered?.(event.callId);
             const proceedOutcomes = new Set<ToolConfirmationOutcome>([
               ToolConfirmationOutcome.ProceedOnce,
@@ -1962,15 +1960,39 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               );
             }
 
-            await event.respond(outcome, payload);
+            try {
+              await event.respond(outcome, payload);
+            } finally {
+              // Show the next prompt only once the scheduler has taken this
+              // answer; on failure it terminalizes this call as an error.
+              const next = nextPendingConfirmation();
+              if (next) {
+                this.updateDisplay({ pendingConfirmation: next }, updateOutput);
+              }
+            }
           },
         } as ToolCallConfirmationDetails;
+        pendingConfirmations.set(event.callId, details);
 
         this.updateDisplay(
           {
             toolCalls: [...this.currentToolCalls!],
-            pendingConfirmation: details,
+            pendingConfirmation: nextPendingConfirmation(),
           },
+          updateOutput,
+        );
+      },
+    );
+
+    // Covers calls that leave awaiting_approval without their prompt being
+    // answered, e.g. auto-approved by a sibling's "always allow".
+    eventEmitter.on(
+      AgentEventType.TOOL_APPROVAL_RESOLVED,
+      (...args: unknown[]) => {
+        const event = args[0] as AgentApprovalResolvedEvent;
+        if (!pendingConfirmations.delete(event.callId)) return;
+        this.updateDisplay(
+          { pendingConfirmation: nextPendingConfirmation() },
           updateOutput,
         );
       },
