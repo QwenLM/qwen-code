@@ -362,28 +362,42 @@ export interface PrepareArgs {
 }
 
 /**
- * Refuse when the PR's state file is tracked in the git index (e.g. a
- * contributor force-added a forged `.qwen/tmp/autofix-pr-<n>-state.json` on
- * the PR branch). Fails closed if git cannot read the index.
+ * Refuse when any watch file of this PR is tracked in the git index (e.g. a
+ * contributor force-added a forged state, history, gate cursor, instructions,
+ * lock, or worktree entry under `.qwen/tmp/autofix-pr-<n>*` on the PR branch).
+ * Uses narrowed case-insensitive pathspecs so unrelated `.qwen/tmp` entries
+ * are never emitted, and fails closed if git cannot read the index.
  */
-function assertStateNotTracked(checkout: string, prNumber: number): void {
+function assertWatchFilesNotTracked(checkout: string, prNumber: number): void {
   const res = spawnSync(
     'git',
-    ['-C', checkout, 'ls-files', '-z', '--', ':(icase).qwen/tmp'],
-    { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+    [
+      '-C',
+      checkout,
+      'ls-files',
+      '-z',
+      '--',
+      `:(icase,glob).qwen/tmp/autofix-pr-${prNumber}-*`,
+      `:(icase).qwen/tmp/autofix-pr-${prNumber}.lock`,
+      `:(icase).qwen/tmp/autofix-pr-${prNumber}`,
+    ],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
   if (res.error || res.status !== 0) {
     throw new Error(
-      `git cannot check whether PR #${prNumber}'s state file is tracked in ${checkout}; fix the repository before starting --in-place.`,
+      `git cannot check whether PR #${prNumber}'s watch files are tracked in ${checkout}; fix the repository before starting --in-place.`,
     );
   }
-  const target = `.qwen/tmp/autofix-pr-${prNumber}-state.json`;
   const tracked = (res.stdout ?? '')
     .split('\0')
-    .some((entry) => entry.toLowerCase() === target);
-  if (tracked) {
+    .filter((entry) => entry !== '');
+  if (tracked.length > 0) {
+    const shown =
+      tracked.length > 3
+        ? `${tracked.slice(0, 3).join(', ')}, +${tracked.length - 3} more`
+        : tracked.join(', ');
     throw new Error(
-      `PR #${prNumber}'s state file is tracked by git in ${checkout}; remove it from the branch before starting --in-place.`,
+      `PR #${prNumber}'s watch file(s) are tracked by git in ${checkout} (${shown}); remove them from the branch before starting --in-place.`,
     );
   }
 }
@@ -530,7 +544,7 @@ function runInPlacePrepare(
       `refusing to prepare PR #${prNumber} in ${checkout}: ${redirected} is a symlink.`,
     );
   }
-  assertStateNotTracked(checkout, prNumber);
+  assertWatchFilesNotTracked(checkout, prNumber);
 
   const alreadyWatched = (where: string) =>
     `PR #${prNumber} already has a watch in this clone (${where}); run \`qwen autofix-pr cleanup ${prNumber}\` first.`;
@@ -647,7 +661,7 @@ function runInPlacePrepare(
     );
     let tookOver = false;
     const resumedState = withWatchLock(paths, prNumber, () => {
-      assertStateNotTracked(checkout, prNumber);
+      assertWatchFilesNotTracked(checkout, prNumber);
       const current = requireState(paths.statePath, prNumber);
       sameInPlaceWatch(current, found!);
       if (isTakeOver(current, args.takeOver)) tookOver = true;
@@ -724,7 +738,7 @@ function runInPlacePrepare(
 
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, prNumber, () => {
-    assertStateNotTracked(checkout, prNumber);
+    assertWatchFilesNotTracked(checkout, prNumber);
     // Another start (here or in a sibling worktree) may have raced the check above.
     const raced = findWatchRoot(prNumber);
     if (raced !== null) {

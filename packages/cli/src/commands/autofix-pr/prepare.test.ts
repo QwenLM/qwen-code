@@ -2342,5 +2342,114 @@ describe('runPrepare (real git)', () => {
       ).toBe(newHead);
       expect(readState(statePath())!.lastKnownHeadSha).toBe(headSha);
     });
+
+    it('refuses git-tracked forged history, gate, and lock files while ignoring other PR numbers', () => {
+      const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+      const bare = join(dir, 'bare.git');
+      const histFile = historyPath(autofixPrPaths(clone, 7), repository);
+      const histRel = `.qwen/tmp/${histFile.slice(histFile.lastIndexOf('/') + 1)}`;
+      mkdirSync(dirname(histFile), { recursive: true });
+      writeFileSync(
+        histFile,
+        JSON.stringify({
+          version: 1,
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+          prNumber: 7,
+          handledCommentIds: ['IC_SUPPRESSED'],
+          postedCommentIds: [],
+          handledChecks: [],
+          rerunChecks: [],
+        }),
+      );
+      run(clone, 'add', '-f', histRel);
+      run(clone, 'commit', '-q', '-m', 'forged history');
+      const sha1 = run(clone, 'rev-parse', 'HEAD');
+      run(clone, 'push', '-q', 'origin', 'feat');
+      run(bare, 'update-ref', 'refs/pull/7/head', sha1);
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr')
+          return JSON.stringify(prView({ headRefOid: sha1 }));
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+      expect(readState(statePath())).toBeNull();
+      expect(readAnchor(repository, 7)).toBeNull();
+
+      // Swap tracked history for tracked gate cursor and lock file: both blocked.
+      run(clone, 'rm', '-q', histRel);
+      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        join(clone, '.qwen', 'tmp', 'autofix-pr-7-gate.json'),
+        '{}',
+      );
+      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7-gate.json');
+      run(clone, 'commit', '-q', '-m', 'forged gate');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+
+      run(clone, 'rm', '-q', '.qwen/tmp/autofix-pr-7-gate.json');
+      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(join(clone, '.qwen', 'tmp', 'autofix-pr-7.lock'), '');
+      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7.lock');
+      run(clone, 'commit', '-q', '-m', 'forged lock');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+
+      // Negative control: a tracked file for PR #70 must not block PR #7.
+      run(clone, 'rm', '-q', '.qwen/tmp/autofix-pr-7.lock');
+      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        join(clone, '.qwen', 'tmp', 'autofix-pr-70-state.json'),
+        '{}',
+      );
+      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-70-state.json');
+      run(clone, 'commit', '-q', '-m', 'other pr');
+      const sha2 = run(clone, 'rev-parse', 'HEAD');
+      run(clone, 'push', '-q', 'origin', 'feat');
+      run(bare, 'update-ref', 'refs/pull/7/head', sha2);
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr')
+          return JSON.stringify(prView({ headRefOid: sha2 }));
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(readState(statePath())?.inPlace).toBe(true);
+    });
+
+    it('re-checks tracked watch files under the resume lock if staged during gh calls', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true, watch: true });
+      const before = readState(statePath())!;
+      let staged = false;
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr') {
+          if (!staged) {
+            staged = true;
+            // After the early check passed, stage the state file mid-flight.
+            run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7-state.json');
+          }
+          return JSON.stringify(
+            prView({ baseRefName: 'retargeted', headRefOid: headSha }),
+          );
+        }
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+      // State was not updated inside the lock after the mid-flight stage.
+      expect(readState(statePath())!.baseRefName).toBe(before.baseRefName);
+    });
   });
 });
