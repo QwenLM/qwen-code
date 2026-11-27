@@ -226,6 +226,37 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     return restored;
   }
 
+  // A nested checkout the way production has one: a worktree of the user's main
+  // repository, so its git dir lives outside the managed checkout that gets
+  // deleted. A child of `worktree` itself would keep its objects inside the
+  // tree the cleanup removes, which the archive must carry.
+  async function addNestedWorktree(
+    dir: string,
+    branch: string,
+    detached = false,
+  ): Promise<void> {
+    const origin = path.join(root, 'nested-origin');
+    if (!(await fs.stat(origin).catch(() => undefined))) {
+      await fs.mkdir(origin, { recursive: true });
+      git(origin, 'init', '-q', '-b', 'main');
+      git(origin, 'config', 'user.email', 't@e.com');
+      git(origin, 'config', 'user.name', 't');
+      git(origin, 'config', 'commit.gpgsign', 'false');
+      await fs.writeFile(path.join(origin, 'seed.txt'), 'seed\n');
+      git(origin, 'add', '.');
+      git(origin, 'commit', '-qm', 'seed', '--no-verify');
+    }
+    git(
+      origin,
+      'worktree',
+      'add',
+      '-q',
+      ...(detached ? ['--detach'] : ['-b', branch]),
+      dir,
+      'HEAD',
+    );
+  }
+
   it('captures work and excludes ignored regenerable dirs, .git, and the marker', async () => {
     await fs.writeFile(path.join(worktree, 'committed.txt'), 'dirty-tracked\n');
     await fs.writeFile(
@@ -498,7 +529,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
 
   it('refuses to capture a checkout whose nested checkout holds work', async () => {
     const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
-    git(worktree, 'worktree', 'add', '-q', '-b', 'inner', inner, 'HEAD');
+    await addNestedWorktree(inner, 'inner');
     await fs.writeFile(path.join(inner, 'draft.md'), 'inner-draft\n');
     // Excluding it would delete uncommitted work with the parent directory;
     // throwing makes every caller preserve the checkout instead.
@@ -513,7 +544,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
 
   it('still excludes a nested checkout that holds no work of its own', async () => {
     const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
-    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-clean', inner, 'HEAD');
+    await addNestedWorktree(inner, 'inner-clean');
     const captured = await captureWorktreeSnapshot({
       worktreePath: worktree,
       snapshotDir,
@@ -535,7 +566,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     // pre-tar exclusion list would skip it after the capture too and report a
     // match, and the caller then deletes a draft written while tar ran (F-5).
     const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
-    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-race', inner, 'HEAD');
+    await addNestedWorktree(inner, 'inner-race');
     captureTiming.afterCreate = async () => {
       await fs.writeFile(path.join(inner, 'draft.md'), 'mid-capture\n');
     };
@@ -546,6 +577,154 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         meta: meta(),
       }),
     ).rejects.toThrow(/nested checkout \.qwen\/worktrees\/inner holds work/);
+  });
+
+  it('archives a nested repository whose git dir lives inside the checkout', async () => {
+    // `--separate-git-dir` makes `.git` a file, but the git dir it names is in
+    // the tree the cleanup deletes: excluding the child would take the only
+    // copy of its objects with it (F-2).
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    await fs.mkdir(inner, { recursive: true });
+    git(
+      inner,
+      'init',
+      '-q',
+      '-b',
+      'inner-separate',
+      `--separate-git-dir=${path.join(worktree, '.qwen', 'worktrees', 'inner-git')}`,
+    );
+    git(inner, 'config', 'user.email', 't@e.com');
+    git(inner, 'config', 'user.name', 't');
+    git(inner, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(inner, 'only.txt'), 'only copy\n');
+    git(inner, 'add', '.');
+    git(inner, 'commit', '-qm', 'inner', '--no-verify');
+
+    const { snapshotPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+    expect(checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path),
+    });
+    expect(members).toEqual(
+      expect.arrayContaining(['./.qwen/worktrees/inner/only.txt']),
+    );
+  });
+
+  it('archives a nested checkout whose HEAD no branch keeps', async () => {
+    // A detached linked worktree is pruned once the parent is gone, leaving its
+    // commits unreachable; the archive has to carry the tree (F-2).
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    await addNestedWorktree(inner, '', true);
+    await fs.writeFile(path.join(inner, 'only.txt'), 'detached\n');
+
+    const { snapshotPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+    expect(checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path),
+    });
+    expect(members).toEqual(
+      expect.arrayContaining(['./.qwen/worktrees/inner/only.txt']),
+    );
+  });
+
+  it('archives a cache directory that holds a nested checkout', async () => {
+    // The review tooling keeps its worktrees under `.qwen/tmp`, so an ignored
+    // cache there is not regenerable: its drafts exist nowhere else (R1-1).
+    await fs.writeFile(path.join(worktree, '.gitignore'), '.qwen/\n');
+    const inner = path.join(worktree, '.qwen', 'tmp', 'review-pr-123');
+    await addNestedWorktree(inner, 'review-123');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'review draft\n');
+
+    const { snapshotPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+    expect(checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path),
+    });
+    expect(members).toEqual(
+      expect.arrayContaining(['./.qwen/tmp/review-pr-123/draft.md']),
+    );
+  });
+
+  it('captures a checkout whose .qwen/worktrees is a regular file', async () => {
+    const qwen = path.join(worktree, '.qwen');
+    await fs.mkdir(qwen, { recursive: true });
+    await fs.writeFile(path.join(qwen, 'worktrees'), 'not a directory\n');
+
+    const { snapshotPath, checkoutMatchesCapture } =
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+
+    expect(checkoutMatchesCapture).toBe(true);
+    const members: string[] = [];
+    await tar.t({
+      file: snapshotPath,
+      onReadEntry: (entry) => members.push(entry.path),
+    });
+    expect(members).toEqual(expect.arrayContaining(['./.qwen/worktrees']));
+  });
+
+  it('verifies an archive that carries a nested checkout holding work', async () => {
+    // An archive written before the nested-checkout exclusion contains the
+    // child tree, and the child may hold work today. Verification compares
+    // against the members the archive carries instead of re-running the
+    // capture-time refusal, so an upgrade can still restore it (F-1).
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-legacy', inner, 'HEAD');
+    await fs.writeFile(path.join(inner, 'draft.md'), 'legacy-draft\n');
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const snapshotPath = path.join(snapshotDir, 'legacy.tar.gz');
+    await tar.create(
+      {
+        cwd: worktree,
+        file: snapshotPath,
+        gzip: true,
+        portable: true,
+        noMtime: true,
+        jobs: 1,
+        // The pre-exclusion capture dropped the top-level git dir and the
+        // daemon marker exactly as the current matcher does.
+        filter: (member) => {
+          const rel = member.replace(/^\.\//, '').replace(/\/$/, '');
+          return rel !== '.git' && !rel.startsWith('.git/');
+        },
+      },
+      ['.'],
+    );
+
+    expect(
+      await verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath,
+        meta: meta(),
+      }),
+    ).toBe(true);
   });
 
   it.skipIf(process.platform === 'win32').each([

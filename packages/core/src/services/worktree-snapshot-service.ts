@@ -138,13 +138,14 @@ interface DisposableIgnoredMatcher {
   dirs: string[];
   files: ReadonlySet<string>;
   /**
-   * Subtrees excluded regardless of the ignore listing: nested checkouts under
-   * `.qwen/worktrees/` that hold no work of their own, so archiving them would
-   * only duplicate another checkout's clean tree. Everything else this matcher
-   * excludes is derived from the ignore listing — the same geometry the
-   * has-work gate waives — so no path the gate counts as work can be dropped
-   * from the archive. A nested checkout that DOES hold work is refused before
-   * this list is built instead of being silently excluded.
+   * Subtrees excluded beyond the ignore listing, each one rebuildable or
+   * preserved outside this checkout: an ignored Qwen cache that holds no
+   * checkout of its own, and a nested checkout under `.qwen/worktrees/` whose
+   * git dir lives outside this checkout and whose HEAD is a branch. A nested
+   * checkout that holds work and would be excluded here refuses the capture
+   * instead; one that cannot be rebuilt is archived. Everything else this
+   * matcher excludes is derived from the ignore listing — the same geometry the
+   * has-work gate waives.
    */
   neverDirs: readonly string[];
 }
@@ -671,6 +672,7 @@ async function checkoutMatchesCapture(
  */
 async function readSnapshotExclusions(
   worktreePath: string,
+  archived?: SnapshotPathKinds,
 ): Promise<DisposableIgnoredMatcher> {
   // The ignored disposable output the exclusion geometry consults, taken
   // from the SAME listing the has-work gate waives (`status --porcelain
@@ -736,38 +738,44 @@ async function readSnapshotExclusions(
         (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
       ),
     ),
-    neverDirs: await boundedSnapshotExclusions(worktreePath, ignoredEntries),
+    neverDirs: await boundedSnapshotExclusions(
+      worktreePath,
+      ignoredEntries,
+      archived,
+    ),
   };
   await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
   return matcher;
 }
 
 /**
- * The `neverDirs` half of the matcher: nested checkouts under this checkout's
- * own `.qwen/worktrees/`. Those are OTHER trees, and archiving a clean one only
- * duplicates a working tree that its branch still reconstructs — so a clean
- * nested checkout is excluded, exactly as before.
+ * The `neverDirs` half of the matcher: subtrees this checkout owns but the
+ * archive can leave out because something outside it can rebuild them.
  *
- * A nested checkout that holds work is a different matter. The git worktree's
- * files are unique bytes, and they vanish with the parent directory, so
- * excluding it would delete work the has-work gate had already counted (the
- * gate sees `?? .qwen/worktrees/`). Instead of silently dropping it, refuse the
+ * Two shapes qualify:
+ * - A regenerable Qwen cache under `.qwen/` that git ignores and that holds no
+ *   checkout of its own. A cache containing a checkout is not regenerable — the
+ *   review tooling keeps its worktrees under `.qwen/tmp` — so it stays in the
+ *   archive.
+ * - A nested checkout under `.qwen/worktrees/` whose commits survive the parent
+ *   deletion: its `.git` is a file naming a git dir OUTSIDE this checkout, and
+ *   its HEAD is a branch. A `.git` directory, a git dir inside the tree being
+ *   deleted, or a detached HEAD all mean the only copy dies with the parent, so
+ *   those are archived instead of excluded.
+ *
+ * A nested checkout that holds work and would otherwise be excluded refuses the
  * capture: `captureWorktreeSnapshot` throwing makes every caller preserve the
  * checkout, which is the fail-closed direction.
  *
- * Nothing else is excluded here. Qwen's regenerable caches are excluded through
- * the ignore listing (`isDisposableIgnoredEntry`), so they are skipped only
- * where git actually ignores them.
+ * `archived` is the member set of an archive being verified. Verification must
+ * compare against what the archive actually carries: a path present there was
+ * not excluded when it was written, so it must not be excluded now either.
  */
 async function boundedSnapshotExclusions(
   worktreePath: string,
   ignoredEntries: readonly string[],
+  archived?: SnapshotPathKinds,
 ): Promise<readonly string[]> {
-  const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
-  const relative = path
-    .relative(path.resolve(worktreePath), path.resolve(managedDir))
-    .split(path.sep)
-    .join('/');
   const exclusions: string[] = [];
   // A regenerable cache is skipped only where git ignores it. Git collapses a
   // broad rule (`.qwen/`) to one `!! .qwen/` entry, so an ignored ANCESTOR
@@ -778,41 +786,88 @@ async function boundedSnapshotExclusions(
     const covered = ignoredEntries.some(
       (entry) => entry.endsWith('/') && trailing.startsWith(entry),
     );
-    if (covered) exclusions.push(trailing);
+    if (!covered || archived?.directories.has(trailing)) continue;
+    if (await holdsCheckout(path.join(worktreePath, '.qwen', cacheDir))) {
+      continue;
+    }
+    exclusions.push(trailing);
   }
-  if (relative.length === 0 || relative.startsWith('..')) return exclusions;
+  const managedRelative = '.qwen/worktrees/';
+  const managedDir = path.join(worktreePath, '.qwen', 'worktrees');
   let entries;
   try {
     entries = await fs.readdir(managedDir, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return exclusions;
+    const code = (error as NodeJS.ErrnoException).code;
+    // Anything but a directory — a regular file, a dangling link — is content
+    // of the checkout, not a set of checkouts: leave it to the archive.
+    if (code === 'ENOENT' || code === 'ENOTDIR') return exclusions;
     throw error;
   }
   for (const entry of entries) {
-    // A plain file (or symlink) here is content, not another checkout: leave it
-    // to the archive.
     if (!entry.isDirectory()) continue;
     const child = path.join(managedDir, entry.name);
-    // `lstat`, never a followed probe: `.git` as a DIRECTORY is a repository
-    // whose only object database lives inside this directory (an independent
-    // `git init` under the checkout). Excluding it would delete its commits —
-    // the archive drops `.git` unconditionally — and the gate reads the tree
-    // clean, so nothing else would refuse. Only a registered LINKED worktree,
-    // whose `.git` is a file naming a git dir elsewhere, can be excluded.
-    const gitEntry = await fs
-      .lstat(path.join(child, '.git'))
-      .catch(() => undefined);
-    if (gitEntry === undefined || gitEntry.isDirectory()) {
-      continue;
-    }
+    const relative = `${managedRelative}${entry.name}/`;
+    // `includeParents` records every archived directory, so one lookup
+    // answers "did this archive carry anything under the prefix".
+    if (archived?.directories.has(relative)) continue;
+    if (!(await isRecoverableLinkedWorktree(child, worktreePath))) continue;
     if (await worktreeHasWork(child)) {
       throw new Error(
-        `Worktree snapshot: nested checkout ${relative}/${entry.name} holds work; refusing to capture a parent that would delete it`,
+        `Worktree snapshot: nested checkout ${relative.slice(0, -1)} holds work; refusing to capture a parent that would delete it`,
       );
     }
-    exclusions.push(`${relative}/${entry.name}/`);
+    exclusions.push(relative);
   }
   return exclusions;
+}
+
+/** Whether the cache directory directly holds a checkout of any kind. */
+async function holdsCheckout(dir: string): Promise<boolean> {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const marker = await fs
+      .lstat(path.join(dir, entry.name, '.git'))
+      .catch(() => undefined);
+    if (marker !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether deleting `child` leaves its commits reachable: the `.git` file must
+ * name a git dir outside `worktreePath`, and HEAD must name a branch. A
+ * `.git` directory, a git dir under the checkout being deleted, or a detached
+ * HEAD each mean the only copy of the objects or of the ref goes with it.
+ */
+async function isRecoverableLinkedWorktree(
+  child: string,
+  worktreePath: string,
+): Promise<boolean> {
+  const marker = await fs
+    .lstat(path.join(child, '.git'))
+    .catch(() => undefined);
+  // `lstat`, never a followed probe: `.git` as a DIRECTORY is a repository
+  // whose only object database lives inside this directory.
+  if (marker === undefined || !marker.isFile()) return false;
+  const gitFile = await fs
+    .readFile(path.join(child, '.git'), 'utf8')
+    .catch(() => '');
+  const declared = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(gitFile)?.[1];
+  if (!declared) return false;
+  const gitDir = path.resolve(child, declared);
+  const toGitDir = path.relative(path.resolve(worktreePath), gitDir);
+  if (toGitDir.length === 0 || !toGitDir.startsWith('..')) return false;
+  const head = await fs
+    .readFile(path.join(gitDir, 'HEAD'), 'utf8')
+    .catch(() => '');
+  return head.startsWith('ref: ');
 }
 
 export async function verifyRestoredWorktreeSnapshot(options: {
@@ -820,8 +875,15 @@ export async function verifyRestoredWorktreeSnapshot(options: {
   snapshotPath: string;
   meta: CaptureWorktreeSnapshotOptions['meta'];
 }): Promise<boolean> {
-  const matcher = await readSnapshotExclusions(options.worktreePath);
   const knownPaths = await readSnapshotPathKinds(options.snapshotPath);
+  // An archive written before the exclusion existed can carry a nested
+  // checkout that holds work today. Verification answers "does this archive
+  // represent the checkout", so it must not re-run the capture-time refusal:
+  // the members the archive holds decide what was excluded when it was written.
+  const matcher = await readSnapshotExclusions(
+    options.worktreePath,
+    knownPaths,
+  );
   return checkoutMatchesCapture(
     options.worktreePath,
     options.snapshotPath,
@@ -855,6 +917,11 @@ export async function captureWorktreeSnapshot(
     throw new Error('Worktree snapshot: invalid commit id');
   }
   await fs.access(path.join(worktreePath, '.git'));
+  // Preflight before any directory exists: a refusal (a case-variant protected
+  // path, or a nested checkout whose work exclusion would delete) must not
+  // leave an empty snapshot directory behind for the sweep to trip over. The
+  // same matcher filters the archive; membership is re-read after tar below.
+  const matcher = await readSnapshotExclusions(worktreePath);
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
     createdAt: Date.now(),
@@ -878,7 +945,6 @@ export async function captureWorktreeSnapshot(
 
   let matchesCheckout = true;
   await atomicWriteFile(snapshotPath, async (tmp) => {
-    const matcher = await readSnapshotExclusions(worktreePath);
     await tar.create(
       {
         cwd: worktreePath,
