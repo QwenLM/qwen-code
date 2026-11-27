@@ -95,7 +95,9 @@ class Query:
         self._router_task: asyncio.Task[None] | None = None
         self._input_task: asyncio.Task[None] | None = None
         self._initialize_task: asyncio.Task[None] | None = None
-        self._first_result_event = asyncio.Event()
+        self._pending_input_count = 0
+        self._input_results_complete = asyncio.Event()
+        self._input_results_complete.set()
         self._terminal_event_sent = False
         self._exhausted = False
 
@@ -203,7 +205,10 @@ class Query:
             return
 
         if is_sdk_result_message(message):
-            self._first_result_event.set()
+            if self._pending_input_count:
+                self._pending_input_count -= 1
+            if self._pending_input_count == 0:
+                self._input_results_complete.set()
             if self._single_turn:
                 self._transport.end_input()
             await self._message_queue.put(message)
@@ -481,12 +486,14 @@ class Query:
             async for message in messages:
                 if self._cancel_event.is_set() or self._closed:
                     break
+                self._pending_input_count += 1
+                self._input_results_complete.clear()
                 await self._write_payload(message)
 
             if not self._single_turn:
                 try:
                     await asyncio.wait_for(
-                        self._first_result_event.wait(),
+                        self._input_results_complete.wait(),
                         timeout=self._options.timeout.stream_close,
                     )
                 except asyncio.TimeoutError:
