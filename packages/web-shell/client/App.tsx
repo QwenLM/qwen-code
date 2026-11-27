@@ -1996,6 +1996,7 @@ const emptyComposerApi: WebShellComposerApi = {
   focus: () => {},
   insertText: () => {},
   setText: () => {},
+  saveCurrentDraftToHistory: () => {},
   addTags: () => {},
   removeTag: () => {},
   clear: () => {},

@@ -3,6 +3,18 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 场景推荐与输入历史
+
+欢迎页的场景推荐要替换输入时，宿主可通过 `composerRef` 先保存当前草稿，再填入推荐文本。
+已有文本会进入当前工作区的输入历史，可以按 Ctrl+R 搜索并恢复。空白草稿会被跳过，
+整个操作无需创建会话。
+
+```ts
+const composer = composerRef.current;
+composer?.saveCurrentDraftToHistory();
+composer?.setText(recommendation);
+```
+
 ## 宿主已有 Managed Session
 
 `ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略它时必须同时传 `baseUrl`，
