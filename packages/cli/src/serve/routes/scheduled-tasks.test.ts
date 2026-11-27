@@ -1483,10 +1483,12 @@ describe('scheduled-tasks routes', () => {
       tasks.map((task) => ({ ...task, id })),
     );
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let tasksAfterSessionRemoval: Awaited<ReturnType<typeof readCronTasks>> =
+      [];
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
       await removeTasksForSessions(h.workspace, [other.body.sessionId]);
-      expect(await readCronTasks(h.workspace)).toEqual([]);
+      tasksAfterSessionRemoval = await readCronTasks(h.workspace);
       return { ...child, modelApplied: false };
     });
 
@@ -1494,7 +1496,9 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(tasksAfterSessionRemoval).toEqual([]);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
         id,
@@ -1532,21 +1536,25 @@ describe('scheduled-tasks routes', () => {
       })),
     );
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    const ownerKey = JSON.stringify([owned.body.sessionId, id]);
+    let childSessionId: string | undefined;
+    let spawnParentSessionId: string | undefined;
+    let remainingBeforeDelete: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let deletedStatus: number | undefined;
+    let deletedBody: unknown;
+    let tasksAfterDelete: Awaited<ReturnType<typeof readCronTasks>> = [];
+    let observed = new Map<string, number>();
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
-      expect(child.sessionId).not.toBe(owned.body.sessionId);
-      expect(req.parentSessionId).toBe(owned.body.sessionId);
-      const remaining = await readCronTasks(h.workspace);
-      expect(remaining).toHaveLength(1);
-      expect(remaining[0]?.sessionId).toBeUndefined();
+      childSessionId = child.sessionId;
+      spawnParentSessionId = req.parentSessionId;
+      remainingBeforeDelete = await readCronTasks(h.workspace);
       const deleted = await request(h.app)
         .delete(`/scheduled-tasks/${id}`)
         .query({ expectedSessionId: '' });
-      expect(deleted.status).toBe(200);
-      expect(deleted.body).toEqual({ deleted: true, id });
-      expect(await readCronTasks(h.workspace)).toEqual([]);
-      const ownerKey = JSON.stringify([owned.body.sessionId, id]);
-      let observed = new Map<string, number>();
+      deletedStatus = deleted.status;
+      deletedBody = deleted.body;
+      tasksAfterDelete = await readCronTasks(h.workspace);
       await updateCronTasks(h.workspace, (tasks) => tasks, {
         observeDeletionIds: [
           JSON.stringify([null, id]),
@@ -1558,10 +1566,6 @@ describe('scheduled-tasks routes', () => {
           observed = new Map(generations);
         },
       });
-      expect(observed.get(JSON.stringify([null, id]))).toBe(1);
-      expect(observed.get(ownerKey)).toBe(0);
-      expect(observed.get(id)).toBe(0);
-      expect(observed.get(`session:${owned.body.sessionId}`)).toBe(0);
       return { ...child, modelApplied: false };
     });
 
@@ -1569,7 +1573,19 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(childSessionId).not.toBe(owned.body.sessionId);
+    expect(spawnParentSessionId).toBe(owned.body.sessionId);
+    expect(remainingBeforeDelete).toHaveLength(1);
+    expect(remainingBeforeDelete[0]?.sessionId).toBeUndefined();
+    expect(deletedStatus).toBe(200);
+    expect(deletedBody).toEqual({ deleted: true, id });
+    expect(tasksAfterDelete).toEqual([]);
+    expect(observed.get(JSON.stringify([null, id]))).toBe(1);
+    expect(observed.get(ownerKey)).toBe(0);
+    expect(observed.get(id)).toBe(0);
+    expect(observed.get(`session:${owned.body.sessionId}`)).toBe(0);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
         id,
@@ -1608,6 +1624,7 @@ describe('scheduled-tasks routes', () => {
       );
 
       expect(run.status).toBe(500);
+      expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
       expect(await readCronTasks(h.workspace)).toEqual([
         expect.objectContaining({
           id: taskId,
@@ -1650,12 +1667,13 @@ describe('scheduled-tasks routes', () => {
       ];
     });
     const originalSpawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    let collisionDeleteStatus: number | undefined;
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
       const child = await originalSpawn(req);
       const deleted = await request(h.app).delete(
         `/scheduled-tasks/${encodeURIComponent(collisionId)}`,
       );
-      expect(deleted.status).toBe(200);
+      collisionDeleteStatus = deleted.status;
       return { ...child, modelApplied: false };
     });
 
@@ -1663,7 +1681,9 @@ describe('scheduled-tasks routes', () => {
       .post(`/scheduled-tasks/${id}/run`)
       .query({ expectedSessionId: owned.body.sessionId });
 
+    expect(collisionDeleteStatus).toBe(200);
     expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
     expect(await readCronTasks(h.workspace)).toEqual([
       expect.objectContaining({
         id,

@@ -2791,6 +2791,58 @@ describe('ArtifactPanel scheduled-task ownership', () => {
     );
   });
 
+  it('does not let a late loadTask response resurrect a bound task absent from the authoritative session snapshot', async () => {
+    let resolveLoad!: (tasks: DaemonScheduledTask[]) => void;
+    const delayedLoad = new Promise<DaemonScheduledTask[]>((resolve) => {
+      resolveLoad = resolve;
+    });
+    mockWorkspaceActions.listScheduledTasks.mockReturnValueOnce(delayedLoad);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const options = {
+      sourceSessionId: 'active-session',
+      liveSessionScheduledTasksOwnerSessionId: 'active-session',
+    };
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: false,
+        }),
+      ),
+    );
+    await flush();
+
+    // Authoritative empty session snapshot arrives before the stale list load settles.
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          ...options,
+          liveDurableScheduledTasks: [],
+          hasLiveDurableScheduledSnapshot: true,
+        }),
+      ),
+    );
+    await flush();
+
+    // Stale list response carrying the deleted bound task arrives later.
+    await act(async () => {
+      resolveLoad([secondaryScheduledTask]);
+      await delayedLoad;
+    });
+    await flush();
+
+    expect(container.textContent).toContain('live status is unavailable');
+    const editBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Edit',
+    );
+    expect(editBtn?.disabled).toBe(true);
+  });
+
   it('rejects an untrusted primary durable task without issuing a request', async () => {
     mockWorkspace.capabilities = {
       ...mockWorkspace.capabilities,

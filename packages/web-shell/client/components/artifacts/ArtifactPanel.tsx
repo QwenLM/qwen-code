@@ -2270,6 +2270,14 @@ function ScheduledTaskDetail({
   const detailRef = useRef<HTMLDivElement>(null);
   const showFormRef = useRef(showForm);
   showFormRef.current = showForm;
+  const liveDurableSnapshotRef = useRef({
+    hasLiveDurableScheduledSnapshot,
+    liveDurableTask,
+  });
+  liveDurableSnapshotRef.current = {
+    hasLiveDurableScheduledSnapshot,
+    liveDurableTask,
+  };
   const requestRef = useRef(0);
   const loadRequestRef = useRef(0);
   const pendingLoadRequestsRef = useRef(new Set<number>());
@@ -2371,7 +2379,7 @@ function ScheduledTaskDetail({
         )
       )
         return;
-      const match =
+      const candidate =
         tasks.find(
           (item) =>
             item.id === task.id &&
@@ -2388,6 +2396,15 @@ function ScheduledTaskDetail({
           ),
         ) ??
         null;
+      const snapshot = liveDurableSnapshotRef.current;
+      const match =
+        candidate &&
+        candidate.sessionId === sourceSessionId &&
+        sourceSessionId !== undefined &&
+        snapshot.hasLiveDurableScheduledSnapshot &&
+        !snapshot.liveDurableTask
+          ? null
+          : candidate;
       setLoadedTask(match);
       if (showFormRef.current) return;
       if (match) {
