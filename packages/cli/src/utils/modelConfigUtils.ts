@@ -211,6 +211,7 @@ export interface ResolvedCliGenerationConfig {
   baseUrl: string;
   /** The full generation config to pass to core Config */
   generationConfig: Partial<ContentGeneratorConfig>;
+  providerReasoning?: ContentGeneratorConfig['reasoning'];
   /** Exact selected modelProviders baseUrl; null selects an implicit route. */
   registryBaseUrl?: string | null;
   /** Source attribution for each resolved field */
@@ -461,6 +462,7 @@ export function resolveCliGenerationConfig(
   };
 
   // Local CLI resolves the global fallback after it knows the selected route.
+  const providerReasoning = generationConfig.reasoning;
   const rawReasoningEffort = settings.model?.reasoningEffort;
   const reasoningDisabled = rawReasoningEffort === 'none';
   const reasoningEffort = reasoningDisabled
@@ -502,6 +504,7 @@ export function resolveCliGenerationConfig(
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
+    providerReasoning,
     ...(modelProvider
       ? { registryBaseUrl: modelProvider.baseUrl ?? null }
       : {}),

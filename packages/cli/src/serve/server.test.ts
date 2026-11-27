@@ -1026,6 +1026,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'realtime_voice_web',
   ),
   'workspace_settings',
+  'workspace_model_preferences',
   'workspace_permissions',
   'workspace_voice',
   'workspace_voice_transcription',
@@ -3912,6 +3913,16 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_model_preferences') {
+          expect(predicate({ modelPreferencesAvailable: true })).toBe(true);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              modelPreferencesAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'workspace_voice_transcription') {
           expect(predicate({ voiceTranscriptionAvailable: true })).toBe(true);
           expect(predicate({ voiceTranscriptionAvailable: false })).toBe(false);
@@ -6615,8 +6626,8 @@ describe('createServeApp', () => {
         },
         originatorClientId: 'client-1',
       };
-      expect(primaryPublish).toHaveBeenCalledWith(expectedEvent);
-      expect(secondaryPublish).toHaveBeenCalledWith({
+      expect(primaryPublish).toHaveBeenCalledExactlyOnceWith(expectedEvent);
+      expect(secondaryPublish).toHaveBeenCalledExactlyOnceWith({
         type: 'settings_changed',
         data: expectedEvent.data,
       });

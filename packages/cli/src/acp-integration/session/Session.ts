@@ -15916,7 +15916,10 @@ export class Session implements SessionContext {
     modelId: string,
     options: { persist: boolean },
   ): void {
-    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    const frozenPreferences = this.config.getModelPreferenceSnapshot?.();
+    const rawSelection = frozenPreferences
+      ? undefined
+      : this.settings.merged.model?.reasoningEffort;
     let hasSessionSelection = this.sessionReasoningSelection !== undefined;
     if (!hasSessionSelection && rawSelection === undefined) return;
 
@@ -15949,6 +15952,7 @@ export class Session implements SessionContext {
     if (hasSessionSelection && !supported && !appliesSessionDefault) {
       if (this.sessionReasoningSelectionSaved) return;
       this.sessionReasoningSelection = undefined;
+      if (frozenPreferences) return;
       hasSessionSelection = false;
       selection = parseReasoningSelection(rawSelection);
       supported = supportsPreference(selection);

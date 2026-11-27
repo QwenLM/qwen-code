@@ -19,6 +19,7 @@ import type {
   AuthType,
   ContentGeneratorConfig,
 } from '@qwen-code/qwen-code-core';
+import { resolveModelConfig } from '@qwen-code/qwen-code-core/models/modelConfigResolver.js';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -28,7 +29,16 @@ import type {
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
 import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
-import type { Settings } from '../config/settings.js';
+import type { LoadedSettings, Settings } from '../config/settings.js';
+import {
+  getModelPreferenceKey,
+  type ModelPreference,
+} from '@qwen-code/qwen-code-core/models/model-preferences.js';
+import {
+  isReasoningEffortPlaceholder,
+  normalizeReasoningEffort,
+  type ReasoningEffort,
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import {
   getAuthTypeFromEnv,
   resolveCliGenerationConfig,
@@ -42,7 +52,10 @@ import {
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import { publicAuxModelSelectorValue } from '../utils/aux-model-selector.js';
-import { buildModelReasoningRoutePreview } from '../acp-integration/model-configuration.js';
+import {
+  buildModelReasoningRoutePreview,
+  getGptReasoningOverrideState,
+} from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 import { getModelConfigurationKey } from './model-configuration.js';
 
@@ -66,27 +79,190 @@ export function createWorkspaceProvidersStatusProvider(
     buildWorkspaceProvidersStatus(workspaceCwd, acpChannelLive, options);
 }
 
+export interface WorkspacePreferenceModel {
+  key: string;
+  modelId: string;
+  authType: string;
+  name: string;
+  provider?: string;
+  isCurrent: boolean;
+  contextLimit: number;
+  reasoning?: {
+    canEnable: boolean;
+    canDisable: boolean;
+    efforts: ReasoningEffort[];
+    effortEnablesThinking: boolean;
+  };
+  resolveReasoning: (
+    preference: ModelPreference['reasoning'],
+    fallback: string | undefined,
+  ) => ModelPreference['reasoning'];
+}
+
+export function listWorkspacePreferenceModels(
+  workspaceCwd: string,
+  loaded: LoadedSettings,
+  env: Record<string, string | undefined>,
+): WorkspacePreferenceModel[] {
+  const models = new Map<string, WorkspacePreferenceModel>();
+  const status = buildWorkspaceProvidersStatus(
+    workspaceCwd,
+    false,
+    { env },
+    loaded,
+    (generation, name, isCurrent, opaqueRoute) => {
+      const enforcedAuth = loaded.merged.security?.auth?.enforcedType;
+      if (
+        !generation.authType ||
+        (enforcedAuth && generation.authType !== enforcedAuth)
+      )
+        return;
+      const key = getModelPreferenceKey(
+        generation.authType,
+        generation.model,
+        generation.baseUrl,
+      );
+      if (models.has(key) && !isCurrent) return;
+      const capabilities = resolveReasoningForModel(undefined, generation);
+      const preview = (
+        fallback?: string,
+        preference?: ModelPreference['reasoning'],
+      ) =>
+        buildModelReasoningRoutePreview(
+          generation,
+          capabilities,
+          fallback,
+          opaqueRoute,
+          preference,
+        )?.[0];
+      const option = preview();
+      const override = getGptReasoningOverrideState(
+        { ...generation, reasoning: undefined },
+        capabilities,
+      );
+      const pinnedTier =
+        override?.blocksTierChange ||
+        !isReasoningEffortPlaceholder(
+          generation.extra_body?.['reasoning_effort'] ??
+            generation.samplingParams?.['reasoning_effort'],
+        );
+      const metadata = option?._meta?.['qwenCode/reasoning'] as
+        | {
+            canEnable?: boolean;
+            thinkingMandatory?: boolean;
+            defaultEffort?: ReasoningEffort;
+          }
+        | undefined;
+      const choices =
+        option?.options.flatMap((choice) =>
+          'value' in choice
+            ? [choice.value]
+            : choice.options.map(({ value }) => value),
+        ) ?? [];
+      const efforts = (pinnedTier ? [] : choices).flatMap((choice) => {
+        const effort = normalizeReasoningEffort(choice);
+        return effort ? [effort] : [];
+      });
+      const contextLimit =
+        generation.contextWindowSize &&
+        Number.isSafeInteger(generation.contextWindowSize) &&
+        generation.contextWindowSize > 0
+          ? generation.contextWindowSize
+          : tokenLimit(generation.model, 'input');
+      const provider = URL.canParse(generation.baseUrl ?? '')
+        ? new URL(generation.baseUrl!).host
+        : undefined;
+      models.set(key, {
+        key,
+        modelId: generation.model,
+        authType: generation.authType,
+        name,
+        ...(provider ? { provider } : {}),
+        isCurrent,
+        contextLimit,
+        resolveReasoning: (preference, fallback) => {
+          if (!option) return undefined;
+          const current = preview(fallback, preference) ?? option;
+          const effort = preference?.effort;
+          return {
+            enabled: current.currentValue !== 'none',
+            effort:
+              effort && efforts.includes(effort)
+                ? effort
+                : (normalizeReasoningEffort(current.currentValue) ??
+                  normalizeReasoningEffort(option.currentValue) ??
+                  metadata?.defaultEffort),
+          };
+        },
+        ...(option
+          ? {
+              reasoning: {
+                canEnable:
+                  metadata?.canEnable !== false && override?.enabled !== false,
+                canDisable: choices.includes('none'),
+                efforts,
+                effortEnablesThinking:
+                  generation.reasoning !== false && override?.enabled !== false,
+              },
+            }
+          : {}),
+      });
+    },
+  );
+  if (!status.initialized) {
+    const detail = status.errors?.[0]?.error;
+    throw new Error(
+      detail
+        ? `Unable to resolve model catalog: ${detail}`
+        : 'Unable to resolve model catalog',
+    );
+  }
+  const rows = [...models.values()];
+  const counts = new Map<string, number>();
+  const label = (model: WorkspacePreferenceModel) =>
+    JSON.stringify([model.name, model.provider ?? model.authType]);
+  for (const model of rows) {
+    const id = label(model);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  for (const model of rows) {
+    if ((counts.get(label(model)) ?? 0) > 1) {
+      model.provider = `${model.provider ?? model.authType} · ${model.key.slice(-6)}`;
+    }
+  }
+  return rows;
+}
+
 function buildWorkspaceProvidersStatus(
   workspaceCwd: string,
   acpChannelLive: boolean,
   options: WorkspaceProvidersStatusProviderOptions,
+  loadedSettings?: LoadedSettings,
+  collectPreferenceModel?: (
+    generation: ContentGeneratorConfig,
+    name: string,
+    isCurrent: boolean,
+    opaqueRoute: boolean,
+  ) => void,
 ): ServeWorkspaceProvidersStatus {
   try {
-    const loaded = loadSettings(
-      workspaceCwd,
-      options.env
-        ? {
-            skipLoadEnvironment: true,
-            skipWorkspaceSettings: options.workspaceTrusted === false,
-            workspaceTrusted: options.workspaceTrusted,
-          }
-        : {
-            consumeCorruptionEnvVars: true,
-            skipLoadEnvironment: options.workspaceTrusted === false,
-            skipWorkspaceSettings: options.workspaceTrusted === false,
-            workspaceTrusted: options.workspaceTrusted,
-          },
-    );
+    const loaded =
+      loadedSettings ??
+      loadSettings(
+        workspaceCwd,
+        options.env
+          ? {
+              skipLoadEnvironment: true,
+              skipWorkspaceSettings: options.workspaceTrusted === false,
+              workspaceTrusted: options.workspaceTrusted,
+            }
+          : {
+              consumeCorruptionEnvVars: true,
+              skipLoadEnvironment: options.workspaceTrusted === false,
+              skipWorkspaceSettings: options.workspaceTrusted === false,
+              workspaceTrusted: options.workspaceTrusted,
+            },
+      );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();
     const selectedAuthType =
@@ -103,6 +279,7 @@ function buildWorkspaceProvidersStatus(
       settings,
       selectedAuthType,
       env,
+      deferReasoningEffort: collectPreferenceModel !== undefined,
     });
     const modelsConfig = new ModelsConfig({
       initialAuthType: resolvedCliConfig.authType,
@@ -110,6 +287,7 @@ function buildWorkspaceProvidersStatus(
       providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
+      initialRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     });
     const currentAuth = resolvedCliConfig.authType;
     let currentModelId = (
@@ -136,14 +314,15 @@ function buildWorkspaceProvidersStatus(
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
-    const currentRegistryBaseUrl = usedFallback
-      ? modelsConfig.getCurrentRegistryBaseUrl()
-      : modelCameFromSettings && currentAuth
-        ? settings.model?.baseUrl !== undefined
-          ? settings.model.baseUrl || null
-          : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
-              ?.registryBaseUrl ?? null)
-        : undefined;
+    const currentRegistryBaseUrl =
+      collectPreferenceModel || usedFallback
+        ? modelsConfig.getCurrentRegistryBaseUrl()
+        : modelCameFromSettings && currentAuth
+          ? settings.model?.baseUrl !== undefined
+            ? settings.model.baseUrl || null
+            : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
+                ?.registryBaseUrl ?? null)
+          : undefined;
     const models = modelsConfig.getAllConfiguredModels();
     const modelOptions = buildAcpModelOptions(models);
     const reasoningSnapshot = captureReasoningSnapshot(models);
@@ -187,7 +366,7 @@ function buildWorkspaceProvidersStatus(
       const resolved = modelsConfig.getResolvedModel(
         model.authType,
         model.id,
-        model.registryBaseUrl,
+        model.registryBaseUrl ?? null,
       );
       const generation: ContentGeneratorConfig = {
         ...resolved?.generationConfig,
@@ -197,11 +376,38 @@ function buildWorkspaceProvidersStatus(
         reasoningSnapshot,
         reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
       };
+      const opaqueRoute = modelId.startsWith(ACP_ROUTE_ID_PREFIX);
+      if (collectPreferenceModel) {
+        if (!model.visionOnly) {
+          const baseUrl =
+            model.registryBaseUrl ??
+            resolveModelConfig({
+              authType: model.authType,
+              cli: { baseUrl: argv.openaiBaseUrl },
+              settings: { baseUrl: settings.security?.auth?.baseUrl },
+              env,
+            }).config.baseUrl ??
+            generation.baseUrl;
+          collectPreferenceModel(
+            { ...generation, baseUrl },
+            model.label,
+            isCurrent,
+            opaqueRoute,
+          );
+        }
+        continue;
+      }
+      const preference = getModelPreferenceKey(
+        model.authType,
+        model.id,
+        generation.baseUrl,
+      );
       const configOptions = buildModelReasoningRoutePreview(
         generation,
         resolveReasoningForModel(undefined, generation),
         settings.model?.reasoningEffort,
-        modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+        opaqueRoute,
+        settings.model?.preferences?.[preference]?.reasoning,
       );
       const configurationKey = getModelConfigurationKey(
         loaded,
@@ -236,6 +442,26 @@ function buildWorkspaceProvidersStatus(
       };
       provider.models.push(providerModel);
       if (isCurrent) provider.current = true;
+    }
+
+    if (
+      collectPreferenceModel &&
+      currentAuth &&
+      currentModelId &&
+      currentRegistryBaseUrl === undefined
+    ) {
+      collectPreferenceModel(
+        {
+          ...modelsConfig.getGenerationConfig(),
+          authType: currentAuth,
+          model: currentModelId,
+          reasoningSnapshot,
+          reasoningRouteBaseUrl: null,
+        },
+        currentModelId,
+        true,
+        false,
+      );
     }
 
     const current = buildCurrent(

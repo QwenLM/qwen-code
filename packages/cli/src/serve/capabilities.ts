@@ -50,6 +50,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  modelPreferencesAvailable?: boolean;
   userSkillActivationAvailable?: boolean;
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
@@ -198,6 +199,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'workspace_model_preferences',
+    (toggles) => toggles.modelPreferencesAvailable === true,
+  ],
   [
     'user_skill_activation',
     (toggles) => toggles.userSkillActivationAvailable === true,

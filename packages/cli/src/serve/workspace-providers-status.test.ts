@@ -8,11 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { getModelPreferenceKey } from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import {
   loadSettings,
   resetHomeEnvBootstrapForTesting,
 } from '../config/settings.js';
-import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import {
+  createWorkspaceProvidersStatusProvider,
+  listWorkspacePreferenceModels,
+} from './workspace-providers-status.js';
 import { listModelConfigurations } from './model-configuration.js';
 
 const coreMock = vi.hoisted(() => ({
@@ -108,6 +112,140 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         modelId: 'same(openai-responses)',
       },
     });
+  });
+
+  it.each([
+    ['auth settings', undefined, undefined, 'https://settings.example/v1'],
+    [
+      'environment',
+      'https://proxy.example/v1',
+      undefined,
+      'https://proxy.example/v1',
+    ],
+    [
+      'explicit selection',
+      'https://proxy.example/v1',
+      'https://B.example/v1',
+      'https://B.example/v1',
+    ],
+  ] as const)(
+    'uses the effective preference key from %s',
+    async (_source, proxy, selected, current) => {
+      const endpoints = ['https://a.example/v1', 'https://B.example/v1'];
+      const implicit = proxy ?? 'https://settings.example/v1';
+      await writeUserSettings({
+        $version: 4,
+        security: {
+          auth: {
+            selectedType: 'openai',
+            baseUrl: 'https://settings.example/v1',
+          },
+        },
+        model: { name: 'shared', baseUrl: selected },
+        modelProviders: {
+          openai: [
+            { id: 'shared', generationConfig: { contextWindowSize: 200000 } },
+            ...endpoints.map((baseUrl) => ({ id: 'shared', baseUrl })),
+            { id: 'another' },
+          ],
+        },
+      });
+      const rows = listWorkspacePreferenceModels(
+        workspace,
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+        { OPENAI_API_KEY: 'test-key', OPENAI_BASE_URL: proxy },
+      ).filter(({ authType }) => authType === 'openai');
+      expect(
+        rows.filter(({ isCurrent }) => isCurrent).map(({ key }) => key),
+      ).toEqual([getModelPreferenceKey('openai', 'shared', current)]);
+      expect(new Set(rows.map(({ key }) => key))).toEqual(
+        new Set([
+          ...[implicit, ...endpoints].map((url) =>
+            getModelPreferenceKey('openai', 'shared', url),
+          ),
+          getModelPreferenceKey('openai', 'another', implicit),
+        ]),
+      );
+      expect(
+        rows.find(
+          ({ key }) =>
+            key === getModelPreferenceKey('openai', 'shared', implicit),
+        )?.contextLimit,
+      ).toBe(200000);
+    },
+  );
+
+  it('filters preference rows to the enforced authentication type', async () => {
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai', enforcedType: 'openai' } },
+      model: { name: 'primary' },
+      modelProviders: {
+        openai: [{ id: 'primary' }],
+        anthropic: [{ id: 'blocked', baseUrl: 'https://anthropic.example/v1' }],
+      },
+    });
+    const rows = listWorkspacePreferenceModels(
+      workspace,
+      loadSettings(workspace, { skipLoadEnvironment: true }),
+      { OPENAI_API_KEY: 'test-key' },
+    );
+    expect(rows.map(({ authType, modelId }) => [authType, modelId])).toEqual([
+      ['openai', 'primary'],
+    ]);
+  });
+
+  it('keeps current route metadata when an implicit endpoint matches an explicit one', async () => {
+    const baseUrl = 'https://proxy.example/v1';
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'shared', baseUrl },
+      modelProviders: {
+        openai: [
+          { id: 'shared', generationConfig: { contextWindowSize: 200000 } },
+          {
+            id: 'shared',
+            name: 'Selected route',
+            baseUrl,
+            generationConfig: { contextWindowSize: 128000 },
+          },
+        ],
+      },
+    });
+    const rows = listWorkspacePreferenceModels(
+      workspace,
+      loadSettings(workspace, { skipLoadEnvironment: true }),
+      { OPENAI_BASE_URL: baseUrl },
+    ).filter(({ authType }) => authType === 'openai');
+    expect(rows).toEqual([
+      expect.objectContaining({
+        key: getModelPreferenceKey('openai', 'shared', baseUrl),
+        name: 'Selected route',
+        isCurrent: true,
+        contextLimit: 128000,
+      }),
+    ]);
+  });
+
+  it('keys an unregistered current model by its effective endpoint', async () => {
+    const baseUrl = 'https://proxy.example/v1';
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'unregistered', baseUrl: 'https://old.example/v1' },
+    });
+    const rows = listWorkspacePreferenceModels(
+      workspace,
+      loadSettings(workspace, { skipLoadEnvironment: true }),
+      { OPENAI_API_KEY: 'test-key', OPENAI_BASE_URL: baseUrl },
+    );
+    expect(rows.filter(({ isCurrent }) => isCurrent)).toEqual([
+      expect.objectContaining({
+        key: getModelPreferenceKey('openai', 'unregistered', baseUrl),
+        modelId: 'unregistered',
+      }),
+    ]);
   });
 
   it('aligns configuration keys for implicit and explicit default endpoints', async () => {
@@ -1504,6 +1642,15 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(JSON.stringify(result)).toContain('https://broken.example/v1');
     expect(JSON.stringify(result)).not.toContain('sec ret');
     expect(result.initialized).toBe(false);
+    expect(() =>
+      listWorkspacePreferenceModels(
+        workspace,
+        loadSettings(workspace, { skipLoadEnvironment: true }),
+        {},
+      ),
+    ).toThrow(
+      'Unable to resolve model catalog: Failed loading provider https://broken.example/v1',
+    );
   });
 
   async function writeUserSettings(settings: Record<string, unknown>) {

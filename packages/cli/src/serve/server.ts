@@ -261,6 +261,7 @@ import {
   type WorkspaceVoiceRouteDeps,
 } from './routes/workspace-voice.js';
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
+import { registerWorkspaceModelPreferencesRoutes } from './routes/workspace-model-preferences.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import {
@@ -757,6 +758,7 @@ export interface ServeAppDeps {
     workspace: string,
     writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
+    snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
@@ -1246,6 +1248,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      modelPreferencesAvailable:
+        deps.persistSettings !== undefined && opts.profile !== 'hosted-harness',
       sessionRetireIfIdleAvailable: () =>
         workspaceRegistry
           .listAll()
@@ -3461,6 +3465,7 @@ export function createServeApp(
     value: unknown,
     scope: string,
     clientId: string | undefined,
+    originRuntime?: WorkspaceRuntime,
   ) => {
     invalidateServeFeaturesCache();
     const event = {
@@ -3486,10 +3491,20 @@ export function createServeApp(
       }
     };
 
-    publish(primaryBridge, primaryBoundWorkspace, clientId);
+    const origin = originRuntime?.bridge ?? primaryBridge;
+    publish(
+      origin,
+      originRuntime?.workspaceCwd ?? primaryBoundWorkspace,
+      clientId,
+    );
     if (scope !== 'user') return;
     for (const runtime of workspaceRegistry.listAll()) {
-      if (runtime.primary) continue;
+      if (
+        runtime.bridge === origin ||
+        (!originRuntime && runtime.primary) ||
+        (originRuntime && isInternalWorkspaceRuntime(runtime))
+      )
+        continue;
       publish(runtime.bridge, runtime.workspaceCwd);
     }
   };
@@ -3669,6 +3684,24 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
       syncModelProvidersRuntime: (writeScope, method) =>
         syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
+    });
+  }
+
+  if (deps.persistSettings && opts.profile !== 'hosted-harness') {
+    registerWorkspaceModelPreferencesRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      getEnv: (runtime) =>
+        getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+      persistSettings: deps.persistSettings,
+      broadcast: (runtime, scope, clientId) =>
+        broadcastSettingsChanged(
+          'model.preferences',
+          undefined,
+          scope,
+          clientId,
+          runtime,
+        ),
     });
   }
 

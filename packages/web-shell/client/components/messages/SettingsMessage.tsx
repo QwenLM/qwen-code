@@ -51,6 +51,7 @@ import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
+import { WorkspaceModelPreferencesSection } from './ModelPreferencesSection';
 import { LocalControlSettingsCard } from './LocalControlSettingsCard';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
@@ -103,6 +104,7 @@ interface SettingsMessageProps {
   onChatWidthModeChange: (mode: ChatWidthMode) => void;
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagementSectionProps?: ModelManagementProps;
+  modelPreferencesWorkspaceCwd?: string;
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
   archivedSessions?: ReactNode;
@@ -735,6 +737,7 @@ export function SettingsMessage({
   chatWidthMode,
   onChatWidthModeChange,
   modelManagementSectionProps,
+  modelPreferencesWorkspaceCwd,
   connections,
   archivedSessions,
   workspaceDirectoriesSection,
@@ -983,6 +986,10 @@ export function SettingsMessage({
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
   );
+  const modelPreferencesCwd =
+    showModelManagement &&
+    modelManagementSectionProps &&
+    modelPreferencesWorkspaceCwd;
   const showArchivedSessions = activeGroup?.id === 'Archived';
   const showConnections = activeGroup?.items.some(
     (item) => item.type === 'connections',
@@ -1267,8 +1274,14 @@ export function SettingsMessage({
             )}
             {activeGroup && (
               <div className="mx-auto w-full max-w-5xl">
+                {modelPreferencesCwd && (
+                  <WorkspaceModelPreferencesSection
+                    workspaceCwd={modelPreferencesCwd}
+                    scope={scope}
+                  />
+                )}
                 {activeRows.length > 0 && (
-                  <Card>
+                  <Card className={modelPreferencesCwd ? 'mt-4' : undefined}>
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2">
                         <CategoryIcon category={activeGroup.id} />
@@ -1518,8 +1531,27 @@ export function SettingsMessage({
                   </Card>
                 )}
                 {showModelManagement && modelManagementSectionProps && (
-                  <div className={activeRows.length > 0 ? 'mt-4' : undefined}>
-                    <ModelManagementSection {...modelManagementSectionProps} />
+                  <div
+                    className={
+                      activeRows.length > 0 || modelPreferencesCwd
+                        ? 'mt-4'
+                        : undefined
+                    }
+                  >
+                    {modelPreferencesCwd ? (
+                      <details>
+                        <summary className="mb-2 cursor-pointer text-sm font-medium">
+                          {t('settings.modelPreferences.providerSettings')}
+                        </summary>
+                        <ModelManagementSection
+                          {...modelManagementSectionProps}
+                        />
+                      </details>
+                    ) : (
+                      <ModelManagementSection
+                        {...modelManagementSectionProps}
+                      />
+                    )}
                   </div>
                 )}
                 {showConnections && connections}

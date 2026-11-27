@@ -2500,6 +2500,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    modelPreferencesAvailable: opts.profile !== 'hosted-harness',
     userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
@@ -6161,8 +6162,17 @@ async function runQwenServeImpl(
       (workspaceRegistryForPersistence.current === undefined &&
         workspace === boundWorkspace &&
         trustedWorkspace);
-    const loadSettingsForPersistence = (workspace: string) => {
+    const loadSettingsForPersistence = (
+      workspace: string,
+      snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
+    ) => {
       const trusted = isWorkspaceTrustedForPersistence(workspace);
+      if (snapshotEnvironment !== undefined) {
+        return settingsRuntime.settings.readSettingsSnapshot(workspace, {
+          environment: snapshotEnvironment,
+          workspaceTrusted: trusted,
+        });
+      }
       return settingsRuntime.settings.loadSettings(workspace, {
         skipLoadEnvironment: true,
         skipWorkspaceSettings: !trusted,
@@ -6503,10 +6513,14 @@ async function runQwenServeImpl(
       workspace: string,
       requestedWrites: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
+      snapshotEnvironment?: Readonly<NodeJS.ProcessEnv>,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const fresh = loadSettingsForPersistence(workspace);
+        const fresh = loadSettingsForPersistence(
+          workspace,
+          snapshotEnvironment,
+        );
         const writes =
           typeof requestedWrites === 'function'
             ? requestedWrites(fresh)
@@ -6542,7 +6556,9 @@ async function runQwenServeImpl(
           const message = `persistSettings partial failure (workspace=${workspace}, committed=${committed}/${writes.length}, failedKey=${failedWrite?.key ?? '<unknown>'}, failedScope=${failedWrite?.scope ?? '<unknown>'}): ${
             err instanceof Error ? err.message : String(err)
           }`;
-          writeStderrLine(`qwen serve: ${message}`);
+          if (snapshotEnvironment === undefined) {
+            writeStderrLine(`qwen serve: ${message}`);
+          }
           throw new runtime.WorkspaceSettingsPartialPersistError(
             message,
             writes.filter((write) => committedScopes.has(write.scope)),

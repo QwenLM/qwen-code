@@ -894,6 +894,9 @@
               "reasoning": {
                 "type": "object",
                 "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
                   "effort": {
                     "type": "string",
                     "enum": [

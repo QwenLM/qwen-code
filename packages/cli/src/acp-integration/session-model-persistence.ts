@@ -44,16 +44,18 @@ export async function recordDaemonSessionModel(
   options: { required?: boolean } = {},
 ): Promise<void> {
   const recording = config.getChatRecordingService?.();
+  const preferenceSnapshot = config.getModelPreferenceSnapshot?.();
   const reasoningSelection =
     payload.reasoningSelection ??
     recording?.getRecordedSessionModel?.()?.reasoningSelection;
   try {
     const saved = await recording?.recordSessionModel?.({
       ...payload,
+      ...(preferenceSnapshot ? { preferenceSnapshot } : {}),
       ...(reasoningSelection !== undefined ? { reasoningSelection } : {}),
     });
-    if (options.required && !saved)
-      throw new Error('Could not save reasoning for this task');
+    if (!saved && options.required)
+      throw new Error('Could not save the session model preferences');
   } catch (error) {
     if (options.required) throw error;
     debugLogger.debug('recordSessionModel failed', error);
@@ -68,7 +70,7 @@ export async function recordDaemonSessionModelFromConfig(
   const authType = config.getAuthType();
   if (!modelId || !authType) {
     if (options.required)
-      throw new Error('Could not save reasoning for this task');
+      throw new Error('Could not save the session model preferences');
     return;
   }
   const snapshot = config.getActiveRuntimeModelSnapshot?.();

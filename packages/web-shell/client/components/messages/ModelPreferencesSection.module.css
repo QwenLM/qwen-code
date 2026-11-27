@@ -1,0 +1,232 @@
+.panel {
+  --panel-secondary: color-mix(
+    in srgb,
+    var(--foreground) 64%,
+    var(--background)
+  );
+  container: model-preferences / inline-size;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  color: var(--foreground);
+  background: var(--background);
+  font-size: 0.875rem;
+}
+
+.title,
+.panel > p,
+.panel > .error {
+  padding: 0.875rem 1.125rem;
+}
+
+.title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.table th,
+.table td {
+  padding: 0.875rem 0.75rem;
+  border-top: 1px solid var(--border);
+  vertical-align: middle;
+  text-align: start;
+}
+
+.table th:first-child {
+  padding-inline-start: 1.125rem;
+}
+
+.table :is(th, td):last-child {
+  padding-inline-end: 1.125rem;
+}
+
+.table thead {
+  color: var(--panel-secondary);
+  background: color-mix(in srgb, var(--foreground) 3%, var(--background));
+  font-size: 0.75rem;
+}
+
+.table thead th {
+  padding-block: 0.5rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.table thead th:nth-child(1) {
+  width: 23%;
+}
+
+.table thead th:nth-child(2) {
+  width: 17%;
+}
+
+.table thead th:nth-child(3) {
+  width: 18%;
+}
+
+.name,
+.provider {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.name {
+  font-weight: 600;
+}
+
+.provider,
+.source,
+.windowLimit,
+.windowUnit,
+.footer > p {
+  color: var(--panel-secondary);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.provider,
+.source {
+  margin-top: 0.25rem;
+}
+
+.source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.125rem 0.5rem;
+}
+
+.contextCell .source {
+  margin-top: 0.375rem;
+}
+
+.contextControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+}
+
+.windowField {
+  position: relative;
+  inline-size: min(10.5rem, 100%);
+}
+
+.windowField input {
+  padding-inline-end: 3.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.windowUnit {
+  position: absolute;
+  inset-inline-end: 0.625rem;
+  top: 50%;
+  translate: 0 -50%;
+  pointer-events: none;
+}
+
+.windowLimit {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (pointer: coarse) {
+  .windowField input {
+    min-height: 2.75rem;
+    font-size: 1rem;
+  }
+}
+
+.reset {
+  color: var(--foreground);
+  text-underline-offset: 0.2em;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--foreground) 35%, transparent);
+  font-size: inherit;
+}
+
+.reset:hover {
+  text-decoration-color: currentColor;
+}
+
+.thinkingToggle[data-state='checked'] {
+  background: var(--agent-blue-500, var(--primary));
+}
+
+.effort {
+  max-width: 100%;
+}
+
+.compactLabel {
+  display: none;
+}
+
+.error {
+  color: var(--destructive);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.panel > div.error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.625rem;
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.625rem;
+  padding: 0.75rem 1.125rem;
+  border-top: 1px solid var(--border);
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-inline-start: auto;
+}
+
+@container model-preferences (max-width: 40rem) {
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .modelRow {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    border-top: 1px solid var(--border);
+    padding: 0.875rem 1.125rem;
+  }
+
+  .modelRow > th,
+  .modelRow > .contextCell {
+    grid-column: 1 / -1;
+  }
+
+  .table .modelRow > :is(th, td) {
+    border: 0;
+    padding: 0;
+  }
+
+  .compactLabel {
+    display: block;
+    margin-bottom: 0.25rem;
+    color: var(--panel-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+}

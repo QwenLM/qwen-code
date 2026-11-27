@@ -75,6 +75,29 @@ describe('session-model-persistence', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('requires the creation snapshot to be recorded even with no preferences', async () => {
+    const recordSessionModel = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    const config = {
+      getModel: () => 'qwen3-coder-plus',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getModelPreferenceSnapshot: () => ({ values: {}, defaultEffort: 'low' }),
+      getChatRecordingService: () => ({ recordSessionModel }),
+    } as unknown as Config;
+
+    await recordDaemonSessionModelFromConfig(config, { required: true });
+    expect(recordSessionModel).toHaveBeenCalledExactlyOnceWith({
+      modelId: 'qwen3-coder-plus',
+      authType: AuthType.USE_OPENAI,
+      preferenceSnapshot: { values: {}, defaultEffort: 'low' },
+    });
+    await expect(
+      recordDaemonSessionModelFromConfig(config, { required: true }),
+    ).rejects.toThrow('Could not save the session model preferences');
+  });
+
   it('carries a recorded effort to the next model and requires a task write to succeed', async () => {
     const recordSessionModel = vi
       .fn()
@@ -100,7 +123,7 @@ describe('session-model-persistence', () => {
         reasoningSelection: 'low',
         required: true,
       }),
-    ).rejects.toThrow('Could not save reasoning for this task');
+    ).rejects.toThrow('Could not save the session model preferences');
   });
 
   it('captures the current config model for a new daemon session', async () => {
