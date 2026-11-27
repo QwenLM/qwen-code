@@ -1053,6 +1053,14 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       '',
     );
     verifyAppImageClosure(extractedRoot);
+    // libwayland-client.so.0 is host-baseline: the extracted image passing it
+    // through, so the AppImage's LD_LIBRARY_PATH shadows the host copy, breaks
+    // dlopening the host libEGL_mesa.so.0 (issue #18486).
+    writeElf('usr/lib/libwayland-client.so.0');
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage must not bundle host-baseline libraries: libwayland-client\.so\.0/,
+    );
   } finally {
     process.env.PATH = previousPath;
   }

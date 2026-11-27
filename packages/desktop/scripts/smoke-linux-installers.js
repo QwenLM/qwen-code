@@ -177,6 +177,18 @@ export function verifyAppImageClosure(extractedRoot) {
   if (elfFiles.length === 0) {
     throw new Error('AppImage contains no ELF files');
   }
+  // A bundled copy of a host-baseline library is as fatal as a missing one:
+  // the bundle dir leads LD_LIBRARY_PATH, so it shadows the host's newer copy.
+  // An old libwayland-client lacks wl_fixes_interface, which breaks dlopening
+  // the host's libEGL_mesa.so.0 and leaves the window gray (mesa#11316).
+  const shadowed = new Set(
+    [...bundled].filter((name) => APPIMAGE_HOST_LIBRARIES.has(name)),
+  );
+  if (shadowed.size > 0) {
+    throw new Error(
+      `AppImage must not bundle host-baseline libraries: ${[...shadowed].sort().join(', ')}`,
+    );
+  }
   const missing = new Set();
   for (const elf of elfFiles) {
     const result = spawnSync('readelf', ['-d', elf], {
