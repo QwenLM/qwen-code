@@ -67,6 +67,22 @@ describe('TypeScript SDK release workflow', () => {
     expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
+  it('keeps SDK releases out of CLI release consumers', () => {
+    // PAT-created SDK releases emit release:published. The CLI consumers must
+    // retain manual dispatch while ignoring the sdk-typescript-* family.
+    const guard = "startsWith(github.event.release.tag_name, 'v')";
+    for (const [path, jobName] of [
+      ['.github/workflows/finalize-release.yml', 'finalize'],
+      ['.github/workflows/sync-release-to-oss.yml', 'sync'],
+    ]) {
+      const job = parse(readFileSync(path, 'utf8')).jobs[jobName];
+      expect(job.if, path).toContain(guard);
+      expect(job.if, path).toContain(
+        "github.event_name == 'workflow_dispatch'",
+      );
+    }
+  });
+
   it('spaces PR creation out from the release to avoid secondary rate limits', () => {
     // `gh pr create` runs right after the branch push and release creation,
     // which can trip GitHub's "was submitted too quickly" GraphQL secondary

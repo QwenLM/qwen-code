@@ -3271,6 +3271,11 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).not.toContain('package:hosted-installation');
 
     // sync-release-to-oss.yml handles OSS sync triggered by release publish
+    const syncJob = parse(ossWorkflow).jobs.sync;
+    expect(syncJob.if).toContain(
+      "startsWith(github.event.release.tag_name, 'v')",
+    );
+    expect(syncJob.if).toContain("github.event_name == 'workflow_dispatch'");
     expect(ossWorkflow).toContain(
       'npm run package:hosted-installation -- --out-dir dist/installation',
     );

@@ -80,6 +80,13 @@ describe('stable release notes workflow', () => {
   });
 
   it('finalizes stable releases asynchronously', () => {
+    expect(finalizeWorkflow).toContain(
+      "startsWith(github.event.release.tag_name, 'v')",
+    );
+    expect(finalizeWorkflow).toContain(
+      "github.event_name == 'workflow_dispatch'",
+    );
+
     const validate = getStep(finalizeWorkflow, 'Validate stable release tag');
     const checkout = getStep(finalizeWorkflow, 'Checkout release branch');
     const install = getStep(finalizeWorkflow, 'Install Dependencies');
