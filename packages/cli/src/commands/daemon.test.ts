@@ -33,6 +33,16 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
     ...actual,
     currentPidNamespace: () => 'pid:[1]',
     isProcessAlive: () => false,
+    // The moved helpers close over this module's real bindings in their
+    // default arguments, so re-route the defaults through the pinned
+    // namespace and liveness above; a mock of isProcessAlive alone cannot
+    // reach them.
+    listenerIdentityVerified: (
+      record: DaemonDiscoveryRecord,
+      ns = 'pid:[1]',
+      alive = () => false,
+      startedAt = actual.processStartTime,
+    ) => actual.listenerIdentityVerified(record, ns, alive, startedAt),
   };
 });
 
@@ -43,6 +53,7 @@ import {
   canonicalizeStartWorkspaces,
   daemonCommand,
   daemonRejectsToken,
+  describeUnpublishedRecordChild,
   formatDaemonAge,
   formatDaemonDetail,
   formatDaemonStartSummary,
@@ -1044,6 +1055,52 @@ describe('qwen daemon command', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('routes the identity defaults through the pinned namespace and liveness mocks', () => {
+    const started = processStartTime(process.pid);
+    if (started === undefined) return; // no readable process table on this host
+    const live: DaemonDiscoveryRecord = {
+      ...entry(4170).record,
+      pid: process.pid,
+      startedAt: new Date(started).toISOString(),
+    };
+    // The real module verifies this record (live pid, real start time); the
+    // mock's alive() is what refuses. A production change that made identity
+    // unconditionally false would slip past this test — it pins the seam.
+    expect(listenerIdentityVerified(live)).toBe(false);
+  });
+
+  describe('describeUnpublishedRecordChild', () => {
+    it('reports a real exit code instead of a phantom timeout', () => {
+      const message = describeUnpublishedRecordChild({
+        pid: 42,
+        exitCode: 3,
+        signalCode: null,
+      });
+      expect(message).toContain('exited (exit code 3)');
+      expect(message).not.toContain('did not publish a discovery record');
+    });
+
+    it('reports a signal-terminated child', () => {
+      const message = describeUnpublishedRecordChild({
+        pid: 42,
+        exitCode: null,
+        signalCode: 'SIGKILL',
+      });
+      expect(message).toContain('exited (SIGKILL)');
+      expect(message).not.toContain('did not publish a discovery record');
+    });
+
+    it('keeps the timeout wording for a still-running child', () => {
+      const message = describeUnpublishedRecordChild({
+        pid: 42,
+        exitCode: null,
+        signalCode: null,
+      });
+      expect(message).toContain('did not publish a discovery record within');
+      expect(message).not.toContain('exited (');
+    });
   });
 
   it('verifies the recorded listener before trusting a bearer', () => {

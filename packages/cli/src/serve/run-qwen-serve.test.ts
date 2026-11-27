@@ -125,7 +125,13 @@ import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
-import { readDaemonDiscoveries } from './daemon-discovery.js';
+import {
+  processStartTime,
+  readDaemonDiscoveries,
+  removeDaemonDiscovery,
+  writeDaemonDiscovery,
+  type DaemonDiscoveryRecord,
+} from './daemon-discovery.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import {
   ENSURE_KEEP_ALIVE_MS,
@@ -23866,6 +23872,289 @@ describe('runQwenServe channel worker supervisor', () => {
       ).toBe(true);
     } finally {
       await handle.close();
+    }
+  });
+
+  it('fails fast when an explicit port is held by a live qwen serve daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-holder-')),
+    );
+    const startedAt = processStartTime(process.pid);
+    expect(startedAt).toBeDefined();
+    // A legacy date string carries a parseable trailing comment — a record
+    // field is same-user writable, so ESC bytes must never reach the
+    // printed refusal.
+    const esc = String.fromCharCode(27);
+    const bel = String.fromCharCode(7);
+    const maliciousStartedAt = new Date(startedAt!)
+      .toString()
+      .replace(/\([^)]*\)$/, `(${esc}[2J${esc}]0;pwned${bel})`);
+    expect(Number.isFinite(Date.parse(maliciousStartedAt))).toBe(true);
+    const holder: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 4170,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:4170',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: maliciousStartedAt,
+      auth: 'none',
+    };
+    writeDaemonDiscovery(holder);
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    let rejection: unknown;
+    try {
+      await runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+          resolveOnListen: true,
+        },
+      );
+    } catch (error) {
+      rejection = error;
+    } finally {
+      stderrSpy.mockRestore();
+      removeDaemonDiscovery(4170);
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    const message = (rejection as Error).message;
+    expect(message).toMatch(/held by a live qwen serve daemon/);
+    expect(message).not.toContain('\u001b');
+    expect(message).toContain(
+      new Date(Date.parse(maliciousStartedAt)).toISOString(),
+    );
+    expect(message).not.toMatch(/^qwen serve: /);
+    expect(portsAttempted).toEqual([4170]);
+    // The refusal reaches stderr once by design — the daemon startup-failed
+    // log entry. Counting (not absence) is what catches a re-added
+    // in-branch print: the message carries no prefix, so a stray copy
+    // matches neither caller-format pattern.
+    expect(
+      stderrWrites.filter((w) =>
+        w.includes('held by a live qwen serve daemon'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps bumping ports when the holder record cannot be verified', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-stale-holder-')),
+    );
+    // A leftover record whose startedAt sits outside the identity window
+    // (a SIGKILLed daemon, or a recycled pid) says nothing reliable about
+    // the current holder, so the start must keep the next-port fallback.
+    const staleHolder: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 4170,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:4170',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      auth: 'none',
+    };
+    writeDaemonDiscovery(staleHolder);
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    const nativeListen = testServer.listen.bind(testServer);
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      if (portsAttempted.length === 1) {
+        const err = new Error('address in use') as NodeJS.ErrnoException;
+        err.code = 'EADDRINUSE';
+        setImmediate(() => testServer.emit('error', err));
+      } else {
+        nativeListen(0, '127.0.0.1');
+      }
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        httpServerFactory: () => testServer,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      stderrSpy.mockRestore();
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.server.listening).toBe(true);
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('refuses a live holder even on the unbumpable --port 65535', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-max-')),
+    );
+    const startedAt = processStartTime(process.pid);
+    expect(startedAt).toBeDefined();
+    const holder: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 65535,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:65535',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: new Date(startedAt!).toISOString(),
+      auth: 'none',
+    };
+    writeDaemonDiscovery(holder);
+    const portsAttempted: number[] = [];
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    let rejection: unknown;
+    try {
+      await runQwenServe(
+        {
+          port: 65535,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+          resolveOnListen: true,
+        },
+      );
+    } catch (error) {
+      rejection = error;
+    } finally {
+      removeDaemonDiscovery(65535);
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    const message = (rejection as Error).message;
+    expect(message).toMatch(/held by a live qwen serve daemon/);
+    expect(message).not.toContain('EADDRINUSE');
+    expect(portsAttempted).toEqual([65535]);
+  });
+
+  it('keeps bumping past a fallback candidate that names a live daemon', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bump-past-')),
+    );
+    // A verified holder record on a fallback candidate must not refuse: the
+    // operator never named port 4171, so the start keeps looking for a port.
+    const startedAt = processStartTime(process.pid);
+    expect(startedAt).toBeDefined();
+    const candidate: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 4171,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:4171',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: new Date(startedAt!).toISOString(),
+      auth: 'none',
+    };
+    writeDaemonDiscovery(candidate);
+    const portsAttempted: number[] = [];
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    const nativeListen = testServer.listen.bind(testServer);
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      if (portsAttempted.length < 3) {
+        const err = new Error('address in use') as NodeJS.ErrnoException;
+        err.code = 'EADDRINUSE';
+        setImmediate(() => testServer.emit('error', err));
+      } else {
+        nativeListen(0, '127.0.0.1');
+      }
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        httpServerFactory: () => testServer,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      expect(portsAttempted).toEqual([4170, 4171, 4172]);
+      expect(handle.server.listening).toBe(true);
+    } finally {
+      await handle.close();
+      removeDaemonDiscovery(4171);
     }
   });
 
