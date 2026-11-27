@@ -737,6 +737,7 @@ export class StandaloneSessionService {
         },
         {
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          ...(runtime.trusted === false ? { allowSidecarWrite: false } : {}),
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
         },
       );

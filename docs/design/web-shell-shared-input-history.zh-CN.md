@@ -2,6 +2,10 @@
 
 [English Version](./web-shell-shared-input-history.md)
 
+- **状态：** 已合入 — PR #18120，squash `65616b314b`（2026-11-26），随 `v0.28.6` 发布。延后 `[P3]` 后续项跟踪于 #18423。
+- **范围：** `packages/core`、`packages/cli`（Shell 历史文件锁、serve 路由、TUI `useShellHistory`）、`packages/sdk-typescript`、`packages/web-shell`、`integration-tests`
+- **合入时验证：** 最终 PR head `4cfaddc70e` 上，`web-shell E2E Smoke` shard 1 以 416/416（37.1m）通过并执行了 `web-shell.shared-input-history.spec.ts`，同时 Smoke shard 2、Linux unit 两片、no-AK 集成两片、TUI parity、Serve A/B 与 `SDK Java (fast) / Real daemon E2E` 均为绿灯；`4cfaddc70e` 的 `gh pr checks` 终态为 43 pass / 4 fail / 1 cancelled / 53 skipped（3 个 `SDK Java (full)` 作业与 `Managed Agent full suite` 在合入后以 failure 结束，`Capture web-shell visuals` 为 cancelled）。`verify-pr` 在 `4cfaddc70e` 报告 28/28 `merge-ready`（PR #18120 评论 7165336894，其中 Playwright browser E2E 列于未覆盖项）。在 `242d5293ca` 的本地验证（评论 7157080066）中，记录了 CLI 套件 138 passed、Web Shell 套件 84 passed、真实 daemon HTTP/FS 集成 4/4、桌面与 Pixel 7 Chromium E2E 3/3，以及 prompt/mid-turn 落盘排序的变异击杀；100 条上限变异击杀与并发失败回退 `304` 检验记录于评论 7154154453（`255fab4dfc`），并在 `4cfaddc70e` 复测（评论 7165336894）；条件读队列等待变异击杀记录于评论 7135944012（`32231a4b95`）；随后的最终提交 `4cfaddc70e` 仅修改 `web-shell.shared-input-history.spec.ts`（+10/−7），并在 `4cfaddc70e` 本地实测 `PLAYWRIGHT_PORT=42273` 3/3 与默认端口 1/1 通过（评论 7135944012）。合入提交 `65616b314b` 的六条 main push 车道（`Qwen Code CI`、`Managed Agent gate`、`Managed Agent loop verification`、`Web Shell Managed Host Build`、`Verify Landlock helper`、`pnpm Worktree Smoke`）全部成功。覆盖边界：移动端 E2E 在 Linux Chromium Pixel 7 context 与 mock ACP model child 下运行，不替代实体手机、mobile Safari/WebKit 或 live-model 验证。
+
 ## 背景
 
 当前 Web Shell 的输入框历史（Prompt 历史与 Shell 模式命令历史）完全保存在浏览器本地 `localStorage` 中（`qwen-web-shell-history:<workspaceCwd>` 与 `qwen-web-shell-command-history`）。当用户在手机和电脑上同时使用同一个 Web Shell 会话或工作区时，电脑上提交的历史输入在手机端的 **Input history** 面板中不可见（反之亦然）。此外，Web Shell 的 Shell 命令历史目前未按工作区隔离，也没有与 CLI 的项目级 `shell_history` 互通。

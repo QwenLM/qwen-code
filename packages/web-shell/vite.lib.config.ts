@@ -392,6 +392,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/artifacts/workspace-artifact-library-messages.ts',
       './client/components/artifacts/workspace-artifact-library-messages.transcript-stub.ts',
     ],
+    [
+      './client/components/sidebar/archived-sessions-messages.ts',
+      './client/components/sidebar/archived-sessions-messages.transcript-stub.ts',
+    ],
     ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
     ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],
     ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],

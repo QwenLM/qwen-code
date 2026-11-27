@@ -275,7 +275,7 @@ final class AgentMessageProjection {
         return jdbc.query(
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = ''"
-                    + " AND s.covered_sequence > s.replay_floor_sequence"
+                    + " AND s.is_replay_floor_pending = TRUE"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"

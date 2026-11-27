@@ -23,13 +23,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   chownSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +53,7 @@ import {
   normalizeBasePath,
 } from './verify-pr-model-proxy.mjs';
 import {
+  DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MODEL_VSOCK_PORT,
   buildInputManifest,
   createRoundInputBundle,
@@ -925,7 +934,7 @@ function writePrivateSafeFile(filePath, content) {
   chmodSync(filePath, 0o600);
 }
 
-function sha256RegularFile(filePath) {
+function sha256RegularFile(filePath, maxBytes = null) {
   let st;
   try {
     st = lstatSync(filePath);
@@ -935,13 +944,48 @@ function sha256RegularFile(filePath) {
   if (st.isSymbolicLink() || !st.isFile()) {
     return { error: 'non-regular-or-symlink', digest: null };
   }
-  return {
-    error: null,
-    dev: st.dev,
-    ino: st.ino,
-    nlink: st.nlink,
-    digest: createHash('sha256').update(readFileSync(filePath)).digest('hex'),
-  };
+  if (maxBytes !== null && (st.size === 0 || st.size > maxBytes)) {
+    return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+  }
+
+  let fd;
+  try {
+    fd = openSync(
+      filePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    st = fstatSync(fd);
+    if (!st.isFile()) {
+      return { error: 'non-regular-or-symlink', digest: null };
+    }
+    if (maxBytes !== null && (st.size === 0 || st.size > maxBytes)) {
+      return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+    }
+    const hash = createHash('sha256');
+    const buf = Buffer.allocUnsafe(256 * 1024);
+    let bytesRead = 0;
+    for (;;) {
+      const bytes = readSync(fd, buf, 0, buf.length, null);
+      if (bytes === 0) break;
+      bytesRead += bytes;
+      if (maxBytes !== null && bytesRead > maxBytes) {
+        return { error: `bundle-size-budget:${maxBytes}`, digest: null };
+      }
+      hash.update(buf.subarray(0, bytes));
+    }
+    return {
+      error: null,
+      dev: st.dev,
+      ino: st.ino,
+      nlink: st.nlink,
+      bytes: bytesRead,
+      digest: hash.digest('hex'),
+    };
+  } catch (error) {
+    return { error: `unreadable:${error.code ?? 'UNKNOWN'}`, digest: null };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function removeOwnedSocket(filePath, identity) {
@@ -1309,6 +1353,17 @@ export async function runHardwareRound({
         errors: ['roundInput requires repoDir or prebuilt bundlePath'],
       };
     }
+    if (
+      modelProxy !== null &&
+      (!plan.modelVsockPath || effectiveProxySocketPath !== plan.modelVsockPath)
+    ) {
+      return {
+        ok: false,
+        errors: [
+          'roundInput with modelProxy must bind plan.modelVsockPath for guest access',
+        ],
+      };
+    }
   }
   let kernelDigest = null;
   let rootfsDigest = null;
@@ -1416,20 +1471,41 @@ export async function runHardwareRound({
   let effectiveTrustedInputDigest = trustedInputDigest;
   let preparedInput = null;
   if (roundInput !== null) {
+    const maxBundleBytes =
+      roundInput.maxBundleBytes ?? DEFAULT_MAX_BUNDLE_BYTES;
+    if (!Number.isSafeInteger(maxBundleBytes) || maxBundleBytes <= 0) {
+      return {
+        ok: false,
+        errors: ['roundInput.maxBundleBytes must be a positive safe integer'],
+      };
+    }
     try {
+      const entropyHex =
+        roundInput.entropyHex ?? randomBytes(32).toString('hex');
+      if (
+        typeof entropyHex !== 'string' ||
+        /^[0-9a-f]{64}$/.exec(entropyHex)?.[0] !== entropyHex
+      ) {
+        throw new Error('entropyHex must be a 64-char lowercase hex string');
+      }
       let bundleInfo;
+      const prebuiltHashBudget = Math.min(
+        maxBundleBytes,
+        DEFAULT_MAX_BUNDLE_BYTES,
+      );
       if (roundInput.repoDir) {
         bundleInfo = createRoundInputBundle({
           repoDir: roundInput.repoDir,
           baseRefOid: contextSnapshot.baseRefOid,
           headRefOid: contextSnapshot.headRefOid,
           outPath: join(realLauncher, 'round-input.bundle'),
-          ...(roundInput.maxBundleBytes !== undefined
-            ? { maxBundleBytes: roundInput.maxBundleBytes }
-            : {}),
+          maxBundleBytes: prebuiltHashBudget,
         });
       } else {
-        const bHash = sha256RegularFile(roundInput.bundlePath);
+        const bHash = sha256RegularFile(
+          roundInput.bundlePath,
+          prebuiltHashBudget,
+        );
         if (bHash.error) {
           throw new Error(`roundInput.bundlePath rejected (${bHash.error})`);
         }
@@ -1443,6 +1519,15 @@ export async function runHardwareRound({
         if (bStat.nlink !== 1) {
           throw new Error(
             'roundInput.bundlePath must be a single-link regular file',
+          );
+        }
+        if (
+          bStat.dev !== bHash.dev ||
+          bStat.ino !== bHash.ino ||
+          bStat.size !== bHash.bytes
+        ) {
+          throw new Error(
+            'roundInput.bundlePath changed while it was being hashed',
           );
         }
         if (
@@ -1461,11 +1546,137 @@ export async function runHardwareRound({
             'roundInput.bundlePath size does not match bundleBytes',
           );
         }
-        bundleInfo = {
-          bundlePath: realBundle,
-          bundleSha256: bHash.digest,
-          bundleBytes: bStat.size,
-        };
+        const privateBundle = join(realLauncher, 'round-input.bundle');
+        const stagedBundle = join(
+          realLauncher,
+          `.round-input.bundle.tmp.${process.pid}`,
+        );
+        let existingPrivate = null;
+        try {
+          existingPrivate = lstatSync(privateBundle);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (
+          existingPrivate &&
+          (!existingPrivate.isFile() ||
+            existingPrivate.isSymbolicLink() ||
+            existingPrivate.nlink !== 1)
+        ) {
+          throw new Error(
+            'refusing to overwrite a non-regular or multi-link private bundle',
+          );
+        }
+        let sourceFd;
+        let stagedFd;
+        let stagedIdentity;
+        let cleanupError;
+        try {
+          sourceFd = openSync(
+            realBundle,
+            fsConstants.O_RDONLY |
+              fsConstants.O_NOFOLLOW |
+              fsConstants.O_NONBLOCK,
+          );
+          const sourceStat = fstatSync(sourceFd);
+          if (sourceStat.size === 0 || sourceStat.size > prebuiltHashBudget) {
+            throw new Error(`bundle-size-budget:${prebuiltHashBudget}`);
+          }
+          if (
+            !sourceStat.isFile() ||
+            sourceStat.nlink !== 1 ||
+            sourceStat.dev !== bHash.dev ||
+            sourceStat.ino !== bHash.ino ||
+            sourceStat.size !== bStat.size
+          ) {
+            throw new Error(
+              'roundInput.bundlePath changed before its private copy was opened',
+            );
+          }
+          stagedFd = openSync(
+            stagedBundle,
+            fsConstants.O_WRONLY |
+              fsConstants.O_CREAT |
+              fsConstants.O_EXCL |
+              fsConstants.O_NOFOLLOW |
+              fsConstants.O_NONBLOCK,
+            0o600,
+          );
+          fchmodSync(stagedFd, 0o600);
+          stagedIdentity = fstatSync(stagedFd);
+          if (!stagedIdentity.isFile() || stagedIdentity.nlink !== 1) {
+            throw new Error(
+              'private bundle staging must be a single-link file',
+            );
+          }
+          const copyHash = createHash('sha256');
+          const buffer = Buffer.allocUnsafe(256 * 1024);
+          let copiedBytes = 0;
+          for (;;) {
+            const bytes = readSync(sourceFd, buffer, 0, buffer.length, null);
+            if (bytes === 0) break;
+            copiedBytes += bytes;
+            if (copiedBytes > prebuiltHashBudget) {
+              throw new Error(`bundle-size-budget:${prebuiltHashBudget}`);
+            }
+            copyHash.update(buffer.subarray(0, bytes));
+            let offset = 0;
+            while (offset < bytes) {
+              offset += writeSync(
+                stagedFd,
+                buffer,
+                offset,
+                bytes - offset,
+                null,
+              );
+            }
+          }
+          const copiedSha256 = copyHash.digest('hex');
+          if (copiedBytes !== bStat.size || copiedSha256 !== bHash.digest) {
+            throw new Error(
+              'roundInput.bundlePath changed while its private copy was made',
+            );
+          }
+          renameSync(stagedBundle, privateBundle);
+          bundleInfo = {
+            bundlePath: privateBundle,
+            bundleSha256: copiedSha256,
+            bundleBytes: copiedBytes,
+          };
+        } finally {
+          try {
+            if (sourceFd !== undefined) closeSync(sourceFd);
+            if (stagedFd !== undefined) closeSync(stagedFd);
+            if (stagedIdentity !== undefined) {
+              let remaining;
+              try {
+                remaining = lstatSync(stagedBundle);
+              } catch (error) {
+                if (error.code !== 'ENOENT') cleanupError = error;
+              }
+              if (
+                !cleanupError &&
+                remaining &&
+                (!remaining.isFile() ||
+                  remaining.dev !== stagedIdentity.dev ||
+                  remaining.ino !== stagedIdentity.ino)
+              ) {
+                cleanupError = new Error(
+                  'private bundle staging changed identity before cleanup',
+                );
+              }
+              if (!cleanupError && remaining) unlinkSync(stagedBundle);
+            }
+          } catch (error) {
+            cleanupError = error;
+          }
+        }
+        if (cleanupError) throw cleanupError;
+      }
+      if (bundleInfo.bundleBytes > prebuiltHashBudget) {
+        throw new Error(
+          `roundInput bundle exceeds guest transport limit ${prebuiltHashBudget} bytes`,
+        );
       }
       const manifestModelProxy = modelProxy
         ? {
@@ -1484,7 +1695,7 @@ export async function runHardwareRound({
         bundleSha256: bundleInfo.bundleSha256,
         bundleBytes: bundleInfo.bundleBytes,
         modelProxy: manifestModelProxy,
-        entropyHex: roundInput.entropyHex ?? null,
+        entropyHex,
       });
       if (
         trustedInputDigest !== null &&
@@ -1707,6 +1918,10 @@ export async function runHardwareRound({
         const child = spawn(plan.argv[0], plan.argv.slice(1), {
           stdio: 'ignore',
           detached: plan.backend === 'firecracker',
+          env: {
+            // The VMM/helper must not inherit host credentials.
+            PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+          },
         });
         let spawnError = null;
         let childExited = false;
@@ -2284,6 +2499,7 @@ async function main(argv) {
           bundleBytes: rawRoundInput.bundleBytes,
           maxBundleBytes: rawRoundInput.maxBundleBytes,
           maxReads: rawRoundInput.maxReads,
+          entropyHex: rawRoundInput.entropyHex,
         }
       : null;
     const result = await runHardwareRound({
