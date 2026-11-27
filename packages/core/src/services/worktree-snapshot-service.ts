@@ -793,9 +793,16 @@ async function boundedSnapshotExclusions(
     // to the archive.
     if (!entry.isDirectory()) continue;
     const child = path.join(managedDir, entry.name);
-    try {
-      await fs.access(path.join(child, '.git'));
-    } catch {
+    // `lstat`, never a followed probe: `.git` as a DIRECTORY is a repository
+    // whose only object database lives inside this directory (an independent
+    // `git init` under the checkout). Excluding it would delete its commits —
+    // the archive drops `.git` unconditionally — and the gate reads the tree
+    // clean, so nothing else would refuse. Only a registered LINKED worktree,
+    // whose `.git` is a file naming a git dir elsewhere, can be excluded.
+    const gitEntry = await fs
+      .lstat(path.join(child, '.git'))
+      .catch(() => undefined);
+    if (gitEntry === undefined || gitEntry.isDirectory()) {
       continue;
     }
     if (await worktreeHasWork(child)) {
@@ -848,7 +855,6 @@ export async function captureWorktreeSnapshot(
     throw new Error('Worktree snapshot: invalid commit id');
   }
   await fs.access(path.join(worktreePath, '.git'));
-  const matcher = await readSnapshotExclusions(worktreePath);
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
     createdAt: Date.now(),
@@ -872,6 +878,7 @@ export async function captureWorktreeSnapshot(
 
   let matchesCheckout = true;
   await atomicWriteFile(snapshotPath, async (tmp) => {
+    const matcher = await readSnapshotExclusions(worktreePath);
     await tar.create(
       {
         cwd: worktreePath,
@@ -889,7 +896,9 @@ export async function captureWorktreeSnapshot(
     matchesCheckout = await checkoutMatchesCapture(
       worktreePath,
       tmp,
-      matcher,
+      // A nested checkout that was clean when it was excluded and gained a
+      // draft while tar ran must not be skipped and reported as a match.
+      await readSnapshotExclusions(worktreePath),
       meta,
     );
   });

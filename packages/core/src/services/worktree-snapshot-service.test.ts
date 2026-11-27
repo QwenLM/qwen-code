@@ -530,6 +530,24 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     );
   });
 
+  it('does not call a capture faithful when an excluded nested checkout gains a draft', async () => {
+    // A clean nested checkout is excluded, so the archive never holds it. The
+    // pre-tar exclusion list would skip it after the capture too and report a
+    // match, and the caller then deletes a draft written while tar ran (F-5).
+    const inner = path.join(worktree, '.qwen', 'worktrees', 'inner');
+    git(worktree, 'worktree', 'add', '-q', '-b', 'inner-race', inner, 'HEAD');
+    captureTiming.afterCreate = async () => {
+      await fs.writeFile(path.join(inner, 'draft.md'), 'mid-capture\n');
+    };
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(/nested checkout \.qwen\/worktrees\/inner holds work/);
+  });
+
   it.skipIf(process.platform === 'win32').each([
     { committedMode: 0o644, capturedMode: 0o755 },
     { committedMode: 0o755, capturedMode: 0o644 },
