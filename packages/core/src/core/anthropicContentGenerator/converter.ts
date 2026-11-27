@@ -1475,26 +1475,51 @@ export class AnthropicContentConverter {
             volatileTailBlockCount = 0;
             continue;
           }
-          const lastContent = content[anchorIndex];
-          if (typeof lastContent === 'object' && 'type' in lastContent) {
-            const type = lastContent.type;
-            // Empty text blocks cannot be cached (per Anthropic docs).
-            const isEmptyText =
-              type === 'text' &&
-              (!('text' in lastContent) || !lastContent.text);
-            if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
-              lastContent.cache_control = {
-                type: 'ephemeral',
-                ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
-              };
-            }
+          // Anchor on the last cacheable persisted block. A user turn that ends
+          // with an image or document (ACP image blocks, hosted attachments,
+          // embedded PDF resources) is itself cacheable, so it carries the
+          // breakpoint. Otherwise walk back to the nearest eligible block, and
+          // then to an earlier user message, rather than leaving the request
+          // with no message breakpoint at all (history would then be cached
+          // only through system+tools and rewritten on the next request).
+          let marked = false;
+          for (let j = anchorIndex; j >= 0 && !marked; j--) {
+            const block = content[j];
+            if (!isCacheableMessageBlock(block)) continue;
+            (block as { cache_control?: unknown }).cache_control = {
+              type: 'ephemeral',
+              ...(cacheRetention === '1h' ? { ttl: '1h' as const } : {}),
+            };
+            marked = true;
           }
-          msg.content = content;
+          if (marked) {
+            msg.content = content;
+            break;
+          }
+          volatileTailBlockCount = 0;
+          continue;
         }
         break;
       }
     }
   }
+}
+
+/**
+ * Message content blocks that may carry `cache_control`. Anthropic lists
+ * text, tool_result, image and document blocks in `messages.content` as
+ * cacheable; empty text blocks cannot be cached.
+ */
+function isCacheableMessageBlock(block: unknown): boolean {
+  if (typeof block !== 'object' || block === null || !('type' in block)) {
+    return false;
+  }
+  const type = (block as { type: string }).type;
+  if (type === 'text') {
+    const text = (block as { text?: unknown }).text;
+    return typeof text === 'string' && text.length > 0;
+  }
+  return type === 'tool_result' || type === 'image' || type === 'document';
 }
 
 /**
