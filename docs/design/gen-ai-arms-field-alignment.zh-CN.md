@@ -24,23 +24,25 @@ OpenTelemetry GenAI 约定仍处于 Development 状态。本变更锁定到提�
 
 `gen_ai.request.reasoning.level` 是一项范围有限、仅依据 OTel 的补充，来自上述锁定的 GenAI 注册表。它将 OpenAI 兼容请求中已有的推理强度暴露到遥测中，不引入私有别名或 ARMS 专属仪表盘映射。
 
+`gen_ai.request.top_k` 是一项范围有限、仅依据 OTel 的补充，来自上述锁定的 GenAI 注册表。它将 OpenAI 兼容、Anthropic 与 Gemini 请求中已有的安全整数 `top_k` 记录到遥测中，不引入私有别名或 ARMS 专属仪表盘映射。ARMS 基线将 `top_k` 定义为 float，因此不声称该 OTel `int` 值能填充 ARMS 仪表盘；类型差异仍未解决。
+
 ARMS 基线为 [LLM Trace 字段定义](https://help.aliyun.com/zh/arms/application-monitoring/developer-reference/llm-trace-field-definition-description)。
 升级任一基线都需要重新生成并审查此矩阵。
 
 ## 字段契约
 
-| Span     | 本阶段发出的标准属性                                                                                                                                                                                                                                       | 来源与省略规则                                                                                                                          |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| LLM      | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                                                                                                                          | 在创建 Span 时写入。会话 ID 使用现有 session ID。                                                                                       |
-| LLM 请求 | `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, `gen_ai.request.reasoning.level` | 从经过提供方适配后的首个最终 SDK 请求对象读取。无效或不可用的值省略；不推断 SDK 或服务端默认值。                                        |
-| LLM 流式 | `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`                                                                                                                                                                                             | 流式请求发出 `true`；非流式请求省略标准流式标记。收到首个归一化响应后，以秒为单位发出首块时间。                                         |
-| LLM 输入 | `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`                                                                                                                                                                           | 来自同一个首个最终请求的敏感紧凑 JSON。每个完整值在无效或超限时独立省略。                                                               |
-| LLM 响应 | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                                                                                                                            | 仅使用提供方响应数据。缺失响应模型时省略，不以请求模型替代。所有候选的结束原因按候选索引排序。                                          |
-| LLM 输出 | `gen_ai.output.type`, `gen_ai.output.messages`                                                                                                                                                                                                             | 对支持的 Gemini/Vertex 请求设置发出输出类型。敏感输出消息来自最后一次物理请求尝试，保留每个候选。                                       |
-| LLM 用量 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`                                                                                                              | 仅使用提供方报告的非负安全整数。保留显式零值。只报告总量时省略输入/输出用量，不作估算。                                                 |
-| 工具     | `gen_ai.operation.name=execute_tool`, 条件性的 `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.tool.description`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                             | Agent 名称复制自实际父 Agent。描述为静态元数据；敏感参数反映实际执行的调用，结果仅在成功时记录。                                        |
-| 主 Agent | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=qwen-code`, `gen_ai.conversation.id`, 可选的 `gen_ai.output.type=json`, 敏感的 `gen_ai.input.messages`, 敏感的 `gen_ai.output.messages`                                                           | 使用现有交互 Span。输入为一条原始用户提示的投影；输出为一条最终用户可见回答。省略请求模型、提供方、Agent ID/版本/描述、指令与聚合用量。 |
-| 子 Agent | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, 可选的 `gen_ai.request.model`                                                                                                             | 描述限制为 1024 个 UTF-16 代码单元。内部调用 ID 保持私有。                                                                              |
+| Span     | 本阶段发出的标准属性                                                                                                                                                                                                                                                               | 来源与省略规则                                                                                                                          |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| LLM      | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                                                                                                                                                  | 在创建 Span 时写入。会话 ID 使用现有 session ID。                                                                                       |
+| LLM 请求 | `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.top_k`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences`, `gen_ai.request.reasoning.level` | 从经过提供方适配后的首个最终 SDK 请求对象读取。无效或不可用的值省略；不推断 SDK 或服务端默认值。                                        |
+| LLM 流式 | `gen_ai.request.stream`, `gen_ai.response.time_to_first_chunk`                                                                                                                                                                                                                     | 流式请求发出 `true`；非流式请求省略标准流式标记。收到首个归一化响应后，以秒为单位发出首块时间。                                         |
+| LLM 输入 | `gen_ai.input.messages`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`                                                                                                                                                                                                   | 来自同一个首个最终请求的敏感紧凑 JSON。每个完整值在无效或超限时独立省略。                                                               |
+| LLM 响应 | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                                                                                                                                                    | 仅使用提供方响应数据。缺失响应模型时省略，不以请求模型替代。所有候选的结束原因按候选索引排序。                                          |
+| LLM 输出 | `gen_ai.output.type`, `gen_ai.output.messages`                                                                                                                                                                                                                                     | 对支持的 Gemini/Vertex 请求设置发出输出类型。敏感输出消息来自最后一次物理请求尝试，保留每个候选。                                       |
+| LLM 用量 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`                                                                                                                                      | 仅使用提供方报告的非负安全整数。保留显式零值。只报告总量时省略输入/输出用量，不作估算。                                                 |
+| 工具     | `gen_ai.operation.name=execute_tool`, 条件性的 `gen_ai.agent.name`, `gen_ai.tool.name`, `gen_ai.tool.description`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`                                                     | Agent 名称复制自实际父 Agent。描述为静态元数据；敏感参数反映实际执行的调用，结果仅在成功时记录。                                        |
+| 主 Agent | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name=qwen-code`, `gen_ai.conversation.id`, 可选的 `gen_ai.output.type=json`, 敏感的 `gen_ai.input.messages`, 敏感的 `gen_ai.output.messages`                                                                                   | 使用现有交互 Span。输入为一条原始用户提示的投影；输出为一条最终用户可见回答。省略请求模型、提供方、Agent ID/版本/描述、指令与聚合用量。 |
+| 子 Agent | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, 可选的 `gen_ai.request.model`                                                                                                                                     | 描述限制为 1024 个 UTF-16 代码单元。内部调用 ID 保持私有。                                                                              |
 
 没有精确标准对应项的私有属性继续保留以维持兼容性，下表明确移除的除外。与标准完全等价的私有别名和无效 GenAI 别名直接移除，不设双写过渡期：
 
@@ -93,6 +95,7 @@ Gemini 和 Vertex AI 请求使用 `generate_content`。
 | `gen_ai.request.max_tokens`        | `max_tokens`, `max_completion_tokens` 或 `max_new_tokens` | `max_tokens`     | `config.maxOutputTokens`  |
 | `gen_ai.request.temperature`       | `temperature`                                             | `temperature`    | `config.temperature`      |
 | `gen_ai.request.top_p`             | `top_p`                                                   | `top_p`          | `config.topP`             |
+| `gen_ai.request.top_k`             | `top_k`                                                   | `top_k`          | `config.topK`             |
 | `gen_ai.request.frequency_penalty` | `frequency_penalty`                                       | 当前不发送       | `config.frequencyPenalty` |
 | `gen_ai.request.presence_penalty`  | `presence_penalty`                                        | 当前不发送       | `config.presencePenalty`  |
 | `gen_ai.request.stop_sequences`    | `stop`                                                    | `stop_sequences` | `config.stopSequences`    |
@@ -103,6 +106,8 @@ Gemini 和 Vertex AI 请求使用 `generate_content`。
 当多个 OpenAI 兼容输出预算别名同时存在时，仅在所有出现的值均为有效安全整数且相等时发出标准最大值。存在冲突时省略，因为各兼容端点没有共同的优先级规则。
 
 推理强度精确保留请求自身 `reasoning_effort` 属性中的非空字符串，包括提供方特有档位，以及实际发送时的 `none`。缺失、空字符串、非字符串和继承的属性值均省略。不从设置恢复被提供方适配器移除的值，也不映射提供方特有的嵌套推理对象。此非敏感请求参数沿用现有首个请求观察器和通用 Span 导出器，独立于敏感内容采集开关。实现与回归测试位于 `packages/core/src/telemetry/gen-ai-request.ts` 及其同目录测试文件；开发者遥测指南列出导出的属性。验证时对比捕获的请求和导出的 LLM Span，检查省略规则及首个请求的保留行为，不改变提供方或重试行为。
+
+Top-k 记录请求自身属性中的安全整数 `top_k`（OpenAI 兼容与 Anthropic）或 `config.topK`（Gemini 与 Vertex AI）。非整数、非安全整数、缺失和继承的值均省略；保留显式零值。这是一项仅依据 OTel 的补充：ARMS 基线将 `top_k` 定义为 float，因此不声称存在 ARMS 仪表盘映射，类型差异仍未解决。实现与回归测试位于 `packages/core/src/telemetry/gen-ai-request.ts` 及其同目录测试文件；开发者遥测指南列出导出的属性。
 
 ## 内容与工具载荷
 
@@ -148,7 +153,8 @@ Qwen Code 不注入此厂商专用 Resource 属性或 `gen_ai.span.kind`。ARMS 
 
 ## 延后工作
 
-- `seed` 和 `top_k` 在基线中的 ARMS 与 GenAI 类型不兼容。
+- `seed` 在基线中的 ARMS 与 GenAI 类型不兼容。
+- `top_k` 已按 OTel 侧以 `int` 记录，但 ARMS 基线仍将其定义为 `float`；ARMS 接收端是否接受该整数值尚未确定。
 - Embedding 在追踪前需要正确的请求模型生命周期。
 - ARMS 首 token 时间与 OpenTelemetry 首块时间的名称、单位和含义不同。Qwen Code 同时发出标准 `gen_ai.response.time_to_first_chunk` 和私有 `ttft_ms`，不保证自动填充 ARMS 首 token 仪表盘。
 - 完整 GenAI Span 命名、CLIENT Span 类型和逻辑重试拓扑属于独立的合规工作。

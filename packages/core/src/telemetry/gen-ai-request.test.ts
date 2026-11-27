@@ -44,6 +44,7 @@ describe('GenAI request attribute extraction', () => {
         max_completion_tokens: 512,
         temperature: 0,
         top_p: 0.9,
+        top_k: 20,
         frequency_penalty: -0.25,
         presence_penalty: 0.5,
         stop: 'done',
@@ -54,6 +55,7 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.max_tokens': 512,
       'gen_ai.request.temperature': 0,
       'gen_ai.request.top_p': 0.9,
+      'gen_ai.request.top_k': 20,
       'gen_ai.request.frequency_penalty': -0.25,
       'gen_ai.request.presence_penalty': 0.5,
       'gen_ai.request.stop_sequences': ['done'],
@@ -99,6 +101,7 @@ describe('GenAI request attribute extraction', () => {
       extractOpenAiRequestAttributes({
         temperature: Number.NaN,
         top_p: Number.POSITIVE_INFINITY,
+        top_k: '20',
         frequency_penalty: '0.1',
         presence_penalty: null,
         max_tokens: undefined,
@@ -106,11 +109,40 @@ describe('GenAI request attribute extraction', () => {
     ).toEqual({});
   });
 
+  it('omits non-integer and unsafe top_k values but keeps explicit zero', () => {
+    expect(extractOpenAiRequestAttributes({ top_k: 20.5 })).toEqual({});
+    expect(extractAnthropicRequestAttributes({ top_k: 20.5 })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: { topK: 20.5 } })).toEqual({});
+    expect(
+      extractOpenAiRequestAttributes({ top_k: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toEqual({});
+    expect(
+      extractAnthropicRequestAttributes({
+        top_k: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toEqual({});
+    expect(
+      extractLlmRequestAttributes({
+        config: { topK: Number.MAX_SAFE_INTEGER + 1 },
+      }),
+    ).toEqual({});
+    expect(extractOpenAiRequestAttributes({ top_k: 0 })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+    expect(extractAnthropicRequestAttributes({ top_k: 0 })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+    expect(extractLlmRequestAttributes({ config: { topK: 0 } })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+  });
+
   it('requires own properties', () => {
     const request = Object.create({
       n: 2,
       max_tokens: 50,
       temperature: 0.2,
+      top_k: 7,
       stop: ['inherited'],
       reasoning_effort: 'high',
     }) as Record<string, unknown>;
@@ -169,6 +201,7 @@ describe('GenAI request attribute extraction', () => {
         max_tokens: 0,
         temperature: -0.1,
         top_p: 1,
+        top_k: 5,
         stop_sequences: ['done'],
         frequency_penalty: 0.2,
         presence_penalty: 0.3,
@@ -177,6 +210,7 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.max_tokens': 0,
       'gen_ai.request.temperature': -0.1,
       'gen_ai.request.top_p': 1,
+      'gen_ai.request.top_k': 5,
       'gen_ai.request.stop_sequences': ['done'],
     });
   });
@@ -190,6 +224,7 @@ describe('GenAI request attribute extraction', () => {
           maxOutputTokens: -1,
           temperature: 1,
           topP: 0.95,
+          topK: 64,
           frequencyPenalty: 0,
           presencePenalty: -0.2,
           stopSequences: [],
@@ -200,6 +235,7 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.max_tokens': -1,
       'gen_ai.request.temperature': 1,
       'gen_ai.request.top_p': 0.95,
+      'gen_ai.request.top_k': 64,
       'gen_ai.request.frequency_penalty': 0,
       'gen_ai.request.presence_penalty': -0.2,
       'gen_ai.request.stop_sequences': [],
