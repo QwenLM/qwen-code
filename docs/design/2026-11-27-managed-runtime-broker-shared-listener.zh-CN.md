@@ -18,6 +18,8 @@ Anthropic 的自托管 Managed Agents 有类似的监听方式，Worker 和应�
 
 当 `qwen.managed-agent.runtime-broker.enabled=true` 时，由 `ManagedAgentWebConfiguration` 注册 Broker 路由。同一次交付移除 Broker 的 JDK 监听器、专用监听配置和端口分配。
 
+保留现有 Broker 启用语义。该属性为 false 时，服务端既不创建 Broker 服务，也不注册其路由；Hosted Harness 在没有 Broker URL 和 token 时，继续支持现有的纯文本会话模式。不新增监听器选择或迁移开关：启用 Broker 即直接使用 Spring 实现，不提供 JDK 监听器回退。
+
 独立 MA 配有内部连接器时使用该连接器。`qwen serve --managed` 复用已有的 Java 回环端口。独立 MA 的主监听器绑定非回环地址且启用 Broker 时，使用独立的 MA 内部连接器。远端 Harness 走部署提供的 TLS 内部入口。
 
 用 Spring 实际用于路由的路径和请求到达的监听器约束路由归属。解析请求体前按原协议校验 Broker Bearer token，沿用恒定时间比较和 Broker 错误响应。业务 API 签名、Session Store 写入凭据和 Broker 凭据各有独立授权范围。路由准入后，沿用 Broker 原有路径解析和资源检查。独立 MA 的公共入口与本地 CLI 前置入口排除该路由。
@@ -39,3 +41,4 @@ Anthropic 的自托管 Managed Agents 有类似的监听方式，Worker 和应�
 3. 用打包版 Hosted Harness 连接 Spring。验证工具执行、取消或响应丢失后的结果回读，以及重启后续用原会话。确认 Broker 和 Session Store 只在 MA 监听器上服务，Broker 专用端口已移除。
 4. 对 Broker 施加请求压力，同时调用 MA API 和 Session Store。验证有界准入、其他请求仍能推进以及正常关闭。
 5. 验证预检、本地启动和 reload 减少一个端口。分别记录真实进程、MySQL 和协议夹具的结果。
+6. 在 Broker 停用时，启动独立服务端和不带 Broker URL 或 token 的真实 Hosted Harness。验证不会创建 Broker 服务或路由，且现有纯文本会话流程仍然可用。

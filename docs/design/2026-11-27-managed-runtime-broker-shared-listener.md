@@ -18,6 +18,8 @@ Anthropic documents a comparable listener arrangement for its self-hosted Manage
 
 Register the Broker routes from `ManagedAgentWebConfiguration` when `qwen.managed-agent.runtime-broker.enabled=true`. Remove the Broker's JDK listener, listener-specific settings, and independent port reservation in the same delivery.
 
+Keep the existing Broker enablement semantics. When the property is false, the server creates neither the Broker service nor its routes, and Hosted Harness retains its current pure-text session mode without a Broker URL or token. Do not add a listener-selection or migration switch: enabling the Broker selects the Spring implementation directly, with no JDK-listener fallback.
+
 The standalone server uses its existing internal connector when configured. `qwen serve --managed` uses its existing Java loopback port. A standalone main connector bound beyond loopback requires a separate Managed Agent internal connector when the Broker is enabled. Remote Harness calls use the deployment's TLS-protected internal ingress.
 
 Use Spring's routed path and the actual listener to enforce route ownership. Require the existing Broker Bearer token before parsing the request body, with the same constant-time check and Broker error envelope. Public API signatures, Session Store writer credentials, and Broker credentials have separate authorization scopes. Use the Broker's current path parsing and resource checks after route admission. The standalone public ingress and the local CLI front door exclude this prefix.
@@ -39,3 +41,4 @@ Set the internal MA origin once in the launcher or deployment template. Use it f
 3. Run a packaged Hosted Harness against Spring. Verify tool execution, cancellation or readback after a lost response, and reopening the original session after restart. Confirm only the MA listener serves Broker and Session Store, with no independent Broker listener.
 4. Apply Broker request pressure while exercising MA API and Session Store traffic. Verify bounded admission, that those calls continue to make progress, and that shutdown completes cleanly.
 5. Verify preflight and local startup and reload with one fewer port. Record real process and MySQL results separately from protocol fixtures.
+6. With the Broker disabled, start the standalone server and a real Hosted Harness without a Broker URL or token. Verify that no Broker service or routes are created and that the existing pure-text session flow still works.
