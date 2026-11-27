@@ -67,7 +67,7 @@ describe('TypeScript SDK release workflow', () => {
     expect(step.env.GITHUB_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
-  it('only fans release-published consumers out to CLI tags', () => {
+  it('keeps sdk-typescript tags out of the release-published consumers', () => {
     // A GITHUB_TOKEN-created release emits no workflow-triggering event, so
     // the SDK release never reached `on: release: published`. With CI_BOT_PAT
     // it does, and `sdk-typescript-*` tags must stay invisible to the CLI
