@@ -14,9 +14,12 @@ import {
   rebuildProjectMemoryIndexLocked,
   recoverProjectMemoryIndex,
 } from './indexer.js';
-import { withProjectMemoryCommit } from './project-commit.js';
 import {
-  AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
+  readProjectMemoryCursorLocked,
+  withProjectMemoryCommit,
+  writeProjectMemoryCursorLocked,
+} from './project-commit.js';
+import {
   AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_METADATA_FILENAME,
   getAutoMemoryRoot,
@@ -85,38 +88,33 @@ export async function ensureAutoMemoryScaffold(
   owner?: ProjectMemoryOwner,
 ): Promise<void> {
   const root = getAutoMemoryRoot(projectRoot, owner);
-  const stateDir = path.dirname(root);
   await withProjectMemoryCommit(
     root,
     async () => {
       await fs.mkdir(root, { recursive: true });
-      for (const [filePath, state] of [
-        [
-          path.join(stateDir, AUTO_MEMORY_METADATA_FILENAME),
-          createDefaultAutoMemoryMetadata(now),
-        ],
-        [
-          path.join(stateDir, AUTO_MEMORY_EXTRACT_CURSOR_FILENAME),
-          createDefaultAutoMemoryExtractCursor(now),
-        ],
-      ] as const) {
-        try {
-          if (!(await fs.lstat(filePath)).isFile()) {
-            throw new Error(
-              `Project memory state requires a regular file: ${filePath}`,
-            );
-          }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-          await atomicWriteFile(
-            filePath,
-            `${JSON.stringify(state, null, 2)}\n`,
-            {
-              encoding: 'utf-8',
-              noFollow: true,
-            },
+      const metadataFile = path.join(
+        path.dirname(root),
+        AUTO_MEMORY_METADATA_FILENAME,
+      );
+      try {
+        if (!(await fs.lstat(metadataFile)).isFile()) {
+          throw new Error(
+            `Project memory state requires a regular file: ${metadataFile}`,
           );
         }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await atomicWriteFile(
+          metadataFile,
+          `${JSON.stringify(createDefaultAutoMemoryMetadata(now), null, 2)}\n`,
+          { encoding: 'utf-8', noFollow: true },
+        );
+      }
+      if (!(await readProjectMemoryCursorLocked(root, owner))) {
+        await writeProjectMemoryCursorLocked(
+          root,
+          createDefaultAutoMemoryExtractCursor(now),
+        );
       }
       const indexExists = await fs
         .lstat(path.join(root, AUTO_MEMORY_INDEX_FILENAME))
@@ -127,7 +125,14 @@ export async function ensureAutoMemoryScaffold(
             return false;
           },
         );
-      if (!indexExists) await rebuildProjectMemoryIndexLocked(root, owner);
+      if (!indexExists) {
+        await rebuildProjectMemoryIndexLocked(root, owner).catch((error) => {
+          debugLogger.warn(
+            'Failed to bootstrap the project memory index:',
+            error,
+          );
+        });
+      }
     },
     owner,
   );

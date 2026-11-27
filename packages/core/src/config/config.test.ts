@@ -9353,11 +9353,9 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
       new Error('read failed'),
     );
-    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
-      'read failed',
-    );
+    await config.refreshHierarchicalMemory();
     expect(config.getAutoMemoryPrompt()).toBe(policy);
-    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
 
     vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
     await config.refreshHierarchicalMemory();

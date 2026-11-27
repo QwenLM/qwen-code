@@ -365,6 +365,25 @@ describe('remember memory helper', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'remembers a project topic without reading a symlinked index',
+    async () => {
+      const outside = path.join(tempDir, 'outside.md');
+      await fs.writeFile(outside, 'UNTRUSTED_PROJECT_INDEX');
+      await fs.mkdir(path.dirname(projMem('MEMORY.md')), { recursive: true });
+      await fs.symlink(outside, projMem('MEMORY.md'));
+      agentWrites([projMem('project', 'lesson.md')], 'Saved.');
+
+      await expect(runTargeted('project')).resolves.toMatchObject({
+        touchedScopes: ['project'],
+      });
+      expect(runForkedAgent).toHaveBeenCalledOnce();
+      expect(forkParams().systemPrompt).not.toContain(
+        'UNTRUSTED_PROJECT_INDEX',
+      );
+    },
+  );
+
   it('inlines the existing user index into an explicit user-targeted remember', async () => {
     // Same invariant as the project case above, on the sole-tier render: the
     // fork gets no request-tail catalog, so this inline index is its only view

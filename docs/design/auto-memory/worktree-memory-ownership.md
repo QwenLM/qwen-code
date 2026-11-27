@@ -36,6 +36,10 @@ under the lock. Record an index rebuild marker on disk before mutating any
 topic and clear it only after the generated index is successfully published.
 Attempt one repair per dirty-index read. The runtime generates project
 `MEMORY.md` from topics and rejects attempts to edit the generated file.
+If repair fails, reads can still use the last published trusted index.
+Startup and Remember omit a project index that fails the trust checks.
+An unavailable topic keeps the rebuild pending and prevents publication of a
+partial index.
 Dream may hold its separate consolidation lock outside a commit. Legacy
 manual `/dream` runs as a regular conversation turn. Model calls and approval
 waits run outside the commit lock.
@@ -47,6 +51,10 @@ session offsets and preserve an existing single-session offset on upgrade.
 Merge cursor and metadata updates under the commit lock, retaining pending
 index repair and monotonic update times. Use the same version check for
 ordinary writes, forget, Dream deletions, metadata upgrades and migration.
+During cursor recovery, preserve the original file alongside the replacement
+and write the pending marker under the commit lock. Reset invalid offsets to
+zero and preserve valid session progress. A regular cursor owned by the
+current user can also be recovered if its owner read bit was removed.
 
 The generated index and standard prompt budget are 200 lines and 25,000
 UTF-16 code units. When the active context window is below 128K, limit the

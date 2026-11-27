@@ -45,6 +45,7 @@ import {
 import {
   markProjectMemoryIndexPendingLocked,
   readProjectMemoryCursor,
+  readProjectMemoryCursorLocked,
   withProjectMemoryCommit,
   writeProjectMemoryCursorLocked,
 } from './project-commit.js';
@@ -428,7 +429,7 @@ export async function rebuildProjectMemoryIndexLocked(
   root: string,
   owner?: ProjectMemoryOwner,
 ): Promise<string> {
-  const cursor = await readProjectMemoryCursor(root, owner);
+  const cursor = await readProjectMemoryCursorLocked(root, owner);
   let content: string;
   try {
     await fs.mkdir(root, { recursive: true });

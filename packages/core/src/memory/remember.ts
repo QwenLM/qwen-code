@@ -36,6 +36,7 @@ import {
 import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
+  UnreadableProjectMemoryTopicError,
 } from './structured-scan.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
@@ -131,7 +132,10 @@ async function buildCleanMemorySystemPrompt(
     };
   }
   const [projectIndex, projectDocs, userDocs] = await Promise.all([
-    readAutoMemoryIndex(projectRoot, owner),
+    readAutoMemoryIndex(projectRoot, owner).catch((error) => {
+      debugLogger.warn('Project memory index read failed:', error);
+      return null;
+    }),
     // The vocabulary is advisory prompt context on the project side too:
     // an unreadable project memory root must not fail the run either.
     scanAutoMemoryTopicDocuments(projectRoot, owner).catch((error) => {
@@ -365,7 +369,16 @@ export async function runManagedRememberByAgent(params: {
   const rebuildWrittenScopes = () =>
     Promise.all([
       writtenScopes.includes('project')
-        ? rebuildManagedAutoMemoryIndex(params.projectRoot, owner)
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot, owner).catch(
+            (error: unknown) => {
+              if (!(error instanceof UnreadableProjectMemoryTopicError))
+                throw error;
+              debugLogger.warn(
+                'Project memory saved, but the catalog is incomplete:',
+                error,
+              );
+            },
+          )
         : Promise.resolve(),
       writtenScopes.includes('user')
         ? params.scope === 'user'

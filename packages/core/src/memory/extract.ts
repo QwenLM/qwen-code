@@ -23,11 +23,13 @@ import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   readProjectMemoryCursor,
+  readProjectMemoryCursorLocked,
   updateProjectMemoryMetadata,
   withProjectMemoryCommit,
   writeProjectMemoryCursorLocked,
 } from './project-commit.js';
 import { type AutoMemoryExtractCursor, type AutoMemoryType } from './types.js';
+import { UnreadableProjectMemoryTopicError } from './structured-scan.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
@@ -81,7 +83,7 @@ async function writeExtractCursor(
   await withProjectMemoryCommit(
     root,
     async () => {
-      const latest = (await readProjectMemoryCursor(root, owner)) ?? {
+      const latest = (await readProjectMemoryCursorLocked(root, owner)) ?? {
         updatedAt: cursor.updatedAt,
       };
       const sessions = new Map(Object.entries(latest.sessions ?? {}));
@@ -197,7 +199,7 @@ export async function runAutoMemoryExtract(
       updatedAt: now.toISOString(),
     };
   if (projectIndexRebuildPending) {
-    await withProjectMemoryCommit(
+    const repaired = await withProjectMemoryCommit(
       memoryRoot,
       async () => {
         if (
@@ -206,12 +208,18 @@ export async function runAutoMemoryExtract(
         ) {
           await rebuildProjectMemoryIndexLocked(memoryRoot, owner);
         }
+        return true;
       },
       owner,
-    );
-    await refreshMemoryInstruction(config, {
-      logContext: 'managed auto-memory index repair',
+    ).catch((error) => {
+      debugLogger.warn('Failed to repair the project memory index:', error);
+      return false;
     });
+    if (repaired) {
+      await refreshMemoryInstruction(config, {
+        logContext: 'managed auto-memory index repair',
+      });
+    }
   }
   const rawOffset =
     currentCursor.sessions?.[params.sessionId]?.processedOffset ??
@@ -279,7 +287,12 @@ export async function runAutoMemoryExtract(
     ]);
 
     if (projectResult.status === 'rejected') {
-      if (!failure) throw projectResult.reason;
+      if (
+        !failure &&
+        !(projectResult.reason instanceof UnreadableProjectMemoryTopicError)
+      ) {
+        throw projectResult.reason;
+      }
       debugLogger.warn(
         `Auto-memory project index repair failed: ${projectResult.reason}`,
       );

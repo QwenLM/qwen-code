@@ -181,7 +181,7 @@ it('repairs a topic write when the generated index could not be published', asyn
   );
 });
 
-it('reads the published index when the project memory cursor is malformed', async () => {
+it('recovers project topic writes and preserves a malformed cursor for inspection', async () => {
   await commitProjectMemoryWrite(
     memory,
     path.join(memory, 'kept.md'),
@@ -194,9 +194,83 @@ it('reads the published index when the project memory cursor is malformed', asyn
   const cursor = getAutoMemoryExtractCursorPath(project);
   await fs.writeFile(cursor, '{ invalid JSON');
 
-  await expect(readAutoMemoryIndex(project)).resolves.toBe(published);
-  await expect(fs.readFile(cursor, 'utf-8')).resolves.toBe('{ invalid JSON');
+  const newFile = path.join(memory, 'new.md');
+  await expect(
+    commitProjectMemoryWrite(memory, newFile, null, topic('new')),
+  ).resolves.toBeUndefined();
+  await expect(fs.readFile(newFile, 'utf-8')).resolves.toBe(topic('new'));
+  expect(await readAutoMemoryIndex(project)).toContain('[kept](kept.md)');
+  expect(await readAutoMemoryIndex(project)).toContain('[new](new.md)');
+  const backups = (await fs.readdir(path.dirname(cursor))).filter((name) =>
+    name.endsWith('.corrupted'),
+  );
+  expect(backups).toHaveLength(1);
+  await expect(
+    fs.readFile(path.join(path.dirname(cursor), backups[0]), 'utf-8'),
+  ).resolves.toBe('{ invalid JSON');
 });
+
+it.skipIf(!arePermissionBitsEnforced())(
+  'recovers a cursor whose owner read permission was removed',
+  async () => {
+    const cursor = getAutoMemoryExtractCursorPath(project);
+    await fs.chmod(cursor, 0o000);
+    await expect(fs.readFile(cursor)).rejects.toMatchObject({ code: 'EACCES' });
+    const file = path.join(memory, 'new.md');
+
+    await commitProjectMemoryWrite(memory, file, null, topic('new'));
+
+    await expect(fs.readFile(file, 'utf-8')).resolves.toBe(topic('new'));
+    await expect(readProjectMemoryCursor(memory)).resolves.not.toHaveProperty(
+      'projectIndexRebuildPending',
+    );
+  },
+);
+
+it.skipIf(!arePermissionBitsEnforced())(
+  'scaffolds a missing index with an unreadable topic and leaves repair pending',
+  async () => {
+    const index = path.join(memory, 'MEMORY.md');
+    const unseen = path.join(memory, 'unseen.md');
+    await fs.writeFile(unseen, topic('unseen'), { mode: 0o000 });
+    await fs.unlink(index);
+
+    await expect(ensureAutoMemoryScaffold(project)).resolves.toBeUndefined();
+    await expect(fs.access(index)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readProjectMemoryCursor(memory)).resolves.toMatchObject({
+      projectIndexRebuildPending: true,
+    });
+
+    await fs.chmod(unseen, 0o600);
+    await expect(readAutoMemoryIndex(project)).resolves.toContain(
+      '[unseen](unseen.md)',
+    );
+  },
+);
+
+it.skipIf(!arePermissionBitsEnforced())(
+  'keeps the published index and quarantined cursor when an incomplete scan prevents recovery',
+  async () => {
+    const topicPath = path.join(memory, 'kept.md');
+    await commitProjectMemoryWrite(memory, topicPath, null, topic('kept'));
+    const published = await readAutoMemoryIndex(project);
+    const cursor = getAutoMemoryExtractCursorPath(project);
+    await fs.writeFile(cursor, '{ invalid JSON');
+    await fs.chmod(topicPath, 0o000);
+
+    await expect(readAutoMemoryIndex(project)).resolves.toBe(published);
+    await expect(readProjectMemoryCursor(memory)).resolves.toMatchObject({
+      projectIndexRebuildPending: true,
+    });
+    const backups = (await fs.readdir(path.dirname(cursor))).filter((name) =>
+      name.endsWith('.corrupted'),
+    );
+    expect(backups).toHaveLength(1);
+    await expect(
+      fs.readFile(path.join(path.dirname(cursor), backups[0]), 'utf-8'),
+    ).resolves.toBe('{ invalid JSON');
+  },
+);
 
 it.skipIf(!arePermissionBitsEnforced())(
   'keeps the published index and retries repair after an unreadable topic becomes readable',
@@ -345,6 +419,15 @@ it.skipIf(process.platform === 'win32')(
     await expect(readProjectMemoryCursor(memory)).rejects.toMatchObject({
       code: 'ELOOP',
     });
+    await expect(
+      commitProjectMemoryWrite(
+        memory,
+        path.join(memory, 'untouched.md'),
+        null,
+        topic('untouched'),
+      ),
+    ).rejects.toMatchObject({ code: 'ELOOP' });
+    await expect(fs.readFile(outsideCursor, 'utf-8')).resolves.toBe('{}');
 
     const parent = path.dirname(memory);
     await fs.rm(parent, { recursive: true });

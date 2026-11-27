@@ -609,6 +609,8 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
   return { docs: returnedDocs, incompleteScopes };
 }
 
+export class UnreadableProjectMemoryTopicError extends Error {}
+
 async function scanAutoMemoryDocumentsFromRoot(
   root: string,
   opts: {
@@ -635,7 +637,7 @@ async function scanAutoMemoryDocumentsFromRoot(
       );
     }
     if (opts.requireComplete && incomplete.reason === 'file_read_failed') {
-      throw new Error(
+      throw new UnreadableProjectMemoryTopicError(
         `memory scan of ${root} is incomplete: a topic file could not be read`,
       );
     }

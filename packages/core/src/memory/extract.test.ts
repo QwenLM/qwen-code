@@ -10,9 +10,11 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
+  getAutoMemoryRoot,
 } from './paths.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
@@ -142,6 +144,56 @@ describe('auto-memory extraction', () => {
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
   });
+
+  it.each([
+    ['session', -1],
+    ['session', '2'],
+    ['session', 1.5],
+    ['legacy', -1],
+  ])(
+    'replays unprocessed history after an invalid %s offset (%s)',
+    async (scope, offset) => {
+      const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+      const updatedAt = new Date(0).toISOString();
+      const anotherSession = { processedOffset: 7, updatedAt };
+      await fs.writeFile(
+        cursorPath,
+        JSON.stringify({
+          updatedAt,
+          sessionId: 'session-1',
+          processedOffset: scope === 'legacy' ? offset : 2,
+          sessions: {
+            ...(scope === 'session' && {
+              'session-1': { processedOffset: offset, updatedAt },
+            }),
+            'other-session': anotherSession,
+          },
+        }),
+      );
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValueOnce({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [
+          { role: 'user', parts: [{ text: 'A durable correction.' }] },
+          { role: 'model', parts: [{ text: 'Understood.' }] },
+        ],
+      });
+
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+      expect(result.cursor.processedOffset).toBe(2);
+      expect(JSON.parse(await fs.readFile(cursorPath, 'utf-8'))).toMatchObject({
+        sessions: { 'other-session': anotherSession },
+      });
+    },
+  );
 
   it('preserves the legacy session offset when another session extracts first', async () => {
     const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
@@ -432,6 +484,47 @@ describe('auto-memory extraction', () => {
       await fs.mkdir(indexPath);
       return indexPath;
     }
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'advances extraction while an unreadable topic keeps a missing index pending',
+      async () => {
+        const root = getAutoMemoryRoot(projectRoot);
+        const unreadable = path.join(root, 'unreadable.md');
+        const lesson = path.join(root, 'lesson.md');
+        const index = getAutoMemoryIndexPath(projectRoot);
+        await fs.writeFile(unreadable, 'unreadable', { mode: 0o000 });
+        await fs.unlink(index);
+        vi.mocked(runAutoMemoryExtractionByAgent).mockImplementationOnce(
+          async () => {
+            await fs.writeFile(lesson, 'new lesson');
+            return {
+              touchedTopics: ['project'],
+              touchedProjectScope: true,
+              touchedUserScope: false,
+              hasToolActivity: true,
+            };
+          },
+        );
+
+        await expect(
+          runAutoMemoryExtract({
+            projectRoot,
+            sessionId: 'session-1',
+            config: mockConfig,
+            history: newHistory,
+          }),
+        ).resolves.toMatchObject({ touchedTopics: ['project'] });
+
+        await expect(fs.readFile(lesson, 'utf-8')).resolves.toBe('new lesson');
+        await expect(fs.access(index)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        expect(await readCursor()).toMatchObject({
+          processedOffset: 1,
+          projectIndexRebuildPending: true,
+        });
+      },
+    );
 
     it('keeps a rebuild failure recorded by another writer while advancing the cursor', async () => {
       const extraction =

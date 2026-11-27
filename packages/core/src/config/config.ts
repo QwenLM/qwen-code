@@ -5887,7 +5887,10 @@ export class Config {
       const owner = this.getProjectMemoryOwner();
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
-          readAutoMemoryIndexWithStats(projectRoot, owner),
+          readAutoMemoryIndexWithStats(projectRoot, owner).catch((error) => {
+            this.debugLogger.warn('Project memory index read failed', error);
+            return null;
+          }),
           readUserAutoMemoryIndexWithStats().catch(() => null),
         ]);
       this.recordAutoMemoryIndexRead(
