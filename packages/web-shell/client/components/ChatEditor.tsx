@@ -4615,8 +4615,17 @@ export const ChatEditor = memo(
                   data-web-shell-composer-stop
                   {...touchDownGuard}
                   aria-label={t('composerMobile.stop')}
+                  onKeyDown={(event) => {
+                    if (
+                      event.repeat &&
+                      (event.key === 'Enter' || event.key === ' ')
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (event.detail > 1) return;
                     onCancel?.();
                   }}
                 >
@@ -4624,7 +4633,6 @@ export const ChatEditor = memo(
                 </button>
               )}
             <button
-              key={stopAffordance ? 'stop' : 'send'}
               className={
                 submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${

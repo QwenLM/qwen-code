@@ -941,9 +941,13 @@ describe('ChatEditor simple composer', () => {
     expect(composerCoreState.submitText).toHaveBeenCalledOnce();
   });
 
-  it.each(['Enter', ' '])(
-    'does not cancel a submitted prompt on a repeated %j key activation',
-    (key) => {
+  it.each([
+    { key: 'Enter', shiftKey: false },
+    { key: 'Enter', shiftKey: true },
+    { key: ' ', shiftKey: false },
+  ])(
+    'preserves focus and ignores repeated $key with shiftKey=$shiftKey after submitting',
+    ({ key, shiftKey }) => {
       composerCoreState.hasContent = true;
       const onCancel = vi.fn();
       const props = { customization: simple, onCancel };
@@ -952,7 +956,23 @@ describe('ChatEditor simple composer', () => {
         '[data-web-shell-composer-submit]',
       )!;
       submit.focus();
-      act(() => submit.click());
+      const sendPress = new KeyboardEvent('keydown', {
+        key,
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        submit.dispatchEvent(sendPress);
+        if (key === ' ') {
+          submit.dispatchEvent(
+            new KeyboardEvent('keyup', { key, shiftKey, bubbles: true }),
+          );
+        }
+        // jsdom needs the native click modeled explicitly: Enter on keydown,
+        // Space on keyup, provided the keydown default was allowed.
+        if (!sendPress.defaultPrevented) submit.click();
+      });
       expect(composerCoreState.submitText).toHaveBeenCalledOnce();
 
       composerCoreState.hasContent = false;
@@ -960,33 +980,109 @@ describe('ChatEditor simple composer', () => {
       const stop = container.querySelector<HTMLButtonElement>(
         '[data-web-shell-composer-submit]',
       )!;
+      expect(stop).toBe(submit);
+      expect(document.activeElement).toBe(stop);
       const repeat = new KeyboardEvent('keydown', {
         key,
+        shiftKey,
         repeat: true,
         bubbles: true,
         cancelable: true,
       });
       act(() => {
         stop.dispatchEvent(repeat);
-        // jsdom does not synthesize a button's native keyboard click.
+        if (key === ' ') {
+          stop.dispatchEvent(
+            new KeyboardEvent('keyup', { key, shiftKey, bubbles: true }),
+          );
+        }
         if (!repeat.defaultPrevented) stop.click();
       });
       expect(onCancel).not.toHaveBeenCalled();
       expect(repeat.defaultPrevented).toBe(true);
-      expect(document.activeElement).not.toBe(stop);
-
-      stop.focus();
+      expect(document.activeElement).toBe(stop);
       const freshPress = new KeyboardEvent('keydown', {
         key,
+        shiftKey,
         bubbles: true,
         cancelable: true,
       });
       act(() => {
         stop.dispatchEvent(freshPress);
+        if (key === ' ') {
+          stop.dispatchEvent(
+            new KeyboardEvent('keyup', { key, shiftKey, bubbles: true }),
+          );
+        }
         if (!freshPress.defaultPrevented) stop.click();
       });
       expect(onCancel).toHaveBeenCalledOnce();
       expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+      composerCoreState.hasContent = true;
+      rerenderChatEditor(container, props);
+      expect(container.querySelector('[data-web-shell-composer-submit]')).toBe(
+        submit,
+      );
+      expect(document.activeElement).toBe(submit);
+    },
+  );
+
+  it.each([
+    { key: 'Enter', shiftKey: false },
+    { key: 'Enter', shiftKey: true },
+    { key: ' ', shiftKey: false },
+  ])(
+    'ignores repeated $key with shiftKey=$shiftKey on the separate stop button',
+    ({ key, shiftKey }) => {
+      composerCoreState.hasContent = true;
+      const onCancel = vi.fn();
+      const container = renderChatEditor({
+        customization: simple,
+        isRunning: true,
+        onCancel,
+      });
+      const stop = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-stop]',
+      )!;
+      stop.focus();
+      const repeat = new KeyboardEvent('keydown', {
+        key,
+        shiftKey,
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        stop.dispatchEvent(repeat);
+        if (key === ' ') {
+          stop.dispatchEvent(
+            new KeyboardEvent('keyup', { key, shiftKey, bubbles: true }),
+          );
+        }
+        if (!repeat.defaultPrevented) stop.click();
+      });
+      expect(onCancel).not.toHaveBeenCalled();
+      expect(repeat.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(stop);
+
+      const freshPress = new KeyboardEvent('keydown', {
+        key,
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        stop.dispatchEvent(freshPress);
+        if (key === ' ') {
+          stop.dispatchEvent(
+            new KeyboardEvent('keyup', { key, shiftKey, bubbles: true }),
+          );
+        }
+        if (!freshPress.defaultPrevented) stop.click();
+      });
+      expect(onCancel).toHaveBeenCalledOnce();
+      expect(composerCoreState.submitText).not.toHaveBeenCalled();
     },
   );
 
