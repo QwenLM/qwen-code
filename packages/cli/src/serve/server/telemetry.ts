@@ -93,6 +93,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/worktree-restore',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-restore',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/worktree-branch',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/worktree-branch',
@@ -234,6 +240,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mcp-app/tools/call',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/retirements/:operationId',
+  },
+  {
+    method: 'PUT',
+    path: '/session/:id/retirements/:operationId',
+    attribution: 'handler_resolved',
+    route: 'PUT /session/:id/retirements/:operationId',
   },
   {
     method: 'GET',

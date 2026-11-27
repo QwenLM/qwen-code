@@ -6,7 +6,7 @@ import type {
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
-import type { ManagedQuestionDraft } from './ManagedQuestionForm';
+import type { ManagedQuestionDraft } from './managed-question-response';
 import {
   canonicalQuestionAnswers,
   questionResponseKey,

@@ -836,6 +836,7 @@ export default {
   'Debug Keystroke Logging': '调试按键记录',
   'Language: UI': '语言：界面',
   'Language: Model': '语言：模型',
+  'Language: Display Translation': '语言：显示翻译',
   'Output Format': '输出格式',
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
@@ -854,7 +855,6 @@ export default {
   'Screen Reader Mode': '屏幕阅读器模式',
   'Max Session Turns': '最大会话轮次',
   'Skip Next Speaker Check': '跳过下一个说话者检查',
-  'Skip Loop Detection': '跳过循环检测',
   'Skip Startup Context': '跳过启动上下文',
   'Enable OpenAI Logging': '启用 OpenAI 日志',
   'OpenAI Logging Directory': 'OpenAI 日志目录',
@@ -1150,8 +1150,11 @@ export default {
   // ============================================================================
   'Manage Qwen Code hooks': '管理 Qwen Code Hook',
   'List all configured hooks': '列出所有已配置的 Hook',
+  'No hooks were loaded.': '未加载任何 Hook。',
+  'skipped (unsupported args)': '已跳过（不支持 args）',
   // Hooks - Dialog
   Hooks: 'Hook',
+  'A hook stopped the turn: {{reason}}': 'Hook 已结束本轮对话：{{reason}}',
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
@@ -2111,6 +2114,8 @@ export default {
     '对话太长？用 /compress 总结历史，释放上下文。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
+  'Save the context window for the current model.':
+    '保存当前模型的上下文窗口。',
 
   // ============================================================================
   // Exit Screen / Stats

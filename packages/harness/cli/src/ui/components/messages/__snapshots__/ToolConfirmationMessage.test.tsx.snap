@@ -1,0 +1,182 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolConfirmationMessage > height allocation and layout > should keep exec confirmation compact for large commands 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow "echo" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > height allocation and layout > should not pad edit confirmations to the available height 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────╮
+│  1 -const oldLine1 = true;                                                   │
+│  2 -const oldLine2 = true;                                                   │
+│  1 +const newLine1 = true;                                                   │
+│  2 +const newLine2 = true;                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Apply this change?
+
+ ❯ 1. Allow once
+   2. Allow for this session [session]
+   3. Modify with external editor
+   4. Reject and type something
+   5. No
+"
+`;
+
+exports[`ToolConfirmationMessage > persistent permission options > should show persistent option with settings path for exec type 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow "npm" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > should display urls if prompt and url are different 1`] = `
+"URLs to fetch:
+ - https://raw.githubusercontent.com/google/gemini-react/main/README.md
+Do you want to proceed?
+
+ ❯ 1. Allow once
+   2. Always allow "raw.githubusercontent.com" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > should not display urls if prompt and url are the same 1`] = `
+"Do you want to proceed?
+
+ ❯ 1. Allow once
+   2. Always allow "example.com" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > should not duplicate multiline shell scripts in the confirmation body 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow "echo" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > should render simplified prompt for compound commands without listing roots 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow this exact command for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > should strip BiDi characters from MCP tool and server names 1`] = `
+"Allow execution of MCP tool "testtool" from server "testserver"?
+
+ ❯ 1. Allow once
+   2. Always allow "Test Tool" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for edit confirmations' > should show per-tool options when folder is trusted 1`] = `
+"╭────────────────────────╮
+│                        │
+│  No changes detected.  │
+│                        │
+╰────────────────────────╯
+Apply this change?
+
+ ❯ 1. Allow once
+   2. Allow for this session [session]
+   3. Modify with external editor
+   4. Reject and type something
+   5. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for edit confirmations' > should show per-tool options when folder is untrusted 1`] = `
+"╭────────────────────────╮
+│                        │
+│  No changes detected.  │
+│                        │
+╰────────────────────────╯
+Apply this change?
+
+ ❯ 1. Allow once
+   2. Allow for this session [session]
+   3. Modify with external editor
+   4. Reject and type something
+   5. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for exec confirmations' > should show per-tool options when folder is trusted 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow "echo" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for exec confirmations' > should show per-tool options when folder is untrusted 1`] = `
+"Allow this command to run?
+
+ ❯ 1. Allow once
+   2. Always allow "echo" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for info confirmations' > should show per-tool options when folder is trusted 1`] = `
+"Do you want to proceed?
+
+ ❯ 1. Allow once
+   2. Always allow "example.com" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for info confirmations' > should show per-tool options when folder is untrusted 1`] = `
+"Do you want to proceed?
+
+ ❯ 1. Allow once
+   2. Always allow "example.com" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for mcp confirmations' > should show per-tool options when folder is trusted 1`] = `
+"Allow execution of MCP tool "test-tool" from server "test-server"?
+
+ ❯ 1. Allow once
+   2. Always allow "Test Tool" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;
+
+exports[`ToolConfirmationMessage > with folder trust > 'for mcp confirmations' > should show per-tool options when folder is untrusted 1`] = `
+"Allow execution of MCP tool "test-tool" from server "test-server"?
+
+ ❯ 1. Allow once
+   2. Always allow "Test Tool" for future sessions [local]
+   3. Reject and type something
+   4. No
+"
+`;

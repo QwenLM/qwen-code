@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import {
   expect,
   test,
@@ -1378,6 +1379,9 @@ for (const width of [1280, 375]) {
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 800 });
+    await page.addInitScript(() => {
+      localStorage.setItem('qwen-code-web-shell-theme', 'light');
+    });
     const scenario = createWebShellDaemonScenario({
       events: [
         {
@@ -1437,22 +1441,19 @@ for (const width of [1280, 375]) {
     });
     const trigger = panel.getByRole('button', { name: 'Approval options' });
     await expect(panel.locator('[data-option-id]')).toHaveCount(2);
-    await expect(reject).toHaveCSS('border-top-style', 'solid');
-    await expect(allow).toHaveCSS(
-      'background-color',
-      await trigger.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    );
-    expect(
-      await reject.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    ).not.toBe(
-      await allow.evaluate(
-        (element) => getComputedStyle(element).backgroundColor,
-      ),
-    );
+    // Reproduce the embedded cascade with preflight after the component CSS.
+    await page.addStyleTag({
+      path: fileURLToPath(new URL('../styles/preflight.css', import.meta.url)),
+    });
+    await expect(reject).toHaveCSS('border-top-width', '1px');
+    await expect(reject).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+    await expect(reject).toHaveCSS('padding', '6px 12px');
+    for (const button of [allow, trigger]) {
+      await expect(button).toHaveCSS('background-color', 'rgb(21, 21, 23)');
+      await expect(button).toHaveCSS('color', 'rgb(250, 250, 250)');
+    }
+    await expect(allow).toHaveCSS('padding', '6px 12px');
+    await expect(trigger).toHaveCSS('padding', '6px 8px');
     const rejectBox = (await reject.boundingBox())!;
     const allowBox = (await allow.boundingBox())!;
     const triggerBox = (await trigger.boundingBox())!;

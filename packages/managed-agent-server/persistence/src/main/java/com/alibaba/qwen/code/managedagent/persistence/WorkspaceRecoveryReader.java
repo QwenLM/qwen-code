@@ -3,9 +3,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -25,7 +28,7 @@ import static com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRe
 
 /** Original authority reads without acquiring, renewing or quarantining anything. */
 final class WorkspaceRecoveryReader {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
@@ -82,16 +85,14 @@ final class WorkspaceRecoveryReader {
     JsonNode resource(JsonNode source, JsonNode ref) {
         validateRef(ref);
         JsonNode head = head(source);
-        String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
-        String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND tenant_id = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
-                resourceKey, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
+                text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
         byte[] bytes;
         if (!rows.isEmpty()) {
             check(rows.size() == 1, "resource_scope_conflict");
             var row = rows.getFirst();
-            check(row.get("deletion_operation_key") == null, "source_drift");
+            check(row.get("deletion_operation_ref") == null, "source_drift");
             check(text(ref, "kind").equals(row.get("kind")) && ref.path("schemaVersion").asInt() == number(row, "schema_version")
                     && ref.path("byteLength").asLong() == number(row, "byte_length")
                     && text(ref, "digest").equals(row.get("sha256")), "resource_reference_conflict");
@@ -120,10 +121,10 @@ final class WorkspaceRecoveryReader {
                         && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
                         "resource_layout_unsupported");
                 bytes = (byte[]) row.get("inline_bytes");
-                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
-                        + " WHERE resource_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
+                var references = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
+                        + " WHERE owner_kind IN ('JOURNAL','SESSION_RECORD')"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND resource_id = ?"
-                        + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey,
+                        + " AND journal_revision <= ? LIMIT 1", String.class,
                         text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || !references.isEmpty(), "resource_out_of_cut");
                 if (bytes == null) {
@@ -132,10 +133,10 @@ final class WorkspaceRecoveryReader {
                     // transaction; that marker is the positive evidence separating a
                     // collected row from an unexplained byte loss, which stays fail-closed.
                     Long collected = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource"
-                                    + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ? AND capture_state = 'COLLECTED'",
-                            Long.class, resourceKey, scope(head), text(ref, "resourceId"));
+                                    + " WHERE scope_ref = ? AND resource_id = ? AND capture_state = 'COLLECTED'",
+                            Long.class, scope(head), text(ref, "resourceId"));
                     check(collected != null && collected > 0, "resource_corrupt");
-                    throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("resource_collected");
+                    throw WorkspaceRecoveryProtocol.failure("resource_collected");
                 }
             } else if ("OSS_OBJECT".equals(row.get("storage_kind"))) {
                 check(("PUBLISHED".equals(row.get("state")) || "REFERENCED".equals(row.get("state")))
@@ -163,8 +164,7 @@ final class WorkspaceRecoveryReader {
     private JsonNode publicationResource(JsonNode source, JsonNode ref) {
         JsonNode head = head(source);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id, slot_key FROM ma_resource"
-                + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ?",
-                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
+                + " WHERE scope_ref = ? AND resource_id = ?",
                 scope(head), text(ref, "resourceId"));
         check(rows.size() == 1, "resource_missing");
         var row = rows.getFirst();
@@ -179,11 +179,11 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         publication(source, publicationId);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns("r") + ", r.kind AS resource_kind, r.capture_state AS state, CASE WHEN r.inline_bytes IS NULL THEN r.capture_object_key ELSE NULL END AS object_key"
-                + " FROM ma_resource r WHERE scope_key = ?"
+                + " FROM ma_resource r WHERE scope_ref = ?"
                 + " AND publication_id = ? AND slot_key = ?", scope(head), publicationId, slot);
         check(rows.size() == 1, "publication_object_missing");
         var row = rows.getFirst();
-        check(row.get("deletion_operation_key") == null, "source_drift");
+        check(row.get("deletion_operation_ref") == null, "source_drift");
         // A COLLECTED object is the publication collector's positive freed-marker, so the
         // byte loss is permanent: name the terminal resource_collected rather than
         // publication_object_unverified, which never moves the capture out of CAPTURING.
@@ -201,7 +201,7 @@ final class WorkspaceRecoveryReader {
             try (InputStream input = objects.open(key)) {
                 bytes = input.readNBytes((int) length + 1);
             } catch (IOException error) {
-                throw com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.failure("publication_object_io_failed");
+                throw WorkspaceRecoveryProtocol.failure("publication_object_io_failed");
             }
         }
         verifyBytes(bytes, length, (String) row.get("sha256"));
@@ -216,7 +216,7 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         JsonNode expected = request.path("outcomeRef");
         validateRef(expected);
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id FROM ma_output_capture WHERE scope_ref = ?"
                 + " AND admission_resource_id = ?", scope(head), text(expected, "resourceId"));
         check(rows.size() == 1, "publication_receipt_missing");
         String publicationId = (String) rows.getFirst().get("publication_id");
@@ -267,10 +267,12 @@ final class WorkspaceRecoveryReader {
         }
         terminalRef.set("kind", terminal.path("kind"));
         var seals = result.putArray("seals");
-        Object manifestKey = publication.get("seal_manifest_resource_key");
-        if (manifestKey != null) {
+        Object manifestRef = publication.get("seal_manifest_resource_ref");
+        if (manifestRef != null) {
+            List<String> manifestIdentity = ManagedIdentityRef.decode(((String) manifestRef).getBytes(StandardCharsets.UTF_8));
             var manifests = WorkspaceOperations.rows(jdbc, "SELECT kind, capture_state, inline_bytes, byte_length, sha256"
-                    + " FROM ma_resource WHERE resource_key = ?", manifestKey);
+                    + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    manifestIdentity.get(0), manifestIdentity.get(1), manifestIdentity.get(2));
             check(manifests.size() == 1, "publication_seal_missing");
             var manifest = manifests.getFirst();
             byte[] bytes = (byte[]) manifest.get("inline_bytes");
@@ -278,7 +280,7 @@ final class WorkspaceRecoveryReader {
                     && "VERIFIED".equals(manifest.get("capture_state"))
                     && publication.get("seal_manifest_sha256").equals(manifest.get("sha256")), "publication_seal_unverified");
             verifyBytes(bytes, number(manifest, "byte_length"), (String) manifest.get("sha256"));
-            JsonNode document = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(bytes);
+            JsonNode document = WorkspaceRecoveryProtocol.parse(bytes);
             check(document.path("schemaVersion").asInt() == 1 && document.path("seals").isArray()
                     && document.path("seals").size() <= 2, "publication_seal_invalid");
             for (JsonNode seal : document.path("seals")) {
@@ -318,7 +320,7 @@ final class WorkspaceRecoveryReader {
 
     private Map<String, Object> publication(JsonNode source, String publication) {
         JsonNode head = head(source);
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture WHERE scope_ref = ? AND publication_id = ?"
                 + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?", scope(head), publication,
                 text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"));
         check(rows.size() == 1, "publication_scope_conflict");
@@ -356,8 +358,7 @@ final class WorkspaceRecoveryReader {
     }
 
     private static String scope(JsonNode head) {
-        return hash(JSON.createArrayNode().add(text(head, "tenantId")).add(text(head, "workspaceId"))
-                .add(text(head, "sessionId")).toString());
+        return ManagedIdentityRefs.publicationScopeRef(text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"));
     }
 
     private static long number(Map<String, Object> row, String key) {

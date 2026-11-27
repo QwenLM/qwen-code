@@ -646,6 +646,8 @@ describe('REST integration documentation contract', () => {
       // qualified.
       let sdkClass: keyof typeof sdkMethodSets | undefined;
       const sdkCell = cells[sdkColumn] ?? '';
+      // A conditional route without a typed SDK method is available via HTTP.
+      if (sdkCell === 'Raw REST') continue;
       let sdkMatched = 0;
       for (const match of sdkCell.matchAll(sdkToken)) {
         const [, className, method] = match;
