@@ -89,9 +89,15 @@ const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
     byName: {},
   }),
 }));
+const { mockPersistSessionUsageOnClose } = vi.hoisted(() => ({
+  mockPersistSessionUsageOnClose: vi.fn(),
+}));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
   registerCleanup: mockRegisterCleanup,
+}));
+vi.mock('../utils/usage-persistence.js', () => ({
+  persistSessionUsageOnClose: mockPersistSessionUsageOnClose,
 }));
 vi.mock('../services/housekeeping/scheduler.js', () => ({
   startNonInteractiveOpenAILogHousekeeping:
@@ -7004,6 +7010,179 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
 
       await vi.waitFor(() => expect(expireQueued).toHaveBeenCalledWith(unread));
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('persists session live usage before removing session telemetry on close', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      const sessionConfigMock = await setupSessionMocks('hosted-usage-persist');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/session-specific-project');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({
+        cwd: '/tmp/session-specific-project',
+        mcpServers: [],
+      });
+
+      await agent.extMethod('qwen/control/session/close', {
+        sessionId: 'hosted-usage-persist',
+        requireFlush: false,
+      });
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(1);
+      const [persistedConfig, persistedId] =
+        mockPersistSessionUsageOnClose.mock.calls[0]!;
+      expect(persistedConfig).toBe(sessionConfigMock);
+      expect(persistedId).toBe('hosted-usage-persist');
+      expect((persistedConfig as Config).getProjectRoot()).toBe(
+        '/tmp/session-specific-project',
+      );
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-persist',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[0]!,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('persists and removes a rotated session id after /clear when closing the registry entry', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      const sessionConfigMock = await setupSessionMocks('hosted-usage-orig');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/rotated-session-project');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({
+        cwd: '/tmp/rotated-session-project',
+        mcpServers: [],
+      });
+      // Simulate /clear rotating Config's active session id while the registry
+      // entry stays keyed by the original id.
+      vi.mocked(sessionConfigMock.getSessionId).mockReturnValue(
+        'hosted-usage-rotated',
+      );
+
+      await agent.extMethod('qwen/control/session/close', {
+        sessionId: 'hosted-usage-orig',
+        requireFlush: false,
+      });
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(2);
+      expect(
+        mockPersistSessionUsageOnClose.mock.calls.map(([cfg, id]) => ({
+          sameConfig: cfg === sessionConfigMock,
+          project: (cfg as Config).getProjectRoot(),
+          id,
+        })),
+      ).toEqual([
+        {
+          sameConfig: true,
+          project: '/tmp/rotated-session-project',
+          id: 'hosted-usage-orig',
+        },
+        {
+          sameConfig: true,
+          project: '/tmp/rotated-session-project',
+          id: 'hosted-usage-rotated',
+        },
+      ]);
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-orig',
+      );
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-usage-rotated',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[1]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[1]!,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('sweeps and persists per-session live usage during disposeSessions when close throws on drain timeout', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      const sessionConfigMock = await setupSessionMocks('hosted-drain-timeout');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/drain-timeout-project');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({
+        cwd: '/tmp/drain-timeout-project',
+        mcpServers: [],
+      });
+      // Force closeStoredSession to reject before removeStoredSessionEntry runs.
+      vi.mocked(lastSessionMock!.waitForActiveTurnsToSettle).mockRejectedValue(
+        new Error('drain budget exceeded'),
+      );
+
+      await (
+        agent as unknown as { disposeSessions(): Promise<void> }
+      ).disposeSessions();
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(1);
+      const [persistedConfig, persistedId] =
+        mockPersistSessionUsageOnClose.mock.calls[0]!;
+      expect(persistedConfig).toBe(sessionConfigMock);
+      expect(persistedId).toBe('hosted-drain-timeout');
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-drain-timeout',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[0]!,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('completes disposeSessions without throwing when a staged session lacks getConfig', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      // Stage a partial session without getConfig (mirrors newSession staging
+      // or minimal mocks) alongside a real drain failure so the sweep executes.
+      const stagedWithoutConfig = {
+        waitForActiveTurnsToSettle: vi
+          .fn()
+          .mockRejectedValue(new Error('staged drain error')),
+      };
+      (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+        'staged-no-config',
+        stagedWithoutConfig,
+      );
+
+      await expect(
+        (
+          agent as unknown as { disposeSessions(): Promise<void> }
+        ).disposeSessions(),
+      ).resolves.toBeUndefined();
+      expect(mockPersistSessionUsageOnClose).not.toHaveBeenCalled();
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'staged-no-config',
+      );
       mockConnectionState.resolve();
       await agentPromise;
     });

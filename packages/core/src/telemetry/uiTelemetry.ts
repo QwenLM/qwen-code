@@ -512,6 +512,8 @@ export interface UiTelemetryReplaySnapshot {
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionLiveMetrics: SessionMetrics | undefined;
+  readonly sessionRunStartTime: Date | undefined;
   readonly sessionOutputBaseline: number | undefined;
   readonly sessionWasClosed: boolean;
   /**
@@ -526,6 +528,8 @@ export interface UiTelemetryReplaySnapshot {
   readonly outgoingSessionId?: string;
   /** Absent when the outgoing session had no bucket yet — restore removes it. */
   readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionLiveMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionRunStartTime?: Date | undefined;
   readonly outgoingSessionOutputBaseline?: number | undefined;
   readonly outgoingSessionWasClosed?: boolean;
   readonly lastPromptTokenCount: number;
@@ -537,6 +541,8 @@ export class UiTelemetryService extends EventEmitter {
   #metrics: SessionMetrics = createInitialMetrics();
   #liveMetrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
+  #sessionLiveMetrics: Map<string, SessionMetrics> = new Map();
+  #sessionRunStartTimes: Map<string, Date> = new Map();
   #sessionOutputBaselines: Map<string, number> = new Map();
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
@@ -562,6 +568,16 @@ export class UiTelemetryService extends EventEmitter {
     this.#record(event, sessionId, false);
   }
 
+  #getOrCreateSessionLiveMetrics(sessionId: string): SessionMetrics {
+    let liveBucket = this.#sessionLiveMetrics.get(sessionId);
+    if (!liveBucket) {
+      liveBucket = createInitialMetrics();
+      this.#sessionLiveMetrics.set(sessionId, liveBucket);
+      this.#sessionRunStartTimes.set(sessionId, new Date());
+    }
+    return liveBucket;
+  }
+
   #record(event: UiEvent, sessionId: string | undefined, live: boolean) {
     if (!this.#accumulateEvent(this.#metrics, event)) return;
     if (live) this.#accumulateEvent(this.#liveMetrics, event);
@@ -575,6 +591,12 @@ export class UiTelemetryService extends EventEmitter {
         event,
         sessionId,
       );
+      if (live) {
+        this.#accumulateEvent(
+          this.#getOrCreateSessionLiveMetrics(sessionId),
+          event,
+        );
+      }
     }
 
     this.emit('update', {
@@ -605,6 +627,19 @@ export class UiTelemetryService extends EventEmitter {
 
   getMetricsForSession(sessionId: string): SessionMetrics {
     return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+  }
+
+  /**
+   * Usage produced live for a single session in this process, excluding
+   * replayed or restored transcript history. Used by multi-session daemon/ACP
+   * teardown to persist only that session's own delta.
+   */
+  getLiveMetricsForSession(sessionId: string): SessionMetrics | undefined {
+    return this.#sessionLiveMetrics.get(sessionId);
+  }
+
+  getRunStartTimeForSession(sessionId: string): Date | undefined {
+    return this.#sessionRunStartTimes.get(sessionId);
   }
 
   /**
@@ -675,6 +710,11 @@ export class UiTelemetryService extends EventEmitter {
       }
       this.#accumulateSkillInvocation(
         this.#sessionMetrics.get(sessionId)!,
+        skillName,
+        success,
+      );
+      this.#accumulateSkillInvocation(
+        this.#getOrCreateSessionLiveMetrics(sessionId),
         skillName,
         success,
       );
@@ -751,8 +791,16 @@ export class UiTelemetryService extends EventEmitter {
         ? outgoingSessionId
         : undefined;
     const sessionMetrics = this.#sessionMetrics.get(sessionId);
+    const sessionLiveMetrics = this.#sessionLiveMetrics.get(sessionId);
+    const sessionRunStartTime = this.#sessionRunStartTimes.get(sessionId);
     const outgoingSessionMetrics = outgoing
       ? this.#sessionMetrics.get(outgoing)
+      : undefined;
+    const outgoingSessionLiveMetrics = outgoing
+      ? this.#sessionLiveMetrics.get(outgoing)
+      : undefined;
+    const outgoingSessionRunStartTime = outgoing
+      ? this.#sessionRunStartTimes.get(outgoing)
       : undefined;
     return {
       metrics: cloneSessionMetrics(this.#metrics),
@@ -763,11 +811,23 @@ export class UiTelemetryService extends EventEmitter {
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
         : undefined,
+      sessionLiveMetrics: sessionLiveMetrics
+        ? cloneSessionMetrics(sessionLiveMetrics)
+        : undefined,
+      sessionRunStartTime: sessionRunStartTime
+        ? new Date(sessionRunStartTime)
+        : undefined,
       sessionOutputBaseline: this.#sessionOutputBaselines.get(sessionId),
       sessionWasClosed: this.#closedSessions.has(sessionId),
       outgoingSessionId: outgoing,
       outgoingSessionMetrics: outgoingSessionMetrics
         ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionLiveMetrics: outgoingSessionLiveMetrics
+        ? cloneSessionMetrics(outgoingSessionLiveMetrics)
+        : undefined,
+      outgoingSessionRunStartTime: outgoingSessionRunStartTime
+        ? new Date(outgoingSessionRunStartTime)
         : undefined,
       outgoingSessionOutputBaseline: outgoing
         ? this.#sessionOutputBaselines.get(outgoing)
@@ -797,6 +857,8 @@ export class UiTelemetryService extends EventEmitter {
     this.#restoreSessionState(
       snapshot.sessionId,
       snapshot.sessionMetrics,
+      snapshot.sessionLiveMetrics,
+      snapshot.sessionRunStartTime,
       snapshot.sessionWasClosed,
       snapshot.sessionOutputBaseline,
     );
@@ -804,6 +866,8 @@ export class UiTelemetryService extends EventEmitter {
       this.#restoreSessionState(
         snapshot.outgoingSessionId,
         snapshot.outgoingSessionMetrics,
+        snapshot.outgoingSessionLiveMetrics,
+        snapshot.outgoingSessionRunStartTime,
         snapshot.outgoingSessionWasClosed,
         snapshot.outgoingSessionOutputBaseline,
       );
@@ -820,6 +884,8 @@ export class UiTelemetryService extends EventEmitter {
   #restoreSessionState(
     sessionId: string,
     metrics: SessionMetrics | undefined,
+    liveMetrics: SessionMetrics | undefined,
+    runStartTime: Date | undefined,
     wasClosed: boolean | undefined,
     outputBaseline: number | undefined,
   ): void {
@@ -829,6 +895,16 @@ export class UiTelemetryService extends EventEmitter {
       // No bucket existed before the replay; the replay created one. Drop it
       // rather than leave an empty bucket that reads as a live session.
       this.#sessionMetrics.delete(sessionId);
+    }
+    if (liveMetrics) {
+      this.#sessionLiveMetrics.set(sessionId, cloneSessionMetrics(liveMetrics));
+    } else {
+      this.#sessionLiveMetrics.delete(sessionId);
+    }
+    if (runStartTime) {
+      this.#sessionRunStartTimes.set(sessionId, new Date(runStartTime));
+    } else {
+      this.#sessionRunStartTimes.delete(sessionId);
     }
     if (outputBaseline === undefined) {
       this.#sessionOutputBaselines.delete(sessionId);
@@ -849,6 +925,8 @@ export class UiTelemetryService extends EventEmitter {
     this.#metrics = createInitialMetrics();
     this.#liveMetrics = createInitialMetrics();
     this.#sessionMetrics.clear();
+    this.#sessionLiveMetrics.clear();
+    this.#sessionRunStartTimes.clear();
     this.#sessionOutputBaselines.clear();
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
@@ -865,12 +943,16 @@ export class UiTelemetryService extends EventEmitter {
   resetSession(sessionId: string): void {
     this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.set(sessionId, createInitialMetrics());
+    this.#sessionLiveMetrics.delete(sessionId);
+    this.#sessionRunStartTimes.delete(sessionId);
     this.#closedSessions.delete(sessionId);
   }
 
   removeSession(sessionId: string): void {
     this.#sessionOutputBaselines.delete(sessionId);
     this.#sessionMetrics.delete(sessionId);
+    this.#sessionLiveMetrics.delete(sessionId);
+    this.#sessionRunStartTimes.delete(sessionId);
     this.#closedSessions.add(sessionId);
     if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
       const oldest = this.#closedSessions.values().next().value;

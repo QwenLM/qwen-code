@@ -267,6 +267,7 @@ import {
   UserFeedbackRating,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
+import { persistSessionUsageOnClose } from '../utils/usage-persistence.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -4819,6 +4820,46 @@ class QwenAgent implements Agent {
     }
   }
 
+  private finalizeSessionUsageOnTeardown(
+    sessionId: string,
+    session: Session,
+    cleanupErrors?: unknown[],
+  ): void {
+    let sessionConfig: ReturnType<Session['getConfig']> | undefined;
+    try {
+      sessionConfig =
+        typeof session?.getConfig === 'function'
+          ? session.getConfig()
+          : undefined;
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    let activeSessionId: string | undefined;
+    try {
+      activeSessionId = sessionConfig?.getSessionId?.();
+    } catch (error) {
+      cleanupErrors?.push(error);
+    }
+    const sessionIdsToFinalize =
+      activeSessionId && activeSessionId !== sessionId
+        ? [sessionId, activeSessionId]
+        : [sessionId];
+    for (const id of sessionIdsToFinalize) {
+      if (sessionConfig) {
+        try {
+          persistSessionUsageOnClose(sessionConfig, id);
+        } catch (error) {
+          cleanupErrors?.push(error);
+        }
+      }
+      try {
+        uiTelemetryService.removeSession(id);
+      } catch (error) {
+        cleanupErrors?.push(error);
+      }
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
@@ -4860,11 +4901,7 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    try {
-      uiTelemetryService.removeSession(sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
+    this.finalizeSessionUsageOnTeardown(sessionId, session, cleanupErrors);
     try {
       await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
@@ -5577,6 +5614,12 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Any session whose budgeted close/drain threw before reaching
+    // removeStoredSessionEntry is still in `this.sessions`; sweep its live
+    // telemetry bucket per session so its delta is not lost on process exit.
+    for (const [sessionId, session] of [...this.sessions.entries()]) {
+      this.finalizeSessionUsageOnTeardown(sessionId, session);
+    }
     // Turn admission can return a peer item to the queue after the inbox's
     // first snapshot. Session disposal detaches those items as well.
     await Promise.all(this.pendingPeerExpiries);

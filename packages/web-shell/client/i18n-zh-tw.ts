@@ -1731,7 +1731,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.usage.dailyTokensTitle': 'Tokens',
   'daemon.usage.dailyTokensSub': '每日 token 總量',
   'daemon.usage.dailySessionsTitle': '會話',
-  'daemon.usage.dailySessionsSub': '每日結束執行數',
+  'daemon.usage.dailySessionsSub': '每日活躍會話數',
   'delete.cannotCurrent': '當前會話正在執行，無法刪除。',
   'delete.action': '刪除',
   'delete.deleted': '會話已刪除。',
