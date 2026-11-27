@@ -480,6 +480,13 @@ function validateWithCoercion(
   return null;
 }
 
+const BROKEN_JSON_HINT_PREFIX = '\nMalformed JSON argument guidance:\n';
+
+export function getSchemaValidationRetryMessage(message: string): string {
+  const hintStart = message.indexOf(BROKEN_JSON_HINT_PREFIX);
+  return hintStart === -1 ? message : message.slice(0, hintStart);
+}
+
 /**
  * Explains `type` errors on strings that hold broken JSON. Such a string is
  * usually an array or object the model wrote with a syntax error, which a
@@ -503,7 +510,7 @@ function describeBrokenJsonStrings(
     }
   }
 
-  let notes = '';
+  const notes: string[] = [];
   for (const [instancePath, types] of expectedByPath) {
     let value: unknown = data;
     for (const part of instancePath.split('/').slice(1)) {
@@ -524,26 +531,28 @@ function describeBrokenJsonStrings(
       const position = Number(
         / at position (\d+) \(line \d+ column \d+\)$/.exec(reason)?.[1],
       );
-      // Drop half a surrogate pair at either edge rather than quote it.
-      const near =
+      // Parser messages may contain the argument itself. Keep only the offset.
+      const location =
         Number.isInteger(position) && position <= text.length
-          ? ` Text near the error, with <<HERE>> at that position: ${JSON.stringify(
-              text
-                .slice(Math.max(0, position - 80), position)
-                .replace(/^[\udc00-\udfff]/, '') +
-                '<<HERE>>' +
-                text
-                  .slice(position, position + 20)
-                  .replace(/[\ud800-\udbff]$/, ''),
-            )}. Fix the text there`
-          : ' Fix the JSON syntax';
+          ? ` at position ${position} in the trimmed text (zero-based UTF-16 offset)`
+          : '';
       const expected = types.size === 2 ? 'array or object' : [...types][0];
-      notes +=
-        `; params${instancePath} arrived as a string whose text is not valid JSON (${reason}).` +
-        `${near} and send it as a JSON ${expected}, not as a string`;
+      const failedAlternative = errors.some(
+        (error) =>
+          (error.keyword === 'anyOf' || error.keyword === 'oneOf') &&
+          (instancePath === error.instancePath ||
+            instancePath.startsWith(`${error.instancePath}/`)),
+      );
+      const condition = failedAlternative
+        ? 'If the schema alternative requiring a structured value applies, fix'
+        : 'Fix';
+      notes.push(
+        `params${instancePath} arrived as a string whose text is not valid JSON${location}. ` +
+          `${condition} the JSON syntax and send it as a JSON ${expected}, not as a string.`,
+      );
     }
   }
-  return notes;
+  return notes.length > 0 ? BROKEN_JSON_HINT_PREFIX + notes.join('\n') : '';
 }
 
 /**

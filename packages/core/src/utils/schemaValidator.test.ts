@@ -231,18 +231,16 @@ describe('SchemaValidator', () => {
         obj({ docs: arrayOf(obj({ pages: arrayOf({ type: 'integer' }) })) }),
         { docs },
       );
-      expect(error).toMatch(
-        /^params\/docs must be array; params\/docs arrived as a string whose text is not valid JSON \(.*position 50.*\)\. /,
-      );
       expect(error).toContain(
-        'Text near the error, with <<HERE>> at that position: "[{\\"pages\\": [1], \\"fields\\": {\\"a\\": {\\"raw_value\\": \\"x\\"}<<HERE>>]}, \\"issues\\": []}]".',
+        'params/docs arrived as a string whose text is not valid JSON at position 50',
       );
-      expect(error).toMatch(
-        / Fix the text there and send it as a JSON array, not as a string$/,
+      expect(error).not.toContain('raw_value');
+      expect(error).toContain(
+        'Fix the JSON syntax and send it as a JSON array',
       );
     });
 
-    it.each(['[oops position 9]', '[oops position 999]'])(
+    it.each(['[oops at position 5]', '[oops\n at position 999]'])(
       'does not take the error position from echoed input: %s',
       (docs) => {
         const error = SchemaValidator.validate(obj({ docs: strings() }), {
@@ -251,7 +249,8 @@ describe('SchemaValidator', () => {
         expect(error).toContain(
           'arrived as a string whose text is not valid JSON',
         );
-        expect(error).not.toContain('<<HERE>>');
+        expect(error).not.toContain('oops');
+        expect(error).not.toContain('position');
         expect(error).toContain(
           'Fix the JSON syntax and send it as a JSON array',
         );
@@ -297,27 +296,56 @@ describe('SchemaValidator', () => {
       expect(error).toContain('send it as a JSON array or object');
     });
 
+    it('makes the hint conditional when another alternative accepts the string', () => {
+      const schema = {
+        definitions: { list: obj({ docs: strings() }, 'docs') },
+        anyOf: [
+          obj(
+            { docs: { type: 'string' }, mode: { const: 'text' } },
+            'docs',
+            'mode',
+          ),
+          { $ref: '#/definitions/list' },
+        ],
+      };
+      const docs = '[raw text]';
+      const error = SchemaValidator.validate(schema, { docs });
+      expect(error).toContain("must have required property 'mode'");
+      expect(error).toContain(
+        'If the schema alternative requiring a structured value applies, fix the JSON syntax',
+      );
+      expect(
+        SchemaValidator.validate(schema, { docs, mode: 'text' }),
+      ).toBeNull();
+    });
+
+    it('finds broken JSON at an escaped property path', () => {
+      expect(
+        SchemaValidator.validate(obj({ 'a/b~c': strings() }), {
+          'a/b~c': '[1,',
+        }),
+      ).toContain('params/a~1b~0c arrived as a string');
+    });
+
     it('points at the syntax error for a plain object field', () => {
       const error = SchemaValidator.validate(obj({ config: obj({}) }), {
         config: '{"key": 1,}',
       });
-      expect(error).toMatch(
-        /^params\/config must be object; params\/config arrived as a string whose text is not valid JSON \(/,
+      expect(error).toContain(
+        'params/config arrived as a string whose text is not valid JSON at position 10',
       );
-      expect(error).toContain('<<HERE>>}');
-      expect(error).toMatch(/send it as a JSON object, not as a string$/);
+      expect(error).toContain('send it as a JSON object');
     });
 
-    it('does not quote half of a surrogate pair at either edge', () => {
-      // The error sits at 86, so the window starts inside the first emoji and
-      // ends inside the second.
-      const docs = `["aaa😀${'b'.repeat(77)}" 1, "${'c'.repeat(15)}😀"]`;
+    it('reports the UTF-16 offset after an astral character', () => {
+      const docs = '["😀" 1]';
       const error = SchemaValidator.validate(obj({ docs: strings() }), {
         docs,
       });
       expect(error).toContain(
-        `with <<HERE>> at that position: "${'b'.repeat(77)}\\" <<HERE>>1, \\"${'c'.repeat(15)}".`,
+        'at position 6 in the trimmed text (zero-based UTF-16 offset)',
       );
+      expect(error).not.toContain('😀');
     });
 
     it('adds nothing for strings that do not start like JSON', () => {
