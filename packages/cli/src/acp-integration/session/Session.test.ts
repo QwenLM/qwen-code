@@ -8466,7 +8466,7 @@ describe('Session', () => {
         name: 'read_file',
         kind: core.Kind.Read,
         build: vi.fn().mockReturnValue({
-          params: { path: '/tmp/test.txt' },
+          params: { file_path: '/tmp/test.txt' },
           getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           getDescription: vi.fn().mockReturnValue('Read file'),
           toolLocations: vi.fn().mockReturnValue([]),
@@ -8509,7 +8509,7 @@ describe('Session', () => {
       ).toHaveBeenNthCalledWith(2, 'tool_result');
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         'read_file',
-        { path: '/tmp/test.txt' },
+        { file_path: '/tmp/test.txt' },
       );
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
@@ -49878,7 +49878,7 @@ describe('Session', () => {
             name: 'read_file',
             kind: core.Kind.Read,
             build: vi.fn().mockReturnValue({
-              params: { path: '/tmp/test.txt' },
+              params: { file_path: '/tmp/test.txt' },
               getDefaultPermission: vi.fn().mockResolvedValue('allow'),
               execute: executeSpy,
             }),
@@ -49920,7 +49920,7 @@ describe('Session', () => {
               },
               input: expect.objectContaining({
                 tool_name: 'read_file',
-                tool_input: { path: '/tmp/test.txt' },
+                tool_input: { file_path: '/tmp/test.txt' },
               }),
             }),
             expect.anything(),
@@ -49942,7 +49942,7 @@ describe('Session', () => {
               kind: core.Kind.Edit,
               build: vi.fn((params: Record<string, unknown>) => {
                 const onConfirm = vi.fn(async (outcome: unknown) => {
-                  confirmed.push([params['path'], outcome]);
+                  confirmed.push([params['file_path'], outcome]);
                 });
                 return {
                   params,
@@ -49950,17 +49950,17 @@ describe('Session', () => {
                   getConfirmationDetails: vi.fn().mockResolvedValue({
                     type: 'info',
                     title: 'Write',
-                    prompt: `write ${params['path']}`,
+                    prompt: `write ${params['file_path']}`,
                     onConfirm,
                   }),
                   getDescription: vi
                     .fn()
-                    .mockReturnValue(`write ${params['path']}`),
+                    .mockReturnValue(`write ${params['file_path']}`),
                   toolLocations: vi
                     .fn()
-                    .mockReturnValue([{ path: params['path'] }]),
+                    .mockReturnValue([{ path: params['file_path'] }]),
                   execute: vi.fn(async () => {
-                    executed.push(params['path']);
+                    executed.push(params['file_path']);
                     return ok;
                   }),
                   ...extra(params),
@@ -50011,7 +50011,7 @@ describe('Session', () => {
           it('builds, confirms and runs the replacement once', async () => {
             const pre = vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
               shouldProceed: true,
-              updatedInput: { path: '/tmp/b.txt' },
+              updatedInput: { file_path: '/tmp/b.txt' },
             });
             const post = vi
               .spyOn(core, 'firePostToolUseHook')
@@ -50023,27 +50023,29 @@ describe('Session', () => {
               },
             });
             const { tool, executed } = writeTool();
-            const args = { path: '/tmp/a.txt' };
+            const args = { file_path: '/tmp/a.txt' };
             await promptWith(args);
 
             expect(pre).toHaveBeenCalledOnce();
-            expect(pre.mock.calls[0][2]).toEqual({ path: '/tmp/a.txt' });
+            expect(pre.mock.calls[0][2]).toEqual({ file_path: '/tmp/a.txt' });
             expect(pre.mock.invocationCallOrder[0]).toBeLessThan(
               tool.build.mock.invocationCallOrder[0],
             );
-            expect(tool.build.mock.calls[0][0]).toEqual({ path: '/tmp/b.txt' });
+            expect(tool.build.mock.calls[0][0]).toEqual({
+              file_path: '/tmp/b.txt',
+            });
             expect(mockClient.requestPermission).toHaveBeenCalledOnce();
             expect(
               vi.mocked(mockClient.requestPermission).mock.calls[0][0].toolCall
                 .rawInput,
-            ).toEqual({ path: '/tmp/b.txt' });
+            ).toEqual({ file_path: '/tmp/b.txt' });
             expect(executed).toEqual(['/tmp/b.txt']);
-            expect(post.mock.calls[0][2]).toEqual({ path: '/tmp/b.txt' });
-            expect(args).toEqual({ path: '/tmp/a.txt' });
+            expect(post.mock.calls[0][2]).toEqual({ file_path: '/tmp/b.txt' });
+            expect(args).toEqual({ file_path: '/tmp/a.txt' });
           });
 
           describe('from a PermissionRequest hook', () => {
-            const replacementInput = { path: '/tmp/c.txt' };
+            const replacementInput = { file_path: '/tmp/c.txt' };
 
             function mockHookPermissionUpdates(
               updatedInput?: Record<string, unknown>,
@@ -50080,9 +50082,11 @@ describe('Session', () => {
             it('runs a valid replacement with its own confirmation', async () => {
               const persistRule = mockHookPermissionUpdates(replacementInput);
               const { tool, executed, confirmed } = writeTool();
-              await promptWith({ path: '/tmp/a.txt' });
+              await promptWith({ file_path: '/tmp/a.txt' });
 
-              expect(tool.build).toHaveBeenCalledWith({ path: '/tmp/c.txt' });
+              expect(tool.build).toHaveBeenCalledWith({
+                file_path: '/tmp/c.txt',
+              });
               expect(confirmed).toEqual([
                 ['/tmp/c.txt', core.ToolConfirmationOutcome.ProceedOnce],
               ]);
@@ -50102,7 +50106,8 @@ describe('Session', () => {
                 const persistRule = mockHookPermissionUpdates(replacementInput);
                 const { executed, confirmed } = writeTool((params) => ({
                   getDefaultPermission: async () => {
-                    if (params['path'] !== replacementInput.path) return 'ask';
+                    if (params['file_path'] !== replacementInput.file_path)
+                      return 'ask';
                     if (allowedBy === 'YOLO') {
                       vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
                         ApprovalMode.YOLO,
@@ -50112,12 +50117,12 @@ describe('Session', () => {
                     return 'allow';
                   },
                 }));
-                await promptWith({ path: '/tmp/a.txt' });
+                await promptWith({ file_path: '/tmp/a.txt' });
 
-                expect(executed).toEqual([replacementInput.path]);
+                expect(executed).toEqual([replacementInput.file_path]);
                 expect(confirmed).toEqual([
                   [
-                    replacementInput.path,
+                    replacementInput.file_path,
                     core.ToolConfirmationOutcome.ProceedOnce,
                   ],
                 ]);
@@ -50130,7 +50135,7 @@ describe('Session', () => {
             it.each([false, true])(
               'skips rule updates when AUTO_EDIT allows the final input (replacement: %s)',
               async (replaceInput) => {
-                const originalInput = { path: '/tmp/a.txt' };
+                const originalInput = { file_path: '/tmp/a.txt' };
                 const persistRule = mockHookPermissionUpdates(
                   replaceInput ? replacementInput : undefined,
                 );
@@ -50139,9 +50144,11 @@ describe('Session', () => {
                     isToolEnabled: vi.fn().mockResolvedValue(true),
                     hasRelevantRules: () => true,
                     hasMatchingAskRule: (ctx: { filePath?: string }) =>
-                      ctx.filePath === originalInput.path,
+                      ctx.filePath === originalInput.file_path,
                     evaluate: async (ctx: { filePath?: string }) =>
-                      ctx.filePath === originalInput.path ? 'ask' : 'default',
+                      ctx.filePath === originalInput.file_path
+                        ? 'ask'
+                        : 'default',
                   });
                 }
                 const { executed, confirmed } = writeTool();
@@ -50150,9 +50157,12 @@ describe('Session', () => {
                   : originalInput;
                 await promptWith(originalInput, ApprovalMode.AUTO_EDIT);
 
-                expect(executed).toEqual([finalInput.path]);
+                expect(executed).toEqual([finalInput.file_path]);
                 expect(confirmed).toEqual([
-                  [finalInput.path, core.ToolConfirmationOutcome.ProceedOnce],
+                  [
+                    finalInput.file_path,
+                    core.ToolConfirmationOutcome.ProceedOnce,
+                  ],
                 ]);
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(mockClient.requestPermission).not.toHaveBeenCalled();
@@ -50170,7 +50180,7 @@ describe('Session', () => {
                 findMatchingDenyRule: () => 'Write(/tmp/c.txt)',
               });
               const { executed, confirmed } = writeTool();
-              await promptWith({ path: '/tmp/a.txt' });
+              await promptWith({ file_path: '/tmp/a.txt' });
 
               expect(executed).toEqual([]);
               expect(confirmed).toEqual([]);
@@ -50180,9 +50190,10 @@ describe('Session', () => {
 
             it('rejects a replacement that needs a user decision', async () => {
               const { executed, confirmed } = writeTool((params) => ({
-                requiresUserInteraction: () => params['path'] === '/tmp/c.txt',
+                requiresUserInteraction: () =>
+                  params['file_path'] === '/tmp/c.txt',
               }));
-              await promptWith({ path: '/tmp/a.txt' });
+              await promptWith({ file_path: '/tmp/a.txt' });
 
               expect(executed).toEqual([]);
               expect(confirmed).toEqual([]);
@@ -50240,11 +50251,17 @@ describe('Session', () => {
                   )
                   .mockResolvedValueOnce(decision(verdict));
                 const { executed } = writeTool();
-                await promptWith({ path: '/tmp/a.txt' }, ApprovalMode.AUTO);
+                await promptWith(
+                  { file_path: '/tmp/a.txt' },
+                  ApprovalMode.AUTO,
+                );
 
                 expect(
                   classify.mock.calls.map(([input]) => input.toolParams),
-                ).toEqual([{ path: '/tmp/a.txt' }, { path: '/tmp/c.txt' }]);
+                ).toEqual([
+                  { file_path: '/tmp/a.txt' },
+                  { file_path: '/tmp/c.txt' },
+                ]);
                 expect(mockClient.requestPermission).not.toHaveBeenCalled();
                 expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
                 expect(core.firePreToolUseHook).toHaveBeenCalledOnce();
@@ -50286,7 +50303,7 @@ describe('Session', () => {
                   durationMs: 1,
                 });
               const { executed } = writeTool();
-              await promptWith({ path: '/tmp/a.txt' }, ApprovalMode.AUTO);
+              await promptWith({ file_path: '/tmp/a.txt' }, ApprovalMode.AUTO);
 
               expect(executed).toEqual(['/tmp/c.txt']);
               expect(denialState.consecutiveUnavailable).toBe(0);
@@ -50323,7 +50340,7 @@ describe('Session', () => {
                           {
                             id: 'call-r',
                             name: 'write_file',
-                            args: { path: '/tmp/a.txt' },
+                            args: { file_path: '/tmp/a.txt' },
                           },
                         ],
                       },
@@ -50345,12 +50362,12 @@ describe('Session', () => {
               const { tool, executed } = writeTool();
               const build = tool.build.getMockImplementation()!;
               tool.build.mockImplementation((params) => {
-                if (params['path'] === '/tmp/c.txt') {
+                if (params['file_path'] === '/tmp/c.txt') {
                   throw new Error('invalid replacement');
                 }
                 return build(params);
               });
-              await promptWith({ path: '/tmp/a.txt' });
+              await promptWith({ file_path: '/tmp/a.txt' });
 
               expect(executed).toEqual([]);
               recordedError('invalid replacement');
@@ -50363,7 +50380,7 @@ describe('Session', () => {
                 const released: unknown[] = [];
                 const spies = writeTool((params) => ({
                   release: vi.fn(async () => {
-                    released.push(params['path']);
+                    released.push(params['file_path']);
                   }),
                   ...extra(params),
                 }));
@@ -50372,7 +50389,7 @@ describe('Session', () => {
 
               it('when the replacement runs', async () => {
                 const { executed, released } = releasingWriteTool();
-                await promptWith({ path: '/tmp/a.txt' });
+                await promptWith({ file_path: '/tmp/a.txt' });
 
                 expect(executed).toEqual(['/tmp/c.txt']);
                 await vi.waitFor(() =>
@@ -50390,7 +50407,7 @@ describe('Session', () => {
                   findMatchingDenyRule: () => 'Write(/tmp/c.txt)',
                 });
                 const { executed, released } = releasingWriteTool();
-                await promptWith({ path: '/tmp/a.txt' });
+                await promptWith({ file_path: '/tmp/a.txt' });
 
                 expect(executed).toEqual([]);
                 recordedError('Write(/tmp/c.txt)');
@@ -50402,13 +50419,13 @@ describe('Session', () => {
               it('when the call is cancelled while checking the replacement', async () => {
                 const { executed, released } = releasingWriteTool((params) => ({
                   getDefaultPermission: vi.fn(async () => {
-                    if (params['path'] === '/tmp/c.txt') {
+                    if (params['file_path'] === '/tmp/c.txt') {
                       await session.cancelPendingPrompt();
                     }
                     return 'ask';
                   }),
                 }));
-                await promptWith({ path: '/tmp/a.txt' });
+                await promptWith({ file_path: '/tmp/a.txt' });
 
                 expect(executed).toEqual([]);
                 expect(
