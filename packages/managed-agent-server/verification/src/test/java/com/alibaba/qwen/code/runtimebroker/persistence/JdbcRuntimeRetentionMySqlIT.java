@@ -18,6 +18,11 @@ class JdbcRuntimeRetentionMySqlIT {
         withFreshDatabase(JdbcPlacementGuardTest::verifyOnDatabase);
     }
 
+    @Test
+    void independentExternalStorageCanUseTheSameMountPathOnMySql() throws Exception {
+        withFreshDatabase(JdbcPlacementGuardTest::verifyExternalPlacement);
+    }
+
     private static void withFreshDatabase(DatabaseCheck check) throws Exception {
         String schema = "broker_retention_" + UUID.randomUUID().toString().replace("-", "");
         String url = required("mysql.url");

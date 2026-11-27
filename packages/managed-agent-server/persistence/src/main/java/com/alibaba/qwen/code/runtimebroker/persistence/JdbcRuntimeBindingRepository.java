@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 
@@ -1997,8 +1998,10 @@ public final class JdbcRuntimeBindingRepository
     private void requireRecoverablePlacement(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
         RuntimeScope scope = request.getScope();
+        String externalAlias = RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(request.getProvisionerKind())
+                && scope.getWorkspaceId().equals(request.getStorageId()) ? request.getStorageId() : null;
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT 1 FROM ma_runtime_binding WHERE tenant_id = ? "
+                "SELECT 1 FROM ma_runtime_binding b WHERE tenant_id = ? "
                         + "AND CAST(tenant_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
                         + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED', 'DRAINING') "
                         + "AND (binding_state IN ('LOST', 'OPERATOR_RECOVERY', 'DRAINING') "
@@ -2013,14 +2016,23 @@ public final class JdbcRuntimeBindingRepository
                         + "AND (provision_request_id IS NULL OR provision_seed_ciphertext IS NULL OR credential_key_id IS NULL))))) "
                         + "AND (storage_id IS NULL "
                         + "OR CAST(storage_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
-                        + "OR CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
-                        + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))) LIMIT 1")) {
+                        + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        // Independent external storage can have the same mount path inside separate workers.
+                        + "OR (CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND NOT EXISTS ("
+                        + "SELECT 1 FROM ma_storage prior JOIN ma_storage candidate ON candidate.tenant_id = prior.tenant_id "
+                        + "WHERE CAST(b.provisioner_kind AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND prior.tenant_id = b.tenant_id "
+                        + "AND prior.storage_id = b.storage_id AND prior.storage_id = b.workspace_id AND candidate.storage_id = ? "
+                        + "AND prior.storage_kind = 'EXTERNAL' AND candidate.storage_kind = 'EXTERNAL' "
+                        + "AND prior.registration_state = 'REGISTERED' AND candidate.registration_state = 'REGISTERED' "
+                        + "AND prior.physical_id <> candidate.physical_id))) LIMIT 1")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 3, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
+            JdbcRepositorySupport.setIdentity(statement, 3, RuntimeProviderKinds.LOCAL_PROCESS);
             JdbcRepositorySupport.setIdentity(statement, 4, request.getStorageId());
-            JdbcRepositorySupport.setIdentity(statement, 5, scope.getCanonicalCwd());
-            JdbcRepositorySupport.setIdentity(statement, 6, scope.getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 5, scope.getWorkspaceId());
+            JdbcRepositorySupport.setIdentity(statement, 6, scope.getCanonicalCwd());
+            JdbcRepositorySupport.setIdentity(statement, 7, RuntimeProviderKinds.EXTERNAL_WORKSPACE);
+            JdbcRepositorySupport.setIdentity(statement, 8, externalAlias);
             try (ResultSet result = statement.executeQuery()) {
                 if (result.next()) {
                     throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",
