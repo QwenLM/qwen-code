@@ -2,17 +2,19 @@
 
 [English](managed-agent-reference-deployment.md) | [简体中文](managed-agent-reference-deployment.zh-CN.md)
 
-The Managed Agent reference distribution is experimental. Its accepted initial topology is one Java control plane and its embedded Runtime Broker on one trusted Linux host, one MySQL database, and one compatible Qwen Hosted Harness. The compatibility manifest in each release is authoritative for that release.
+This guide is for operators installing, running, and upgrading the experimental standalone Managed Agent reference distribution on a trusted Linux host. It includes running the components as systemd services. Initial acceptance covers one Java control-plane instance with its embedded Runtime Broker, one MySQL database, and one compatible Qwen Hosted Harness. Each release's compatibility manifest defines its acceptance scope.
 
 ## Choose a tier
 
-Each tier adds to the one before it:
+Tier 2 adds Workspace tools to the Tier 1 deployment. Tier 3 points to the separate Kubernetes Helm deployment.
 
-| Tier                         | What runs                                                                                | What it adds                                                                                                                                    |
-| ---------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Text-only Hosted Sessions | The Java control plane, one Hosted Harness and MySQL on one trusted Linux host           | —                                                                                                                                               |
-| 2. Local-process tools       | Hosted tools on the Workspace, such as file access and, when enabled, a foreground Shell | The embedded Runtime Broker, Runtime workers on the same host, the Runtime credential key, a Runtime state directory and a registered Workspace |
-| 3. Kubernetes                | The API, the Harness and MySQL in a cluster                                              | Container images built from source, installed with a Helm chart, outside this distribution's acceptance scope                                   |
+| Tier                         | What runs                                                                                | What it adds                                                                                                                                    | Harness pool |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| 1. Text-only Hosted Sessions | The Java control plane, one Hosted Harness and MySQL on one trusted Linux host           | —                                                                                                                                               | Disabled     |
+| 2. Local-process tools       | Hosted tools on the Workspace, such as file access and, when enabled, a foreground Shell | The embedded Runtime Broker, Runtime workers on the same host, the Runtime credential key, a Runtime state directory and a registered Workspace | Disabled     |
+| 3. Kubernetes                | The API and two Harness pool members in the application Pod, with MySQL in the cluster   | Container images built from source, installed with a Helm chart, outside this distribution's acceptance scope                                   | Enabled      |
+
+For a custom deployment with multiple Harness instances, see the [Harness pool settings](managed-agent-configuration-reference.md#qwenmanaged-agentharnesspool).
 
 Start at Tier 1 even when tools are the goal. A Session that completes a no-tool Turn proves the control plane, the Harness, the model and the database together, and Tier 2 then enables tools on the same deployment.
 
@@ -194,7 +196,7 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 
 ## Tier 3: Kubernetes
 
-The [Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) installs the signed Managed Agent API and a private Hosted Harness in one Pod, with MySQL 8.4 on a persistent volume, from images you build at a reviewed source revision. Its default runs text Sessions; optional settings add trusted single-node Workspace files and a foreground Shell, and a Managed WebShell gateway. It is installed from source rather than from this archive, follows its own guide, and does not extend this distribution's acceptance scope. K2 CSI resident Workspaces were a separate deployment, now removed from `managed-agent-server` and archived at [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident).
+The [Helm chart](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes) installs the signed Managed Agent API and a private two-member Hosted Harness pool in one application Pod, with MySQL 8.4 on a persistent volume, from images you build at a reviewed source revision. Its default runs text Sessions; optional settings add trusted single-node Workspace files and a foreground Shell, and a Managed WebShell gateway. It is installed from source rather than from this archive, follows its own guide, and does not extend this distribution's acceptance scope. K2 CSI resident Workspaces were a separate deployment, now removed from `managed-agent-server` and archived at [`packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident`](https://github.com/QwenLM/qwen-code/tree/main/packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident).
 
 ## Operate the deployment
 
@@ -315,4 +317,6 @@ After successful key-ring configuration, the server and recovery entry log the r
 
 ## Scope boundary
 
-This distribution does not certify multiple Java control planes, cross-host takeover, public CSI, Kubernetes retirement, public Shell, v2 advertisement, or stable production support. Those capabilities require separate release evidence.
+MySQL integration tests with two Java control-plane instances sharing the same Session Store and Hosted Harness cover reuse of an existing attachment for the first Turn, cancellation of the original Turn, and delivery of Shell approval decisions from a replica with no local attachment. See [cross-instance attachment recovery](https://github.com/QwenLM/qwen-code/pull/18433).
+
+A multi-replica deployment needs release acceptance for its routing in the intended topology. When Workspace tools are enabled, acceptance also covers Runtime Broker and Workspace ownership. Cross-host takeover, public CSI, Kubernetes retirement, public Shell, v2 advertisement, and stable production support require separate release evidence.

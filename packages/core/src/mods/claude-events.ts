@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const CLAUDE_CODE_EVENTS_VERSION = '2.1.318';
+export const CLAUDE_CODE_EVENTS_VERSION = '2.1.332';
 
 // Claude Code's engine events, `$` API events and `classic.*` settings hook
 // events, so registrations for events Qwen does not run yet can be skipped
 // while misspelled names are still rejected.
 const eventsByNamespace: Record<string, readonly string[]> = {
-  agent: ['list', 'offer', 'register', 'spawn'],
+  agent: ['call', 'limits', 'list', 'offer', 'register', 'report', 'spawn'],
   attribution: ['text'],
   audio: ['play', 'speak'],
   classic: [
@@ -32,6 +32,7 @@ const eventsByNamespace: Record<string, readonly string[]> = {
     'PostToolUseFailure',
     'PreCompact',
     'PreModelSwitch',
+    'PreSkillShellCommand',
     'PreToolUse',
     'SessionEnd',
     'SessionStart',
@@ -58,7 +59,7 @@ const eventsByNamespace: Record<string, readonly string[]> = {
   mcp: ['call', 'connect'],
   model: ['classify', 'complete', 'fork'],
   plugin: ['register'],
-  process: ['run', 'spawn'],
+  process: ['hookEnv', 'run', 'spawn'],
   prompt: [
     'attachment',
     'autocomplete',
@@ -84,14 +85,18 @@ const eventsByNamespace: Record<string, readonly string[]> = {
     'end',
     'id',
     'identity',
+    'info',
+    'machine',
     'measure',
     'messages',
     'model',
     'receive',
+    'redact',
     'repo',
     'root',
     'send',
     'start',
+    'stop',
     'surface',
     'surfaces',
     'turns',
@@ -103,11 +108,23 @@ const eventsByNamespace: Record<string, readonly string[]> = {
   state: ['get', 'set'],
   store: ['delete', 'get', 'keys', 'set'],
   telemetry: ['log', 'mark'],
-  tool: ['call', 'check', 'describe', 'list', 'register'],
+  theme: ['clear', 'set'],
+  tool: [
+    'call',
+    'check',
+    'describe',
+    'judge',
+    'list',
+    'offer',
+    'register',
+    'run',
+  ],
   turn: ['abort', 'complete', 'start', 'step'],
   ui: [
+    // Gone in 2.1.332; kept so a Mod written for 2.1.318–2.1.331 still loads.
     'backdrop',
     'blit',
+    'cancelNotify',
     'close',
     'copy',
     'fault',
@@ -118,9 +135,11 @@ const eventsByNamespace: Record<string, readonly string[]> = {
     'message',
     'notice',
     'notify',
+    'offer',
     'open',
     'panes',
     'place',
+    'pointer',
     'press',
     'render',
     'resolve',
@@ -128,9 +147,12 @@ const eventsByNamespace: Record<string, readonly string[]> = {
     'select',
     'selection',
     'status',
+    'tip',
     'toast',
     'view',
   ],
+  vcs: ['detect', 'diff', 'isolate', 'list', 'release', 'status'],
+  wasm: ['compile'],
 };
 
 export const CLAUDE_CODE_EVENTS: readonly string[] = Object.entries(

@@ -7,7 +7,6 @@
 import { Box, Text } from 'ink';
 import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
 import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
-import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
 import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
@@ -166,14 +165,6 @@ export const DialogManager = ({
         request={uiState.shellConfirmationRequest}
         availableTerminalHeight={constrainedDialogHeight}
         contentWidth={mainAreaWidth}
-      />
-    );
-  }
-  if (uiState.loopDetectionConfirmationRequest) {
-    return (
-      <LoopDetectionConfirmation
-        cause={uiState.loopDetectionConfirmationRequest.cause}
-        onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
   }

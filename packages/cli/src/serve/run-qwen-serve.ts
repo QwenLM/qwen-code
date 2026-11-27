@@ -8917,7 +8917,7 @@ async function runQwenServeImpl(
           runtimeAppForCleanup;
         const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
           'stopScheduledTaskKeepaliveForWorkspace'
-        ] as ((workspaceCwd: string) => void) | undefined;
+        ] as ((workspaceCwd: string) => Promise<void> | undefined) | undefined;
         try {
           stopScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain.workspaceCwd);
         } catch (err) {
@@ -9073,13 +9073,19 @@ async function runQwenServeImpl(
               runtimeAppForCleanup;
             const stopWorkspaceGitStateForWorkspace = app?.locals?.[
               'stopWorkspaceGitStateForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const releaseWebTerminalsForWorkspace = app?.locals?.[
               'releaseWebTerminalsForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -9089,7 +9095,7 @@ async function runQwenServeImpl(
               );
             }
             try {
-              stopScheduledTaskKeepaliveForWorkspace?.(
+              await stopScheduledTaskKeepaliveForWorkspace?.(
                 runtimeToDrain.workspaceCwd,
               );
             } catch (err) {

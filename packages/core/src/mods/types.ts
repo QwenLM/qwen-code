@@ -55,6 +55,8 @@ export interface ModCommand {
   name: string;
   description: string;
   argumentHint?: string;
+  aliases?: string[];
+  isTerminalOnly?: true;
 }
 
 export interface ModCommandPresentation {

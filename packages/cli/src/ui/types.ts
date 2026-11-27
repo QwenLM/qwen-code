@@ -1056,11 +1056,6 @@ export interface ConfirmationRequest {
   onConfirm: (confirm: boolean) => void;
 }
 
-export interface LoopDetectionConfirmationRequest {
-  cause?: string;
-  onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
-}
-
 export interface SettingInputRequest {
   settingName: string;
   settingDescription: string;
