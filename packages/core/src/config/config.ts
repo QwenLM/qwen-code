@@ -1029,6 +1029,8 @@ export interface ExtensionInstallMetadata {
     | 'archive-url'
     | 'snapshot';
   installId?: string;
+  /** Deterministic version locator key for multi-version store entries. */
+  versionKey?: string;
   credentialPersistence?: 'stored';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.

@@ -37,6 +37,11 @@ export type WorkspaceActivation = ExtensionActivation | 'inherit';
 export interface ExtensionPolicy {
   name: string;
   artifactDirectory?: string;
+  /**
+   * When present, the artifact lives under `<versionsDir>/<name>/<versionSlot>/`
+   * instead of `<extensionsDir>/<artifactDirectory ?? name>/`.
+   */
+  versionSlot?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
   preserveActivationOnNextInstall?: true;
@@ -104,8 +109,28 @@ export function withExtensionTurnDrainWait<T>(
 
 export interface ExtensionStoreOptions {
   extensionsDir?: string;
+  versionsDir?: string;
   storeDir?: string;
   enablementPath?: string;
+}
+
+export interface PrunedExtensionVersion {
+  id: string;
+  name: string;
+  versionSlot: string;
+  directory: string;
+}
+
+export interface PruneUnusedVersionsOptions {
+  removeMissingWorkspaces?: boolean;
+  dryRun?: boolean;
+  workspaceExists?: (workspacePath: string) => boolean;
+}
+
+export interface PruneUnusedVersionsResult {
+  snapshot: ExtensionStoreSnapshot;
+  pruned: PrunedExtensionVersion[];
+  removedWorkspaceRefs: number;
 }
 
 export type ExtensionStoreEmptiness =
@@ -133,6 +158,13 @@ export interface CommitExtensionArtifactInput {
   identity: ExtensionIdentity;
   destinationDirectory: string;
   stagingDirectory?: string;
+  versionSlot?: string;
+  /**
+   * When true on a versioned install whose exact `identity.id` and artifact
+   * already exist on disk, reuse the existing artifact and update activation
+   * bindings idempotently instead of throwing a conflict error.
+   */
+  idempotent?: boolean;
   initialActivation?: InitialExtensionActivation;
   expectedArtifactGeneration?: number;
 }
@@ -485,6 +517,11 @@ function parseState(
           /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
           parsed.artifactDirectory !== '.' &&
           parsed.artifactDirectory !== '..')) &&
+      (parsed.versionSlot === undefined ||
+        (typeof parsed.versionSlot === 'string' &&
+          /^[a-zA-Z0-9-_.]+$/.test(parsed.versionSlot) &&
+          parsed.versionSlot !== '.' &&
+          parsed.versionSlot !== '..')) &&
       (parsed.artifactGeneration === undefined ||
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
@@ -547,6 +584,7 @@ function parseState(
 
 export class ExtensionStore {
   readonly extensionsDir: string;
+  readonly versionsDir: string;
   readonly storeDir: string;
   readonly enablementPath: string;
   private readonly statePath: string;
@@ -556,6 +594,9 @@ export class ExtensionStore {
   constructor(options: ExtensionStoreOptions = {}) {
     this.extensionsDir =
       options.extensionsDir ?? Storage.getUserExtensionsDir();
+    this.versionsDir =
+      options.versionsDir ??
+      path.join(path.dirname(this.extensionsDir), 'extension-versions');
     this.storeDir =
       options.storeDir ??
       path.join(Storage.getGlobalQwenDir(), 'extension-store');
@@ -565,6 +606,38 @@ export class ExtensionStore {
     this.statePath = path.join(this.storeDir, 'state.json');
     this.previousStatePath = path.join(this.storeDir, 'state.previous.json');
     this.lockPath = path.join(this.storeDir, 'lock');
+  }
+
+  resolveArtifactDirectory(
+    policy: Pick<ExtensionPolicy, 'name' | 'artifactDirectory' | 'versionSlot'>,
+  ): string {
+    if (policy.versionSlot) {
+      return path.join(this.versionsDir, policy.name, policy.versionSlot);
+    }
+    return path.join(
+      this.extensionsDir,
+      policy.artifactDirectory ?? policy.name,
+    );
+  }
+
+  resolveVersionedDirectory(name: string, versionSlot: string): string {
+    return path.join(this.versionsDir, name, versionSlot);
+  }
+
+  workspaceEnvFilePath(extensionId: string, workspacePath: string): string {
+    if (!/^[a-f0-9]{64}$/.test(extensionId)) {
+      throw new Error(`Invalid extension id "${extensionId}".`);
+    }
+    const workspaceHash = crypto
+      .createHash('sha256')
+      .update(canonicalizeWorkspacePath(workspacePath))
+      .digest('hex');
+    return path.join(
+      this.storeDir,
+      'workspace-env',
+      extensionId,
+      `${workspaceHash}.env`,
+    );
   }
 
   agentPluginDataRoot(extensionId: string): string {
@@ -625,6 +698,26 @@ export class ExtensionStore {
         };
       }
     }
+    for (const extName of (await readDirectoryIfPresent(this.versionsDir)) ??
+      []) {
+      const extDir = path.join(this.versionsDir, extName);
+      const extStats = await fsp.lstat(extDir);
+      if (!extStats.isDirectory()) continue;
+      for (const slot of (await readDirectoryIfPresent(extDir)) ?? []) {
+        const slotPath = path.join(extDir, slot);
+        const slotStats = await fsp.lstat(slotPath);
+        if (
+          slotStats.isDirectory() ||
+          (slotStats.isSymbolicLink() &&
+            (await fsp.stat(slotPath)).isDirectory())
+        ) {
+          return {
+            status: 'installed',
+            reason: 'a versioned extension directory is present',
+          };
+        }
+      }
+    }
     const storeEntries = await readDirectoryIfPresent(this.storeDir);
     for (const entry of (storeEntries ?? []).filter(isStoreName)) {
       const stats = await fsp.lstat(path.join(this.storeDir, entry));
@@ -652,6 +745,7 @@ export class ExtensionStore {
         }
       } else if (
         !(entry === 'plugin-data' && stats.isDirectory()) &&
+        !(entry === 'workspace-env' && stats.isDirectory()) &&
         !(
           (STORE_FILES.has(entry) || STATE_WRITE_LEFTOVER.test(entry)) &&
           stats.isFile()
@@ -724,6 +818,7 @@ export class ExtensionStore {
     const parts: string[] = [];
     for (const directory of [
       this.extensionsDir,
+      this.versionsDir,
       this.storeDir,
       ...STORE_TRANSACTION_DIRS.map((name) => path.join(this.storeDir, name)),
     ]) {
@@ -774,21 +869,16 @@ export class ExtensionStore {
   private async ensureInitializedUnlocked(
     extensions: readonly ExtensionIdentity[],
   ): Promise<ExtensionStoreSnapshot> {
-    const loadedNames = new Map<string, ExtensionIdentity>();
+    const loadedById = new Map<string, ExtensionIdentity>();
     for (const identity of extensions) {
       assertIdentity(identity);
-      const normalizedName = identity.name.toLowerCase();
-      const existingIdentity = loadedNames.get(normalizedName);
-      if (
-        existingIdentity &&
-        (existingIdentity.id !== identity.id ||
-          existingIdentity.name !== identity.name)
-      ) {
+      const existingById = loadedById.get(identity.id);
+      if (existingById && existingById.name !== identity.name) {
         throw new ExtensionConflictError(
-          `Extension name "${identity.name}" conflicts with loaded extension "${existingIdentity.name}".`,
+          `Extension id ${identity.id} conflicts between "${identity.name}" and "${existingById.name}".`,
         );
       }
-      loadedNames.set(normalizedName, identity);
+      loadedById.set(identity.id, identity);
     }
     const existing = await this.readSnapshotUnlocked();
     const legacy = await this.readLegacyProjection();
@@ -859,9 +949,15 @@ export class ExtensionStore {
         const staleEntry = Object.entries(existing.extensions).find(
           ([id, policy]) =>
             !loadedIds.has(id) &&
+            !policy.versionSlot &&
             policy.name.toLowerCase() === identity.name.toLowerCase(),
         );
-        if (staleEntry) {
+        const otherLoadedSameName = extensions.some(
+          (other) =>
+            other.id !== identity.id &&
+            other.name.toLowerCase() === identity.name.toLowerCase(),
+        );
+        if (staleEntry && !otherLoadedSameName) {
           const [staleId, policy] = staleEntry;
           if (!policy.declarationOnly && policy.name !== identity.name) {
             policy.artifactDirectory ??= policy.name;
@@ -1098,12 +1194,18 @@ export class ExtensionStore {
       const journalPath = path.join(transactionsDir, `${transactionId}.json`);
       const currentPolicy = snapshot.extensions[input.identity.id];
       const destinationDirectory =
-        input.operation !== 'install' && currentPolicy?.artifactDirectory
-          ? path.join(this.extensionsDir, currentPolicy.artifactDirectory)
+        input.operation !== 'install' && currentPolicy
+          ? this.resolveArtifactDirectory(currentPolicy)
           : input.destinationDirectory;
       this.assertArtifactDestination(destinationDirectory);
       const destinationExists = await this.pathExists(destinationDirectory);
-      if (input.operation === 'install' && destinationExists) {
+      const isIdempotentReuse =
+        input.operation === 'install' &&
+        input.idempotent === true &&
+        !!currentPolicy &&
+        !currentPolicy.declarationOnly &&
+        destinationExists;
+      if (input.operation === 'install' && destinationExists && !isIdempotentReuse) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is installed.`,
         );
@@ -1116,11 +1218,46 @@ export class ExtensionStore {
       if (input.operation === 'install' && !input.initialActivation) {
         throw new Error('Install requires an initial activation.');
       }
+      if (
+        input.operation === 'install' &&
+        !isIdempotentReuse &&
+        !input.stagingDirectory
+      ) {
+        throw new Error('install requires a staging directory.');
+      }
+      if (isIdempotentReuse) {
+        const targetSnapshot = structuredClone(snapshot);
+        const policy = targetSnapshot.extensions[input.identity.id]!;
+        const initial = input.initialActivation!;
+        if (initial.scope === 'workspace') {
+          const canonicalWs = canonicalizeWorkspacePath(initial.workspacePath);
+          policy.workspaceOverrides[canonicalWs] = 'enabled';
+          this.enforceSameNameExclusivity(
+            targetSnapshot,
+            input.identity.id,
+            input.identity.name,
+            { scope: 'workspace', workspacePath: canonicalWs },
+          );
+        } else {
+          policy.defaultActivation = 'enabled';
+          this.enforceSameNameExclusivity(
+            targetSnapshot,
+            input.identity.id,
+            input.identity.name,
+            { scope: 'user' },
+          );
+        }
+        targetSnapshot.generation = snapshot.generation + 1;
+        await this.writeSnapshotUnlocked(targetSnapshot);
+        return targetSnapshot;
+      }
       const nameConflict = Object.entries(snapshot.extensions).find(
         ([extensionId, policy]) =>
           extensionId !== input.identity.id &&
           policy.name.toLowerCase() === input.identity.name.toLowerCase(),
       );
+      const allowCoexistence =
+        input.operation === 'install' && input.versionSlot !== undefined;
       const currentPolicyIsAdoptable =
         input.operation === 'install' &&
         !!currentPolicy &&
@@ -1129,6 +1266,7 @@ export class ExtensionStore {
             !(await this.extensionArtifactExists(currentPolicy))));
       const nameConflictIsAdoptable =
         input.operation === 'install' &&
+        !allowCoexistence &&
         !currentPolicy &&
         !!nameConflict &&
         (nameConflict[1].declarationOnly ||
@@ -1136,6 +1274,7 @@ export class ExtensionStore {
             !(await this.extensionArtifactExists(nameConflict[1]))));
       if (
         input.operation !== 'uninstall' &&
+        !allowCoexistence &&
         nameConflict &&
         !nameConflictIsAdoptable
       ) {
@@ -1198,12 +1337,15 @@ export class ExtensionStore {
           targetSnapshot.extensions[input.identity.id] = policy;
         } else {
           const initial = input.initialActivation!;
-          const rules = findLegacyRules(
-            snapshot.legacyProjectionRemainder ?? {},
-            input.identity.name,
-          );
+          const rules = input.versionSlot
+            ? []
+            : findLegacyRules(
+                snapshot.legacyProjectionRemainder ?? {},
+                input.identity.name,
+              );
           targetSnapshot.extensions[input.identity.id] = {
             name: input.identity.name,
+            ...(input.versionSlot ? { versionSlot: input.versionSlot } : {}),
             artifactGeneration: targetSnapshot.generation + 1,
             defaultActivation:
               initial.scope === 'user' ? 'enabled' : 'disabled',
@@ -1216,6 +1358,24 @@ export class ExtensionStore {
                 : {},
             ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
           };
+          if (initial.scope === 'workspace') {
+            this.enforceSameNameExclusivity(
+              targetSnapshot,
+              input.identity.id,
+              input.identity.name,
+              {
+                scope: 'workspace',
+                workspacePath: canonicalizeWorkspacePath(initial.workspacePath),
+              },
+            );
+          } else {
+            this.enforceSameNameExclusivity(
+              targetSnapshot,
+              input.identity.id,
+              input.identity.name,
+              { scope: 'user' },
+            );
+          }
         }
         this.updateLegacyProjectionRemainder(
           targetSnapshot,
@@ -1284,7 +1444,10 @@ export class ExtensionStore {
               forceMode: true,
               noFollow: true,
             });
-            if (!realPathWithin(destinationDirectory, this.extensionsDir)) {
+            if (
+              !realPathWithin(destinationDirectory, this.extensionsDir) &&
+              !realPathWithin(destinationDirectory, this.versionsDir)
+            ) {
               throw new Error(
                 `Extension destination ${destinationDirectory} resolves outside the extensions directory.`,
               );
@@ -1336,6 +1499,10 @@ export class ExtensionStore {
             });
           }
         } else if (input.operation !== 'uninstall') {
+          await fsp.mkdir(path.dirname(destinationDirectory), {
+            recursive: true,
+            mode: 0o700,
+          });
           await this.withLockHint(destinationDirectory, () =>
             renameWithRetry(
               input.stagingDirectory!,
@@ -1386,6 +1553,9 @@ export class ExtensionStore {
       } catch {
         // The committed state is authoritative. Recovery retries cleanup on
         // the next store operation without reporting a false mutation failure.
+      }
+      if (input.operation === 'uninstall' && currentPolicy?.versionSlot) {
+        await fsp.rmdir(path.dirname(destinationDirectory)).catch(() => undefined);
       }
       return targetSnapshot;
     });
@@ -1456,12 +1626,46 @@ export class ExtensionStore {
     };
   }
 
+  private enforceSameNameExclusivity(
+    snapshot: ExtensionStoreSnapshot,
+    activeExtensionId: string,
+    extensionName: string,
+    target:
+      | { scope: 'user' }
+      | { scope: 'workspace'; workspacePath: string },
+  ): void {
+    const normalizedName = extensionName.toLowerCase();
+    const canonicalWs =
+      target.scope === 'workspace'
+        ? canonicalizeWorkspacePath(target.workspacePath)
+        : undefined;
+    for (const [otherId, otherPolicy] of Object.entries(snapshot.extensions)) {
+      if (
+        otherId === activeExtensionId ||
+        otherPolicy.declarationOnly ||
+        otherPolicy.name.toLowerCase() !== normalizedName
+      ) {
+        continue;
+      }
+      if (canonicalWs !== undefined) {
+        otherPolicy.workspaceOverrides[canonicalWs] = 'disabled';
+      } else {
+        otherPolicy.defaultActivation = 'disabled';
+      }
+    }
+  }
+
   async setDefaultActivation(
     identity: ExtensionIdentity,
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
-    return await this.mutate(identity, (policy) => {
+    return await this.mutate(identity, (policy, snapshot) => {
       policy.defaultActivation = activation;
+      if (activation === 'enabled') {
+        this.enforceSameNameExclusivity(snapshot, identity.id, identity.name, {
+          scope: 'user',
+        });
+      }
     });
   }
 
@@ -1479,7 +1683,7 @@ export class ExtensionStore {
     identity: ExtensionIdentity,
     activation: InitialExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
-    return await this.mutate(identity, (policy) => {
+    return await this.mutate(identity, (policy, snapshot) => {
       policy.defaultActivation =
         activation.scope === 'user' ? 'enabled' : 'disabled';
       policy.workspaceOverrides =
@@ -1489,6 +1693,16 @@ export class ExtensionStore {
             }
           : {};
       delete policy.legacyPathRules;
+      if (activation.scope === 'workspace') {
+        this.enforceSameNameExclusivity(snapshot, identity.id, identity.name, {
+          scope: 'workspace',
+          workspacePath: activation.workspacePath,
+        });
+      } else {
+        this.enforceSameNameExclusivity(snapshot, identity.id, identity.name, {
+          scope: 'user',
+        });
+      }
     });
   }
 
@@ -1497,9 +1711,114 @@ export class ExtensionStore {
     workspacePath: string,
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
-    return await this.mutate(identity, (policy) => {
+    return await this.mutate(identity, (policy, snapshot) => {
       policy.workspaceOverrides[canonicalizeWorkspacePath(workspacePath)] =
         activation;
+      if (activation === 'enabled') {
+        this.enforceSameNameExclusivity(snapshot, identity.id, identity.name, {
+          scope: 'workspace',
+          workspacePath,
+        });
+      }
+    });
+  }
+
+  /**
+   * Reclaims unreferenced versioned slots under `versionsDir` (and optionally
+   * strips `workspaceOverrides` pointing at deleted workspace directories).
+   * Never removes primary non-versioned extensions under `extensionsDir`.
+   */
+  async pruneUnusedVersions(
+    options: PruneUnusedVersionsOptions = {},
+  ): Promise<PruneUnusedVersionsResult> {
+    const workspaceExists =
+      options.workspaceExists ??
+      ((workspacePath: string) => fs.existsSync(workspacePath));
+    return await this.withWritableLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const targetSnapshot = structuredClone(snapshot);
+      let removedWorkspaceRefs = 0;
+
+      if (options.removeMissingWorkspaces) {
+        for (const policy of Object.values(targetSnapshot.extensions)) {
+          for (const wsPath of Object.keys(policy.workspaceOverrides)) {
+            if (!workspaceExists(wsPath)) {
+              delete policy.workspaceOverrides[wsPath];
+              removedWorkspaceRefs += 1;
+            }
+          }
+          if (policy.skillWorkspaceOverrides) {
+            for (const wsPath of Object.keys(policy.skillWorkspaceOverrides)) {
+              if (!workspaceExists(wsPath)) {
+                delete policy.skillWorkspaceOverrides[wsPath];
+              }
+            }
+            if (Object.keys(policy.skillWorkspaceOverrides).length === 0) {
+              delete policy.skillWorkspaceOverrides;
+            }
+          }
+        }
+      }
+
+      const pruned: PrunedExtensionVersion[] = [];
+      for (const [id, policy] of Object.entries(targetSnapshot.extensions)) {
+        if (!policy.versionSlot || policy.declarationOnly) continue;
+        const hasEnabledWorkspace = Object.values(
+          policy.workspaceOverrides,
+        ).some((value) => value === 'enabled');
+        const hasLegacyRules = (policy.legacyPathRules?.length ?? 0) > 0;
+        if (
+          policy.defaultActivation === 'disabled' &&
+          !hasEnabledWorkspace &&
+          !hasLegacyRules
+        ) {
+          const directory = this.resolveArtifactDirectory(policy);
+          pruned.push({
+            id,
+            name: policy.name,
+            versionSlot: policy.versionSlot,
+            directory,
+          });
+          delete targetSnapshot.extensions[id];
+        }
+      }
+
+      if (options.dryRun) {
+        return { snapshot, pruned, removedWorkspaceRefs };
+      }
+
+      if (pruned.length === 0 && removedWorkspaceRefs === 0) {
+        return { snapshot, pruned: [], removedWorkspaceRefs: 0 };
+      }
+
+      targetSnapshot.generation = snapshot.generation + 1;
+      await this.writeSnapshotUnlocked(targetSnapshot);
+
+      for (const item of pruned) {
+        await fsp
+          .rm(item.directory, { recursive: true, force: true })
+          .catch(() => undefined);
+        await fsp.rmdir(path.dirname(item.directory)).catch(() => undefined);
+        await fsp
+          .rm(path.join(this.storeDir, 'workspace-env', item.id), {
+            recursive: true,
+            force: true,
+          })
+          .catch(() => undefined);
+        await fsp
+          .rm(this.agentPluginDataRoot(item.id), {
+            recursive: true,
+            force: true,
+          })
+          .catch(() => undefined);
+      }
+
+      return {
+        snapshot: targetSnapshot,
+        pruned,
+        removedWorkspaceRefs,
+      };
     });
   }
 
@@ -1589,7 +1908,7 @@ export class ExtensionStore {
 
   private async mutate(
     identity: ExtensionIdentity,
-    update: (policy: ExtensionPolicy) => void,
+    update: (policy: ExtensionPolicy, snapshot: ExtensionStoreSnapshot) => void,
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(identity);
     return await this.withWritableLock(async () => {
@@ -1611,7 +1930,7 @@ export class ExtensionStore {
           `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
         );
       }
-      update(policy);
+      update(policy, snapshot);
       snapshot.extensions[identity.id] = policy;
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
@@ -1710,10 +2029,14 @@ export class ExtensionStore {
   private async extensionArtifactExists(
     policy: ExtensionPolicy,
   ): Promise<boolean> {
-    const directory = policy.artifactDirectory ?? policy.name;
-    if (await this.pathExists(path.join(this.extensionsDir, directory))) {
+    const resolved = this.resolveArtifactDirectory(policy);
+    if (await this.pathExists(resolved)) {
       return true;
     }
+    if (policy.versionSlot) {
+      return false;
+    }
+    const directory = policy.artifactDirectory ?? policy.name;
     let entries: string[];
     try {
       entries = await fsp.readdir(this.extensionsDir);
@@ -1783,7 +2106,21 @@ export class ExtensionStore {
       if (representedNames.has(name.toLowerCase())) continue;
       projection[name] = { overrides: [...config.overrides] };
     }
-    for (const policy of Object.values(snapshot.extensions)) {
+    // For same-name multi-version entries, project the primary (non-versioned)
+    // policy first so legacy V1 enablement stays deterministic.
+    const orderedPolicies = Object.values(snapshot.extensions).sort((a, b) => {
+      const aPrimary = a.versionSlot ? 1 : 0;
+      const bPrimary = b.versionSlot ? 1 : 0;
+      if (aPrimary !== bPrimary) return aPrimary - bPrimary;
+      const aDefault = a.defaultActivation === 'enabled' ? 0 : 1;
+      const bDefault = b.defaultActivation === 'enabled' ? 0 : 1;
+      return aDefault - bDefault;
+    });
+    const projectedNames = new Set<string>();
+    for (const policy of orderedPolicies) {
+      const lower = policy.name.toLowerCase();
+      if (projectedNames.has(lower)) continue;
+      projectedNames.add(lower);
       const overrides: string[] = [];
       if (policy.defaultActivation === 'disabled') overrides.push('!/*');
       overrides.push(...(policy.legacyPathRules ?? []));
@@ -2025,6 +2362,9 @@ export class ExtensionStore {
       return;
     }
     if (!input.stagingDirectory) {
+      if (input.operation === 'install' && input.idempotent) {
+        return;
+      }
       throw new Error(`${input.operation} requires a staging directory.`);
     }
     const stagingRoot = path.resolve(this.storeDir, 'staging');
@@ -2036,13 +2376,30 @@ export class ExtensionStore {
 
   private assertArtifactDestination(destinationDirectory: string): void {
     const extensionsRoot = path.resolve(this.extensionsDir);
+    const versionsRoot = path.resolve(this.versionsDir);
     const destination = path.resolve(destinationDirectory);
     if (
-      path.dirname(destination) !== extensionsRoot ||
-      destination === extensionsRoot
+      path.dirname(destination) === extensionsRoot &&
+      destination !== extensionsRoot
     ) {
-      throw new Error('Extension destination must be a direct child.');
+      return;
     }
+    const nameDir = path.dirname(destination);
+    const slotSegment = path.basename(destination);
+    const nameSegment = path.basename(nameDir);
+    if (
+      path.dirname(nameDir) === versionsRoot &&
+      nameDir !== versionsRoot &&
+      /^[a-zA-Z0-9-_.]+$/.test(nameSegment) &&
+      nameSegment !== '.' &&
+      nameSegment !== '..' &&
+      /^[a-zA-Z0-9-_.]+$/.test(slotSegment) &&
+      slotSegment !== '.' &&
+      slotSegment !== '..'
+    ) {
+      return;
+    }
+    throw new Error('Extension destination must be a direct child.');
   }
 
   private async pathExists(filePath: string): Promise<boolean> {

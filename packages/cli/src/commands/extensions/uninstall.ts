@@ -22,6 +22,7 @@ import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface UninstallArgs {
   name: string; // can be extension name or source URL.
+  version?: string;
 }
 
 export async function handleUninstall(args: UninstallArgs) {
@@ -35,14 +36,37 @@ export async function handleUninstall(args: UninstallArgs) {
         null,
         requestConsentNonInteractive,
       ),
-      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted === true,
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(
         settings.privacy?.usageStatisticsEnabled,
       ),
       proxy: resolveExtensionTelemetryProxy(settings.proxy),
     });
     await extensionManager.refreshCache();
-    const result = await extensionManager.uninstallExtension(args.name, false);
+    let result;
+    if (args.version) {
+      const allLoaded =
+        typeof extensionManager.getAllLoadedExtensions === 'function'
+          ? extensionManager.getAllLoadedExtensions()
+          : extensionManager.getLoadedExtensions();
+      const lowerName = args.name.toLowerCase();
+      const selector = args.version.toLowerCase();
+      const target = allLoaded.find(
+        (ext) =>
+          ext.name.toLowerCase() === lowerName &&
+          (ext.version.toLowerCase() === selector ||
+            ext.versionSlot?.toLowerCase() === selector ||
+            ext.id.toLowerCase().startsWith(selector)),
+      );
+      if (!target) {
+        throw new Error(
+          `Extension "${args.name}" matching version "${args.version}" not found.`,
+        );
+      }
+      result = await extensionManager.uninstallExtensionById(target.id, false);
+    } else {
+      result = await extensionManager.uninstallExtension(args.name, false);
+    }
     writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
@@ -64,6 +88,12 @@ export const uninstallCommand: CommandModule = {
         describe: t('The name or source path of the extension to uninstall.'),
         type: 'string',
       })
+      .option('version', {
+        describe: t(
+          'Specific version, version slot, or id prefix to uninstall when multiple versions are installed.',
+        ),
+        type: 'string',
+      })
       .check((argv) => {
         if (!argv.name) {
           throw new Error(
@@ -77,6 +107,7 @@ export const uninstallCommand: CommandModule = {
   handler: async (argv) => {
     await handleUninstall({
       name: argv['name'] as string,
+      version: argv['version'] as string | undefined,
     });
   },
 };

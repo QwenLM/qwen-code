@@ -36,7 +36,7 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+    isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted === true,
     usageStatisticsEnabled: resolveUsageStatisticsEnabled(
       settings.privacy?.usageStatisticsEnabled,
     ),
@@ -86,15 +86,18 @@ export function extensionToOutputString(
     extension.config.name,
     os.homedir(),
   );
-  const workspaceEnabled = extensionManager.isEnabled(
-    extension.config.name,
-    cwd,
-  );
+  const workspaceEnabled =
+    typeof extension.isActive === 'boolean'
+      ? extension.isActive
+      : extensionManager.isEnabled(extension.config.name, cwd);
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
   const locale = getCurrentLanguage();
   const displayLabel = getExtensionDisplayName(extension, locale);
-  let output = `${inline ? '' : status} ${displayLabel} (${extension.config.version})`;
+  const slotTag = extension.versionSlot
+    ? ` [slot: ${extension.versionSlot}]`
+    : '';
+  let output = `${inline ? '' : status} ${displayLabel} (${extension.config.version})${slotTag}`;
   const desc = getExtensionDescription(extension, locale);
   if (desc) {
     output += `\n ${t('Description:')} ${stripAnsi(desc)}`;

@@ -769,6 +769,10 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), 'extensions');
   }
 
+  static getUserExtensionVersionsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'extension-versions');
+  }
+
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
   }

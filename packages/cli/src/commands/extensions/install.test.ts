@@ -90,7 +90,7 @@ describe('handleInstall', () => {
   beforeEach(() => {
     mockRefreshCache.mockResolvedValue(undefined);
     mockLoadSettings.mockReturnValue({ merged: {} });
-    mockIsWorkspaceTrusted.mockReturnValue(true);
+    mockIsWorkspaceTrusted.mockReturnValue({ isTrusted: true });
   });
 
   afterEach(() => {
