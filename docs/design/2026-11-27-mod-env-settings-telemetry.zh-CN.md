@@ -50,7 +50,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
    - attribute 的值是字符串、数字、布尔值或字符串列表。
    - `to` 固定不可改。回答是 `{ value: undefined }` 或 `{ deny }`。
 4. **`$.telemetry.mark(entry)`**：接收 `{ feature, kind, reason?, props? }`，`kind` 取 `ok`、`sad` 或 `bad`。回答形状与 `telemetry.log` 相同。
-5. **两个 telemetry 调用**在所有 hook 作答后解析为 `undefined`；有 hook 拒绝时调用被拒绝。
+5. **两个 telemetry 调用**在中间件正常返回时解析为 `undefined`。hook 可以在调用 `next(e)` 前返回 `{ deny }`，拒绝调用并阻止写入。在 `next(e)` 之后返回 `{ deny }` 仍会拒绝调用。已写入的条目会留在调试日志中。
 6. **`CommandPresentation.isColorless`**：终端不显示颜色时为 `true`；其他情况和 headless 运行时不出现。
 7. **`$.session.version().qwen.methods`**：只在宿主能回答 `env.get` 和 `settings.read` 时列出它们。store 的方法也是只在宿主保存 store 时才列出。
 
@@ -74,12 +74,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 系统默认文件是优先级最低的作用域，但不对应 Mod 知道的任何来源。它计入合并结果，但不作为一层列出。
   - 合并结果就是会话实际使用的那份，不是 Mod 能从各层自己折叠出来的。原因是 Qwen Code 的合并会去掉工作区的受限设置，部分键也有各自的合并规则。
 - **hook 的回答只到达调用方。** Claude Code 在自己合并设置时也会触发 `settings.read`，因此 hook 能改写引擎实际使用的设置。Qwen Code 只在 Mod 调用时触发。让沙箱里的插件修改权限、供应商或 MCP 服务器，比读取它们是大得多的决定；检查过的 Mod 也都不需要。
-- **telemetry 只记日志，不发送。** Qwen Code 没有为插件准备的第一方记录；运维方的 collector 也只接收 Qwen Code 自己记录的内容。两个调用都会：
-  - 校验 entry；
-  - 运行 hook；
-  - 把 entry 写进调试日志，形如 `telemetry.log (not sent): …` 或 `telemetry.mark (not sent): …`。
-
-  这样 Mod 作者能看到自己的 Mod 会上报什么。telemetry 与 `$.ui.log` 共用 100,000 字符的额度。条目超出剩余额度时仍然接受调用。只有写入调试日志的条目才扣减额度。
+- **telemetry 使用本地调试日志。** Qwen Code 没有为插件准备的第一方记录。运维方的 collector 只接收 Qwen Code 自己记录的内容。两个调用都会校验条目，并在条目到达中间件链末端时写入日志，形如 `telemetry.log (not sent): …` 或 `telemetry.mark (not sent): …`。这样 Mod 作者能看到自己的 Mod 会上报什么。telemetry 与 `$.ui.log` 共用 100,000 字符的额度。条目超出剩余额度时仍然接受调用。只有写入调试日志的条目才扣减额度。
 
 - **`env.get` 不做字面名字检查。** Claude Code 要求名字必须是字符串字面量，好让它的校验器列出模块读了哪些变量。Qwen Code 没有这样的校验器。凭据靠上面的规则挡住，规则不依赖读取模块源码。
 - **`isColorless` 跟随 `NO_COLOR`。** 设置了 `NO_COLOR` 时两种终端 UI 都不显示颜色，Qwen Code 也没有 `--no-color` 参数。终端在每条命令运行时读取这个变量，所以这个字段反映的是命令运行时看到的环境。
@@ -117,7 +112,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 每个方法的回答，以及经过其他插件 hook 的情况；
   - 改了 `name` 或 `layers` 的 hook 被跳过；
   - 未知来源、不是字符串的键、带自由文本的 telemetry entry 被拒绝；
-  - telemetry 只进调试日志；被拒绝时调用被拒绝；
+  - telemetry 只进调试日志。在 `next(e)` 前拒绝会阻止写入，调用方收到拒绝。
   - 没有 reads 的宿主拒绝两种读取调用，也不列出它们；
   - CLI 宿主的凭据规则：变量及其别名、设置键、`env`、供应商指向的变量、MCP 的 `env` 和 `headers`、包含已解析凭据的字符串（包括环境值变化后），以及不受信任的文件夹；
   - `NO_COLOR` 下的 `isColorless`。

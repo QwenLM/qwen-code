@@ -77,7 +77,7 @@ const settingsCredentialReferences = new WeakMap<object, readonly string[]>();
 // Keep the credential classification for the value actually installed.
 const installedCredentialAliases = new Map<string, string>();
 
-function envKeyIdentity(key: string): string {
+export function envKeyIdentity(key: string): string {
   return process.platform === 'win32' ? key.toUpperCase() : key;
 }
 
@@ -102,16 +102,28 @@ export function registerSettingsCredentialReferences(
   if (names.length) settingsCredentialReferences.set(settings, names);
 }
 
-// The process environment can change before existing sessions update settings.
-export function recordSettingsCredentialSources(settings: object): void {
+export function* settingsCredentialSourceEntries(
+  settings: object,
+  env: Readonly<NodeJS.ProcessEnv>,
+): Generator<[string, string]> {
   const hidden = credentialNameFilter(
     [settings],
     settingsCredentialReferences.get(settings) ?? [],
   );
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !isCredentialName(key) && hidden(key)) {
-      installedCredentialAliases.set(envKeyIdentity(key), value);
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && hidden(key) && !isCredentialName(key)) {
+      yield [key, value];
     }
+  }
+}
+
+// The process environment can change before existing sessions update settings.
+export function recordSettingsCredentialSources(settings: object): void {
+  for (const [key, value] of settingsCredentialSourceEntries(
+    settings,
+    process.env,
+  )) {
+    installedCredentialAliases.set(envKeyIdentity(key), value);
   }
 }
 

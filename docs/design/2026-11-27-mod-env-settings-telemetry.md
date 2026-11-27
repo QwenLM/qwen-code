@@ -44,7 +44,7 @@ These follow the 2.1.332 declarations.
    - An attribute is a string, a number, a boolean or a list of strings.
    - `to` is pinned. The answer is `{ value: undefined }` or `{ deny }`.
 4. **`$.telemetry.mark(entry)`** takes `{ feature, kind, reason?, props? }`, with `kind` one of `ok`, `sad` and `bad`. The answer is the same as `telemetry.log`'s.
-5. **Both telemetry calls** resolve to `undefined` once the hooks have answered, and reject when one denies.
+5. **Both telemetry calls** resolve to `undefined` on a successful middleware result. A hook can return `{ deny }` before `next(e)` to reject the call and prevent the write. A denial after `next(e)` still rejects the call. Any entry already written stays in the debug log.
 6. **`CommandPresentation.isColorless`** is `true` where the terminal shows no color, and absent elsewhere and in headless runs.
 7. **`$.session.version().qwen.methods`** lists `env.get` and `settings.read` only where the host answers them, as it lists the store's methods only where the host keeps a store.
 
@@ -67,7 +67,7 @@ These follow the 2.1.332 declarations.
   - The system defaults file is the lowest scope but names no source a Mod knows. It counts in the merge and is not a layer.
   - The merge is the one the session runs under, not a fold a Mod could recompute from the layers: Qwen Code's merge strips a workspace's restricted settings and merges some keys by their own rules.
 - **A hook's answer reaches the caller only.** Claude Code also raises `settings.read` for its own merge, so a hook can rewrite the settings the engine runs under. Qwen Code raises it only for a Mod's call. Letting a sandboxed plugin change permissions, providers or MCP servers is a larger decision than reading them, and no Mod examined needs it.
-- **Telemetry is logged, not sent.** Qwen Code has no first-party row for a plugin, and an operator's collector receives only what Qwen Code itself records. Both calls validate the entry, run the hooks, then write the entry to the debug log as `telemetry.log (not sent): …` or `telemetry.mark (not sent): …`. A Mod author sees what their Mod would report. The 100,000-character budget is shared with `$.ui.log`. Telemetry calls are still accepted when their entry exceeds the remaining budget. Only entries written to the debug log consume it.
+- **Telemetry uses the local debug log.** Qwen Code has no first-party row for a plugin, and an operator's collector receives only what Qwen Code itself records. Both calls validate the entry and write it when it reaches the end of the middleware chain. The debug entry starts with `telemetry.log (not sent): …` or `telemetry.mark (not sent): …`. A Mod author sees what their Mod would report. The 100,000-character budget is shared with `$.ui.log`. Telemetry calls are still accepted when their entry exceeds the remaining budget. Only entries written to the debug log consume it.
 - **No literal-name check for `env.get`.** Claude Code requires the name to be a string literal so its validator can list what a module reads. Qwen Code has no such validator. Credentials are kept back by the rules above, which do not depend on reading the module's source.
 - **`isColorless` follows `NO_COLOR`.** Both terminal UIs drop color when `NO_COLOR` is set, and Qwen Code has no `--no-color` flag. The terminal reads the variable as each command runs, so the field follows the environment the command sees.
 - **A completion at a usage limit fails at once, as it already does.** A Mod waiting on a retry it cannot cancel would hold its hook for nothing. Qwen Code already sends a Mod's completion once, without retrying, and answers a quota error with `{ isAnswered: false, reason: 'api-error', error: 'billing_error' }`, as the declarations describe. An existing unit test covers the quota case.
@@ -101,7 +101,7 @@ Observed with Qwen Code 0.27.4, the global CLI, with an isolated `HOME` and a Mo
   - each method's answer and its pass through another plugin's hooks;
   - a hook that changes `name` or `layers` is skipped;
   - an unknown source, a key that is not a string, and a telemetry entry with free text are refused;
-  - telemetry reaches the debug log only, and a deny rejects the call;
+  - telemetry reaches the debug log only, and a denial before `next(e)` rejects the call and prevents the write.
   - a host with no reads refuses both calls and does not list them;
   - the CLI host's credential rules for variables and aliases, settings keys, `env`, provider-named variables, MCP `env` and `headers`, a string holding a resolved credential even after the environment changes, and an untrusted folder;
   - `isColorless` under `NO_COLOR`.

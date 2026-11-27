@@ -762,10 +762,13 @@ calling Mod reads, never what the session runs under.
 attributes, loggedAt, span? }` is a record for an operator's collector.
 `$.telemetry.mark({ feature, kind, reason?, props })` marks one use of a
 feature, with `kind` one of `ok`, `sad` and `bad`. A property is a number, a
-boolean or `{ value, of }`, a value chosen from its list. Qwen Code sends none
-of them anywhere: once the hooks have answered, the entry is written to the
-debug log as `telemetry.log (not sent): …`. A hook hears it with `to` pinned,
-and may `{deny}` it, which rejects the call.
+boolean or `{ value, of }`, a value chosen from its list. Both calls use the
+local debug log. An entry that reaches the end of the middleware chain and
+fits the log budget is written as `telemetry.log (not sent): …` or
+`telemetry.mark (not sent): …`. The `to` field of `telemetry.log` stays pinned.
+A hook can return `{ deny }` before `next(e)` to reject the call and prevent
+the write. A denial after `next(e)` still rejects the call. Any entry already
+written stays in the log.
 
 ## Model calls
 

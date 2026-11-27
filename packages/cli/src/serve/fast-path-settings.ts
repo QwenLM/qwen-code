@@ -54,7 +54,9 @@ import {
   parseRelaunchEnvProvenance,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   recordCredentialAliasWrite,
+  recordSettingsCredentialSources,
   registerSettingsCredentialAliases,
+  registerSettingsCredentialReferences,
   restoreCredentialAliases,
   writeRelaunchCredentialAliases,
 } from '../utils/env-provenance.js';
@@ -96,10 +98,38 @@ type CachedTrustRule = TrustPrecedenceRule<string>;
 let homeEnvBootstrapped = false;
 let cachedTrustedFoldersPath: string | undefined;
 let cachedTrustedFolderRules: CachedTrustRule[] | undefined;
+interface CredentialSettingsReferences {
+  configured: Set<string>;
+  referenced: Set<string>;
+}
 const summaryCredentialVariables = new WeakMap<
   ServeFastPathSettings,
-  { configured: Set<string>; referenced: Set<string> }
+  CredentialSettingsReferences
 >();
+const bootstrapCredentialInputs = new WeakMap<
+  ServeFastPathSettings,
+  {
+    sources: CredentialSettingsReferences;
+    initialNames: ReadonlySet<string>;
+    substitutions: ReadonlyMap<string, string>;
+  }
+>();
+
+function resolveCredentialNames(
+  credentials: CredentialSettingsReferences,
+  fallback?: Record<string, string>,
+): Set<string> {
+  const names = new Set(
+    Array.from(credentials.referenced, (name) => name.toUpperCase()),
+  );
+  for (const name of credentials.configured) {
+    addConfiguredCredentialVariable(
+      names,
+      resolveEnvVarsInString(name, fallback),
+    );
+  }
+  return names;
+}
 
 function getTrustedFoldersPathFastPath(): string {
   return (
@@ -378,13 +408,14 @@ export function loadServeFastPathEnvironment(
     }
   }
 
+  const installedSettingsKeys: string[] = [];
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (isLoaderEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
-        recordCredentialAliasWrite(key, settings);
+        installedSettingsKeys.push(key);
       }
     }
     rejectedLoaderKeys.push(
@@ -394,6 +425,29 @@ export function loadServeFastPathEnvironment(
       ),
     );
   }
+  const credentials = bootstrapCredentialInputs.get(settings);
+  if (credentials) {
+    const names = resolveCredentialNames(credentials.sources);
+    registerSettingsCredentialReferences(settings, [...names]);
+    // A configured source name can become available after settings.env
+    // values have already been expanded with the home fallback.
+    if (settings.env && credentials.substitutions.size) {
+      registerSettingsCredentialAliases(
+        settings,
+        findCredentialAliases(
+          settings.env,
+          credentials.substitutions,
+          (name) =>
+            isCredentialName(name) ||
+            names.has(name.toUpperCase()) ||
+            credentials.initialNames.has(name.toUpperCase()),
+        ),
+      );
+    }
+  }
+  for (const key of installedSettingsKeys)
+    recordCredentialAliasWrite(key, settings);
+  recordSettingsCredentialSources(settings);
   writeRelaunchCredentialAliases(process.env, [
     ...liveCredentialAliases().keys(),
   ]);
@@ -975,28 +1029,21 @@ export function loadServeFastPathSettings(
   const resolved = resolveEnvVarsInObject(merged, fallback, {
     onSubstitution: (name, value) => substitutions.set(name, value),
   });
-  if (resolved.env && substitutions.size) {
-    const names = new Set<string>();
-    for (const scope of [systemDefaults, user, workspace, system]) {
-      const credentials = summaryCredentialVariables.get(scope);
-      if (!credentials) continue;
-      for (const name of credentials.configured) {
-        addConfiguredCredentialVariable(
-          names,
-          resolveEnvVarsInString(name, fallback),
-        );
-      }
-      for (const name of credentials.referenced) names.add(name.toUpperCase());
-    }
-    registerSettingsCredentialAliases(
-      resolved,
-      findCredentialAliases(
-        resolved.env,
-        substitutions,
-        (name) => isCredentialName(name) || names.has(name.toUpperCase()),
-      ),
-    );
+  const sources: CredentialSettingsReferences = {
+    configured: new Set(),
+    referenced: new Set(),
+  };
+  for (const scope of [systemDefaults, user, workspace, system]) {
+    const credentials = summaryCredentialVariables.get(scope);
+    if (!credentials) continue;
+    for (const name of credentials.configured) sources.configured.add(name);
+    for (const name of credentials.referenced) sources.referenced.add(name);
   }
+  bootstrapCredentialInputs.set(resolved, {
+    sources,
+    initialNames: resolveCredentialNames(sources, fallback),
+    substitutions,
+  });
   if (ignoredWorkspaceKeys.length > 0) {
     resolved.ignoredWorkspaceKeys = ignoredWorkspaceKeys;
   }

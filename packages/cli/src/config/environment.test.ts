@@ -1036,7 +1036,10 @@ describe('Conversations root environment', () => {
 describe('buildRuntimeEnvironment', () => {
   it('passes installed credential aliases to the child without marking a launch override', async () => {
     const workspace = makeWorkspace();
+    const workspaceSource = 'QWEN_TEST_PROVIDER_KEY';
+    fs.writeFileSync(path.join(workspace, '.env'), `${workspaceSource}=abc\n`);
     const settings = testSettings({
+      modelProviders: { openai: [{ id: 'fixture', envKey: workspaceSource }] },
       env: {
         RUNTIME_SETTINGS: 'synthetic-overlay',
         RUNTIME_PARENT: 'synthetic-shadowed',
@@ -1076,9 +1079,10 @@ describe('buildRuntimeEnvironment', () => {
       credentialAliases: expect.arrayContaining([
         'RUNTIME_SETTINGS',
         'RUNTIME_DOTENV',
+        workspaceSource,
       ]),
     });
-    expect(provenance?.credentialAliases).toHaveLength(2);
+    expect(provenance?.credentialAliases).toHaveLength(3);
     expect(
       effectiveEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE]?.includes('synthetic-'),
     ).toBe(false);
@@ -1089,6 +1093,7 @@ describe('buildRuntimeEnvironment', () => {
       'RUNTIME_SETTINGS',
       'RUNTIME_SOURCE_TOKEN',
       'RUNTIME_SETTINGS_ONLY',
+      workspaceSource,
       PRIVATE_RELAUNCH_ENV_PROVENANCE,
     ])
       vi.stubEnv(key, effectiveEnv[key]);
@@ -1102,6 +1107,7 @@ describe('buildRuntimeEnvironment', () => {
       );
       expect(reads.env('RUNTIME_SETTINGS') === undefined).toBe(true);
       expect(reads.env('RUNTIME_SOURCE_TOKEN') === undefined).toBe(true);
+      expect(reads.env(workspaceSource) === undefined).toBe(true);
       expect(reads.env('RUNTIME_SETTINGS_ONLY')).toBe('ordinary');
       expect(reads.env(PRIVATE_RELAUNCH_ENV_PROVENANCE)).toBeUndefined();
     } finally {

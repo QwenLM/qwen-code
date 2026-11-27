@@ -20,6 +20,7 @@ import {
   isChannelCredentialField,
   MIN_CREDENTIAL_VALUE_LENGTH,
 } from '../utils/credential-names.js';
+import { envKeyIdentity } from '../utils/env-provenance.js';
 
 type Json = Record<string, unknown>;
 
@@ -27,13 +28,14 @@ type Json = Record<string, unknown>;
 // go whole: their names follow no rule.
 function withoutCredentials(
   value: unknown,
-  drops: (key: string, value: string) => boolean,
+  drops: (key: string, value: string, inEnvironment?: boolean) => boolean,
   level:
     | 'root'
     | 'any'
     | 'servers'
     | 'server'
     | 'channels'
+    | 'env'
     | 'channel' = 'root',
 ): unknown {
   if (Array.isArray(value))
@@ -51,7 +53,7 @@ function withoutCredentials(
     Object.entries(value).flatMap(([key, item]) => {
       if (
         (typeof item === 'string' &&
-          (drops(key, item) ||
+          (drops(key, item, level === 'env') ||
             (level === 'channel' && isChannelCredentialField(key)))) ||
         (level === 'server' && (key === 'env' || key === 'headers'))
       ) {
@@ -61,8 +63,8 @@ function withoutCredentials(
         childLevel ??
         (key === 'mcpServers'
           ? 'servers'
-          : level === 'root' && key === 'channels'
-            ? 'channels'
+          : level === 'root' && (key === 'channels' || key === 'env')
+            ? key
             : 'any');
       return [[key, withoutCredentials(item, drops, nextLevel)]];
     }),
@@ -91,14 +93,13 @@ export function modHostReads(
       env === process.env ? getInstalledSettingsCredentials() : undefined;
     const matchesCredential = credentialNameFilter(
       [settings.merged, ...scopes],
-      [
-        ...getSettingsCredentialReferences(scopes),
-        ...(installed?.keys() ?? []),
-      ],
+      getSettingsCredentialReferences(scopes),
     );
     const hidden = (name: string) =>
       matchesCredential(name) ||
       name.toUpperCase() === PRIVATE_RELAUNCH_ENV_PROVENANCE;
+    const hiddenEnvironment = (name: string) =>
+      hidden(name) || installed?.has(envKeyIdentity(name)) === true;
     // A resolved value can differ from the environment after startup or reload.
     const secrets = new Set(
       [...(installed?.values() ?? [])].filter(
@@ -113,13 +114,14 @@ export function modHostReads(
         if (
           value &&
           value.length >= MIN_CREDENTIAL_VALUE_LENGTH &&
-          hidden(name)
+          hiddenEnvironment(name)
         )
           secrets.add(value);
       }
     }
-    return (name: string, value: string) => {
-      if (name && hidden(name)) return true;
+    return (name: string, value: string, inEnvironment = false) => {
+      if (name && (inEnvironment ? hiddenEnvironment(name) : hidden(name)))
+        return true;
       for (const secret of secrets) {
         if (value.includes(secret)) return true;
       }
@@ -129,7 +131,7 @@ export function modHostReads(
   return {
     env: (name) => {
       const value = env[name];
-      return typeof value === 'string' && !dropsCredential()(name, value)
+      return typeof value === 'string' && !dropsCredential()(name, value, true)
         ? value
         : undefined;
     },

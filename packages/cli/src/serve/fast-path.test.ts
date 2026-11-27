@@ -1310,10 +1310,90 @@ describe('serve fast path environment bootstrap', () => {
           parseRelaunchEnvProvenance(
             process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE],
           )?.credentialAliases,
-        ).toEqual([alias]);
+        ).toEqual(
+          source === 'FAST_PATH_FIXTURE_TOKEN' ? [alias] : [alias, source],
+        );
         expect(
           process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]?.includes(prior),
         ).toBe(false);
+      } finally {
+        resetCredentialAliasesForTesting();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([
+    ['direct', 'FAST_PATH_WORKSPACE_INPUT', false, false],
+    ['dotenv selector', '$FAST_PATH_WORKSPACE_SELECTOR', false, false],
+    [
+      'dotenv selector with an alias',
+      '$FAST_PATH_WORKSPACE_SELECTOR',
+      true,
+      false,
+    ],
+    [
+      'settings.env selector with an alias',
+      '$FAST_PATH_WORKSPACE_SELECTOR',
+      true,
+      true,
+    ],
+  ])(
+    'records the workspace credential origin for a %s',
+    async (_kind, envKey, withAlias, selectorInSettings) => {
+      const qwenHome = useTempQwenHome();
+      const source = 'FAST_PATH_WORKSPACE_INPUT';
+      const alias = 'FAST_PATH_WORKSPACE_LABEL';
+      const publicKey = 'FAST_PATH_WORKSPACE_PUBLIC';
+      const selector = 'FAST_PATH_WORKSPACE_SELECTOR';
+      for (const key of [
+        source,
+        alias,
+        publicKey,
+        selector,
+        PRIVATE_RELAUNCH_ENV_PROVENANCE,
+      ]) {
+        vi.stubEnv(key, undefined);
+      }
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-mod-source-')),
+      );
+      const workspaceSettings = join(tempWorkspace, SETTINGS_DIRECTORY_NAME);
+      try {
+        mkdirSync(workspaceSettings, { recursive: true });
+        writeFileSync(
+          join(qwenHome, 'settings.json'),
+          JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+        );
+        writeFileSync(
+          join(workspaceSettings, 'settings.json'),
+          JSON.stringify({
+            modelProviders: { openai: [{ id: 'fixture', envKey }] },
+            ...(withAlias && {
+              env: {
+                [alias]: '$' + source,
+                ...(selectorInSettings && { [selector]: source }),
+              },
+            }),
+          }),
+        );
+        if (withAlias)
+          writeFileSync(join(qwenHome, '.env'), `${source}=fixture-home\n`);
+        const dotenvValues = [
+          `${source}=fixture-workspace`,
+          `${publicKey}=public`,
+        ];
+        if (!selectorInSettings) dotenvValues.push(`${selector}=${source}`);
+        writeFileSync(join(tempWorkspace, '.env'), dotenvValues.join('\n'));
+
+        await bootstrapServeFastPathEnvironment(tempWorkspace);
+        const marker = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
+        expect(process.env[publicKey]).toBe('public');
+        if (withAlias) expect(process.env[alias] === 'fixture-home').toBe(true);
+        expect(parseRelaunchEnvProvenance(marker)?.credentialAliases).toEqual(
+          withAlias ? [alias, source] : [source],
+        );
+        expect(marker?.includes('fixture-')).toBe(false);
       } finally {
         resetCredentialAliasesForTesting();
         vi.unstubAllEnvs();

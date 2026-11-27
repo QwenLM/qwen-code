@@ -35,6 +35,7 @@ import {
   recordSettingsCredentialSources,
   resetCredentialAliasesForTesting,
   restoreCredentialAliases,
+  settingsCredentialSourceEntries,
   writeRelaunchCredentialAliases,
 } from '../utils/env-provenance.js';
 import { spawnedEnvironmentView } from './storage-paths-lite.js';
@@ -813,6 +814,12 @@ export function buildRuntimeEnvironment(
   const overlayKeys = Object.keys(effectiveEnv)
     .filter((key) => effectiveEnv[key] !== baseEnv[key])
     .sort();
+  for (const [key, value] of settingsCredentialSourceEntries(
+    settings,
+    effectiveEnv,
+  )) {
+    credentialAliasValues.set(key, value);
+  }
   const inheritedAliases = parseRelaunchEnvProvenance(
     baseEnv[PRIVATE_RELAUNCH_ENV_PROVENANCE],
   )?.credentialAliases;

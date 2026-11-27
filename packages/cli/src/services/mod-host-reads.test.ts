@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings, SettingsFile } from '../config/settings.js';
 import { credentialFieldReferences } from '../utils/credential-names.js';
+import {
+  resetCredentialAliasesForTesting,
+  restoreCredentialAliases,
+} from '../utils/env-provenance.js';
 import { modHostReads } from './mod-host-reads.js';
 
 const file = (settings: Record<string, unknown>) =>
@@ -64,6 +68,37 @@ describe('modHostReads', () => {
     expect(reads.env(apiKeyEnv)).toBeUndefined();
     expect(reads.env('OMNI_UPLOAD_INPUT')).toBeUndefined();
     expect(reads.env('PUBLIC_LABEL')).toBe('public');
+  });
+
+  it('matches installed credential names only in environment entries', () => {
+    const posix = process.platform !== 'win32';
+    vi.stubEnv('theme', 'installed-fixture');
+    if (posix) vi.stubEnv('THEME', 'public-case-variant');
+    restoreCredentialAliases(['theme']);
+    try {
+      const user = {
+        env: { theme: 'older-setting', THEME: 'public-case-variant' },
+        ui: { theme: 'public-theme' },
+        general: { preferredEditor: 'prefix installed-fixture suffix' },
+      };
+      const reads = modHostReads(loaded({ user, merged: user }));
+      expect(reads.env('theme')).toBeUndefined();
+      expect(reads.env('THEME')).toBe(
+        posix ? 'public-case-variant' : undefined,
+      );
+      const clean = {
+        env: posix ? { THEME: 'public-case-variant' } : {},
+        ui: { theme: 'public-theme' },
+        general: {},
+      };
+      expect(reads.settings()).toEqual({
+        merged: clean,
+        layers: [{ source: 'user', settings: clean }],
+      });
+    } finally {
+      resetCredentialAliasesForTesting();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('gives each source and the merge without credentials', () => {
