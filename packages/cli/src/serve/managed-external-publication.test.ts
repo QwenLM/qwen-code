@@ -317,7 +317,7 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
 
   it('preserves the other Session directory when one shared external Workspace context is released', async () => {
     boot = { ...boot, isolationClass: 'workspace' };
-    const { worker } = await startWorker();
+    const { worker, headers: publicationHeaders } = await startWorker();
     const headers = {
       authorization: `Bearer ${boot.token}`,
       'content-type': 'application/json',
@@ -325,10 +325,14 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       'x-qwen-managed-lease-id': boot.leaseId,
       'x-qwen-managed-lease-epoch': String(boot.epoch),
     };
-    const post = async (route: string, body: unknown) => {
+    const post = async (
+      route: string,
+      body: unknown,
+      wireHeaders: Record<string, string> = headers,
+    ) => {
       const response = await fetch(worker.ready.url + route, {
         method: 'POST',
-        headers,
+        headers: wireHeaders,
         body: JSON.stringify(body),
       });
       expect(response.status).toBe(200);
@@ -370,27 +374,30 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       });
       return activation;
     };
+    const references: Array<typeof request.reference> = [];
     const execute = async (
       sessionId: string,
       toolName: string,
       input: Record<string, string>,
     ) => {
+      const reference = {
+        sessionId,
+        promptId: 'prompt',
+        callId: `${toolName}-${sessionId}`,
+        argsDigest: managedToolDigest(input),
+      };
       const result = await post('/internal/managed-runtime/v2/execute', {
         protocolVersion: 2,
-        reference: {
-          sessionId,
-          promptId: 'prompt',
-          callId: `${toolName}-${sessionId}`,
-          argsDigest: managedToolDigest(input),
-        },
+        reference,
         toolName,
         input,
       });
       expect(result.result.executionStatus).toBe('success');
+      references.push(reference);
       return result;
     };
     const first = await install('alpha');
-    await install('bravo');
+    const second = await install('bravo');
     for (const id of ['alpha', 'bravo']) {
       await execute(id, 'write_file', { file_path: 'note.txt', content: id });
       expect(
@@ -408,6 +415,32 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       file_path: 'note.txt',
     });
     expect(JSON.stringify(remaining.result)).toContain('bravo');
+    await post(WORKSPACE_ACTIVATION_ROUTE.path, {
+      ...second,
+      operation: 'release',
+    });
+    const stop = () =>
+      post(
+        '/internal/managed-runtime/v2/publication:stop-drained',
+        { protocolVersion: 2, channel: 'all' },
+        publicationHeaders,
+      );
+    expect(await stop()).toEqual({ protocolVersion: 2, state: 'unknown' });
+    for (const reference of references) {
+      expect(
+        await post('/internal/managed-runtime/v2/acknowledge', {
+          protocolVersion: 2,
+          reference,
+        }),
+      ).toMatchObject({ state: 'acknowledged' });
+    }
+    const stopped = await stop();
+    expect(stopped).toMatchObject({
+      state: 'drained',
+      proof: { kind: 'external-publication' },
+      receipts: [],
+    });
+    expect(await stop()).toEqual(stopped);
   });
 
   it('shares publication channels across main and legacy listeners with closed identity checks', async () => {

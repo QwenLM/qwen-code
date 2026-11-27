@@ -19,6 +19,8 @@ import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -590,14 +592,17 @@ class ExternalWorkspaceProvisionerTest {
                 lease, handle, 1, drainRequested, "broker-a", now.plusSeconds(60), 1, 1, now, now, now);
     }
 
-    @Test
-    void savedOriginalDrainsAfterAdapterRestartWithoutObservingOrAllocating() throws Exception {
-        var subject = provisioner(registration(PROVIDER, 3, MOUNT));
-        var request = request();
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void savedOriginalDrainsAfterAdapterRestartWithoutObservingOrAllocating(boolean sharedFiles) throws Exception {
+        var storage = sharedFiles ? new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL,
+                3, ALIAS, ALIAS_PATH, MOUNT, null, "workspace") : registration(PROVIDER, 3, MOUNT);
+        var subject = provisioner(storage);
+        var request = sharedFiles ? residentRequest() : request();
         var seed = seed("stop");
         var handle = join(subject.ensureResource(request, seed, null));
         subject.close();
-        subject = provisioner(registration(PROVIDER, 3, MOUNT));
+        subject = provisioner(storage);
         AtomicInteger attestations = new AtomicInteger();
         AtomicInteger stops = new AtomicInteger();
         AtomicReference<Map<String, Object>> stopBody = new AtomicReference<>();

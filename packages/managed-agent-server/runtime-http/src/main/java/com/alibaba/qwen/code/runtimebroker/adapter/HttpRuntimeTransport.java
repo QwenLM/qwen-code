@@ -343,8 +343,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     @Override
     public CompletionStage<Void> stopExternalWorkspaceDrained(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
-        requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
-        HttpRequest stop = externalPublicationRequest(lease, seed, registrationRevision,
+        HttpRequest stop = externalPublicationRequest(lease, request, seed, registrationRevision,
                 EXTERNAL_STOP_PATH, encodeToolRequest(
                         Map.of("protocolVersion", 2, "channel", "all"), EXTERNAL_STOP_LIMIT));
         return externalExchange(lease, request, seed, stop, EXTERNAL_STOP_LIMIT, bytes -> {
@@ -364,7 +363,6 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             Map<String, Object> reference, Map<String, Object> capture, long expiresAt,
             String captureId) {
-        requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
         requireClosed(reference, Set.of("sessionId", "promptId", "callId", "argsDigest"), "reference");
         requireClosed(capture, V3_CAPTURE_REQUEST_FIELDS, "capture");
         if (!"complete_required".equals(capture.get("capturePolicy"))
@@ -384,7 +382,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("expiresAt", expiresAt);
         body.put("captureId", captureId);
         requireClosed(body, EXTERNAL_BEGIN_REQUEST_FIELDS, "publication begin");
-        HttpRequest begin = externalPublicationRequest(lease, seed, registrationRevision,
+        HttpRequest begin = externalPublicationRequest(lease, request, seed, registrationRevision,
                 EXTERNAL_PUBLICATION_BEGIN_PATH, encodeToolRequest(body, EXTERNAL_PUBLICATION_LIMIT));
         return externalExchange(lease, request, seed, begin, EXTERNAL_PUBLICATION_LIMIT, bytes -> {
             Map<String, Object> response = parseExternalPublication(bytes);
@@ -407,7 +405,6 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     public CompletionStage<Map<String, Object>> externalPublicationRead(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             String channelId, String streamId, long sequence, long acknowledgedSequence) {
-        requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
         if (channelId == null || !channelId.matches(CHANNEL_ID_PATTERN)
                 || !("stdout".equals(streamId) || "stderr".equals(streamId))
                     || sequence < 0 || sequence > 9_007_199_254_740_991L
@@ -424,7 +421,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("sequence", sequence);
         body.put("acknowledgedSequence", acknowledgedSequence);
         requireClosed(body, EXTERNAL_READ_REQUEST_FIELDS, "publication read");
-        HttpRequest read = externalPublicationRequest(lease, seed, registrationRevision,
+        HttpRequest read = externalPublicationRequest(lease, request, seed, registrationRevision,
                 EXTERNAL_PUBLICATION_READ_PATH, encodeToolRequest(body, EXTERNAL_PUBLICATION_LIMIT));
         return externalExchange(lease, request, seed, read, EXTERNAL_PUBLICATION_LIMIT, bytes -> {
             Map<String, Object> response = parseExternalPublication(bytes);
@@ -526,7 +523,6 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     public CompletionStage<Void> externalPublicationRenew(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision,
             String channelId, long expiresAt) {
-        requireExternalPublicationIdentity(lease, request, seed, registrationRevision);
         if (channelId == null || !channelId.matches(CHANNEL_ID_PATTERN)
                 || expiresAt <= 0 || expiresAt > 9_007_199_254_740_991L) {
             throw new IllegalArgumentException("External publication renewal is invalid.");
@@ -536,7 +532,7 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("channelId", channelId);
         body.put("expiresAt", expiresAt);
         requireClosed(body, EXTERNAL_RENEW_REQUEST_FIELDS, "publication renew");
-        HttpRequest renew = externalPublicationRequest(lease, seed, registrationRevision,
+        HttpRequest renew = externalPublicationRequest(lease, request, seed, registrationRevision,
                 EXTERNAL_PUBLICATION_RENEW_PATH, encodeToolRequest(body, EXTERNAL_PUBLICATION_LIMIT));
         return externalExchange(lease, request, seed, renew, EXTERNAL_PUBLICATION_LIMIT, bytes -> {
             Map<String, Object> response = parseExternalPublication(bytes);
@@ -548,21 +544,20 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         });
     }
 
-    private void requireExternalPublicationIdentity(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
+    private HttpRequest externalPublicationRequest(RuntimeLease lease, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, long registrationRevision, String path, byte[] body) {
+        boolean sharedFilesStop = EXTERNAL_STOP_PATH.equals(path)
+                && WorkspaceExecutionProfile.isExternalWorkspaceRetirementRequest(request)
+                && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest());
         if (lease == null || seed == null || !seed.matches(lease) || request == null
                 || !"external-workspace".equals(request.getProvisionerKind()) || !request.isManagedContext()
-                || !"session".equals(request.getScope().getIsolationClass())
+                || !sharedFilesStop && !"session".equals(request.getScope().getIsolationClass())
                 || !WorkspaceExecutionProfile.admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
                 || registrationRevision <= 0 || registrationRevision > 9_007_199_254_740_991L
                 || client.followRedirects() != HttpClient.Redirect.NEVER
                 || !lease.getEndpoint().equals(endpoint(lease))) {
             throw new IllegalArgumentException("Original external Workspace publication identity is required.");
         }
-    }
-
-    private HttpRequest externalPublicationRequest(RuntimeLease lease, RuntimeProvisionSeed seed,
-            long registrationRevision, String path, byte[] body) {
         return HttpRequest.newBuilder(lease.getEndpoint().resolve(path))
                 .timeout(requestTimeout)
                 .header("Authorization", "Bearer " + lease.getToken())
