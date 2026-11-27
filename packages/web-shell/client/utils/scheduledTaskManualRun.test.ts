@@ -589,6 +589,68 @@ describe('runScheduledTaskManually owner matching', () => {
     },
   );
 
+  it.each([
+    { directCurrent: true, expectedRuns: 1 },
+    { directCurrent: false, expectedRuns: 0 },
+  ])(
+    'guards per_run direct dispatch with isDirectDispatchCurrent ($directCurrent)',
+    async ({ directCurrent, expectedRuns }) => {
+      const task = makeTask({ sessionMode: 'per_run' });
+      const actions = {
+        listScheduledTasks: vi.fn().mockResolvedValue([task]),
+        runScheduledTask: vi.fn().mockResolvedValue(task),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onRunPrompt = vi.fn();
+      const onError = vi.fn();
+
+      await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+        reload: vi.fn(),
+        onError,
+        isCurrent: () => true,
+        isDirectDispatchCurrent: () => directCurrent,
+        isStale: () => false,
+      });
+
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(expectedRuns);
+      expect(onRunPrompt).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { ownerRemainsCurrent: true, expectedRuns: 1, expectedPrompts: 1 },
+    { ownerRemainsCurrent: false, expectedRuns: 0, expectedPrompts: 0 },
+  ])(
+    'guards one-shot consumption with isOwnerCurrent after fresh read ($ownerRemainsCurrent)',
+    async ({ ownerRemainsCurrent, expectedRuns, expectedPrompts }) => {
+      const task = makeTask({ recurring: false });
+      let ownerCurrent = true;
+      const actions = {
+        listScheduledTasks: vi.fn().mockImplementation(async () => {
+          ownerCurrent = ownerRemainsCurrent;
+          return [task];
+        }),
+        runScheduledTask: vi.fn().mockResolvedValue(task),
+        assertScheduledTaskOwnerSelection: vi.fn().mockResolvedValue(undefined),
+      };
+      const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+      const onError = vi.fn();
+
+      await runScheduledTaskManually(task, actions, onRunPrompt, (key) => key, {
+        reload: vi.fn(),
+        onError,
+        isCurrent: () => true,
+        isOwnerCurrent: () => ownerCurrent,
+        isStale: () => false,
+      });
+
+      expect(actions.runScheduledTask).toHaveBeenCalledTimes(expectedRuns);
+      expect(onRunPrompt).toHaveBeenCalledTimes(expectedPrompts);
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not re-list a consumed one-shot before prompt dispatch', async () => {
     const task = makeTask({ recurring: false });
     const actions = {
