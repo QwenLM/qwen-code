@@ -1115,6 +1115,13 @@ const {
       latestAskUserQuestionOnError: null as
         | ((error: unknown, fallback: string) => void)
         | null,
+      latestAskUserQuestionOnConfirm: null as
+        | ((
+            id: string,
+            selectedOption: string,
+            answers?: Record<string, string>,
+          ) => boolean | void | Promise<boolean | void>)
+        | null,
       latestAskUserQuestionOnAskDetails: null as (() => void) | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
       backgroundTasks: [] as DaemonSessionTaskStatus[],
@@ -3226,12 +3233,18 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
   return {
     AskUserQuestion: (props: {
       keyboardActive?: boolean;
+      onConfirm: (
+        id: string,
+        selectedOption: string,
+        answers?: Record<string, string>,
+      ) => boolean | void | Promise<boolean | void>;
       onError: (error: unknown, fallback: string) => void;
       onAskDetails?: () => void;
     }) => {
       testState.latestAskUserQuestionKeyboardActive =
         props.keyboardActive ?? null;
       testState.askUserKeyboardActiveHistory.push(props.keyboardActive ?? null);
+      testState.latestAskUserQuestionOnConfirm = props.onConfirm;
       testState.latestAskUserQuestionOnError = props.onError;
       testState.latestAskUserQuestionOnAskDetails = props.onAskDetails ?? null;
       return React.createElement('div', { 'data-web-shell-ask-panel': '' });
@@ -10656,7 +10669,7 @@ describe('artifact panel fullscreen', () => {
       testState.latestChatEditorProps?.onSelectMode?.('yolo');
       await expect(
         testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
-      ).rejects.toThrow('still pending');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
     expect(testState.latestToolApprovalDisabled).toBe(true);
@@ -10746,7 +10759,7 @@ describe('artifact panel fullscreen', () => {
     await act(async () => {
       await expect(
         testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
-      ).rejects.toThrow('permission failed');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(false);
     await act(async () => testState.latestChatEditorProps?.onTogglePlan?.());
@@ -10782,7 +10795,7 @@ describe('artifact panel fullscreen', () => {
     act(() => testState.latestChatEditorProps?.onSelectMode?.('yolo'));
     await act(async () => {
       permission.reject(new Error('old owner failed'));
-      await expect(submission).rejects.toThrow('old owner failed');
+      await expect(submission).rejects.toThrow('Approval was not accepted');
     });
     expect(testState.latestChatEditorProps?.modeControlsDisabled).toBe(true);
     await act(async () => {
@@ -10847,11 +10860,10 @@ describe('artifact panel fullscreen', () => {
       'proceed_once',
     );
     expect(submission).toBeInstanceOf(Promise);
-    await expect(submission).rejects.toBe(failure);
+    await expect(submission).rejects.toThrow('Approval was not accepted');
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -13926,6 +13938,7 @@ beforeEach(() => {
   testState.latestTodoPanelOnOpen = null;
   testState.latestTasksStatusProps = null;
   testState.latestAskUserQuestionOnError = null;
+  testState.latestAskUserQuestionOnConfirm = null;
   testState.latestAskUserQuestionOnAskDetails = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
   testState.backgroundTasks = [];
@@ -46872,7 +46885,6 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -46946,7 +46958,6 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
       'req-1',
       'proceed_once',
-      undefined,
     );
   });
 
@@ -62430,5 +62441,132 @@ describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
     });
     await flush();
     expect(onToast).toHaveBeenCalledWith('error', 'session deleted mid-jump');
+  });
+});
+
+describe('App main chat ChatSurface convergence (slice 2f.3)', () => {
+  it('renders main chat through ChatSurface, routes AskUserQuestion submit and dismiss, and preserves single-report permission diagnostics', async () => {
+    const onToast = vi.fn();
+    testState.blocks = [
+      makePendingPermissionBlock({
+        requestId: 'ask-main-1',
+        toolName: 'ask_user_question',
+        rawInput: {
+          questions: [{ question: 'Choose', options: [{ label: 'Alpha' }] }],
+        },
+        options: [
+          {
+            optionId: 'allow-once',
+            label: 'Submit',
+            raw: { kind: 'allow_once' },
+          },
+          {
+            optionId: 'reject-once',
+            label: 'Ignore',
+            raw: { kind: 'reject_once' },
+          },
+        ],
+      }),
+    ];
+    mockSessionActions.submitPermission.mockResolvedValue(true);
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    // Main chat renders through ChatSurface with the display:contents class.
+    const surface = container.querySelector('[data-testid="chat-surface"]');
+    expect(surface).not.toBeNull();
+    expect(surface?.className).toContain('chatSurface');
+
+    // AskUserQuestion submit routes through ChatSurface -> controller.respondQuestion.
+    await act(async () => {
+      const accepted = await testState.latestAskUserQuestionOnConfirm?.(
+        'ask-main-1',
+        'allow-once',
+        { '0': 'Alpha' },
+      );
+      expect(accepted).toBe(true);
+    });
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'ask-main-1',
+      'allow-once',
+      { '0': 'Alpha' },
+    );
+
+    // AskUserQuestion dismiss routes through controller.respondApproval.
+    testState.blocks = [
+      makePendingPermissionBlock({
+        requestId: 'ask-main-2',
+        toolName: 'ask_user_question',
+        rawInput: {
+          questions: [{ question: 'Choose', options: [{ label: 'Beta' }] }],
+        },
+        options: [
+          {
+            optionId: 'allow-once',
+            label: 'Submit',
+            raw: { kind: 'allow_once' },
+          },
+          {
+            optionId: 'reject-once',
+            label: 'Ignore',
+            raw: { kind: 'reject_once' },
+          },
+        ],
+      }),
+    ];
+    rerender();
+    await flush();
+    await act(async () => {
+      const accepted = await testState.latestAskUserQuestionOnConfirm?.(
+        'ask-main-2',
+        'reject-once',
+      );
+      expect(accepted).toBe(true);
+    });
+    expect(mockSessionActions.submitPermission).toHaveBeenCalledWith(
+      'ask-main-2',
+      'reject-once',
+    );
+
+    // Failed ToolApproval preserves the original daemon error in a single toast
+    // and re-arms via rejection; mode-lock surfaces localized mode.changePending.
+    onToast.mockClear();
+    mockConnection.currentMode = 'plan';
+    mockConnection.planExecutionMode = 'yolo';
+    testState.blocks = [makePlanPermissionBlock()];
+    rerender();
+    await flush();
+    const transportErr = new Error('daemon says: plan conflict');
+    mockSessionActions.respondToPermission.mockRejectedValueOnce(transportErr);
+    await act(async () => {
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onToast).toHaveBeenCalledTimes(1);
+    expect(onToast).toHaveBeenCalledWith('error', 'daemon says: plan conflict');
+
+    onToast.mockClear();
+    const modeDeferred = deferred<{
+      mode: string;
+      planExecutionMode: string;
+    }>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(
+      modeDeferred.promise,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+      await expect(
+        testState.latestToolApprovalOnConfirm?.('req-1', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onToast).toHaveBeenCalledTimes(1);
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'A mode change or plan confirmation is pending. Try again when it finishes.',
+    );
+    await act(async () => {
+      modeDeferred.resolve({ mode: 'plan', planExecutionMode: 'yolo' });
+    });
   });
 });
