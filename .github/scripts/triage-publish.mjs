@@ -76,6 +76,44 @@ function markerLine(marker) {
   return `<!-- qwen-triage ${marker} -->`;
 }
 
+// Matches any leading qwen-triage HTML comment (stage/lifecycle/verify/typo/
+// malformed) while leaving `<!-- qwen-triage-ci ... -->` regions untouched.
+const LEADING_TRIAGE_COMMENT = /^<!--\s*qwen-triage(?!-ci(?:\s|-->|$))/i;
+
+function normalizeUpsertBody(text, marker, where, err) {
+  const expected = markerLine(marker);
+  const lines = text.split('\n');
+  if (lines[0] === expected) {
+    return text;
+  }
+  const firstNonEmptyIdx = lines.findIndex((line) => line.trim() !== '');
+  if (firstNonEmptyIdx === -1) {
+    throw new Error(`${where}: comment body is empty`);
+  }
+  const firstNonEmpty = lines[firstNonEmptyIdx].trim();
+  if (firstNonEmpty === expected) {
+    const rest = lines.slice(firstNonEmptyIdx + 1);
+    err?.write(
+      `note: ${where}: normalized leading "${expected}" marker line\n`,
+    );
+    return rest.length > 0 ? `${expected}\n${rest.join('\n')}` : expected;
+  }
+  const bodyFromFirstNonEmpty = lines.slice(firstNonEmptyIdx).join('\n');
+  if (LEADING_TRIAGE_COMMENT.test(bodyFromFirstNonEmpty.trimStart())) {
+    throw new Error(
+      `${where}: body starts with mismatched marker; expected "${expected}"`,
+    );
+  }
+  const prefixed = `${expected}\n\n${bodyFromFirstNonEmpty}`;
+  if (prefixed.length > MAX_BODY_LENGTH) {
+    throw new Error(
+      `${where}: body exceeds ${MAX_BODY_LENGTH} characters (${prefixed.length})`,
+    );
+  }
+  err?.write(`note: ${where}: prepended missing "${expected}" marker\n`);
+  return prefixed;
+}
+
 function readBodyFile(draftDir, bodiesDir, rel, where) {
   const resolved = path.resolve(draftDir, rel);
   if (!resolved.startsWith(bodiesDir + path.sep)) {
@@ -107,7 +145,7 @@ function readBodyFile(draftDir, bodiesDir, rel, where) {
   return { file: resolved, text };
 }
 
-export function validateDrafts({ dir, targetKind }) {
+export function validateDrafts({ dir, targetKind, err = null }) {
   const draftDir = path.resolve(dir);
   const bodiesDir = path.join(draftDir, 'bodies');
   // lstat the containers themselves: a symlinked bodies/ would redirect the
@@ -199,18 +237,16 @@ export function validateDrafts({ dir, targetKind }) {
         throw new Error(`${where}: ${action.action} requires a body path`);
       }
       const body = readBodyFile(draftDir, bodiesDir, action.body, where);
-      if (
-        action.action === 'upsert-comment' &&
-        body.text.split('\n')[0] !== markerLine(action.marker)
-      ) {
-        // The publisher owns the marker prefix; the agent is not trusted to
-        // have written it, and dedup/finalize match on these exact bytes.
-        throw new Error(
-          `${where}: body must start with "${markerLine(action.marker)}"`,
-        );
+      let bodyText = body.text;
+      if (action.action === 'upsert-comment') {
+        // The publisher owns the exact marker prefix that dedup and finalize
+        // match on: stamp it when omitted, canonicalize harmless whitespace on
+        // a matching marker, and fail closed on empty bodies or mismatched
+        // leading triage markers.
+        bodyText = normalizeUpsertBody(body.text, action.marker, where, err);
       }
       action.bodyFile = body.file;
-      action.bodyText = body.text;
+      action.bodyText = bodyText;
     }
     actions.push(action);
   }
@@ -347,29 +383,42 @@ function upsertComment(action, { repo, number, botLogin, exec }) {
     );
     existing = matches.at(-1) ?? null;
   }
-  if (existing) {
+  const postOrPatch = (bodyFile) => {
+    if (existing) {
+      ghCall(exec, [
+        'api',
+        '-X',
+        'PATCH',
+        `repos/${repo}/issues/comments/${existing.id}`,
+        '-F',
+        `body=@${bodyFile}`,
+      ]);
+      return { status: 'published', detail: `PATCH comment ${existing.id}` };
+    }
     ghCall(exec, [
       'api',
-      '-X',
-      'PATCH',
-      `repos/${repo}/issues/comments/${existing.id}`,
+      `repos/${repo}/issues/${number}/comments`,
       '-F',
-      `body=@${action.bodyFile}`,
+      `body=@${bodyFile}`,
     ]);
-    return { status: 'published', detail: `PATCH comment ${existing.id}` };
-  }
-  ghCall(exec, [
-    'api',
-    `repos/${repo}/issues/${number}/comments`,
-    '-F',
-    `body=@${action.bodyFile}`,
-  ]);
-  return {
-    status: 'published',
-    detail: botLogin
-      ? 'POST comment'
-      : 'POST comment (identity unresolved; PATCH disabled)',
+    return {
+      status: 'published',
+      detail: botLogin
+        ? 'POST comment'
+        : 'POST comment (identity unresolved; PATCH disabled)',
+    };
   };
+  if (action.bodyText === undefined) {
+    return postOrPatch(action.bodyFile);
+  }
+  const tempDir = mkdtempSync(path.join(tmpdir(), 'triage-publish-'));
+  const bodyFile = path.join(tempDir, 'comment.md');
+  try {
+    writeFileSync(bodyFile, action.bodyText);
+    return postOrPatch(bodyFile);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 function submitReview(action, { repo, number, botLogin, exec }) {
@@ -623,7 +672,7 @@ export function run({
 
   let actions;
   try {
-    actions = validateDrafts({ dir, targetKind });
+    actions = validateDrafts({ dir, targetKind, err });
   } catch (error) {
     err.write(`preflight rejected: ${error.message}\n`);
     return 2;

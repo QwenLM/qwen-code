@@ -272,12 +272,34 @@ describe('preflight fail-closed', () => {
   );
 
   it.each([
-    ['no marker at all', 'just text\n'],
+    ['empty body', ''],
+    ['whitespace-only body', '   \n\t\r\n'],
     ['wrong marker value', stageBody('stage=2')],
-    ['leading blank line', `\n${stageBody('stage=1')}`],
-    ['trailing space on marker line', `${markerLine('stage=1')} \nbody\n`],
+    ['leading blank line with wrong marker', `\n${stageBody('stage=2')}`],
+    ['leading BOM with wrong marker', `\uFEFF${stageBody('stage=2')}`],
+    ['unlisted stage marker', stageBody('stage=4')],
+    [
+      'lifecycle marker on stage upsert',
+      '<!-- qwen-triage lifecycle -->\nbody\n',
+    ],
+    ['verify marker on stage upsert', '<!-- qwen-triage:verify -->\nbody\n'],
+    [
+      'approve-on-green marker on line 1',
+      `<!-- qwen-triage approve-on-green sha=${HEAD} -->\nbody\n`,
+    ],
+    ['text appended to marker line', `${markerLine('stage=1')} extra\nbody\n`],
+    ['wrong case on marker line', '<!-- QWEN-TRIAGE stage=1 -->\nbody\n'],
+    [
+      'extra internal spacing on marker',
+      '<!--  qwen-triage  stage=1  -->\nbody\n',
+    ],
+    ['unclosed triage comment', '<!-- qwen-triage stage=1\nbody\n'],
+    ['multiline triage comment', '<!--\nqwen-triage stage=2\n-->\nbody\n'],
+    ['hyphenated typo stage marker', '<!-- qwen-triage-stage=2 -->\nbody\n'],
+    ['equals-sign typo marker', '<!-- qwen-triage=stage=2 -->\nbody\n'],
+    ['non-ci hyphenated suffix', '<!-- qwen-triage-ci-extra -->\nbody\n'],
   ])(
-    'rejects a body whose first line is not the exact marker (%s)',
+    'rejects empty or mismatched/malformed leading triage marker (%s)',
     (_name, text) => {
       const dir = makeDraft(
         [{ action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s.md' }],
@@ -289,6 +311,209 @@ describe('preflight fail-closed', () => {
       expect(writes).toHaveLength(0);
     },
   );
+
+  it('prepends the expected marker when omitted without mutating the draft file', () => {
+    const raw = '## Code review\n\nLooks clean.\n';
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': raw },
+    );
+    const gh = fakeGh();
+    const { code, postedBodies, err } = runPublish(dir, gh);
+    expect(code).toBe(0);
+    expect(postedBodies).toEqual([`${markerLine('stage=2')}\n\n${raw}`]);
+    expect(err.text()).toContain('prepended missing');
+    expect(readFileSync(join(dir, 'bodies', 's2.md'), 'utf8')).toBe(raw);
+  });
+
+  it('strips leading blank lines while preserving first-line indentation when prepending a missing marker', () => {
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': '\n  \r\n  indented\n' },
+    );
+    const gh = fakeGh();
+    const { code, postedBodies } = runPublish(dir, gh);
+    expect(code).toBe(0);
+    expect(postedBodies).toEqual([`${markerLine('stage=2')}\n\n  indented\n`]);
+  });
+
+  it('prepends the marker even when prose mentions triage markers or contains a CI region', () => {
+    const raw = [
+      '## Code review',
+      '',
+      `Mentions \`${markerLine('stage=2')}\` in prose.`,
+      '',
+      `<!-- qwen-triage-ci sha=${HEAD} -->`,
+      '| Check | Conclusion |',
+      '<!-- /qwen-triage-ci -->',
+      '',
+    ].join('\n');
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': raw },
+    );
+    const gh = fakeGh();
+    const { code, postedBodies } = runPublish(dir, gh);
+    expect(code).toBe(0);
+    expect(postedBodies).toEqual([`${markerLine('stage=2')}\n\n${raw}`]);
+  });
+
+  it.each([
+    ['non-triage HTML comment', '<!-- note -->\n## Code review\n'],
+    [
+      'leading qwen-triage-ci region',
+      `<!-- qwen-triage-ci sha=${HEAD} -->\n| Check | Conclusion |\n<!-- /qwen-triage-ci -->\n`,
+    ],
+  ])('prepends the marker ahead of %s', (_name, raw) => {
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': raw },
+    );
+    const gh = fakeGh();
+    const { code, postedBodies } = runPublish(dir, gh);
+    expect(code).toBe(0);
+    expect(postedBodies).toEqual([`${markerLine('stage=2')}\n\n${raw}`]);
+  });
+
+  it.each([
+    [
+      'leading blank lines',
+      `\n\n${stageBody('stage=1')}`,
+      stageBody('stage=1'),
+    ],
+    [
+      'trailing space on marker line',
+      `${markerLine('stage=1')} \nbody\n`,
+      `${markerLine('stage=1')}\nbody\n`,
+    ],
+    [
+      'CRLF on marker line',
+      `${markerLine('stage=1')}\r\nbody\r\n`,
+      `${markerLine('stage=1')}\nbody\r\n`,
+    ],
+    [
+      'UTF-8 BOM before marker line',
+      `\uFEFF${markerLine('stage=1')}\nbody\n`,
+      `${markerLine('stage=1')}\nbody\n`,
+    ],
+    [
+      'standalone marker line with surrounding whitespace',
+      `  ${markerLine('stage=1')}  `,
+      markerLine('stage=1'),
+    ],
+  ])(
+    'normalizes harmless whitespace on a matching leading marker (%s) without duplicating it',
+    (_name, raw, expected) => {
+      const dir = makeDraft(
+        [{ action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s.md' }],
+        { 's.md': raw },
+      );
+      const gh = fakeGh();
+      const { code, postedBodies, err } = runPublish(dir, gh);
+      expect(code).toBe(0);
+      expect(postedBodies).toEqual([expected]);
+      expect(postedBodies[0].split(markerLine('stage=1')).length - 1).toBe(1);
+      expect(err.text()).toContain('normalized leading');
+      expect(readFileSync(join(dir, 'bodies', 's.md'), 'utf8')).toBe(raw);
+    },
+  );
+
+  it('rejects a markerless body whose length exceeds 65536 after prepending the marker', () => {
+    const prefixLen = `${markerLine('stage=2')}\n\n`.length;
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': 'x'.repeat(65536 - prefixLen + 1) },
+    );
+    const gh = fakeGh();
+    const { code, writes, err } = runPublish(dir, gh);
+    expect(code).toBe(2);
+    expect(writes).toHaveLength(0);
+    expect(err.text()).toContain('65536');
+  });
+
+  it('accepts a markerless body whose length is exactly 65536 after prepending the marker', () => {
+    const prefix = `${markerLine('stage=2')}\n\n`;
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': 'x'.repeat(65536 - prefix.length) },
+    );
+    const gh = fakeGh();
+    const { code, postedBodies } = runPublish(dir, gh);
+    expect(code).toBe(0);
+    expect(postedBodies[0]).toHaveLength(65536);
+    expect(postedBodies[0].startsWith(prefix)).toBe(true);
+  });
+
+  it('allows a markerless body in --dry-run with zero writes and untouched draft file', () => {
+    const raw = '## Code review\n';
+    const dir = makeDraft(
+      [{ action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' }],
+      { 's2.md': raw },
+    );
+    const gh = fakeGh();
+    const { code, writes, results } = runPublish(dir, gh, {
+      argv: ['--dry-run'],
+    });
+    expect(code).toBe(0);
+    expect(writes).toHaveLength(0);
+    expect(results).toEqual([
+      { action: 'upsert-comment', status: 'skipped', detail: 'dry-run' },
+    ]);
+    expect(readFileSync(join(dir, 'bodies', 's2.md'), 'utf8')).toBe(raw);
+  });
+
+  it('publishes a multi-stage PR draft set when stage=2 omits its marker and PATCHes it on re-run', () => {
+    const stage2Raw = `## Code review\n\n<!-- qwen-triage-ci sha=${HEAD} -->\n| Check | Conclusion |\n<!-- /qwen-triage-ci -->\n`;
+    const dir = makeDraft(
+      [
+        { action: 'upsert-comment', marker: 'stage=1', body: 'bodies/s1.md' },
+        { action: 'upsert-comment', marker: 'stage=2', body: 'bodies/s2.md' },
+        { action: 'upsert-comment', marker: 'stage=3', body: 'bodies/s3.md' },
+        { action: 'labels', add: ['type/bug'], remove: [] },
+      ],
+      {
+        's1.md': stageBody('stage=1', 'Gate ok'),
+        's2.md': stage2Raw,
+        's3.md': stageBody(
+          'stage=3',
+          `Confidence: 4/5\n<!-- qwen-triage approve-on-green sha=${HEAD} -->`,
+        ),
+      },
+    );
+    const firstGh = fakeGh();
+    const first = runPublish(dir, firstGh);
+    expect(first.code).toBe(0);
+    expect(first.results.every((r) => r.status === 'published')).toBe(true);
+    expect(first.postedBodies[0].startsWith(`${markerLine('stage=1')}\n`)).toBe(
+      true,
+    );
+    expect(first.postedBodies[1]).toBe(
+      `${markerLine('stage=2')}\n\n${stage2Raw}`,
+    );
+    expect(first.postedBodies[2].startsWith(`${markerLine('stage=3')}\n`)).toBe(
+      true,
+    );
+
+    // A subsequent re-run matches the prefixed Stage 2 comment via startswith
+    // and PATCHes it in place rather than stacking a duplicate.
+    const secondGh = fakeGh({
+      comments: [
+        { id: 101, user: { login: BOT }, body: first.postedBodies[0] },
+        { id: 102, user: { login: BOT }, body: first.postedBodies[1] },
+        { id: 103, user: { login: BOT }, body: first.postedBodies[2] },
+      ],
+    });
+    const second = runPublish(dir, secondGh);
+    expect(second.code).toBe(0);
+    expect(second.results[1]).toEqual({
+      action: 'upsert-comment',
+      status: 'published',
+      detail: 'PATCH comment 102',
+    });
+    expect(second.postedBodies[1]).toBe(
+      `${markerLine('stage=2')}\n\n${stage2Raw}`,
+    );
+  });
 
   it('rejects a body over 65536 characters without truncating', () => {
     const prefix = `${markerLine('stage=1')}\n`;
