@@ -681,10 +681,12 @@ jobs:
           fi
           root="$(dirname "${cli}")"
           pkg="$(dirname "${root}")"
+          # Archive layout: <pkg>/lib/cli.js + <pkg>/node/bin/node
+          # (Windows: <pkg>/node/node.exe).
           if [ "${{ matrix.os }}" = 'windows-latest' ]; then
-            nodebin="${pkg}/node.exe"
+            nodebin="${pkg}/node/node.exe"
           else
-            nodebin="${pkg}/bin/node"
+            nodebin="${pkg}/node/bin/node"
           fi
           if [ ! -x "${nodebin}" ]; then
             echo "::error::archive node runtime missing or not executable: ${nodebin}"
