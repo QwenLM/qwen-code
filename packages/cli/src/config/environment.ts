@@ -28,6 +28,7 @@ import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { MIN_CREDENTIAL_VALUE_LENGTH } from '../utils/credential-names.js';
 import {
+  getLateSettingsCredentialAliases,
   isSettingsCredentialAlias,
   liveCredentialAliases,
   parseRelaunchEnvProvenance,
@@ -791,6 +792,7 @@ export function buildRuntimeEnvironment(
     );
   }
 
+  const settingsEnvWrites = new Map<string, string>();
   if (settings.env) {
     const excludedVars =
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
@@ -802,11 +804,8 @@ export function buildRuntimeEnvironment(
       if (typeof value !== 'string') continue;
       if (!isEffectivelyUnset(effectiveEnv, key)) continue;
       effectiveEnv[key] = value;
-      if (
-        value.length >= MIN_CREDENTIAL_VALUE_LENGTH &&
-        isSettingsCredentialAlias(settings, key)
-      )
-        credentialAliasValues.set(key, value);
+      if (value.length >= MIN_CREDENTIAL_VALUE_LENGTH)
+        settingsEnvWrites.set(key, value);
     }
     reportRejectedSettingsEnv(settings.env, startDir);
   }
@@ -814,9 +813,17 @@ export function buildRuntimeEnvironment(
   const overlayKeys = Object.keys(effectiveEnv)
     .filter((key) => effectiveEnv[key] !== baseEnv[key])
     .sort();
+  let childEnv: Readonly<Record<string, string>> | undefined;
+  const getChildEnv = () => (childEnv ??= spawnedEnvironmentView(effectiveEnv));
+  const lateAliases = getLateSettingsCredentialAliases(settings, getChildEnv);
+  for (const [key, value] of settingsEnvWrites) {
+    if (isSettingsCredentialAlias(settings, key) || lateAliases?.has(key))
+      credentialAliasValues.set(key, value);
+  }
   for (const [key, value] of settingsCredentialSourceEntries(
     settings,
     effectiveEnv,
+    getChildEnv,
   )) {
     credentialAliasValues.set(key, value);
   }
@@ -832,9 +839,9 @@ export function buildRuntimeEnvironment(
     }
   }
   if (credentialAliasValues.size || inheritedAliases?.length) {
-    const childEnv = spawnedEnvironmentView(effectiveEnv);
+    const spawnedEnv = getChildEnv();
     const credentialAliases = [...credentialAliasValues]
-      .filter(([key, value]) => childEnv[key] === value)
+      .filter(([key, value]) => spawnedEnv[key] === value)
       .map(([key]) => key);
     writeRelaunchCredentialAliases(effectiveEnv, credentialAliases);
   }
@@ -908,6 +915,7 @@ export function loadEnvironment(
   // Step 2: settings.env fallback (lowest priority, no-override).
   // Storage-routing vars must never come from settings.json — a workspace
   // settings.json could otherwise redirect global state after path bootstrap.
+  const installedSettingsKeys: string[] = [];
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) {
@@ -930,6 +938,7 @@ export function loadEnvironment(
         process.env[key] = value;
         settingsEnvSourcedKeys.add(key);
         recordCredentialAliasWrite(key, settings);
+        installedSettingsKeys.push(key);
       }
       if (
         !lastReloadSnapshotSeeded &&
@@ -942,7 +951,7 @@ export function loadEnvironment(
     reportRejectedSettingsEnv(settings.env, startDir);
   }
   lastReloadSnapshotSeeded = true;
-  recordSettingsCredentialSources(settings);
+  recordSettingsCredentialSources(settings, installedSettingsKeys);
   Object.assign(process.env, getRelaunchEnvProvenance());
   publishPendingCompileCache();
 }
@@ -1100,7 +1109,7 @@ export function reloadEnvironment(
   for (const key of newSettingsEnvKeys.keys()) {
     settingsEnvSourcedKeys.add(key);
   }
-  recordSettingsCredentialSources(settings);
+  recordSettingsCredentialSources(settings, newSettingsEnvKeys.keys());
   Object.assign(process.env, getRelaunchEnvProvenance());
 
   return {

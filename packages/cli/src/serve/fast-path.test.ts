@@ -1345,12 +1345,16 @@ describe('serve fast path environment bootstrap', () => {
       const source = 'FAST_PATH_WORKSPACE_INPUT';
       const alias = 'FAST_PATH_WORKSPACE_LABEL';
       const publicKey = 'FAST_PATH_WORKSPACE_PUBLIC';
+      const caseVariant =
+        process.platform === 'win32' ? undefined : source.toLowerCase();
+      const caseAlias = 'FAST_PATH_WORKSPACE_CASE_LABEL';
       const selector = 'FAST_PATH_WORKSPACE_SELECTOR';
       for (const key of [
         source,
         alias,
         publicKey,
         selector,
+        ...(caseVariant ? [caseVariant, caseAlias] : []),
         PRIVATE_RELAUNCH_ENV_PROVENANCE,
       ]) {
         vi.stubEnv(key, undefined);
@@ -1372,24 +1376,33 @@ describe('serve fast path environment bootstrap', () => {
             ...(withAlias && {
               env: {
                 [alias]: '$' + source,
+                ...(caseVariant && { [caseAlias]: '$' + caseVariant }),
                 ...(selectorInSettings && { [selector]: source }),
               },
             }),
           }),
         );
-        if (withAlias)
-          writeFileSync(join(qwenHome, '.env'), `${source}=fixture-home\n`);
+        if (withAlias) {
+          const homeEnv = [`${source}=fixture-home`];
+          if (caseVariant) homeEnv.push(`${caseVariant}=ordinary-home`);
+          writeFileSync(join(qwenHome, '.env'), homeEnv.join('\n'));
+        }
         const dotenvValues = [
           `${source}=fixture-workspace`,
           `${publicKey}=public`,
         ];
         if (!selectorInSettings) dotenvValues.push(`${selector}=${source}`);
+        if (caseVariant) dotenvValues.push(`${caseVariant}=ordinary-workspace`);
         writeFileSync(join(tempWorkspace, '.env'), dotenvValues.join('\n'));
 
         await bootstrapServeFastPathEnvironment(tempWorkspace);
         const marker = process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE];
         expect(process.env[publicKey]).toBe('public');
         if (withAlias) expect(process.env[alias] === 'fixture-home').toBe(true);
+        if (caseVariant) {
+          expect(process.env[caseVariant]).toBe('ordinary-workspace');
+          if (withAlias) expect(process.env[caseAlias]).toBe('ordinary-home');
+        }
         expect(parseRelaunchEnvProvenance(marker)?.credentialAliases).toEqual(
           withAlias ? [alias, source] : [source],
         );

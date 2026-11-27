@@ -41,11 +41,16 @@ import {
 import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
+  configuredCredentialVariables,
   credentialFieldReferences,
   credentialNameFilter,
   findCredentialAliases,
 } from '../utils/credential-names.js';
-import { registerSettingsCredentialReferences } from '../utils/env-provenance.js';
+import {
+  envKeyIdentity,
+  registerSettingsCredentialReferences,
+  registerSettingsCredentialSelectors,
+} from '../utils/env-provenance.js';
 import {
   deleteNestedPropertySafe,
   setNestedPropertySafe,
@@ -272,6 +277,7 @@ const settingsEnvProvenance = new WeakMap<
   {
     substitutions: ReadonlyMap<string, string>;
     credentialReferences: ReadonlySet<string>;
+    credentialSelectors: readonly string[];
   }
 >();
 
@@ -298,10 +304,18 @@ function resolveSettingsEnvironment(
     onSubstitution: (name, value) => substitutions.set(name, value),
   });
   const credentialReferences = credentialFieldReferences(settings);
-  if (substitutions.size || credentialReferences.size)
+  const credentialSelectors = [
+    ...configuredCredentialVariables(settings),
+  ].filter((name) => name.includes('$'));
+  if (
+    substitutions.size ||
+    credentialReferences.size ||
+    credentialSelectors.length
+  )
     settingsEnvProvenance.set(resolved, {
       substitutions,
       credentialReferences,
+      credentialSelectors,
     });
   return resolved;
 }
@@ -323,6 +337,7 @@ function registerEnvironmentAliases(
       credentialNameFilter(
         [merged, ...scopes],
         getSettingsCredentialReferences(scopes),
+        envKeyIdentity,
       ),
     ),
   );
@@ -852,15 +867,29 @@ function mergeSettings(
       catalogRefresh: operatorCatalogRefresh,
     } as Settings['model'];
   }
+  const activeScopes = [
+    systemDefaults,
+    user,
+    ...(isTrusted ? [workspace] : []),
+    system,
+  ];
   registerSettingsCredentialReferences(
     merged,
-    getSettingsCredentialReferences([
-      systemDefaults,
-      user,
-      ...(isTrusted ? [workspace] : []),
-      system,
-    ]),
+    getSettingsCredentialReferences(activeScopes),
   );
+  const selectors = activeScopes.flatMap(
+    (scope) => settingsEnvProvenance.get(scope)?.credentialSelectors ?? [],
+  );
+  if (selectors.length) {
+    registerSettingsCredentialSelectors(
+      merged,
+      selectors,
+      merged.env,
+      activeScopes.flatMap((scope) => [
+        ...(getSettingsEnvSubstitutions(scope) ?? []),
+      ]),
+    );
+  }
   registerEnvironmentAliases(merged, [systemDefaults, user, workspace, system]);
   return merged;
 }

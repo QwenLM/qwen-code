@@ -50,6 +50,7 @@ import {
   isCredentialName,
 } from '../utils/credential-names.js';
 import {
+  envKeyIdentity,
   liveCredentialAliases,
   parseRelaunchEnvProvenance,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
@@ -119,13 +120,12 @@ function resolveCredentialNames(
   credentials: CredentialSettingsReferences,
   fallback?: Record<string, string>,
 ): Set<string> {
-  const names = new Set(
-    Array.from(credentials.referenced, (name) => name.toUpperCase()),
-  );
+  const names = new Set(Array.from(credentials.referenced, envKeyIdentity));
   for (const name of credentials.configured) {
     addConfiguredCredentialVariable(
       names,
       resolveEnvVarsInString(name, fallback),
+      envKeyIdentity,
     );
   }
   return names;
@@ -439,8 +439,8 @@ export function loadServeFastPathEnvironment(
           credentials.substitutions,
           (name) =>
             isCredentialName(name) ||
-            names.has(name.toUpperCase()) ||
-            credentials.initialNames.has(name.toUpperCase()),
+            names.has(envKeyIdentity(name)) ||
+            credentials.initialNames.has(envKeyIdentity(name)),
         ),
       );
     }

@@ -428,6 +428,78 @@ describe('operator container requirement across environment reload', () => {
 });
 
 describe('relaunch environment provenance', () => {
+  it('classifies sources selected by the final workspace environment', async () => {
+    vi.resetModules();
+    const environment = await import('./environment.js');
+    const { loadSettings } = await import('./settings.js');
+    const workspace = makeWorkspace();
+    const workspaceSettings = path.join(workspace, '.qwen');
+    const source = 'RUNTIME_DOTENV';
+    const selector = 'RUNTIME_SETTINGS_ONLY';
+    const alias = 'RUNTIME_SETTINGS';
+    fs.mkdirSync(workspaceSettings, { recursive: true });
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `${source}=fixture-home\n`,
+    );
+    fs.writeFileSync(
+      path.join(workspaceSettings, 'settings.json'),
+      JSON.stringify({
+        modelProviders: { openai: [{ id: 'example', envKey: '$' + selector }] },
+        env: { [alias]: '$' + source },
+      }),
+    );
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      `${selector}=${source}\n${source}=fixture-workspace\nDEMO_VAR=public\n`,
+    );
+
+    const skipLoad = loadSettings(workspace, {
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+    const overlay = environment.buildRuntimeEnvironment(
+      skipLoad.merged,
+      workspace,
+      {},
+      true,
+    );
+    const aliases = (env: NodeJS.ProcessEnv) =>
+      parseRelaunchEnvProvenance(env[PRIVATE_RELAUNCH_ENV_PROVENANCE])
+        ?.credentialAliases;
+    expect(aliases(overlay.effectiveEnv)).toEqual([alias, source]);
+    expect(overlay.effectiveEnv['DEMO_VAR']).toBe('public');
+
+    try {
+      loadSettings(workspace, { workspaceTrusted: true });
+      expect(process.env[alias] === 'fixture-home').toBe(true);
+      expect(aliases(process.env)).toEqual([alias, source]);
+      expect(process.env[PRIVATE_RELAUNCH_ENV_PROVENANCE]).not.toContain(
+        'fixture-',
+      );
+
+      const secondary = environment.buildRuntimeEnvironment(
+        testSettings({}),
+        makeWorkspace(),
+        { ...process.env },
+        true,
+      );
+      expect(aliases(secondary.effectiveEnv)).toEqual([alias, source]);
+
+      const rotated = 'QWEN_TEST_PROVIDER_KEY';
+      fs.writeFileSync(
+        envPath,
+        `${selector}=${rotated}\n${rotated}=fixture-rotated\n`,
+      );
+      environment.reloadEnvironment(skipLoad.merged, workspace, true);
+      expect(aliases(process.env)).toContain(rotated);
+      expect(aliases(process.env)).toContain(alias);
+    } finally {
+      environment.resetEnvironmentTrackingForTesting();
+    }
+  });
+
   it('carries the alias name across relaunch and clears it when overwritten', async () => {
     vi.resetModules();
     const parent = await import('./environment.js');

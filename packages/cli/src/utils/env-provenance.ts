@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolveEnvVarsInString } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   credentialNameFilter,
+  findCredentialAliases,
   isCredentialName,
   MIN_CREDENTIAL_VALUE_LENGTH,
 } from './credential-names.js';
@@ -74,6 +76,15 @@ export function writeRelaunchCredentialAliases(
 
 const settingsCredentialAliases = new WeakMap<object, ReadonlySet<string>>();
 const settingsCredentialReferences = new WeakMap<object, readonly string[]>();
+type GetSelectorEnvironment = () => Readonly<Record<string, string>>;
+const settingsCredentialSelectors = new WeakMap<
+  object,
+  {
+    selectors: readonly string[];
+    settingsEnv: Readonly<Record<string, unknown>> | undefined;
+    substitutions: ReadonlyArray<readonly [string, string]>;
+  }
+>();
 // Keep the credential classification for the value actually installed.
 const installedCredentialAliases = new Map<string, string>();
 
@@ -102,14 +113,58 @@ export function registerSettingsCredentialReferences(
   if (names.length) settingsCredentialReferences.set(settings, names);
 }
 
+export function registerSettingsCredentialSelectors(
+  settings: object,
+  selectors: readonly string[],
+  settingsEnv: Readonly<Record<string, unknown>> | undefined,
+  substitutions: ReadonlyArray<readonly [string, string]>,
+): void {
+  settingsCredentialSelectors.set(settings, {
+    selectors,
+    settingsEnv,
+    substitutions,
+  });
+}
+
+function settingsCredentialNameFilter(
+  settings: object,
+  getSelectorEnvironment?: GetSelectorEnvironment,
+): (name: string) => boolean {
+  const references = settingsCredentialReferences.get(settings) ?? [];
+  const selectors = settingsCredentialSelectors.get(settings)?.selectors;
+  if (!selectors)
+    return credentialNameFilter([settings], references, envKeyIdentity);
+  const sourceEnv = getSelectorEnvironment?.();
+  const names = [...references];
+  for (const selector of selectors) {
+    const name = resolveEnvVarsInString(selector, sourceEnv, {
+      processEnvFallback: sourceEnv === undefined,
+    });
+    names.push(name, name.trim());
+  }
+  return credentialNameFilter([settings], names, envKeyIdentity);
+}
+
+export function getLateSettingsCredentialAliases(
+  settings: object,
+  getSelectorEnvironment?: GetSelectorEnvironment,
+): ReadonlySet<string> | undefined {
+  const metadata = settingsCredentialSelectors.get(settings);
+  if (!metadata?.settingsEnv || !metadata.substitutions.length)
+    return undefined;
+  return findCredentialAliases(
+    metadata.settingsEnv,
+    metadata.substitutions,
+    settingsCredentialNameFilter(settings, getSelectorEnvironment),
+  );
+}
+
 export function* settingsCredentialSourceEntries(
   settings: object,
   env: Readonly<NodeJS.ProcessEnv>,
+  getSelectorEnvironment?: GetSelectorEnvironment,
 ): Generator<[string, string]> {
-  const hidden = credentialNameFilter(
-    [settings],
-    settingsCredentialReferences.get(settings) ?? [],
-  );
+  const hidden = settingsCredentialNameFilter(settings, getSelectorEnvironment);
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined && hidden(key) && !isCredentialName(key)) {
       yield [key, value];
@@ -118,7 +173,17 @@ export function* settingsCredentialSourceEntries(
 }
 
 // The process environment can change before existing sessions update settings.
-export function recordSettingsCredentialSources(settings: object): void {
+export function recordSettingsCredentialSources(
+  settings: object,
+  installedSettingsKeys: Iterable<string> = [],
+): void {
+  const lateAliases = getLateSettingsCredentialAliases(settings);
+  for (const key of installedSettingsKeys) {
+    const value = process.env[key];
+    if (lateAliases?.has(key) && value !== undefined) {
+      installedCredentialAliases.set(envKeyIdentity(key), value);
+    }
+  }
   for (const [key, value] of settingsCredentialSourceEntries(
     settings,
     process.env,

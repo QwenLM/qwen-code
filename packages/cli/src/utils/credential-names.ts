@@ -61,13 +61,16 @@ export function configuredCredentialVariables(settings: unknown): Set<string> {
   return names;
 }
 
+const uppercaseName = (name: string) => name.toUpperCase();
+
 export function addConfiguredCredentialVariable(
   names: Set<string>,
   value: string,
+  normalize = uppercaseName,
 ): void {
   // Consumers differ on whether they trim the configured variable name.
-  names.add(value.toUpperCase());
-  names.add(value.trim().toUpperCase());
+  names.add(normalize(value));
+  names.add(normalize(value.trim()));
 }
 
 export function credentialFieldReferences(
@@ -107,12 +110,13 @@ export function credentialFieldReferences(
 export function credentialNameFilter(
   scopes: unknown[],
   references: Iterable<string>,
+  normalize = uppercaseName,
 ): (name: string) => boolean {
-  const names = new Set(Array.from(references, (name) => name.toUpperCase()));
+  const names = new Set(Array.from(references, normalize));
   for (const name of configuredCredentialVariables(scopes)) {
-    addConfiguredCredentialVariable(names, name);
+    addConfiguredCredentialVariable(names, name, normalize);
   }
-  return (name) => isCredentialName(name) || names.has(name.toUpperCase());
+  return (name) => isCredentialName(name) || names.has(normalize(name));
 }
 
 export function findCredentialAliases(
