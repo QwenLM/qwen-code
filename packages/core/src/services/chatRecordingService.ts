@@ -67,9 +67,13 @@ import {
   writeSessionArtifactSummarySidecar,
 } from './session-artifact-summary-sidecar.js';
 import {
+  addPromptUuidToBloom,
+  createPromptUuidBloom,
+  encodePromptUuidBloom,
   removeSessionPromptTimeSidecar,
   sessionPromptTimeSidecarPath,
   writeSessionPromptTimeSidecar,
+  type PromptUuidBloomState,
 } from './session-prompt-time-sidecar.js';
 import type {
   ChatCompressionInfo,
@@ -1322,6 +1326,8 @@ export class ChatRecordingService {
   private turnDaemonPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
+  private prefixUuidBloom: PromptUuidBloomState | undefined;
+  private prefixUuidBloomPath: string | undefined;
   private legacyArchiveGeneration?: { filePath: string; value?: string };
   private pendingPromptTitleProjections = 0;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1465,6 +1471,10 @@ export class ChatRecordingService {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
     const resumed = config.getResumedSessionData();
+    if (!restoreState && !resumed) {
+      this.prefixUuidBloom = createPromptUuidBloom(1024);
+      this.prefixUuidBloomPath = undefined;
+    }
     if (writerLeaseRequired) {
       this.lastRecordUuid =
         restoreState?.lastCompletedUuid ?? resumed?.lastCompletedUuid ?? null;
@@ -1705,6 +1715,59 @@ export class ChatRecordingService {
     );
   }
 
+  private clearPrefixUuidBloom(): void {
+    this.prefixUuidBloom = undefined;
+    this.prefixUuidBloomPath = undefined;
+  }
+
+  private verifyPrefixUuidBloomBeforeWrite(
+    record: ChatRecord,
+    legacyConversationFile: string | undefined,
+  ): void {
+    if (!this.prefixUuidBloom) return;
+    const transcriptPath = this.resolvePromptTimeTranscriptPath(
+      legacyConversationFile,
+    );
+    if (!transcriptPath) {
+      this.clearPrefixUuidBloom();
+      return;
+    }
+    if (this.prefixUuidBloomPath !== undefined) {
+      if (this.prefixUuidBloomPath !== transcriptPath) {
+        this.clearPrefixUuidBloom();
+      }
+      return;
+    }
+    if (record.parentUuid !== null || this.lastPersistedRecordUuid !== null) {
+      this.clearPrefixUuidBloom();
+      return;
+    }
+    try {
+      if (
+        fs.existsSync(transcriptPath) &&
+        fs.statSync(transcriptPath).size > 0
+      ) {
+        this.clearPrefixUuidBloom();
+        return;
+      }
+      this.prefixUuidBloomPath = transcriptPath;
+    } catch {
+      this.clearPrefixUuidBloom();
+    }
+  }
+
+  private recordUuidForPrefixBloom(record: ChatRecord): void {
+    if (record.subtype === 'rewind') {
+      this.clearPrefixUuidBloom();
+      return;
+    }
+    if (!this.prefixUuidBloom || this.prefixUuidBloomPath === undefined) return;
+    addPromptUuidToBloom(this.prefixUuidBloom, record.uuid);
+    if (this.prefixUuidBloom.count > this.prefixUuidBloom.buffer.length) {
+      this.clearPrefixUuidBloom();
+    }
+  }
+
   private updatePromptTimeSidecar(
     record: ChatRecord,
     promptTime: string | undefined,
@@ -1754,6 +1817,10 @@ export class ChatRecordingService {
           fs.closeSync(fd);
         }
       }
+      const prefixUuidBloom =
+        this.prefixUuidBloom && this.prefixUuidBloomPath === transcriptPath
+          ? encodePromptUuidBloom(this.prefixUuidBloom)
+          : undefined;
       writeSessionPromptTimeSidecar(sidecarPath, {
         fileIdentity: { dev: stats.dev, ino: stats.ino },
         snapshotSize: stats.size,
@@ -1765,6 +1832,7 @@ export class ChatRecordingService {
           cwd: record.cwd,
         },
         ...(tailHex !== undefined ? { tailHex } : {}),
+        ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       });
     } catch {
       // Best-effort: a missing sidecar must never fail transcript recording.
@@ -1957,7 +2025,12 @@ export class ChatRecordingService {
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
     this.firstPromptUnknown = false;
-    if (!sessionData) return;
+    if (!sessionData) {
+      this.prefixUuidBloom = createPromptUuidBloom(1024);
+      this.prefixUuidBloomPath = undefined;
+      return;
+    }
+    this.clearPrefixUuidBloom();
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
     // only the newest 20 prompts, so its head is not the session's first turn.
@@ -2046,6 +2119,7 @@ export class ChatRecordingService {
     // the first prompt (if any) predates this recorder. No record stream is
     // carried here, so the seed cannot recover it.
     this.firstPromptUnknown = true;
+    this.clearPrefixUuidBloom();
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
@@ -2270,9 +2344,12 @@ export class ChatRecordingService {
         if (managedSink) {
           // The authority appends through the same lease; writing the record
           // here as well would leave a raw line in the Managed Session log.
+          this.clearPrefixUuidBloom();
           await managedSink.write(record);
         } else if (lease) {
+          this.verifyPrefixUuidBloomBeforeWrite(record, undefined);
           await lease.appendJsonLine(record);
+          this.recordUuidForPrefixBloom(record);
         } else if (!this.writerLeaseRequired && legacyConversationFile) {
           const lock = await acquireSessionArchiveWriteLock(
             legacyConversationFile,
@@ -2281,12 +2358,17 @@ export class ChatRecordingService {
           try {
             lock.assertHeld();
             assertSessionArchiveGeneration(legacyConversationFile, generation);
+            this.verifyPrefixUuidBloomBeforeWrite(
+              record,
+              legacyConversationFile,
+            );
             if (this.cachedConversationFile !== legacyConversationFile) {
               this.createConversationFile(legacyConversationFile);
               this.cacheConversationFile(legacyConversationFile);
             }
             await jsonl.writeLine(legacyConversationFile, record);
             lock.assertHeld();
+            this.recordUuidForPrefixBloom(record);
             if (changesPromptTime) {
               this.updatePromptTimeSidecar(
                 record,
@@ -2808,6 +2890,7 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
+        this.clearPrefixUuidBloom();
         const sidecarPath = this.promptTimeSidecarPath();
         if (sidecarPath) removeSessionPromptTimeSidecar(sidecarPath);
         this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
@@ -3007,6 +3090,9 @@ export class ChatRecordingService {
    */
   pinSessionIdentity(sessionId: string): void {
     if (this.binding === undefined) {
+      if (this.pinnedSessionId !== sessionId) {
+        this.clearPrefixUuidBloom();
+      }
       this.pinnedSessionId = sessionId;
     }
   }
@@ -3146,6 +3232,7 @@ export class ChatRecordingService {
     }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
+    this.clearPrefixUuidBloom();
     this.resetExternalRecordIndex();
   }
 
@@ -4442,6 +4529,7 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
+    this.clearPrefixUuidBloom();
     const turns = collectSessionTurnState(messages, this.getSessionId());
     this.turnParentUuids = turns.turnParentUuids;
     this.turnPromptIds = turns.turnPromptIds;

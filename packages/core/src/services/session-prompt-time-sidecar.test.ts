@@ -9,7 +9,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  addPromptUuidToBloom,
+  buildPromptUuidBloom,
+  createPromptUuidBloom,
+  decodePromptUuidBloom,
+  encodePromptUuidBloom,
   moveSessionPromptTimeSidecar,
+  promptUuidBloomMayContain,
   readSessionPromptTimeSidecarAsync,
   removeSessionPromptTimeSidecar,
   sessionPromptTimeSidecarPath,
@@ -51,6 +57,8 @@ describe('session-prompt-time-sidecar', () => {
     });
 
     const p2 = sessionPromptTimeSidecarPath(tmpDir, 'sess-2');
+    const bloom = buildPromptUuidBloom(['u1', 'a1', 'u2'], 3);
+    expect(bloom).toBeDefined();
     expect(
       writeSessionPromptTimeSidecar(p2, {
         fileIdentity: { dev: 1, ino: 2 },
@@ -59,6 +67,7 @@ describe('session-prompt-time-sidecar', () => {
         lastUserPromptAt: null,
         leafUuid: 'leaf-2',
         firstRecordOwner: { sessionId: 'sess-2', cwd: '/repo' },
+        prefixUuidBloom: bloom,
         managed: true,
       }),
     ).toBe(true);
@@ -70,8 +79,36 @@ describe('session-prompt-time-sidecar', () => {
       lastUserPromptAt: null,
       leafUuid: 'leaf-2',
       firstRecordOwner: { sessionId: 'sess-2', cwd: '/repo' },
+      prefixUuidBloom: bloom,
       managed: true,
     });
+  });
+
+  it('builds a zero-false-negative prefix UUID Bloom filter and drops saturated or oversized filters', () => {
+    const uuids = Array.from({ length: 500 }, (_, i) => `uuid-${i}`);
+    const encoded = buildPromptUuidBloom(uuids, uuids.length);
+    expect(encoded).toBeDefined();
+    const decoded = decodePromptUuidBloom(encoded!);
+    expect(decoded).toBeDefined();
+    for (const uuid of uuids) {
+      expect(promptUuidBloomMayContain(decoded!, uuid)).toBe(true);
+    }
+    let falsePositives = 0;
+    for (let i = 0; i < 500; i += 1) {
+      if (promptUuidBloomMayContain(decoded!, `unseen-${i}`)) {
+        falsePositives += 1;
+      }
+    }
+    expect(falsePositives).toBeLessThan(20);
+
+    // Saturated filter (count > buffer.length) returns undefined from encode so
+    // the next append triggers a lightweight scan and resizes.
+    const small = createPromptUuidBloom(10)!;
+    for (let i = 0; i <= small.buffer.length; i += 1) {
+      addPromptUuidToBloom(small, `sat-${i}`);
+    }
+    expect(encodePromptUuidBloom(small)).toBeUndefined();
+    expect(createPromptUuidBloom(200_000)).toBeUndefined();
   });
 
   it('rejects malformed, corrupt, or invalid-field sidecars and honors AbortSignal', async () => {
@@ -160,6 +197,48 @@ describe('session-prompt-time-sidecar', () => {
         leafUuid: 'u1',
         firstRecordOwner: { sessionId: 's', cwd: '/r' },
         tailHex: 'abc',
+      }),
+      JSON.stringify({
+        version: 1,
+        fileIdentity: { dev: 1, ino: 1 },
+        snapshotSize: 100,
+        lastUpdated: '2026-06-01T12:00:00.000Z',
+        lastUserPromptAt: null,
+        leafUuid: 'u1',
+        firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        prefixUuidBloom: {
+          bits: Buffer.alloc(300).toString('base64'),
+          hashes: 7,
+          count: 1,
+        },
+      }),
+      JSON.stringify({
+        version: 1,
+        fileIdentity: { dev: 1, ino: 1 },
+        snapshotSize: 100,
+        lastUpdated: '2026-06-01T12:00:00.000Z',
+        lastUserPromptAt: null,
+        leafUuid: 'u1',
+        firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        prefixUuidBloom: {
+          bits: `${Buffer.alloc(256).toString('base64')}!`,
+          hashes: 7,
+          count: 1,
+        },
+      }),
+      JSON.stringify({
+        version: 1,
+        fileIdentity: { dev: 1, ino: 1 },
+        snapshotSize: 100,
+        lastUpdated: '2026-06-01T12:00:00.000Z',
+        lastUserPromptAt: null,
+        leafUuid: 'u1',
+        firstRecordOwner: { sessionId: 's', cwd: '/r' },
+        prefixUuidBloom: {
+          bits: Buffer.alloc(256).toString('base64'),
+          hashes: 0,
+          count: 1,
+        },
       }),
     ];
     for (const [index, payload] of badPayloads.entries()) {

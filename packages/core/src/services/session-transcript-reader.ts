@@ -92,10 +92,16 @@ import {
   type SessionExecutionEngineState,
 } from './session-execution-engine.js';
 import {
+  addPromptUuidToBloom,
+  buildPromptUuidBloom,
+  decodePromptUuidBloom,
+  encodePromptUuidBloom,
+  promptUuidBloomMayContain,
   readSessionPromptTimeSidecarAsync,
   removeSessionPromptTimeSidecar,
   sessionPromptTimeSidecarPath,
   writeSessionPromptTimeSidecar,
+  type SessionPromptTimeUuidBloom,
 } from './session-prompt-time-sidecar.js';
 import {
   selectActiveSideArtifactRecordUuids,
@@ -4391,6 +4397,7 @@ interface PromptTimeResolution {
   snapshot: LastUserPromptSnapshot;
   leafUuid?: string;
   tailHex?: string;
+  prefixUuidBloom?: SessionPromptTimeUuidBloom;
   managed?: boolean;
   shouldPersistSidecar: boolean;
 }
@@ -4564,6 +4571,7 @@ export class SessionTranscriptReader {
       leafUuid: string;
       firstRecordOwner: { sessionId: string; cwd: string };
       tailHex?: string;
+      prefixUuidBloom?: SessionPromptTimeUuidBloom;
     };
     signal: AbortSignal;
   }): Promise<PromptTimeResolution | undefined> {
@@ -4576,6 +4584,14 @@ export class SessionTranscriptReader {
       sidecar,
       signal,
     } = params;
+    // Require a prefix UUID Bloom filter so tail extension has zero false
+    // negatives against duplicate UUIDs aliasing any earlier prefix record.
+    const bloom = sidecar.prefixUuidBloom
+      ? decodePromptUuidBloom(sidecar.prefixUuidBloom)
+      : undefined;
+    if (!bloom) {
+      return undefined;
+    }
     const expectedTail = sidecar.tailHex
       ? Buffer.from(sidecar.tailHex, 'hex')
       : undefined;
@@ -4591,7 +4607,7 @@ export class SessionTranscriptReader {
     let sessionIdMismatch = false;
     let expectedParent = sidecar.leafUuid;
     let latestPrompt = sidecar.lastUserPromptAt ?? undefined;
-    const seenUuids = new Set<string>([sidecar.leafUuid]);
+    let tailConversationRecords = 0;
     let tailFingerprint: Buffer = expectedTail ?? Buffer.alloc(0);
 
     const releaseBuild = await transcriptBuildSemaphore.acquire(signal);
@@ -4631,16 +4647,23 @@ export class SessionTranscriptReader {
               linear = false;
               return;
             }
-            if (!isTranscriptConversationRecord(envelope)) continue;
+            if (promptUuidBloomMayContain(bloom, envelope.uuid)) {
+              linear = false;
+              return;
+            }
+            if (!isTranscriptConversationRecord(envelope)) {
+              addPromptUuidToBloom(bloom, envelope.uuid);
+              continue;
+            }
             if (
-              seenUuids.size >= MAX_PROMPT_TAIL_EXTENSION_RECORDS ||
-              seenUuids.has(envelope.uuid) ||
+              tailConversationRecords >= MAX_PROMPT_TAIL_EXTENSION_RECORDS ||
               envelope.parentUuid !== expectedParent
             ) {
               linear = false;
               return;
             }
-            seenUuids.add(envelope.uuid);
+            addPromptUuidToBloom(bloom, envelope.uuid);
+            tailConversationRecords += 1;
             expectedParent = envelope.uuid;
             if (envelope.lastUserPromptAt !== undefined) {
               latestPrompt = envelope.lastUserPromptAt;
@@ -4689,6 +4712,7 @@ export class SessionTranscriptReader {
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
+    const nextBloom = encodePromptUuidBloom(bloom);
     return {
       snapshot: {
         lastUserPromptAt: latestPrompt,
@@ -4698,6 +4722,7 @@ export class SessionTranscriptReader {
       ...(tailFingerprint.length > 0
         ? { tailHex: tailFingerprint.toString('hex') }
         : {}),
+      ...(nextBloom !== undefined ? { prefixUuidBloom: nextBloom } : {}),
       managed: false,
       shouldPersistSidecar: true,
     };
@@ -4923,6 +4948,9 @@ export class SessionTranscriptReader {
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
+    const prefixUuidBloom = hasManagedHeader
+      ? undefined
+      : buildPromptUuidBloom(nodes.keys(), nodes.size);
     return {
       snapshot: {
         lastUserPromptAt: timestamp,
@@ -4932,6 +4960,7 @@ export class SessionTranscriptReader {
       ...(tailFingerprint.length > 0
         ? { tailHex: tailFingerprint.toString('hex') }
         : {}),
+      ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
       managed: hasManagedHeader,
       shouldPersistSidecar: true,
     };
@@ -4997,6 +5026,9 @@ export class SessionTranscriptReader {
         indexIncrementalState.tailFingerprint.length > 0
           ? indexIncrementalState.tailFingerprint.toString('hex')
           : undefined;
+      const prefixUuidBloom = managed
+        ? undefined
+        : buildPromptUuidBloom(index.byUuid.keys(), index.byUuid.size);
       promptTimeScanModeHookForTest?.({
         filePath,
         mode: 'index_cache',
@@ -5013,6 +5045,7 @@ export class SessionTranscriptReader {
         },
         leafUuid: index.leafUuid,
         ...(tailHex !== undefined ? { tailHex } : {}),
+        ...(prefixUuidBloom !== undefined ? { prefixUuidBloom } : {}),
         managed,
         shouldPersistSidecar: true,
       };
@@ -5221,6 +5254,9 @@ export class SessionTranscriptReader {
                 firstRecordOwner: resolved.snapshot.firstRecordOwner,
                 ...(resolved.tailHex !== undefined
                   ? { tailHex: resolved.tailHex }
+                  : {}),
+                ...(resolved.prefixUuidBloom !== undefined
+                  ? { prefixUuidBloom: resolved.prefixUuidBloom }
                   : {}),
                 ...(resolved.managed ? { managed: true } : {}),
               },

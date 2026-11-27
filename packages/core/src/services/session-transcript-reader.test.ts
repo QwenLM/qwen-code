@@ -7312,6 +7312,150 @@ describe('SessionTranscriptReader', () => {
           startOffset: 0,
         }),
       ]);
+
+      // Duplicate UUID aliasing an earlier non-leaf prefix record (dupdemo / adv-c5)
+      // must be caught by prefixUuidBloom and fall back to lightweight_scan,
+      // returning the first-wins original timestamp rather than the duplicate's.
+      const p1 = {
+        ...record('dup-u1', null, 'original prompt'),
+        timestamp: '2026-01-01T00:00:00.000Z',
+      };
+      const p2 = {
+        ...record('dup-a1', p1.uuid, 'assistant reply'),
+        type: 'assistant' as const,
+        timestamp: '2026-01-01T00:00:01.000Z',
+      };
+      const pNonConv: ChatRecord = {
+        ...record('dup-meta', p2.uuid, ''),
+        type: 'system',
+        subtype: 'generated_ui_state',
+        message: undefined,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      };
+      await writeRecords([p1, p2, pNonConv]);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p1.timestamp,
+      );
+
+      const p3 = {
+        ...record('dup-u2', p2.uuid, 'intermediate prompt'),
+        timestamp: '2026-01-01T00:00:03.000Z',
+      };
+      const dupOfPrefix = {
+        ...record(p1.uuid, p3.uuid, 'forged duplicate of prefix u1'),
+        timestamp: '2026-01-01T00:00:10.000Z',
+      };
+      await appendRecords(file, p3, dupOfPrefix);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansPrefixDup: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansPrefixDup.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p1.timestamp,
+      );
+      expect(scansPrefixDup).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // Duplicate UUID aliasing an earlier non-conversation prefix record must also fall back.
+      await writeRecords([p1, p2, pNonConv]);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p1.timestamp,
+      );
+      const dupOfNonConv = {
+        ...record(pNonConv.uuid, p2.uuid, 'forged duplicate of non-conv'),
+        timestamp: '2026-01-01T00:00:20.000Z',
+      };
+      await appendRecords(file, dupOfNonConv);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansNonConvDup: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansNonConvDup.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBeUndefined();
+      expect(scansNonConvDup).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // Within-tail duplicate UUID (two records in the appended tail sharing a uuid)
+      // must also be rejected by the Bloom guard and fall back to lightweight_scan.
+      await writeRecords([p1, p2]);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p1.timestamp,
+      );
+      const tailFirst = {
+        ...record('dup-tail', p2.uuid, 'first tail prompt'),
+        timestamp: '2026-01-01T00:01:00.000Z',
+      };
+      const tailSecond = {
+        ...record('dup-tail', tailFirst.uuid, 'duplicate tail prompt'),
+        timestamp: '2026-01-01T00:02:00.000Z',
+      };
+      await appendRecords(file, tailFirst, tailSecond);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansTailDup: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansTailDup.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        tailFirst.timestamp,
+      );
+      expect(scansTailDup).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+
+      // A sidecar without prefixUuidBloom (e.g. from an older writer or saturated filter)
+      // must fall back to lightweight_scan on append and heal prefixUuidBloom.
+      await writeRecords([p1, p2]);
+      resetSessionTranscriptIndexCacheForTest();
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p1.timestamp,
+      );
+      const rawSidecar = JSON.parse(await fs.readFile(sidecarPath, 'utf8'));
+      delete rawSidecar.prefixUuidBloom;
+      await fs.writeFile(sidecarPath, JSON.stringify(rawSidecar), 'utf8');
+      const p4 = {
+        ...record(
+          'u-after-missing-bloom',
+          p2.uuid,
+          'prompt after legacy sidecar',
+        ),
+        timestamp: '2026-01-01T00:03:00.000Z',
+      };
+      await appendRecords(file, p4);
+      resetSessionTranscriptIndexCacheForTest();
+      const scansNoBloom: PromptTimeScanModeEvent[] = [];
+      setSessionTranscriptPromptTimeScanModeHookForTest((e) =>
+        scansNoBloom.push(e),
+      );
+      expect(await newReader().getLastUserPromptAt(sessionId)).toBe(
+        p4.timestamp,
+      );
+      expect(scansNoBloom).toEqual([
+        expect.objectContaining({
+          filePath: file,
+          mode: 'lightweight_scan',
+          startOffset: 0,
+        }),
+      ]);
+      const healedSidecar = JSON.parse(await fs.readFile(sidecarPath, 'utf8'));
+      expect(healedSidecar.prefixUuidBloom).toBeDefined();
     });
 
     it('never writes a prompt-time sidecar when allowSidecarWrite is false or transcript belongs to a foreign workspace', async () => {

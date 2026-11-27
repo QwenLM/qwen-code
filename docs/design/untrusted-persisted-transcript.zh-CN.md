@@ -52,4 +52,4 @@ TypeScript SDK 在 `WorkspaceDaemonClient` 上暴露该方法。它强制原生 
 
 ## 延后工作
 
-归档 transcript 读取、反向/尾部翻页、live 跟随、自动全量历史加载、worker 线程索引、跨重启游标、重建时校验冻结前缀摘要（关闭改写后追加残余）与 Web Shell 查看器均为独立后续项。
+归档 transcript 读取、反向/尾部翻页、live 跟随、自动全量历史加载、worker 线程索引、恢复投影（`readRestoreProjection`）的 `AbortSignal` 取消、跨重启游标、重建时校验冻结前缀摘要（关闭改写后追加残余）与 Web Shell 查看器均为独立后续项。
