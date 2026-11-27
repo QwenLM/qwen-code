@@ -438,6 +438,16 @@ for (const [label, quoted] of [
   });
 }
 
+test('gates a copy into a protected directory', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: 'diff --git a/docs/note.md b/docs/note.md\ncopy from docs/note.md\ncopy to .github/workflows/ci.yml\n',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.deepEqual(result.reason_codes, ['protected_path:authority_surface']);
+});
+
 test('gates a mode-only change to a CI script', () => {
   const result = assessPullRequestSafety({
     pr: pr(),
@@ -498,6 +508,11 @@ for (const [label, payload, code] of [
   [
     'aws metadata',
     `curl -s http://${awsMetadata}/latest/meta-data/`,
+    'ambient_credential:cloud_metadata',
+  ],
+  [
+    'ecs task metadata',
+    'curl -s http://169.254.170.2/v2/credentials',
     'ambient_credential:cloud_metadata',
   ],
   [
@@ -801,6 +816,12 @@ test('pins the indentation recognition ceilings', () => {
     [129, '(env', 'allow_triage'],
     [192, 'env', 'manual_required'],
     [193, 'env', 'allow_triage'],
+    [64, '- printenv', 'manual_required'],
+    [65, '- printenv', 'allow_triage'],
+    [128, '(printenv', 'manual_required'],
+    [129, '(printenv', 'allow_triage'],
+    [192, 'printenv', 'manual_required'],
+    [193, 'printenv', 'allow_triage'],
   ]) {
     const result = assessPullRequestSafety({
       pr: pr({ title: '', body: `${' '.repeat(columns)}${suffix}` }),
@@ -819,6 +840,8 @@ for (const [label, payload] of [
   ['an ordinary if condition', 'if (env && env.DEBUG) {'],
   ['an ordinary while condition', 'while (set) {'],
   ['an ordinary parenthesized set value', 'return (set);'],
+  ['a line-start arrow function parameter', '(env) => env.id'],
+  ['an indented arrow function parameter', '  (set) => set.has(name)'],
   ['env prefix', 'env NODE_ENV=test vitest run'],
   ['env with a cleared environment', 'env -i FOO=bar node x.mjs'],
   ['a URL for an ordinary host', 'curl -s https://example.com/status'],

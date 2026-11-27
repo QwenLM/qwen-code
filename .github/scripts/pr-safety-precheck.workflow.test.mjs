@@ -225,6 +225,11 @@ test('a trusted author bypasses the input fail-closed arms', () => {
   assert.equal(result.decision, 'allow_triage');
 });
 
+test('a trusted author bypasses the truncated-diff arm as well', () => {
+  const { result } = runWorkflow({ bytes: CAP + 1, trusted: 'true' });
+  assert.equal(result.decision, 'allow_triage');
+});
+
 test('removing the extra witness byte silently disables truncation', () => {
   const collect = collectBlock.replace(
     'head -c "$((max_diff_bytes + 1))"',
