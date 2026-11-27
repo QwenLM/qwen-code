@@ -2,7 +2,7 @@
 
 [English](2026-11-25-verify-pr-round-input-hardening.md) | [简体中文](2026-11-25-verify-pr-round-input-hardening.zh-CN.md)
 
-**状态：已实现；独立复核及远端发布检查仍未结束。当前评审跟进修改在 macOS arm64、Node 24.18.1 上的三个相关文件有 66 项聚焦检查通过。§8.6 保留先前 guest `b2540d889c85761f44a7df4b46adb7bb12579fdb687921bb66e56d0366374baf` 的 Linux 与 KVM 证据，不证明当前 guest。其有界重试、字节预算、前置校验和 bridge 修复及对应的源码级重放状态见 §§8.7–8.8。不宣称远端提交 CI 或合并已获批准。日期：2026-11-25；后续证据：2026-11-27。**
+**状态：已实现；独立复核及远端发布检查仍未结束。当前评审跟进修改在 macOS arm64、Node 24.18.1 上的三个相关文件有 67 项聚焦检查通过。§8.6 保留先前 Linux、capability 探测与 KVM 测量，这些仅是历史证据，不证明当前 guest；旧 head 的计数与能力探测范围、确切源码、KVM 及不支持环境的边界也见该节。其有界重试、字节预算、前置校验和 bridge 修复及对应的源码级重放状态见 §§8.7–8.8。不宣称远端提交 CI 或合并已获批准。日期：2026-11-25；后续证据：2026-11-27。**
 
 ## 1. 背景与问题
 
@@ -215,3 +215,16 @@ Linux 调查使用 aarch64 宿主、真实 Node 22、Git/Python/UDS 夹具和去
 三份新 KVM 报告均记录完整输出、destroyed teardown、token 吊销、worker 消失与 ownership 清理零错误，且无 NIC、无目录共享。它们是真实 Linux Firecracker/KVM 场景，不替代注入式线程故障或外部 provider 证明。golden kernel/rootfs 哈希保持不变。输入诊断继续在错误文案中标明真正的载荷预算，同时区分 bundle 大小与诊断输出溢出，避免把 stderr 噪声误报成扩大载荷上限的证据。
 
 相应证据在 `.qwen/tmp/pr18400-r3-kvm-*`、`.qwen/tmp/pr18400-r2-cap-witness.py` 及其输出记录中，新实现的 SHA 与 Linux 部署一致。main 集成、精确提交 archive 身份、最新公开 CI 与评审回复仍是独立检查。不宣称云资源分配、Apple vfkit、Windows IPC、外部模型调用、完整仓库输入 bundle 或合并批准。
+
+### 8.9 评审驱动的证据强化
+
+后续评审要求真正观测每个守卫，而不只是增加测试数量。以下修改只作用于测试、测试驱动和说明，不改变既有预算或 socket 协议。
+
+- **用饱和现场证明名额归还。**启动故障注入后，63 个保持连接建立起 63 个真实上游 socket。随后两次健康 echo 正常复用剩余名额。每次连接前还等待前一对 relay 完成，因为 TCP 关闭回声本身不证明名额已经归还。销毁保持连接后，65 对 relay 均须完成，两个启动故障变体各自保持预期的完成计数。只删除外层 `finish_client()`，下一次健康客户端就以 `ECONNRESET` 失败，bridge 恰好输出一次 64-client 饱和诊断。这样不靠扩大连接总数或提高上限，就能区分漏归还一个槽位与正确归还。
+- **区分原生预算错误和流后预算检查。**真实 Git 导出包含 2 MiB 随机文件内容，且 `maxBundleBytes=1048576` 时，触发原生 `spawnSync` 的 ENOBUFS。断言保留 `code=ENOBUFS`、原生子进程错误信息及 `cause.syscall === 'spawnSync git'`，避免把后续预算分支构造的 cause 当作原生错误。错误若错用总 buffer 会显示 `(1..1114112)`，而不是实际载荷上限 `(1..1048576)`，用例会转红，且不会提升超大输出。原有小 cap 用例继续单独覆盖流后长度校验，不把它当成原生映射证据。
+- **实测诊断字节，而非自证常量。**测试包装器记录 bundle 创建子进程的真实 `result.stderr.length`，要求每次观测至少为 48 KiB；不记录诊断内容。两次正常 Git 执行均观测到 49,152 字节。把注入改为零诊断字节时，观测为 `[0,0]` 且 `pass:false`，不再让硬编码的 `diagnosticBytes` 掩盖故障。`[98304,134283264]` 的其它预算断言保持不变。
+- **双语状态段的证据范围一致。**中英文都包含先前 Linux、capability 探测与 KVM 测量仅为历史证据，并指向确切源码和不支持环境的边界，均不以单独的旧 guest 摘要暗示当前认证。
+
+本增量实测为：本机三份聚焦文件 **67 passed**；`qa-r3-final` 的 Linux 十一文件 **541 passed、8 environment skips**；受限 root 权限目标 **2 passed、40 个仅由测试名过滤跳过**。`scripts/verify-pr-vm-guest-vsock.py` 保持已用于 KVM 报告的 `8d00890261d7ab4e7b453209a65df8536cd50f52a28f644fb3b78e42f97b2f8b`，channel 与 runner 的 SHA 也未变。本增量是测试和说明修订，不是用旧 guest 冒称新 replay。
+
+扩展饱和用例之初还出现过一次 90 秒的 inner relay 超时，随后聚焦重放和完整 Linux 套件均通过。原触发没有再次重现，不能把反复通过当成已修复。现在测试在失败时保留阶段、客户端 readiness、真实上游数量及完成数，未延长时限；这仍不是对所有调度时序的普遍证明。

@@ -16,6 +16,7 @@ const { pathToFileURL } = require('node:url');
 const diagnosticBytes = 48 * 1024;
 const originalSpawnSync = childProcess.spawnSync;
 const bundleBuffers = [];
+const observedStderrBytes = [];
 (async () => {
   const root = fs.mkdtempSync('/tmp/qc-round-prep-');
   const fixtureBin = join(root, 'bin');
@@ -53,6 +54,9 @@ process.exit(result.status ?? 1);
         args[createIndex + 1] === '-'
       ) {
         bundleBuffers.push(options.maxBuffer);
+        const result = originalSpawnSync(command, args, options);
+        observedStderrBytes.push(result.stderr?.length ?? 0);
+        return result;
       }
       return originalSpawnSync(command, args, options);
     };
@@ -175,6 +179,8 @@ process.exit(result.status ?? 1);
     ];
     const repoBundle = join(root, 'repo-launcher', 'round-input.bundle');
     const pass =
+      observedStderrBytes.length === expectedBuffers.length &&
+      observedStderrBytes.every((bytes) => bytes >= diagnosticBytes) &&
       fs.statSync(directOut).size === direct.bundleBytes &&
       fs.statSync(directOut).size < 32 * 1024 &&
       digest(fs.readFileSync(directOut)) === direct.bundleSha256 &&
@@ -201,7 +207,7 @@ process.exit(result.status ?? 1);
     console.log(
       JSON.stringify({
         directBundleBytes: direct.bundleBytes,
-        fixtureGitStderrBytes: diagnosticBytes,
+        fixtureGitStderrBytes: observedStderrBytes,
         realBundleVerified: verification.includes(
           'The bundle records a complete history',
         ),

@@ -833,10 +833,15 @@ describe('verify-pr-vm-runner runHardwareRound orchestrator', () => {
     const report = JSON.parse(child.stdout);
     expect(report).toMatchObject({
       realBundleVerified: true,
-      fixtureGitStderrBytes: 48 * 1024,
       allocations: 1,
       pass: true,
     });
+    expect(report.fixtureGitStderrBytes).toHaveLength(
+      report.bundleBuffers.length,
+    );
+    expect(
+      report.fixtureGitStderrBytes.every((bytes) => bytes >= 48 * 1024),
+    ).toBe(true);
     expect(report.bundleBuffers).toEqual(report.expectedBuffers);
     expect(report.repoErrors.join('\n')).toContain(
       'round-prep-allocation-sentinel',

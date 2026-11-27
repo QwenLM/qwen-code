@@ -5,7 +5,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import {
   chmodSync,
@@ -238,6 +238,42 @@ describe('verify-pr-vm-channel input packaging and manifest', () => {
       }),
     ).toThrow(/non-regular outPath/);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves native ENOBUFS diagnostics while naming the payload budget',
+    () => {
+      const { root, repoDir, baseRefOid } = makeFixtureRepo();
+      writeFileSync(
+        join(repoDir, 'incompressible.bin'),
+        randomBytes(2 * 1024 * 1024),
+      );
+      git(['add', 'incompressible.bin'], repoDir);
+      git(['commit', '-q', '-m', 'add incompressible data'], repoDir);
+      const headRefOid = git(['rev-parse', 'HEAD'], repoDir);
+      const maxBundleBytes = 1 << 20;
+      let nativeError;
+      try {
+        createRoundInputBundle({
+          repoDir,
+          baseRefOid,
+          headRefOid,
+          outPath: join(root, 'native-oversize.bundle'),
+          maxBundleBytes,
+        });
+      } catch (error) {
+        nativeError = error;
+      }
+      expect(nativeError).toBeInstanceOf(Error);
+      expect(nativeError.message).toContain(
+        `bundle size or diagnostic output exceeds allowed range (1..${maxBundleBytes})`,
+      );
+      expect(nativeError.code).toBe('ENOBUFS');
+      expect(nativeError.cause?.code).toBe('ENOBUFS');
+      expect(nativeError.cause?.message).toContain('spawnSync git ENOBUFS');
+      expect(nativeError.cause?.syscall).toBe('spawnSync git');
+      expect(existsSync(join(root, 'native-oversize.bundle'))).toBe(false);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'refuses aliased or nested materialize directories before git initialization',
@@ -1694,41 +1730,89 @@ threading.Thread = StartFailureThread
           });
           return { client, closed };
         };
-        const failed = await connectClient();
-        await expect
-          .poll(() => existsSync(failureCountPath), { timeout: 5_000 })
-          .toBe(true);
-        await failed.closed;
-        expect(failed.client.destroyed).toBe(true);
-        expect(readFileSync(failureCountPath, 'utf8')).toBe(
-          innerRelayFailure ? '2' : '1',
-        );
-        const completedRelays = () =>
-          existsSync(relayDonePath)
-            ? readFileSync(relayDonePath, 'utf8')
-                .trim()
-                .split('\n')
-                .filter(Boolean).length
-            : 0;
-        const failedRelaysBeforeRecovery = innerRelayFailure ? 1 : 0;
-        await expect
-          .poll(completedRelays, { timeout: 5_000 })
-          .toBe(failedRelaysBeforeRecovery);
-        await expect.poll(() => bridge.exitCode, { timeout: 5_000 }).toBeNull();
-        for (let index = 0; index < 2; index += 1) {
-          const healthy = await connectClient();
-          const echoed = once(healthy.client, 'data');
-          healthy.client.end(`healthy-after-start-failure-${index}`);
-          expect((await echoed)[0].toString('utf8')).toBe(
-            `healthy-after-start-failure-${index}`,
+        let phase = 'injection';
+        let completedRelays = () => null;
+        try {
+          const failed = await connectClient();
+          await expect
+            .poll(() => existsSync(failureCountPath), { timeout: 5_000 })
+            .toBe(true);
+          await failed.closed;
+          phase = 'before-holds';
+          expect(failed.client.destroyed).toBe(true);
+          expect(readFileSync(failureCountPath, 'utf8')).toBe(
+            innerRelayFailure ? '2' : '1',
           );
-          await healthy.closed;
+          completedRelays = () =>
+            existsSync(relayDonePath)
+              ? readFileSync(relayDonePath, 'utf8')
+                  .trim()
+                  .split('\n')
+                  .filter(Boolean).length
+              : 0;
+          const failedRelaysBeforeRecovery = innerRelayFailure ? 1 : 0;
+          await expect
+            .poll(completedRelays, { timeout: 5_000 })
+            .toBe(failedRelaysBeforeRecovery);
+          await expect
+            .poll(() => bridge.exitCode, { timeout: 5_000 })
+            .toBeNull();
+          const held = [];
+          // Leave one slot: a leaked slot turns the next healthy echo into a refusal.
+          for (let index = 0; index < 63; index += 1) {
+            held.push(await connectClient());
+          }
+          await expect
+            .poll(() => upstreamSockets.size, { timeout: 5_000 })
+            .toBe(63);
+          for (let index = 0; index < 2; index += 1) {
+            const completedBeforeHealthy = completedRelays();
+            const healthy = await connectClient();
+            phase = `healthy-data-${index}`;
+            const echoed = once(healthy.client, 'data');
+            healthy.client.end(`healthy-after-start-failure-${index}`);
+            expect((await echoed)[0].toString('utf8')).toBe(
+              `healthy-after-start-failure-${index}`,
+            );
+            phase = `healthy-close-${index}`;
+            await healthy.closed;
+            // A peer close can arrive before handle_bridge_client returns its slot.
+            await expect
+              .poll(completedRelays, { timeout: 5_000 })
+              .toBe(completedBeforeHealthy + 2);
+          }
+          phase = 'drain';
+          for (const client of held) client.client.destroy();
+          await expect
+            .poll(() => upstreamSockets.size, { timeout: 5_000 })
+            .toBe(0);
+          await expect
+            .poll(completedRelays, { timeout: 5_000 })
+            .toBe(failedRelaysBeforeRecovery + 130);
+          expect(bridge.exitCode).toBeNull();
+          expect(stderr).toBe('');
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              innerRelayFailure,
+              phase,
+              error: { code: error.code, message: error.message },
+              bridgeExitCode: bridge.exitCode,
+              bridgeStderr: stderr,
+              completedRelayCount: completedRelays(),
+              upstreamCount: upstreamSockets.size,
+              failureCount: existsSync(failureCountPath)
+                ? readFileSync(failureCountPath, 'utf8')
+                : null,
+              clients: [...clients].map((client) => ({
+                readyState: client.readyState,
+                destroyed: client.destroyed,
+                connecting: client.connecting,
+              })),
+            }),
+          );
+          throw error;
         }
-        await expect
-          .poll(completedRelays, { timeout: 5_000 })
-          .toBe(failedRelaysBeforeRecovery + 4);
-        expect(bridge.exitCode).toBeNull();
-        expect(stderr).toBe('');
       },
     );
   }
