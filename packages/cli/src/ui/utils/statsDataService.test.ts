@@ -1784,4 +1784,30 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(result.report.projects[0]?.path).toBe('/workspace/demo');
     expect(result.report.projects[0]?.sessionCount).toBe(1);
   });
+
+  it('excludes future-dated run records from report.sessionCount and per-project session counts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-27T10:00:00.000Z'));
+      vi.mocked(loadLedgerOrEmpty).mockResolvedValue(new Map());
+      const now = Date.now();
+      mockedLoadUsageHistory.mockResolvedValue([
+        makeRecord({
+          sessionId: 'future-dated-session',
+          project: '/workspace/future',
+          startTime: now + 30_000,
+          timestamp: now + 60_000,
+          models: {},
+          runScoped: true,
+        }),
+      ]);
+
+      const result = await loadStatsData('today');
+      expect(result.report.sessionCount).toBe(0);
+      expect(result.report.totalRequests).toBe(0);
+      expect(result.report.projects).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

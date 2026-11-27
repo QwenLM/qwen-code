@@ -7095,6 +7095,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
     });
 
+    it('sweeps and persists per-session live usage during disposeSessions when close throws on drain timeout', async () => {
+      mockPersistSessionUsageOnClose.mockClear();
+      vi.mocked(uiTelemetryService.removeSession).mockClear();
+      const sessionConfigMock = await setupSessionMocks('hosted-drain-timeout');
+      sessionConfigMock.getProjectRoot = vi
+        .fn()
+        .mockReturnValue('/tmp/drain-timeout-project');
+      vi.mocked(loadSettings).mockReturnValue(messagingOn());
+      const { agent, agentPromise } =
+        await bootInitializedAcpAgent(messagingOn());
+      await agent.newSession({
+        cwd: '/tmp/drain-timeout-project',
+        mcpServers: [],
+      });
+      // Force closeStoredSession to reject before removeStoredSessionEntry runs.
+      vi.mocked(lastSessionMock!.waitForActiveTurnsToSettle).mockRejectedValue(
+        new Error('drain budget exceeded'),
+      );
+
+      await (
+        agent as unknown as { disposeSessions(): Promise<void> }
+      ).disposeSessions();
+
+      expect(mockPersistSessionUsageOnClose).toHaveBeenCalledTimes(1);
+      const [persistedConfig, persistedId] =
+        mockPersistSessionUsageOnClose.mock.calls[0]!;
+      expect(persistedConfig).toBe(sessionConfigMock);
+      expect(persistedId).toBe('hosted-drain-timeout');
+      expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+        'hosted-drain-timeout',
+      );
+      expect(
+        mockPersistSessionUsageOnClose.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        vi.mocked(uiTelemetryService.removeSession).mock
+          .invocationCallOrder[0]!,
+      );
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it("registers nothing when the session's own settings turn messaging off, whatever the process started with", async () => {
       // Startup settings on, session settings off: the per-setting
       // contract the docs state is about the session, and a session that

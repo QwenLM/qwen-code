@@ -887,6 +887,12 @@ describe('clearCommand', () => {
       expect(telemetryMock.resetSession).toHaveBeenCalledWith('acp-session-a');
       expect(telemetryMock.removeSession).toHaveBeenCalledWith('acp-session-a');
       expect(telemetryMock.resetSession).toHaveBeenCalledWith('new-session-id');
+      expect(persistSessionUsageMock.mock.invocationCallOrder[0]!).toBeLessThan(
+        telemetryMock.resetSession.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        telemetryMock.resetSession.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(telemetryMock.removeSession.mock.invocationCallOrder[0]!);
       expect(telemetryMock.reset).not.toHaveBeenCalled();
       expect(telemetryMock.resetLiveMetrics).not.toHaveBeenCalled();
     });

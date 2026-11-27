@@ -365,7 +365,9 @@ export async function loadStatsData(
         ),
       }
     : undefined;
-  const { start, end } = getTimeRangeBounds(range);
+  const nowDate = new Date();
+  const nowMs = nowDate.getTime();
+  const { start, end } = getTimeRangeBounds(range, nowDate);
   const currentStartKey = localDateKey(start.getTime());
   const currentEndKey = localDateKey(end.getTime());
   const currentCompletedEndKey = addLocalDays(currentEndKey, -1);
@@ -434,6 +436,8 @@ export async function loadStatsData(
     currentStartKey,
     currentEndKey,
     ledgerDaily,
+    undefined,
+    nowMs,
   );
   // Align per-project sessionCount with the header's distinct-session unit so
   // resuming one conversation multiple times in a project counts once rather
@@ -441,7 +445,15 @@ export async function loadStatsData(
   // the per-request ledger does not store workspace paths).
   const projectSessionIds = new Map<string, Set<string>>();
   for (const r of currentRecords) {
-    if (r.transcriptSupplement === true || !r.project || !r.sessionId) continue;
+    if (
+      r.transcriptSupplement === true ||
+      !Number.isFinite(r.timestamp) ||
+      r.timestamp > nowMs ||
+      !r.project ||
+      !r.sessionId
+    ) {
+      continue;
+    }
     let ids = projectSessionIds.get(r.project);
     if (!ids) {
       ids = new Set<string>();
@@ -489,12 +501,16 @@ export async function loadStatsData(
         currentStartKey,
         currentCompletedEndKey,
         ledgerDaily,
+        undefined,
+        nowMs,
       );
       previousReport.sessionCount = countActiveSessions(
         prevFiltered,
         prevStartKey,
         prevEndKey,
         ledgerDaily,
+        undefined,
+        nowMs,
       );
       if (
         canUseLedgerDelta(

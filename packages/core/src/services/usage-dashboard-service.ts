@@ -1276,10 +1276,15 @@ export function countActiveSessions(
   endKey: string,
   ledgerDaily?: TokenUsageDailyByModel,
   runtimeScopes?: readonly UsageDashboardSources[],
+  endMs?: number,
 ): number {
   const sessions = new Set<string>();
   for (const r of records) {
-    if (r.transcriptSupplement === true || !Number.isFinite(r.timestamp)) {
+    if (
+      r.transcriptSupplement === true ||
+      !Number.isFinite(r.timestamp) ||
+      (endMs !== undefined && r.timestamp > endMs)
+    ) {
       continue;
     }
     const key = localDateKey(r.timestamp);
@@ -1475,6 +1480,7 @@ export function buildUsageDashboard(
       todayKey,
       ledgerDaily,
       runtimeScopes,
+      now,
     ),
     toolCalls: report.tools.totalCalls,
     linesAdded: report.files.linesAdded,

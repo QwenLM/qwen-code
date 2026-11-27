@@ -4821,6 +4821,31 @@ class QwenAgent implements Agent {
     }
   }
 
+  private finalizeSessionUsageOnTeardown(
+    sessionId: string,
+    session: Session,
+    cleanupErrors?: unknown[],
+  ): void {
+    const sessionConfig = session.getConfig();
+    const activeSessionId = sessionConfig.getSessionId?.();
+    const sessionIdsToFinalize =
+      activeSessionId && activeSessionId !== sessionId
+        ? [sessionId, activeSessionId]
+        : [sessionId];
+    for (const id of sessionIdsToFinalize) {
+      try {
+        persistSessionUsageOnClose(sessionConfig, id);
+      } catch (error) {
+        cleanupErrors?.push(error);
+      }
+      try {
+        uiTelemetryService.removeSession(id);
+      } catch (error) {
+        cleanupErrors?.push(error);
+      }
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
@@ -4862,24 +4887,7 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    const sessionConfig = session.getConfig();
-    const activeSessionId = sessionConfig.getSessionId?.();
-    const sessionIdsToFinalize =
-      activeSessionId && activeSessionId !== sessionId
-        ? [sessionId, activeSessionId]
-        : [sessionId];
-    for (const id of sessionIdsToFinalize) {
-      try {
-        persistSessionUsageOnClose(sessionConfig, id);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-      try {
-        uiTelemetryService.removeSession(id);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
+    this.finalizeSessionUsageOnTeardown(sessionId, session, cleanupErrors);
     try {
       await this.turnSkillLeases.collect(sessionId, true);
     } catch (error) {
@@ -5592,6 +5600,12 @@ class QwenAgent implements Agent {
         }),
       ),
     );
+    // Any session whose budgeted close/drain threw before reaching
+    // removeStoredSessionEntry is still in `this.sessions`; sweep its live
+    // telemetry bucket per session so its delta is not lost on process exit.
+    for (const [sessionId, session] of [...this.sessions.entries()]) {
+      this.finalizeSessionUsageOnTeardown(sessionId, session);
+    }
     // Turn admission can return a peer item to the queue after the inbox's
     // first snapshot. Session disposal detaches those items as well.
     await Promise.all(this.pendingPeerExpiries);
