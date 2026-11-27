@@ -30,6 +30,7 @@ class ManagedStoreDecompositionTest {
             AgentSessionCommands.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            ChildSessionAdmissions.class,
             AgentActionParking.class,
             AgentTurnExecution.class,
             AgentExecutionOperations.class,
@@ -40,7 +41,8 @@ class ManagedStoreDecompositionTest {
             JournalResourceReads.class,
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
-            JournalCommit.class);
+            JournalCommit.class,
+            ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
@@ -166,14 +168,20 @@ class ManagedStoreDecompositionTest {
 
     private static void assertEntries(Class<?> facade, String expected) {
         assertThat(facade.getAnnotation(Qualifier.class).value()).isEqualTo("managedAgentTransactionManager");
-        List<String> actual = Arrays.stream(facade.getDeclaredMethods())
-                .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
-                .map(method -> {
-                    var tx = method.getAnnotation(Transactional.class);
-                    String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
-                            + ":" + tx.isolation() + ":" + tx.readOnly();
-                    return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
-                }).toList();
+        // The facade may inherit an entry arm from a package-private
+        // superclass; the population pin covers the whole hierarchy, so a
+        // move between facade and superclass keeps the same contract.
+        List<String> actual = new java.util.ArrayList<>();
+        for (Class<?> type = facade; type != null && type != Object.class; type = type.getSuperclass()) {
+            Arrays.stream(type.getDeclaredMethods())
+                    .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
+                    .map(method -> {
+                        var tx = method.getAnnotation(Transactional.class);
+                        String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
+                                + ":" + tx.isolation() + ":" + tx.readOnly();
+                        return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
+                    }).forEach(actual::add);
+        }
         assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
     }
 
