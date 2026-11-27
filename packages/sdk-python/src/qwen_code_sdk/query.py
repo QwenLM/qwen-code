@@ -433,8 +433,17 @@ class Query:
             "request": request_payload,
         }
 
-        await self._write_payload(payload)
-        return await future
+        try:
+            await self._write_payload(payload)
+            return await future
+        finally:
+            self._pending_control_requests.pop(request_id, None)
+            timeout_handle.cancel()
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # A response or timeout may arrive while the write is still pending.
+                future.exception()
 
     async def _send_control_response(
         self,
