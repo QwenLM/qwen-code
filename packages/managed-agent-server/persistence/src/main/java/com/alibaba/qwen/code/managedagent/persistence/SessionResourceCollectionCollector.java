@@ -36,11 +36,6 @@ public final class SessionResourceCollectionCollector {
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     private static final int PAGE_ROWS = 100;
     private static final long PAGE_BYTES = 32L * 1024 * 1024;
-    // No USE INDEX hint: the (tenant_id, session_id, resource_id) unique key
-    // uk_ma_resource_id serves the equality prefix, the resource_id range and
-    // the ORDER BY without a filesort, and MySQL chooses it naturally now that
-    // the duplicate idx_ma_resource_scope_page is gone. H2 cannot name a unique
-    // constraint's index in a hint, so a hint here would break the H2 lane.
     private static final String RESOURCE_PAGE =
             "SELECT resource_id, byte_length, CASE WHEN state IN ('PUBLISHED', 'REFERENCED') AND"
                 + " storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL"
@@ -48,7 +43,7 @@ public final class SessionResourceCollectionCollector {
                 + " deletion_operation_ref IS NULL AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
                 + " WHERE f.resource_id = ma_resource.resource_id AND f.tenant_id = ma_resource.tenant_id"
                 + " AND f.session_id = ma_resource.session_id) THEN 1 ELSE 0 END AS"
-                + " collectible FROM ma_resource WHERE"
+                + " collectible FROM ma_resource /*! FORCE INDEX (uk_ma_resource_id) */ WHERE"
                 + " tenant_id = ? AND session_id = ? AND resource_id > ? ORDER BY resource_id LIMIT "
                     + (PAGE_ROWS + 1);
     private final JdbcTemplate jdbc;
@@ -160,7 +155,8 @@ public final class SessionResourceCollectionCollector {
                     + " AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id"
                     + " LIMIT 1) THEN 1 ELSE 0 END AS needs_ledger FROM"
                     + " (SELECT id, tenant_id, session_id, retired_at"
-                    + " FROM ma_session WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") s ORDER BY s.id",
+                    + " FROM ma_session /*! USE INDEX (uk_ma_session_id) */ WHERE id > ? AND id <= ? ORDER BY id LIMIT "
+                    + SCAN_ROWS + ") s LIMIT " + SCAN_ROWS,
                 (row, index) -> ManagedSchemaRows.read(row), due, ledgerScanId, ledgerScanRoundEnd);
         for (var row : page) {
             if (!ToolPublicationRetentionStore.flag(row, "needs_ledger")) {

@@ -1350,8 +1350,8 @@ public final class JdbcRepositoryContract {
         repository.findOrCreate(execution(
                 prefix + "-keyed-execution", keyedKey,
                 prefix + "-keyed-digest"));
-        tamper(dataSource, "idempotency_key", prefix + "-keyed-execution",
-                keyedKey + " ");
+        tamper(dataSource, "idempotency_key", keyedKey,
+                prefix + "-keyed-execution", keyedKey + " ");
         if (padSpace) {
             assertEquals("Tool idempotency hash collision",
                     assertThrows(IllegalStateException.class,
@@ -1365,7 +1365,8 @@ public final class JdbcRepositoryContract {
                 indexedId,
                 prefix + "-indexed-idempotency",
                 prefix + "-indexed-digest"));
-        tamper(dataSource, "execution_call_id", indexedId, indexedId + " ");
+        tamper(dataSource, "execution_call_id", indexedId,
+                indexedId + " ", indexedId);
         if (padSpace) {
             assertEquals("Tool execution-call hash collision",
                     assertThrows(IllegalStateException.class,

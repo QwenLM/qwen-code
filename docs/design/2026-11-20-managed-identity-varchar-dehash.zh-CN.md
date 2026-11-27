@@ -486,6 +486,14 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 - 「等值精确含尾随空格」不再由 collation 保证，而由准入保证；大小写敏感仍由
   `utf8mb4_bin` 保持。早期「尾随空格区分」测试改为「尾随空格拒绝」测试，大小写区分保留。
 
+### 2026-11-27 窄范围排序规则修正
+
+直接建表的 registry 契约覆盖 Unicode 标识符，而不只覆盖回执派生的应用标识符。
+`ma_workspace.workspace_id` 使用 NO PAD 的 `utf8mb4_0900_as_cs`，使这些值在 join 和
+递归遍历中仍保持精确等值。其他表、canonical ref 和准入侧拒绝尾随空格的策略不变。
+对应的 MySQL 夹具在构造前拒绝不允许的列宽变更，不再把失败的 schema 变更误当作
+排序规则测试。
+
 ### actor 列
 
 - raw actor（≤36 个 UTF-16 单元）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、

@@ -10,6 +10,8 @@ import javax.sql.DataSource;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 class ManagedRuntimeRetentionGuardMySqlIT {
     private JdbcTemplate admin;
     private String schema;
@@ -66,6 +68,15 @@ class ManagedRuntimeRetentionGuardMySqlIT {
 
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
+        assertThatThrownBy(() -> contract.jdbc.execute(
+                "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL"))
+                .hasMessageContaining("Specified key was too long");
+        contract.jdbc.execute(
+                "ALTER TABLE ma_session_record DROP INDEX idx_ma_record_task,"
+                        + " DROP INDEX idx_ma_record_session_delivery,"
+                        + " DROP INDEX idx_ma_hook_definition");
+        contract.jdbc.execute(
+                "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL");
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 
