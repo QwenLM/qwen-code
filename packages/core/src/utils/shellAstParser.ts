@@ -1063,16 +1063,97 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   );
 }
 
+/** Redirection operators that close a descriptor and take no target word. */
+const CLOSE_DESCRIPTOR_OPERATORS = new Set(['<&-', '>&-']);
+
+/**
+ * The children of a `heredoc_redirect` node that are the heredoc itself or
+ * carry nothing to run: its descriptor, delimiter, body and a trailing comment.
+ */
+const HEREDOC_OWN_PART =
+  /^(?:heredoc_(?:start|body|end)|file_descriptor|comment)$/;
+
+/** A heredoc delimiter that is one plain word: bash expands the body. */
+const PLAIN_HEREDOC_DELIMITER = /^[\w.-]+$/;
+
+/**
+ * A heredoc delimiter quoted as a whole, with nothing in it that bash could
+ * expand: `'EOF'`, `"EOF"` or `\EOF`. bash then leaves the body as text.
+ */
+const QUOTED_HEREDOC_DELIMITER = /^(?:'[^']*'|"[^"$`\\]*"|\\[\w.-]+)$/;
+
+/**
+ * A heredoc body is expanded unless its delimiter is quoted, and what the
+ * parser shows of a body is not what bash expands: a backtick substitution
+ * stays plain text, and so does `$(...)` behind leading whitespace. So the
+ * body is not read from the tree. Every expansion bash performs in a heredoc
+ * body (parameter, command, arithmetic) starts with `$` or a backtick, and
+ * an expandable body holding either is not vouched for. This is the test
+ * `detectCommandSubstitution` already applies to a heredoc body, widened from
+ * `$(` to any `$`, since `$[x]` and `$((x))` run a command held in `x`.
+ *
+ * A delimiter that is neither one plain word nor quoted as a whole
+ * (`${X:-'E'}`, `$X`, `E"O"F`) is not vouched for either: a quote character
+ * in it need not quote it.
+ */
+function evaluateHeredocBody(heredoc: SyntaxNode): ShellCommandSafety {
+  const delimiter =
+    heredoc.namedChildren.find((child) => child.type === 'heredoc_start')
+      ?.text ?? '';
+  if (QUOTED_HEREDOC_DELIMITER.test(delimiter)) return 'read-only';
+  if (!PLAIN_HEREDOC_DELIMITER.test(delimiter)) return 'unknown';
+  // Everything after the heredoc's first line: the body and its closing line.
+  const firstLineEnd = heredoc.text.indexOf('\n');
+  const body = firstLineEnd < 0 ? '' : heredoc.text.slice(firstLineEnd + 1);
+  return /[$`]/.test(body) ? 'unknown' : 'read-only';
+}
+
+/**
+ * Judges what shares a heredoc's first line. tree-sitter files all of it
+ * under the `heredoc_redirect` node, where no rule looked: in
+ * `cat <<EOF > out.txt`, `cat <<EOF | sh` and `cat <<EOF && rm x`, the
+ * redirection, the pipeline and the second command are that node's children,
+ * and a plain word after the delimiter is its `argument`. A redirection and a
+ * statement get the rule for their kind. A word is an argument no rule has
+ * seen, so it is `unknown`, as is any other node (#16856).
+ */
+function evaluateHeredocLine(heredoc: SyntaxNode): ShellCommandSafety {
+  return mergeSafety(
+    evaluateHeredocBody(heredoc),
+    evaluateRedirectionSafety(heredoc),
+    ...heredoc.namedChildren
+      .filter(
+        (child) =>
+          !HEREDOC_OWN_PART.test(child.type) &&
+          !child.type.endsWith('_redirect'),
+      )
+      .map(evaluateStatementSafety),
+  );
+}
+
 function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   let result: ShellCommandSafety = 'read-only';
   for (const redirect of node.namedChildren) {
     if (!redirect.type.endsWith('_redirect')) continue;
     result = mergeSafety(result, evaluateSubstitutions(redirect));
+    if (redirect.type === 'heredoc_redirect') {
+      result = mergeSafety(result, evaluateHeredocLine(redirect));
+    }
     if (redirect.type !== 'file_redirect') continue;
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',
     );
     if (!operator) return 'unknown';
+    // bash gives a redirection one word as its target, and none to `<&-` and
+    // `>&-`, which only close a descriptor. tree-sitter attaches the words
+    // after it to the redirection as well, so they never reach the command's
+    // arguments: `git branch < /dev/null -D main` reads as `git branch`. No
+    // rule has seen those words, so the command is not known to be read-only
+    // (#16856).
+    const ownWords = CLOSE_DESCRIPTOR_OPERATORS.has(operator.type) ? 0 : 1;
+    if (redirect.childrenForFieldName('destination').length > ownWords) {
+      result = mergeSafety(result, 'unknown');
+    }
     if (WRITE_REDIRECT_OPERATORS.has(operator.type)) return 'write';
     if (operator.type === '>&') {
       const destination = redirect.childForFieldName('destination');
