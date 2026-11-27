@@ -254,7 +254,6 @@ class SshRuntimeWiringTest {
         broker.setEnabled(true);
         broker.setProvisioner("ssh-process");
         broker.setTrustedLocalRebootRecovery(false);
-        broker.setPort(0);
         broker.setToken("fixture-broker-token");
         broker.setWorkspaceId("fixture-workspace");
         broker.setWorkspaceCwd("/remote/workspace");

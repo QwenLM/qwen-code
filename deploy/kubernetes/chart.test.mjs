@@ -109,6 +109,8 @@ test('renders a signed API and a private loopback Harness pool with matching pro
   );
   for (const [index, harness] of harnesses.entries()) {
     const harnessEnv = env(harness);
+    assert.equal(harnessEnv.QWEN_MANAGED_RUNTIME_BROKER_URL, undefined);
+    assert.equal(harnessEnv.QWEN_MANAGED_RUNTIME_BROKER_TOKEN, undefined);
     const url = new URL(pool.instances[index]['base-url']);
     assert.equal(
       harnessEnv.QWEN_HOSTED_HARNESS_INSTANCE_ID.value,
@@ -303,7 +305,7 @@ test('LOCAL tools require a fixed node and persist private state outside Workspa
     const harnessEnv = env(harness);
     assert.equal(
       harnessEnv.QWEN_MANAGED_RUNTIME_BROKER_URL.value,
-      'http://127.0.0.1:4182',
+      serverEnv.QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL.value,
     );
     assert.deepEqual(
       serverEnv.QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN.valueFrom,
