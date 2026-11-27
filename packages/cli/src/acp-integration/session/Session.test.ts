@@ -54261,6 +54261,50 @@ describe('Session', () => {
       }>;
     };
 
+    it('normalizes legacy ACP file arguments before hooks and execution', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      const preToolUse = vi
+        .spyOn(core, 'firePreToolUseHook')
+        .mockResolvedValue({ shouldProceed: true });
+      vi.spyOn(core, 'firePostToolUseHook').mockResolvedValue({
+        shouldStop: false,
+      });
+      const tool = mockConfirmingTool(
+        'edit',
+        vi.fn().mockResolvedValue({
+          llmContent: 'updated',
+          returnDisplay: 'updated',
+        }),
+      );
+      tool.kind = core.Kind.Edit;
+      mockToolRegistry.getTool.mockReturnValue(tool);
+
+      const modelArgs = { path: '/tmp/a.txt', old_str: 'one', new_str: 'two' };
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'edit-aliases', [
+        { id: 'call-edit-aliases', name: 'edit', args: modelArgs },
+      ]);
+
+      const canonicalArgs = {
+        file_path: '/tmp/a.txt',
+        old_string: 'one',
+        new_string: 'two',
+      };
+      expect(preToolUse.mock.calls[0]?.[2]).toEqual(canonicalArgs);
+      expect(tool.build).toHaveBeenCalledWith(canonicalArgs);
+      expect(result.parts[0]?.functionResponse?.response).toEqual({
+        output: 'updated',
+      });
+      expect(modelArgs).toEqual({
+        path: '/tmp/a.txt',
+        old_str: 'one',
+        new_str: 'two',
+      });
+    });
+
     it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({

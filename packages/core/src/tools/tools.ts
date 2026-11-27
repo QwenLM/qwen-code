@@ -567,19 +567,24 @@ const OPEN_SCHEMA_KEYWORDS = [
 /**
  * Names the top-level arguments a schema does not declare, and the ones it
  * does: a model that used another harness's name for an argument otherwise
- * only learns which argument is missing. Empty for a schema that may accept
- * arguments its top-level `properties` do not list.
+ * only learns which argument is missing. Required names can be declared
+ * independently of `properties` when the schema permits additional keys.
  */
 function describeUnrecognizedParams(schema: unknown, params: unknown): string {
   if (typeof params !== 'object' || params === null) return '';
   if (typeof schema !== 'object' || schema === null) return '';
   const record = schema as Record<string, unknown>;
-  const { properties, additionalProperties } = record;
+  const { properties, additionalProperties, required } = record;
   if (
     typeof properties !== 'object' ||
     properties === null ||
     (additionalProperties !== undefined && additionalProperties !== false) ||
-    OPEN_SCHEMA_KEYWORDS.some((keyword) => record[keyword] !== undefined)
+    OPEN_SCHEMA_KEYWORDS.some((keyword) => record[keyword] !== undefined) ||
+    (additionalProperties === undefined &&
+      Array.isArray(required) &&
+      required.some(
+        (key) => typeof key === 'string' && !Object.hasOwn(properties, key),
+      ))
   ) {
     return '';
   }

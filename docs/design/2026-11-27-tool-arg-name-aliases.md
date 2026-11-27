@@ -43,7 +43,7 @@ validate `file_path` on their own and say so).
 
 ## Design
 
-### Aliases at scheduler intake
+### Aliases at tool intake
 
 A table in core maps tool → alias → canonical name:
 
@@ -55,17 +55,19 @@ A table in core maps tool → alias → canonical name:
 | `edit`       | `old_str` | `old_string` |
 | `edit`       | `new_str` | `new_string` |
 
-`CoreToolScheduler` already clones each request's `args` at intake, after the
-`tool_call` bridge resolves a nested call. The aliases are applied to that
-clone: when the canonical name is absent and the alias is present, the value
-moves to the canonical name and the alias key is dropped. When both are
-present nothing changes (the extra key is ignored, as today). The tool name is
-resolved with `canonicalToolName`, so legacy names are covered.
+`CoreToolScheduler` clones the arguments at intake. After resolving the tool,
+including nested calls through the `tool_call` bridge, it applies aliases to
+the clone. When the alias is present and the canonical name is absent, it
+moves the value to the canonical name and drops the alias. When both are
+present, the canonical name wins. Legacy tool names resolve before lookup.
+Discovered tools keep the argument names from their own schemas.
 
-Every execution path (headless, Ink, OpenTUI, ACP sessions, subagents, the
-shared agent loop) schedules through `CoreToolScheduler`, so one place covers
-them. The chat history keeps the model's own call, so duplicate-replay
-fingerprints, which read history, do not change.
+Headless, Ink, OpenTUI, subagents and ACP on the shared loop use
+`CoreToolScheduler`. Legacy ACP dispatches directly and applies the same table
+to its own copy after bridge resolution, before hooks and argument-dependent
+permission checks.
+Both routes keep the model's own call in chat history for duplicate-replay
+fingerprints.
 
 Applying the aliases in the tool's `build` instead would leave `request.args`
 with `path`: the Ink and OpenTUI edit checkpoints read `request.args.file_path`
@@ -78,14 +80,14 @@ back gets today's schema error.
 
 ### History readers
 
-Three places read a file path from the call as the chat history holds it, so
-they would see `path`: the read-residency check in the chat (a read whose path
-it cannot find is treated as unresolved, which is safe), microcompaction's
-list of evicted read paths, and the file list restored after compaction. A
-`path` read now runs and arms the read cache, so microcompaction must report
-its path when it clears the result; otherwise a later read could be answered
-as unchanged while its content is gone from the history. These readers take
-the call's arguments through the same table, on a copy.
+The read-residency check in the chat, microcompaction's evicted read paths and
+post-compaction file restoration apply the same table to copies of the call
+arguments. Microcompaction trims and unescapes the path as the file tool does,
+so it invalidates the cache entry for the file whose result it cleared.
+Post-compaction restoration normalizes bridged tool names before looking up
+aliases. Session export counts writes and edits by the tool result's resolved
+path, with the recorded `file_path` and the basename as fallbacks for older
+records. This keeps same-named files in different directories distinct.
 
 ### Unknown arguments in schema errors
 
@@ -97,16 +99,17 @@ ones:
 params must have required property 'pattern'. Unrecognized parameters: query. Accepted parameters: pattern, glob, path, limit.
 ```
 
-Schemas without top-level `properties`, with an `additionalProperties` other
-than `false`, or with a keyword that can accept other keys
+Omitting `additionalProperties` or setting it to `false` can allow the note.
+Schemas without top-level `properties`, with an explicit
+`additionalProperties` value other than `false`, or with a keyword that can
+accept other keys
 (`patternProperties`, `allOf`, `anyOf`, `oneOf`, `$ref`, `if`,
-`dependentSchemas`, `dependencies`, `unevaluatedProperties`) get no note, so
-an argument declared in a branch is never called unrecognised. A closed schema
-(`additionalProperties: false`) does get one: Ajv reports
-`must NOT have additional properties` without naming the key. The note is
-added only to an error that validation already reports; a valid call with an
-extra key stays valid. Tools that validate their parameters themselves (the
-`agent` tool does) are not affected.
+`dependentSchemas`, `dependencies`, `unevaluatedProperties`) skip the note.
+With `additionalProperties` omitted, a key in `required` outside `properties`
+also suppresses the note. For a closed schema, the note can name the extra
+keys behind Ajv's `must NOT have additional properties` error. The note is
+added only when schema validation reports an error. Tools such as `agent`
+continue to produce their own parameter validation errors.
 
 The note lives in the tool layer rather than in `SchemaValidator`, whose error
 text other callers share.
@@ -122,13 +125,15 @@ text other callers share.
 
 ## Validation
 
-Unit tests: the alias function; scheduler intake (the tool, the PreToolUse
-hook and the scheduled request see `file_path`; the caller's args are
-unchanged); microcompaction and the post-compaction file list with a `path`
-call; the note on and off, including closed and composed schemas. The `tool_call` bridge only reaches deferred
-tools, and the file tools are not deferred, so it needs no case of its own.
+Unit tests cover alias normalization before hooks in the scheduler and legacy
+ACP, raw history arguments, cache eviction and restoration for direct and
+bridged calls, session export, and schema hints for closed, composed and
+required-only keys. The bridged history fixtures represent file tools that
+`tools.eager` can defer.
 
-End to end against a mock (`.qwen/e2e-tests/tool-arg-name-aliases/`):
+The [E2E report](https://github.com/QwenLM/qwen-code/pull/18500#issuecomment-7211299701)
+records the mock model setup and the initial CLI, ACP and subagent results.
+The acceptance cases include the following:
 
 - headless: `read_file {"path": …}` reads the file; `write_file` and `edit`
   with `path`, `old_str`, `new_str` change the file;
@@ -136,7 +141,8 @@ End to end against a mock (`.qwen/e2e-tests/tool-arg-name-aliases/`):
 - non-yolo: a `write_file {"path": …}` asks for approval with the file shown;
 - a deny rule on the file still denies the `path` call;
 - a PreToolUse hook sees `file_path`;
-- an ACP session and a subagent read a file with `path`.
+- ACP on both the default and legacy loops and a subagent read a file with
+  `path`.
 
 ## Acceptance criteria
 

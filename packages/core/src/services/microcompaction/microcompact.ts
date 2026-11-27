@@ -13,6 +13,7 @@ import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
 import { applyToolArgAliases } from '../../tools/tool-arg-aliases.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
 import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
+import { unescapePath } from '../../utils/paths.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -280,8 +281,9 @@ function getResponseToolIdentity(
  * lives on the request-side tool args (inside `tool_call.arguments` for a
  * bridged call), not on the
  * `functionResponse` microcompaction blanks, so this is the only way
- * to recover which file a cleared result referred to. Calls missing an
- * id or file_path are absent (the caller treats that as unresolvable).
+ * to recover which file a cleared result referred to. Match the file
+ * tools' trimming and unescaping so cache invalidation reaches the path
+ * they used. Calls missing an id or path are treated as unresolvable.
  *
  * Paths accumulate per id rather than overwrite: if a (malformed or
  * resumed) history reuses a `functionCall.id` across different files,
@@ -296,12 +298,13 @@ function buildCallIdToFilePath(
   for (const [callId, identities] of callIdentityById) {
     for (const identity of identities) {
       if (!FILE_PATH_TOOLS.has(identity.name)) continue;
-      const filePath = identity.args['file_path'];
-      if (typeof filePath === 'string' && filePath.length > 0) {
-        const existing = map.get(callId);
-        if (existing) existing.push(filePath);
-        else map.set(callId, [filePath]);
-      }
+      const modelPath = identity.args['file_path'];
+      if (typeof modelPath !== 'string') continue;
+      const filePath = unescapePath(modelPath.trim());
+      if (!filePath) continue;
+      const existing = map.get(callId);
+      if (existing) existing.push(filePath);
+      else map.set(callId, [filePath]);
     }
   }
   return map;

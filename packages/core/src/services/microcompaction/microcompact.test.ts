@@ -13,6 +13,7 @@ import {
   getToolOutputRecovery,
   setToolOutputRecovery,
 } from '../../tools/tool-output-recovery.js';
+import { escapePath } from '../../utils/paths.js';
 
 import {
   collectResidentMemoryBodies,
@@ -2487,7 +2488,9 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
-  it('reports the path of a blanked read_file call that named it `path`', () => {
+  it('reports the executed path of a blanked read_file call that named it `path`', () => {
+    const filePath = '/proj/old file.ts';
+    const modelPath = ` ${process.platform === 'win32' ? filePath : escapePath(filePath)} `;
     const call: Content = {
       role: 'model',
       parts: [
@@ -2495,7 +2498,7 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
           functionCall: {
             id: 'c0',
             name: 'read_file',
-            args: { path: '/proj/old.ts' },
+            args: { path: modelPath },
           },
         },
       ],
@@ -2514,36 +2517,39 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     expect(result.meta).toMatchObject({
       toolsCleared: 1,
-      evictedReadPaths: ['/proj/old.ts'],
+      evictedReadPaths: [filePath],
       unresolvedEvictedReads: 0,
     });
-    // The history keeps the model's own argument name.
+    // The history keeps the model's own argument name and spelling.
     expect(call.parts?.[0]?.functionCall?.args).toEqual({
-      path: '/proj/old.ts',
+      path: modelPath,
     });
   });
 
-  it('reports the inner file path of a blanked bridged read_file result', () => {
-    const history: Content[] = [
-      makeBridgedToolCall('c0', 'read_file', {
-        file_path: '/proj/old.ts',
-      }),
-      makeBridgedToolResult('c0', 'old long content '.repeat(50)),
-      makeBridgedToolCall('c1', 'web_fetch'),
-      makeBridgedToolResult('c1', 'recent content'),
-    ];
+  it.each(['file_path', 'path'])(
+    'reports the inner %s of a blanked bridged read_file result',
+    (pathArgument) => {
+      const history: Content[] = [
+        makeBridgedToolCall('c0', 'read_file', {
+          [pathArgument]: '/proj/old.ts',
+        }),
+        makeBridgedToolResult('c0', 'old long content '.repeat(50)),
+        makeBridgedToolCall('c1', 'web_fetch'),
+        makeBridgedToolResult('c1', 'recent content'),
+      ];
 
-    const result = microcompactHistory(history, TWO_HOURS_AGO, {
-      toolResultsThresholdMinutes: 5,
-      toolResultsNumToKeep: 1,
-    });
+      const result = microcompactHistory(history, TWO_HOURS_AGO, {
+        toolResultsThresholdMinutes: 5,
+        toolResultsNumToKeep: 1,
+      });
 
-    expect(result.meta).toMatchObject({
-      toolsCleared: 1,
-      evictedReadPaths: ['/proj/old.ts'],
-      unresolvedEvictedReads: 0,
-    });
-  });
+      expect(result.meta).toMatchObject({
+        toolsCleared: 1,
+        evictedReadPaths: ['/proj/old.ts'],
+        unresolvedEvictedReads: 0,
+      });
+    },
+  );
 
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {
     // A kept read_file result may be a cache-hit placeholder or partial

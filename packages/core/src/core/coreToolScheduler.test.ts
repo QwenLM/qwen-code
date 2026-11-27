@@ -100,7 +100,7 @@ import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
 import { CreateSubSessionTool } from '../tools/create-sub-session.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
@@ -5616,6 +5616,43 @@ describe('CoreToolScheduler', () => {
       );
       // The model's own call, which the chat history holds, is unchanged.
       expect(modelArgs).toEqual({ path: '/repo/a.txt' });
+    });
+
+    it('keeps the declared path for a discovered tool with a built-in name', async () => {
+      const tool = new DiscoveredTool(
+        makeFakeConfig({
+          toolDiscoveryCommand: 'discover',
+          toolCallCommand: 'call',
+        }),
+        ToolNames.READ_FILE,
+        'Discovered tool',
+        {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+          additionalProperties: false,
+        },
+      );
+      const build = tool.build.bind(tool);
+      vi.spyOn(tool, 'build').mockImplementation((args) => {
+        const invocation = build(args);
+        vi.spyOn(invocation, 'execute').mockResolvedValue(textResult('found'));
+        return invocation;
+      });
+      const { scheduler, ensureTool, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName: new Map() });
+      ensureTool.mockResolvedValue(tool);
+
+      const args = { path: '/repo/a.txt' };
+      await scheduleBatch(
+        scheduler,
+        toolRequest('discovered', tool.name, args, 'p-discovered'),
+      );
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'success');
+      expect(completed.request.args).toEqual(args);
     });
   });
 

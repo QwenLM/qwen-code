@@ -12,7 +12,7 @@ import type {
   GoalRecord,
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
-import { collectSessionData } from './collect.js';
+import { collectSessionData, collectSessionMetadata } from './collect.js';
 import { toJson } from './formatters/json.js';
 import { toJsonl } from './formatters/jsonl.js';
 import { toMarkdown } from './formatters/markdown.js';
@@ -98,6 +98,69 @@ describe('collectSessionData', () => {
       linesRemoved: 0,
       uniqueFiles: ['/workspace/direct.txt'],
     });
+  });
+
+  it('counts aliased and canonical writes by resolved path', async () => {
+    const base = {
+      sessionId: 'session-1',
+      timestamp: '2026-08-16T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const paths = ['/workspace/a/readme.md', '/workspace/b/readme.md'];
+    const writes = [
+      { args: { path: paths[0] }, filePath: paths[0] },
+      { args: { path: paths[1] }, filePath: paths[1] },
+      { args: { file_path: `${paths[0]} ` }, filePath: paths[0] },
+    ];
+    const records = writes.flatMap<ChatRecord>(({ args, filePath }, index) => {
+      const callId = `write-${index}`;
+      return [
+        {
+          ...base,
+          uuid: callId,
+          parentUuid: index === 0 ? null : `result-${index - 1}`,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: callId,
+                  name: 'write_file',
+                  args: { ...args, content: 'created' },
+                },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          uuid: `result-${index}`,
+          parentUuid: callId,
+          type: 'tool_result',
+          toolCallResult: {
+            callId,
+            resultDisplay: {
+              fileName: 'readme.md',
+              filePath,
+              fileDiff: '',
+              originalContent: null,
+              newContent: 'created',
+            },
+          },
+        },
+      ];
+    });
+    const metadata = await collectSessionMetadata(
+      {
+        sessionId: base.sessionId,
+        startTime: base.timestamp,
+        messages: records,
+      },
+      config,
+    );
+    expect(metadata).toMatchObject({ filesWritten: 2, uniqueFiles: paths });
   });
 
   it('keeps oversized canonical tool results lossless in offline export', async () => {

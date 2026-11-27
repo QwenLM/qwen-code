@@ -218,9 +218,16 @@ describe('extractRecentFilePaths', () => {
     expect(paths).not.toContain('/ws/.env');
   });
 
-  it.each(['read_file', 'write_file', 'edit', 'replace', 'Read_File'])(
-    'restores a successful bridged %s path using the outer call id',
-    (name) => {
+  it.each([
+    ['read_file', 'file_path'],
+    ['write_file', 'file_path'],
+    ['edit', 'file_path'],
+    ['replace', 'file_path'],
+    ['Read_File', 'file_path'],
+    ['Read_File', 'path'],
+  ])(
+    'restores a successful bridged %s with %s using the outer call id',
+    (name, pathArgument) => {
       const history: Content[] = [
         fileReadCall('/older.ts'),
         {
@@ -230,7 +237,7 @@ describe('extractRecentFilePaths', () => {
               functionCall: {
                 id: 'outer-call',
                 name: ToolNames.TOOL_CALL,
-                args: { name, arguments: { file_path: '/bridged.ts' } },
+                args: { name, arguments: { [pathArgument]: '/bridged.ts' } },
               },
             },
           ],

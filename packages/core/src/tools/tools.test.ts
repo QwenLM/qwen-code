@@ -150,6 +150,19 @@ describe('BaseDeclarativeTool.validateToolParams', () => {
     ).toBeNull();
   });
 
+  it('omits the hint when a required key is declared outside properties', () => {
+    const discovered = tool({ ...schema, required: ['pattern', 'tenant'] });
+    expect(discovered.validateToolParams({ query: 'x', tenant: 'dev' })).toBe(
+      "params must have required property 'pattern'",
+    );
+    expect(discovered.validateToolParams({ pattern: 'x' })).toBe(
+      "params must have required property 'tenant'",
+    );
+    expect(
+      discovered.validateToolParams({ pattern: 'x', tenant: 'dev' }),
+    ).toBeNull();
+  });
+
   it('names them for a closed schema', () => {
     expect(
       tool({ ...schema, additionalProperties: false }).validateToolParams({

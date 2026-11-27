@@ -198,6 +198,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import { DiscoveredTool } from '../tools/tool-registry.js';
 import { IdeClient } from '../ide/ide-client.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
@@ -3434,11 +3435,7 @@ export class CoreToolScheduler {
       // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
       // place. Without the clone those rewrites would leak into history and skew
       // the (name, args) fingerprints that duplicate-replay detection
-      // derives from it. Aliased argument names are renamed on the clone, so
-      // everything from here on reads the canonical names.
-      for (const item of requestsToProcess) {
-        applyToolArgAliases(item.name, item.args);
-      }
+      // derives from it.
       const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
         requestsToProcess.map((item) => canonicalToolName(item.name)),
       );
@@ -3712,6 +3709,14 @@ export class CoreToolScheduler {
               durationMs: 0,
             });
             continue;
+          }
+
+          // Discovered tools can share a built-in name with a different schema.
+          if (
+            !(toolInstance instanceof DiscoveredTool) &&
+            !(toolInstance instanceof DiscoveredMCPTool)
+          ) {
+            applyToolArgAliases(toolInstance.name, reqInfo.args);
           }
 
           // Reject file-modifying calls whose arguments arrived incomplete, to

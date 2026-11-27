@@ -37,7 +37,7 @@ schema；托管工作区的文件工具（它们自行校验 `file_path` 并会�
 
 ## 设计
 
-### 在调度器接收请求时应用别名
+### 在接收工具调用时应用别名
 
 core 中的一张表把工具 → 别名 → 标准名对应起来：
 
@@ -49,14 +49,14 @@ core 中的一张表把工具 → 别名 → 标准名对应起来：
 | `edit`       | `old_str` | `old_string` |
 | `edit`       | `new_str` | `new_string` |
 
-`CoreToolScheduler` 在接收请求时、`tool_call` 桥接展开嵌套调用之后，本来就会
-克隆每个请求的 `args`。别名作用在这份克隆上：标准名不存在而别名存在时，把值移到
-标准名下并删除别名键。两者都存在时不做改动（多出来的键照旧被忽略）。工具名先经
-`canonicalToolName` 解析，所以旧工具名也能覆盖。
+`CoreToolScheduler` 在接收请求时克隆参数。解析出工具之后，包括通过 `tool_call`
+展开的嵌套调用，它会对参数副本应用别名。标准名不存在而别名存在时，把值移到标准名
+下并删除别名键。两者都存在时，以标准名为准。查找时先将旧工具名转换为标准名。
+通过发现机制注册的工具保留各自 schema 中声明的参数名。
 
-所有执行路径（headless、Ink、OpenTUI、ACP 会话、子代理、共享 agent loop）都通过
-`CoreToolScheduler` 调度，所以一处就能覆盖全部。聊天历史保留模型自己的调用，
-因此读取历史的重复重放指纹不变。
+headless、Ink、OpenTUI、子代理以及共享循环上的 ACP 通过 `CoreToolScheduler`
+调度。旧 ACP 循环直接执行工具，在桥接展开后、hook 和依赖参数的权限检查前，对参数
+副本应用同一张表。两条路径都在聊天历史中保留模型原始调用，用于计算重复重放指纹。
 
 如果改在工具的 `build` 里应用别名，`request.args` 里仍是 `path`：Ink 和 OpenTUI
 的编辑 checkpoint 读取 `request.args.file_path`，会跳过这样的编辑，导致它无法
@@ -68,12 +68,11 @@ core 中的一张表把工具 → 别名 → 标准名对应起来：
 
 ### 读取历史的地方
 
-有三处从聊天历史中保存的调用里读取文件路径，所以会看到 `path`：聊天中的读取驻留
-检查（找不到路径的读取视为未解析，这是安全的）、microcompaction 记录的被清除读取
-路径，以及压缩后恢复的文件列表。用 `path` 的读取现在能执行并会登记读取缓存，因此
-microcompaction 清除其结果时必须报告它的路径；否则之后的读取可能被当作“未变化”
-回答，而它的内容已不在历史中。这几处读取方把调用参数复制一份后，经过同一张表
-转换。
+聊天中的读取驻留检查、microcompaction 记录的被清除读取路径和压缩后的文件恢复，都会
+对调用参数副本应用同一张别名表。microcompaction 按文件工具的规则去除路径首尾空白并
+解除转义，从而将被清除结果对应文件的缓存置为失效。压缩后恢复文件时，先规范化桥接
+工具名，再查别名。会话导出按写入或编辑结果中的实际路径计数。旧记录可回退到所保存的
+`file_path` 和文件名，因此不同目录中的同名文件会分别计数。
 
 ### 在 schema 错误中点出未知参数
 
@@ -84,13 +83,14 @@ microcompaction 清除其结果时必须报告它的路径；否则之后的读�
 params must have required property 'pattern'. Unrecognized parameters: query. Accepted parameters: pattern, glob, path, limit.
 ```
 
-顶层没有 `properties`、`additionalProperties` 不是 `false`，或带有可能接受其他
-键的关键字（`patternProperties`、`allOf`、`anyOf`、`oneOf`、`$ref`、`if`、
-`dependentSchemas`、`dependencies`、`unevaluatedProperties`）的 schema 不追加
-说明，这样在分支中声明的参数不会被说成不认识。封闭的 schema
-（`additionalProperties: false`）会追加：Ajv 报告 `must NOT have additional
-properties` 时不点名是哪个键。说明只加在校验本来就会报告的错误上；带多余键的
-合法调用仍然合法。自行校验参数的工具（如 `agent` 工具）不受影响。
+省略 `additionalProperties` 或将它设为 `false` 时，校验错误可能追加说明。顶层没有
+`properties`、显式把 `additionalProperties` 设为非 `false`，或带有可能接受其他键
+的关键字（`patternProperties`、`allOf`、`anyOf`、`oneOf`、`$ref`、`if`、
+`dependentSchemas`、`dependencies`、`unevaluatedProperties`）的 schema 会跳过
+这条说明。省略 `additionalProperties` 且 `required` 中有键未列在 `properties` 时，
+也会跳过说明。封闭 schema 可在 Ajv 的 `must NOT have additional properties`
+错误之后点明多出的键。说明只在 schema 校验报错时追加。自行校验参数的工具（如
+`agent`）继续返回自己的参数校验错误。
 
 说明放在工具层而不是 `SchemaValidator` 里，因为后者的错误文本还有其他调用方共用。
 
@@ -104,13 +104,12 @@ properties` 时不点名是哪个键。说明只加在校验本来就会报告�
 
 ## 验证
 
-单元测试：别名函数；调度器接收请求（工具、PreToolUse hook 和调度中的请求看到的
-都是 `file_path`；调用方传入的 args 不变）；带 `path` 调用时的 microcompaction 和
-压缩后文件列表；说明在该出现时出现、不该出现时不出现，包括封闭和组合的 schema。
-`tool_call` 桥接只能调用延迟加载的工具，而文件工具不是延迟加载的，所以不需要单独
-的用例。
+单元测试覆盖调度器和旧 ACP 在 hook 前处理别名、保留原始历史参数、直接调用和桥接
+调用的缓存失效与恢复、会话导出，以及封闭、组合和只在 `required` 中声明参数时的
+schema 提示行为。桥接历史样例对应可由 `tools.eager` 设为延迟加载的文件工具。
 
-对接模拟服务的端到端测试（`.qwen/e2e-tests/tool-arg-name-aliases/`）：
+[E2E 报告](https://github.com/QwenLM/qwen-code/pull/18500#issuecomment-7211299701)
+记录了模型模拟环境和最初的 CLI、ACP 及子代理测试结果。验收用例包括：
 
 - headless：`read_file {"path": …}` 能读到文件；带 `path`、`old_str`、`new_str`
   的 `write_file` 和 `edit` 能修改文件；
@@ -118,7 +117,7 @@ properties` 时不点名是哪个键。说明只加在校验本来就会报告�
 - 非 yolo：`write_file {"path": …}` 请求确认时显示该文件；
 - 针对该文件的 deny 规则仍然拒绝 `path` 调用；
 - PreToolUse hook 看到 `file_path`；
-- ACP 会话和子代理用 `path` 读文件。
+- 默认及旧循环上的 ACP 会话、子代理均可用 `path` 读文件。
 
 ## 验收标准
 

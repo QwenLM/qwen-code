@@ -147,13 +147,10 @@ export function extractRecentFilePaths(
       if (bridged && (!call.id || !successfulBridgeCallIds.has(call.id))) {
         continue;
       }
-      const name = bridged ? call.args?.['name'] : call.name;
-      if (
-        typeof name !== 'string' ||
-        !FILE_TOUCHING_TOOLS.has(bridged ? name.toLowerCase() : name)
-      ) {
-        continue;
-      }
+      const callName = bridged ? call.args?.['name'] : call.name;
+      if (typeof callName !== 'string') continue;
+      const name = bridged ? callName.toLowerCase() : callName;
+      if (!FILE_TOUCHING_TOOLS.has(name)) continue;
       // A copy with the canonical names the tool ran with; history keeps
       // the model's own (`path` for `file_path`).
       const args = {
