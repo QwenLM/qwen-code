@@ -2731,7 +2731,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('keeps a loop type without numbers and drops malformed ones', () => {
+  it('keeps a legacy loop type and drops a malformed call count', () => {
     const [event] = normalizeDaemonEvent({
       id: 49,
       v: 1,
@@ -2740,13 +2740,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
         sessionId: 'session-1',
         message: 'stopped',
         errorKind: 'loop_detected',
-        loopType: 'global_tool_call_duplicate',
+        loopType: 'invalid_tool_params_stagnation',
         toolCallCount: 'many',
       },
     });
 
     expect(event).toMatchObject({
-      loop: { loopType: 'global_tool_call_duplicate' },
+      loop: { loopType: 'invalid_tool_params_stagnation' },
     });
     expect(
       event && 'loop' in event ? event.loop : undefined,

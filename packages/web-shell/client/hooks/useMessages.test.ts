@@ -202,6 +202,35 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     }
   });
 
+  it('shows generic text for a live backstop from an older daemon', () => {
+    const loop = {
+      loopType: 'turn_tool_call_cap',
+      loopReason: 'backstop',
+      toolCallCount: 1001,
+      toolCallLimit: 1000,
+    };
+    const store = createDaemonTranscriptStore();
+    store.dispatch(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'Tool-call loop protection stopped this turn.',
+          errorKind: 'loop_detected',
+          ...loop,
+        },
+      }),
+    );
+
+    const { blocks } = store.getSnapshot();
+    const t = getTranslator('en');
+    expect(blocks).toMatchObject([{ kind: 'error', loop }]);
+    expect(transcriptBlocksToLocalizedMessages(blocks, t)).toMatchObject([
+      { content: t('error.loopDetected') },
+    ]);
+  });
+
   it.each(['assistant', 'thought'] as const)(
     'skips complete projection for a streaming %s tail update',
     async (kind) => {
