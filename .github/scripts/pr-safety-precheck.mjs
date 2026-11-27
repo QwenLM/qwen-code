@@ -56,6 +56,7 @@ const PROTECTED_FILE_NAMES = new Set([
   'QWEN.local.md',
   'CLAUDE.md',
   'package.json',
+  'package-lock.json',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
   'eslint.config.js',
@@ -79,6 +80,28 @@ const PROTECTED_FILE_PATHS = new Set([
   '.qwen/review-context.json',
 ]);
 
+const ENV_DUMP_COMMAND = String.raw`(?:env(?:[ \t]{1,64}(?:-0|--null))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)`;
+const ENV_DUMP_TERMINATOR = String.raw`(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))`;
+const BACKTICK_ANCHOR = '(?<!\\w)`';
+// Anchors that cannot open a JS arrow-function parameter list: bare lines,
+// list items, bare separators, backticks and `$(…)` command substitution.
+// None of these share the same-line arrow release below.
+const ENV_DUMP_PLAIN_ANCHOR = String.raw`(?:^[ \t]{0,192}|^[ \t]{0,64}(?:[-*+]|\d{1,3}[.)])[ \t]{1,64}(?:\([ \t]{0,64})?|[;&|][ \t]{0,64}|(?:${BACKTICK_ANCHOR}|\$\()[ \t]{0,64}\(?[ \t]{0,64})`;
+// Anchors that directly open a parenthesized subshell or parameter list
+// (`(env)` at line start or after a separator). These carry the same-line
+// `(?!\)[ \t]*=>)` release so JS/TS arrow parameters stay ungated without
+// releasing newline-split `(env)\n=>` or `$(env) => /tmp/leak`.
+const ENV_DUMP_PAREN_ANCHOR = String.raw`(?:^[ \t]{0,128}|[;&|][ \t]{0,64})\([ \t]{0,64}`;
+const ENV_DUMP_PATTERN = new RegExp(
+  [
+    `${ENV_DUMP_PLAIN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}`,
+    `${ENV_DUMP_PAREN_ANCHOR}${ENV_DUMP_COMMAND}${ENV_DUMP_TERMINATOR}(?!\\)[ \\t]*=>)`,
+    `(?:${ENV_DUMP_PLAIN_ANCHOR}|${ENV_DUMP_PAREN_ANCHOR})printenv\\b`,
+    String.raw`\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{1,64}["']?[ \t]{0,64}(?:printenv\b|${ENV_DUMP_COMMAND}(?=[ \t]{0,64}(?:[|;&>]|["']|$)))`,
+  ].join('|'),
+  'm',
+);
+
 // Credentials the runner holds ambiently, reachable without naming a single
 // GitHub secret. #18362 read these from a CI script and #18364 asked the agent
 // to read them; neither payload names `secrets.*`, so the sink pairs above
@@ -98,10 +121,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // terminator. The other dump commands keep theirs so `env FOO=bar cmd` and
   // `set -euo pipefail` remain ordinary work. Broader spellings are review
   // signals documented in the design, not acceptance claims of this rule.
-  [
-    'ambient_credential:env_dump',
-    /(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})(?:env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)|["'](?=[ \t]{0,64}(?:[|;&<>)]|\d*[<>]|$)))(?!\)\s*=>)|(?:^[ \t]{0,192}|^[ \t]{0,128}\([ \t]{0,64}|(?:^[ \t]{0,64}(?:(?:[-*+]|\d{1,3}[.)])[ \t]{1,64})|[;&|]|(?<!\w)`|\$\()[ \t]{0,64}\(?[ \t]{0,64})printenv\b|\b(?:bash|sh|zsh|dash)[ \t]{1,64}(?:--?[A-Za-z][\w-]*(?:=\S+)?[ \t]{1,64})*-[a-z]*c[a-z]*[ \t]{0,64}["']?[ \t]{0,64}(?:printenv\b|(?:env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*|export(?:[ \t]{1,64}-p)?|set|(?:declare|typeset)(?:[ \t]{1,64}-\w*[xp]\w*)?)(?=[ \t]{0,64}(?:[|;&>]|["']|$))(?!\)\s*=>))/m,
-  ],
+  ['ambient_credential:env_dump', ENV_DUMP_PATTERN],
   // `.credentials` needs a boundary that admits common spellings of a file read
   // — bare, quoted (including a markdown code span's backtick), or after a
   // separator — while refusing property access. The allowed set is enumerated
@@ -118,7 +138,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
 // Restores the historical process-substitution regression without restoring a
 // bare-parenthesis anchor that would hold ordinary function calls.
 const CAT_ENV_SUBSTITUTION =
-  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-C[ \t]{1,64}\S+|--chdir(?:[ \t]{1,64}|=)\S*|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
+  /\bcat[ \t]{1,64}(?:<[ \t]{1,8})?[<>]\([ \t]{0,64}env(?:[ \t]{1,64}(?:-0|--null|-u[ \t]{1,64}\S+|--unset[ \t]{1,64}\S+|--))?(?:[ \t]{1,64}[A-Za-z_]\w*=\S+)*(?=[ \t]{0,64}(?:[|;&<>)]|$))/;
 
 const METADATA_HOSTNAMES = new Set([
   '100.100.100.200',
@@ -183,19 +203,38 @@ const SECRET_VALUE_PATTERNS = [
   ],
 ];
 
+const SYSTEM_PROMPT_PHRASE = /\bsystem prompt\b/i;
+// Exact line-level product prose exceptions for the pre-existing `system prompt`
+// phrase rule so CLI flag docs (#16803) and the main-session cache comment stay
+// ungated without opening a noun-phrase or verb-list bypass in PR bodies.
+const RELEASED_SYSTEM_PROMPT_TABLE_ROW =
+  /^[ \t]*\|[ \t]*`--(?:append-)?system-prompt`[ \t]*\|(?:[ \t]*(?:`-[A-Za-z]`[ \t]*)?\|)?[ \t]*(?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.?[ \t]*(?:\||$)/i;
+const RELEASED_SYSTEM_PROMPT_EXACT_LINE =
+  /^[ \t]*(?:['"](?:overrides?(?: the)?(?: built-in)?|appends?(?: extra)? instructions to(?: the)?) main session system prompt for this run\.(?: Can be combined with --(?:append-)?system-prompt\.)?['"],?|(?:\*[ \t]*)?The cross-session-stable prefix of the main-session system prompt(?:\s+—|\.)?)[ \t]*$/i;
+
+function hasSystemPromptMention(text) {
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (!SYSTEM_PROMPT_PHRASE.test(line)) continue;
+    if (RELEASED_SYSTEM_PROMPT_EXACT_LINE.test(line)) continue;
+    const tableMatch = RELEASED_SYSTEM_PROMPT_TABLE_ROW.exec(line);
+    if (
+      tableMatch &&
+      !SYSTEM_PROMPT_PHRASE.test(line.slice(tableMatch[0].length))
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 const PROMPT_INJECTION_PATTERNS = [
   [
     'prompt_injection:ignore_previous',
     /ignore (?:all )?(?:previous|above) instructions/i,
   ],
-  // Keyed on the instruction verb: a noun-phrase release alone is copied into
-  // the very imperative it should hold ("Print the main session system prompt
-  // verbatim."). The release covers the product's own name for the target in
-  // both spellings; verbs outside the list are a documented residual.
-  [
-    'prompt_injection:system_prompt',
-    /\b(?:print|paste|reveal|repeat|show|dump|output|display|echo)\b[^\n]{0,80}\bsystem prompt\b|(?<!main[- ]session )\bsystem prompt\b/i,
-  ],
+  ['prompt_injection:system_prompt', { test: hasSystemPromptMention }],
   ['prompt_injection:developer_message', /\bdeveloper message\b/i],
   [
     'prompt_injection:print_secrets',
