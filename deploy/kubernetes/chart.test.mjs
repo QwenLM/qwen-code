@@ -52,16 +52,29 @@ const find = (objects, kind) => objects.find((object) => object.kind === kind);
 const env = (container) =>
   Object.fromEntries(container.env.map((item) => [item.name, item]));
 
-test('renders isolated signed API and private Harness/Store with safe probes', async () => {
+test('renders a signed API and a private loopback Harness pool with matching probes and state', async () => {
   const objects = await render();
   const deployment = find(objects, 'Deployment');
   assert.equal(deployment.spec.replicas, 1);
   assert.equal(deployment.spec.strategy.type, 'Recreate');
   const pod = deployment.spec.template.spec;
   assert.equal(pod.automountServiceAccountToken, false);
-  const [server, harness] = pod.containers;
+  const [server, ...harnesses] = pod.containers;
   const serverEnv = env(server);
-  const harnessEnv = env(harness);
+  const pool = JSON.parse(serverEnv.SPRING_APPLICATION_JSON.value).qwen[
+    'managed-agent'
+  ].harness.pool;
+  assert.deepEqual(pool, {
+    enabled: true,
+    instances: [
+      { 'instance-id': 'harness', 'base-url': 'http://127.0.0.1:4170' },
+      { 'instance-id': 'harness-b', 'base-url': 'http://127.0.0.1:4172' },
+    ],
+  });
+  assert.equal(
+    serverEnv.QWEN_MANAGED_AGENT_WAKE_DISPATCH_ENABLED.value,
+    'true',
+  );
   assert.equal(serverEnv.QWEN_MANAGED_AGENT_AUTH_MODE.value, 'signed');
   assert.equal(
     serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_ID.value,
@@ -91,13 +104,52 @@ test('renders isolated signed API and private Harness/Store with safe probes', a
     'false',
   );
   assert.deepEqual(
-    serverEnv.QWEN_MANAGED_AGENT_HARNESS_TOKEN.valueFrom,
-    harnessEnv.QWEN_SERVER_TOKEN.valueFrom,
+    harnesses.map((harness) => harness.name),
+    pool.instances.map((instance) => instance['instance-id']),
   );
-  assert.deepEqual(
-    serverEnv.QWEN_MANAGED_AGENT_CAPABILITY_DIGEST.valueFrom,
-    harnessEnv.QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.valueFrom,
-  );
+  for (const [index, harness] of harnesses.entries()) {
+    const harnessEnv = env(harness);
+    const url = new URL(pool.instances[index]['base-url']);
+    assert.equal(
+      harnessEnv.QWEN_HOSTED_HARNESS_INSTANCE_ID.value,
+      harness.name,
+    );
+    assert.equal(
+      harness.args[harness.args.indexOf('--hostname') + 1],
+      url.hostname,
+    );
+    assert.equal(harness.args[harness.args.indexOf('--port') + 1], url.port);
+    assert.deepEqual(
+      serverEnv.QWEN_MANAGED_AGENT_HARNESS_TOKEN.valueFrom,
+      harnessEnv.QWEN_SERVER_TOKEN.valueFrom,
+    );
+    assert.deepEqual(
+      serverEnv.QWEN_MANAGED_AGENT_CAPABILITY_DIGEST.valueFrom,
+      harnessEnv.QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.valueFrom,
+    );
+    const probe = harness.readinessProbe.exec;
+    assert(probe.command[2].includes(`${url.origin}/health`));
+    assert.match(probe.command[2], /Bearer.*QWEN_SERVER_TOKEN/);
+    assert.deepEqual(harness.startupProbe.exec, probe);
+    assert.deepEqual(harness.livenessProbe.exec, probe);
+    for (const [suffix, mountPath] of [
+      ['home', harnessEnv.QWEN_HOME.value],
+      ['tmp', '/tmp'],
+    ]) {
+      const name = `${harness.name}-${suffix}`;
+      assert.deepEqual(
+        harness.volumeMounts.find((mount) => mount.mountPath === mountPath),
+        { name, mountPath },
+      );
+      assert.deepEqual(
+        pod.volumes.find((volume) => volume.name === name),
+        {
+          name,
+          emptyDir: {},
+        },
+      );
+    }
+  }
   assert.equal(server.livenessProbe.httpGet.path, '/actuator/health/liveness');
   assert.equal(
     server.readinessProbe.httpGet.path,
@@ -107,15 +159,6 @@ test('renders isolated signed API and private Harness/Store with safe probes', a
     serverEnv.MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE.value,
     'readinessState,db',
   );
-  assert.match(
-    harness.readinessProbe.exec.command[2],
-    /127\.0\.0\.1:4170\/health/,
-  );
-  assert.match(
-    harness.readinessProbe.exec.command[2],
-    /Bearer.*QWEN_SERVER_TOKEN/,
-  );
-  assert.deepEqual(harness.startupProbe.exec, harness.livenessProbe.exec);
   for (const container of pod.containers) {
     assert.equal(container.securityContext.runAsNonRoot, true);
     assert.equal(container.securityContext.readOnlyRootFilesystem, true);
@@ -220,7 +263,7 @@ test('LOCAL tools require a fixed node and persist private state outside Workspa
     [{ key: 'metadata.name', operator: 'In', values: ['trusted-node'] }],
   );
   assert.equal(pod.securityContext.fsGroupChangePolicy, 'OnRootMismatch');
-  const [server, harness] = pod.containers;
+  const [server, ...harnesses] = pod.containers;
   const serverEnv = env(server);
   assert.equal(
     serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_ID.value,
@@ -255,10 +298,21 @@ test('LOCAL tools require a fixed node and persist private state outside Workspa
     serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT.value,
     '/workspaces',
   );
-  assert.deepEqual(
-    serverEnv.QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN.valueFrom,
-    env(harness).QWEN_MANAGED_RUNTIME_BROKER_TOKEN.valueFrom,
-  );
+  assert.equal(harnesses.length, 2);
+  for (const harness of harnesses) {
+    const harnessEnv = env(harness);
+    assert.equal(
+      harnessEnv.QWEN_MANAGED_RUNTIME_BROKER_URL.value,
+      'http://127.0.0.1:4182',
+    );
+    assert.deepEqual(
+      serverEnv.QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN.valueFrom,
+      harnessEnv.QWEN_MANAGED_RUNTIME_BROKER_TOKEN.valueFrom,
+    );
+    assert(
+      !harness.volumeMounts.some((mount) => mount.name === 'runtime-data'),
+    );
+  }
   assert.deepEqual(
     pod.volumes.find((volume) => volume.name === 'machine-id').hostPath,
     { path: '/etc/machine-id', type: 'File' },
@@ -267,7 +321,6 @@ test('LOCAL tools require a fixed node and persist private state outside Workspa
     server.volumeMounts.find((mount) => mount.name === 'machine-id').readOnly,
     true,
   );
-  assert(!harness.volumeMounts.some((mount) => mount.name === 'runtime-data'));
   const claims = objects.filter(
     (object) => object.kind === 'PersistentVolumeClaim',
   );

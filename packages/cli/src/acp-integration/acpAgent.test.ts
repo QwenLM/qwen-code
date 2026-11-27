@@ -2829,6 +2829,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen.daemon.expectedApprovalMode': 'default',
         'qwen.daemon.approvalModeBeforeStart': 'yolo',
         'qwen.daemon.promptDisplayText': 'trusted display text',
+        'qwen.daemon.promptSource': { sessionId: 'sender', workspaceCwd: '/a' },
         'qwen.channel.prompt': true,
         'qwen.goalProposalApproval': true,
         'qwen.daemon.channelDelivery': {
@@ -2847,6 +2848,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           'qwen.daemon.expectedApprovalMode': 'default',
           'qwen.daemon.approvalModeBeforeStart': 'yolo',
           'qwen.daemon.promptDisplayText': 'trusted display text',
+          'qwen.daemon.promptSource': {
+            sessionId: 'sender',
+            workspaceCwd: '/a',
+          },
           'qwen.channel.prompt': true,
           'qwen.goalProposalApproval': true,
           'qwen.daemon.channelDelivery': {
@@ -3459,6 +3464,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen.daemon.approvalModeBeforeStart': 'default',
         'qwen.daemon.promptDisplayText': 'forged display text',
         'qwen.daemon.submittedPrompt': 'forged submission',
+        'qwen.daemon.promptSource': { sessionId: 'forged', workspaceCwd: '/' },
       },
     });
 

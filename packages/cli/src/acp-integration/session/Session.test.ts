@@ -6458,7 +6458,10 @@ describe('Session', () => {
 
       const result = await prompt();
 
-      expect(result.stopReason).toBe('end_turn');
+      expect(result).toEqual({
+        stopReason: 'end_turn',
+        _meta: { 'qwen.promptBlocked': true },
+      });
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         promptAdmission: { blocked: true },
@@ -6468,6 +6471,41 @@ describe('Session', () => {
       );
       expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])(
+      'checks delegated prompts only when enabled (%s)',
+      async (enabled) => {
+        if (enabled) mockSettings.merged.enableDelegatedPromptHooks = true;
+        const send = useSharedRounds([]);
+        const admitUserPrompt = vi.fn().mockResolvedValue({ blocked: false });
+        Object.assign(mockLlmClient, { admitUserPrompt });
+
+        await prompt({
+          _meta: {
+            'qwen.daemon.promptSource': {
+              sessionId: 'sender-session',
+              workspaceCwd: '/workspace/a',
+            },
+          },
+        });
+
+        if (!enabled) {
+          expect(admitUserPrompt).not.toHaveBeenCalled();
+          expect(send.mock.calls[0][3]).toMatchObject({
+            skipUserPromptSubmit: true,
+          });
+          return;
+        }
+        expect(admitUserPrompt).toHaveBeenCalledExactlyOnceWith(
+          'hello',
+          expect.any(String),
+          expect.objectContaining({
+            submittedPrompt: undefined,
+            source: { session_id: 'sender-session', cwd: '/workspace/a' },
+          }),
+        );
+      },
+    );
 
     it('checks each steering message and sends the tool result with the allowed input', async () => {
       useTool(core.Kind.Read, 'read_file');
@@ -48940,6 +48978,81 @@ describe('Session', () => {
           },
         );
 
+        it.each(['default', 'allowed', 'blocked'])(
+          'handles command-like delegated text in the %s case',
+          async (mode) => {
+            const handleSlashCommand = vi.mocked(
+              nonInteractiveCliCommands.handleSlashCommand,
+            );
+            if (mode === 'default') {
+              handleSlashCommand.mockResolvedValueOnce({
+                type: 'message',
+                messageType: 'info',
+                content: 'Already compressed.',
+              });
+            } else {
+              mockSettings.merged.enableDelegatedPromptHooks = true;
+            }
+            const messageBus = {
+              request: vi.fn().mockResolvedValue({
+                success: true,
+                output:
+                  mode === 'blocked'
+                    ? { decision: 'block', reason: 'declined' }
+                    : {},
+              }),
+            };
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.hasHooksForEvent = vi.fn(
+              (event) => event === HookEventName.UserPromptSubmit,
+            );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValue(createEmptyStream());
+
+            const result = await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: '/compress' }],
+              _meta: {
+                'qwen.daemon.promptSource': {
+                  sessionId: 'sender-session',
+                  workspaceCwd: '/workspace/a',
+                },
+              },
+            });
+
+            if (mode === 'default') {
+              expect(handleSlashCommand).toHaveBeenCalledOnce();
+              expect(messageBus.request).not.toHaveBeenCalled();
+              expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+              return;
+            }
+            expect(messageBus.request).toHaveBeenCalledExactlyOnceWith(
+              expect.objectContaining({
+                eventName: 'UserPromptSubmit',
+                input: {
+                  prompt: '/compress',
+                  source: { session_id: 'sender-session', cwd: '/workspace/a' },
+                },
+              }),
+              expect.anything(),
+            );
+            expect(handleSlashCommand).not.toHaveBeenCalled();
+            if (mode === 'blocked') {
+              expect(result._meta?.['qwen.promptBlocked']).toBe(true);
+              expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+              return;
+            }
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(
+              vi.mocked(mockChat.sendMessageStream).mock.calls[0][1],
+            ).toMatchObject({
+              message: expect.arrayContaining([{ text: '/compress' }]),
+            });
+          },
+        );
+
         it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
           const messageBus = {
             request: vi.fn().mockResolvedValue({
@@ -48959,7 +49072,10 @@ describe('Session', () => {
           });
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-          expect(result.stopReason).toBe('end_turn');
+          expect(result).toEqual({
+            stopReason: 'end_turn',
+            _meta: { 'qwen.promptBlocked': true },
+          });
           expect(
             mockLlmClient.beginManagedAutoMemoryRecall,
           ).not.toHaveBeenCalled();
