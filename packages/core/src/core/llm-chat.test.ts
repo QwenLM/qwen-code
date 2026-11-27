@@ -8488,6 +8488,26 @@ describe('LlmChat', async () => {
     it.each([
       { name: 'an equal window', window: 65_536 },
       { name: 'a smaller window', window: 52_000, output: 4_000 },
+      {
+        name: 'a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        output: 28_487,
+      },
+      {
+        name: 'a caller limit in a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        callerLimit: 12_500,
+        output: 12_500,
+      },
+      {
+        name: 'different raw messages in a larger window',
+        primaryWindow: 33_000,
+        window: 65_536,
+        rawMessages: [{ role: 'user', content: 'Use this fixed prompt.' }],
+        output: 4_000,
+      },
       { name: 'a different system prompt', window: 36_000, otherSystem: true },
       {
         name: 'a raw message override',
@@ -8496,7 +8516,14 @@ describe('LlmChat', async () => {
       },
     ])(
       'keeps a warmed compatible fallback within budget for $name',
-      async ({ window, output, otherSystem, rawMessages }) => {
+      async ({
+        window,
+        primaryWindow = 65_536,
+        callerLimit,
+        output,
+        otherSystem,
+        rawMessages,
+      }) => {
         const fallbackModel = 'compatible-minimax';
         const fallback = vi.fn().mockResolvedValue(textStream('completed'));
         const differentPrompt = otherSystem || rawMessages !== undefined;
@@ -8522,13 +8549,14 @@ describe('LlmChat', async () => {
               },
             }),
           ),
-          narrowPrimary,
+          { ...narrowPrimary, contextWindowSize: primaryWindow },
         );
         mockCompress(noop());
+        const promptTokenCount = primaryWindow === 33_000 ? 27_038 : 41_038;
         streamMock().mockResolvedValueOnce(
           textStream('acknowledged', {
-            promptTokenCount: 41_038,
-            totalTokenCount: 41_041,
+            promptTokenCount,
+            totalTokenCount: promptTokenCount + 3,
           }),
         );
         await drain(
@@ -8547,7 +8575,10 @@ describe('LlmChat', async () => {
         await drain(
           await chat.sendMessageStream(
             digitalOceanModel,
-            { message: 'What happened next?' },
+            {
+              message: 'What happened next?',
+              config: { maxOutputTokens: callerLimit },
+            },
             'warm-compatible-second',
           ),
         );
@@ -8557,7 +8588,7 @@ describe('LlmChat', async () => {
         if (otherSystem) {
           expect(fallbackRequest.config.systemInstruction).toBe(fallbackSystem);
         }
-        if (differentPrompt) {
+        if (differentPrompt && output === undefined) {
           expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(5_000);
         } else {
           expect(fallbackRequest.config.maxOutputTokens).toBe(

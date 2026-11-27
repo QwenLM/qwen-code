@@ -6890,11 +6890,13 @@ export class LlmChat {
       );
       const { explicitOutputCeiling, promptSource, usagePromptTokens } =
         outputClamp;
-      // A fallback without its own prompt source can shrink the primary budget.
+      // Keep the primary cap when only a generic prompt estimate is available.
       const outputCeiling = Math.min(
         explicitOutputCeiling ?? Infinity,
         bodyOutputCeiling ?? Infinity,
-        promptSource ? Infinity : (params.config?.maxOutputTokens ?? Infinity),
+        promptSource || usagePromptTokens !== undefined
+          ? Infinity
+          : (params.config?.maxOutputTokens ?? Infinity),
         contentGeneratorConfig?.samplingParams?.max_tokens ??
           explicitOutputCeiling ??
           bodyOutputCeiling ??
