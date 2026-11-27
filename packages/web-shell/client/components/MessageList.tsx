@@ -6459,7 +6459,12 @@ export const MessageList = memo(
                   <div
                     key={key}
                     data-index={index}
-                    className={getRowClassName(item)}
+                    className={joinClassNames(
+                      getRowClassName(item),
+                      item && transcriptRenderMode === 'interactive'
+                        ? styles.nonVirtualRow
+                        : undefined,
+                    )}
                     data-message-row-key={String(key)}
                     data-source-block-ids={displayItemSourceBlockIds(
                       item,

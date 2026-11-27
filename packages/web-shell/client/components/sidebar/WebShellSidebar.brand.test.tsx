@@ -18,6 +18,7 @@ const expectedDarkPath =
 
 const catalogOptions = vi.hoisted(() => vi.fn());
 const catalogRefresh = vi.hoisted(() => vi.fn());
+const catalogPolling = vi.hoisted(() => vi.fn());
 
 const mocks = createSidebarMocks({
   connectionCapabilities: { qwenCodeVersion: '1.2.3', features: [] },
@@ -50,7 +51,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     refreshWorkspace: catalogRefresh,
     renamed: vi.fn(),
   }),
-  useSessionCatalogPolling: () => undefined,
+  useSessionCatalogPolling: catalogPolling,
   useSessionCatalogQuery: () => staticSidebarSessionCatalogQuery(),
   useSessionCatalogQueries: mocks.useSessionCatalogQueries,
 }));
@@ -79,6 +80,8 @@ function renderSidebar(
     | 'hideProjectHeader'
     | 'collapsed'
     | 'theme'
+    | 'containerWidth'
+    | 'mobileOpen'
   >,
 ) {
   act(() => {
@@ -186,6 +189,7 @@ function expectOriginalLightMark(): void {
 beforeEach(() => {
   catalogOptions.mockClear();
   catalogRefresh.mockClear();
+  catalogPolling.mockClear();
   mocks.connection.capabilities = {
     qwenCodeVersion: '1.2.3',
     features: [],
@@ -201,6 +205,32 @@ afterEach(() => {
     root.unmount();
   });
   container.remove();
+});
+
+describe('sidebar catalog polling', () => {
+  it('backs off only when the compact shell drawer is closed', () => {
+    mocks.active.sessions.push({
+      id: 'running',
+      cwd: '/workspace/project',
+      hasActivePrompt: true,
+    });
+    try {
+      renderSidebar(undefined, undefined, { containerWidth: 1000 });
+      expect(catalogPolling.mock.lastCall?.[2]).toBe(2000);
+      renderSidebar(undefined, undefined, {
+        containerWidth: 650,
+        mobileOpen: false,
+      });
+      expect(catalogPolling.mock.lastCall?.[2]).toBe(30_000);
+      renderSidebar(undefined, undefined, {
+        containerWidth: 650,
+        mobileOpen: true,
+      });
+      expect(catalogPolling.mock.lastCall?.[2]).toBe(2000);
+    } finally {
+      mocks.active.sessions.pop();
+    }
+  });
 });
 
 describe('sidebar brand', () => {

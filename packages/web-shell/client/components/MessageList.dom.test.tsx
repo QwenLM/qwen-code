@@ -379,6 +379,7 @@ function mount(
   ref?: RefObject<MessageListHandle | null>,
   opts: {
     frozenViewport?: boolean;
+    virtualScrollThreshold?: number;
     hideSessionTimeline?: boolean;
     loadingTranscript?: boolean;
     catchingUp?: boolean;
@@ -433,6 +434,7 @@ function mount(
               <MessageList
                 ref={ref}
                 frozenViewport={opts.frozenViewport}
+                virtualScrollThreshold={opts.virtualScrollThreshold}
                 messages={messages}
                 pendingApproval={opts.pendingApproval ?? null}
                 hideSessionTimeline={opts.hideSessionTimeline}
@@ -641,6 +643,30 @@ const simpleTurns = (count: number): Message[] =>
     const turn = index + 1;
     return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
   }).flat();
+
+describe('MessageList — offscreen rendering', () => {
+  it('uses content visibility only for non-virtualized interactive rows', () => {
+    const messages = [userMsg('user')];
+    const rowSelector = '[data-web-shell-message-row]';
+    const normal = mount(messages);
+    expect(
+      normal
+        .querySelector(rowSelector)
+        ?.classList.contains(styles.nonVirtualRow),
+    ).toBe(true);
+
+    const document = mount(messages, undefined, {
+      transcriptRenderMode: 'document',
+    });
+    expect(document.querySelector(rowSelector)).not.toBeNull();
+    expect(document.querySelector(`.${styles.nonVirtualRow}`)).toBeNull();
+
+    virtualizerTestState.renderItems = true;
+    const virtual = mount(messages, undefined, { virtualScrollThreshold: 0 });
+    expect(virtual.querySelector(`.${styles.virtualRow}`)).not.toBeNull();
+    expect(virtual.querySelector(`.${styles.nonVirtualRow}`)).toBeNull();
+  });
+});
 
 describe('MessageList — locate scroll timer lifecycle', () => {
   it('follows a queued resize when the reader resumes following before locate settles', () => {

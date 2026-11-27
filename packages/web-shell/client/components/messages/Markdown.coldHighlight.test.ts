@@ -9,7 +9,7 @@
  */
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getCachedHtml: vi.fn<(...args: unknown[]) => string | null>(() => null),
@@ -120,5 +120,64 @@ describe('CodeBlock cold-highlight path', () => {
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe('CodeBlock transcript viewport', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('observes the new code node after a Mermaid fence and waits for the scroll root', async () => {
+    let notify: IntersectionObserverCallback | undefined;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const observer = vi.fn(function (callback: IntersectionObserverCallback) {
+      notify = callback;
+      return { observe, disconnect };
+    });
+    vi.stubGlobal('IntersectionObserver', observer);
+
+    const container = document.createElement('div');
+    container.setAttribute('data-web-shell-message-list', '');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    async function render(content: string) {
+      await act(async () => {
+        root.render(createElement(Markdown, { content }));
+      });
+    }
+
+    try {
+      await render('```mermaid\nflowchart TD; A-->B;\n```');
+      expect(observe).not.toHaveBeenCalled();
+
+      await render('```ts\nconst visible = true;\n```');
+      const target = container.querySelector('[data-selection-code-language]');
+      expect(target).not.toBeNull();
+      expect(observe).toHaveBeenCalledWith(target);
+      expect(observer).toHaveBeenCalledWith(expect.any(Function), {
+        root: container,
+        rootMargin: '200px 0px',
+      });
+      expect(container.querySelector('pre code')?.textContent).toContain(
+        'visible',
+      );
+      expect(mocks.getCachedHtml).not.toHaveBeenCalled();
+      expect(mocks.getCodeHighlighter).not.toHaveBeenCalled();
+      expect(mocks.highlightToHtmlSync).not.toHaveBeenCalled();
+
+      await act(async () => {
+        notify?.([{ isIntersecting: true } as IntersectionObserverEntry], {
+          observe,
+          disconnect,
+        } as unknown as IntersectionObserver);
+      });
+      expect(container.querySelector('[data-hl]')?.textContent).toContain(
+        'visible',
+      );
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });
