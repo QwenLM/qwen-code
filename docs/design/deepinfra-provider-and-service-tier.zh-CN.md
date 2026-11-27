@@ -34,7 +34,7 @@ DeepInfra 注册为 OpenAI 兼容服务商：
 - **协议**：`AuthType.USE_OPENAI`
 - **基地址**：`https://api.deepinfra.com/v1/openai`
 - **环境变量名**：`DEEPINFRA_API_KEY`
-- **预置模型**：精选热门模型（`deepseek-ai/DeepSeek-V3`、`deepseek-ai/DeepSeek-R1`、`meta-llama/Llama-3.3-70B-Instruct`、`Qwen/Qwen2.5-Coder-32B-Instruct`），配置 `modelsEditable: true`。
+- **预置模型**：精选热门模型（`deepseek-ai/DeepSeek-V3`、`deepseek-ai/DeepSeek-R1-0528`、`meta-llama/Llama-3.3-70B-Instruct-Turbo`、`Qwen/Qwen2.5-72B-Instruct`），配置 `modelsEditable: true`。
 - **归属判断门禁**：双重检查，要求 `model.envKey === DEEPINFRA_ENV_KEY` 且主机名为 `api.deepinfra.com` 或以 `.deepinfra.com` 结尾。
 - **归属标头**：配置 `HTTP-Referer` 与 `X-Title` 进行请求归属标识。
 - **界面分组**：`third-party`。
