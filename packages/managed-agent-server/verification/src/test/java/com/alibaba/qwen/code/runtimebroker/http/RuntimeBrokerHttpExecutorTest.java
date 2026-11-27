@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,22 +28,18 @@ class RuntimeBrokerHttpExecutorTest {
             + "\"harnessSessionId\":\"harness\",\"runtimeSessionId\":\"runtime\"}";
 
     @Test
-    void saturatedDispatchClosesExcessConnectionsAndRecovers() throws Exception {
+    void saturatedDispatchRejectsExcessRequestsAndRecovers() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.fillWorkers();
             for (int index = 0; index < 64; index++) {
                 fixture.connect();
             }
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 64);
-            try (Socket rejected = new Socket()) {
-                fixture.connectSocket(rejected);
-                try {
-                    // The HTTP dispatcher submits a connection once it is readable.
-                    rejected.getOutputStream().write('P');
-                } catch (SocketException reset) {
-                    // The rejection can race with the write. Verify the disconnect below.
-                }
-                assertDisconnected(rejected);
+            try (Socket rejected = fixture.open()) {
+                String response = new String(rejected.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertTrue(response.startsWith("HTTP/1.1 503"), response);
+                assertTrue(response.contains("runtime_broker_overloaded"), response);
             }
             assertEquals(32, fixture.executor.getLargestPoolSize());
             assertEquals(32, fixture.threads.size());
@@ -62,25 +57,20 @@ class RuntimeBrokerHttpExecutorTest {
     }
 
     @Test
-    void closeDisconnectsRunningAndQueuedRequestsAndStopsWorkers() throws Exception {
+    void closeRejectsRunningAndQueuedRequestsAndStopsWorkers() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.fillWorkers();
             fixture.connect();
             await().atMost(5, TimeUnit.SECONDS).until(() -> fixture.executor.getQueue().size() == 1);
             fixture.server.close();
             for (Socket socket : fixture.sockets) {
-                assertDisconnected(socket);
+                String response = new String(socket.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8);
+                assertTrue(response.startsWith("HTTP/1.1 503"), response);
+                assertTrue(response.contains("runtime_broker_unavailable"), response);
             }
             assertTrue(fixture.executor.awaitTermination(5, TimeUnit.SECONDS));
             verify(fixture.service).close();
-        }
-    }
-
-    private static void assertDisconnected(Socket socket) throws Exception {
-        try {
-            assertEquals(-1, socket.getInputStream().read());
-        } catch (SocketException reset) {
-            // JDK/OS may report a reset instead of EOF for the refused connection.
         }
     }
 
@@ -92,7 +82,7 @@ class RuntimeBrokerHttpExecutorTest {
 
     private static final class Fixture implements AutoCloseable {
         private final RuntimeBrokerService service = mock(RuntimeBrokerService.class);
-        private final RuntimeBrokerHttpServer server;
+        private final RuntimeBrokerHttpControllerTestFixture server;
         private final ThreadPoolExecutor executor;
         private final CountDownLatch entered = new CountDownLatch(32);
         private final CountDownLatch release = new CountDownLatch(1);
@@ -100,10 +90,8 @@ class RuntimeBrokerHttpExecutorTest {
         private final List<Socket> sockets = new ArrayList<>();
 
         private Fixture() throws Exception {
-            server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0), "secret", service);
-            var field = RuntimeBrokerHttpServer.class.getDeclaredField("executor");
-            field.setAccessible(true);
-            executor = (ThreadPoolExecutor) field.get(server);
+            server = new RuntimeBrokerHttpControllerTestFixture("secret", service);
+            executor = server.executor();
             when(service.authorizeLifecycle("harness", null)).thenAnswer(invocation -> {
                 threads.add(Thread.currentThread());
                 entered.countDown();

@@ -2,13 +2,13 @@
 
 [English](2026-11-27-managed-runtime-broker-shared-listener.md) | [简体中文](2026-11-27-managed-runtime-broker-shared-listener.zh-CN.md)
 
-状态为上线前提案，2026-11-27。范围是 Qwen Code 的独立 Managed Agent Server 及其启动器、参考 systemd 分发包和现役 Kubernetes Helm chart。源码基线是 Qwen Code `main` 的 `94b1d9dc0d42dabab71adc6f94a23eab80d95889`。实现和运行验收待完成。
+状态为上线前实现，2026-11-27。范围是 Qwen Code 的独立 Managed Agent Server 及其启动器、参考 systemd 分发包和现役 Kubernetes Helm chart。源码基线是 Qwen Code `main` 的 `94b1d9dc0d42dabab71adc6f94a23eab80d95889`。本变更包含实现；真实 Managed、Helm 和 Hosted/MySQL 运行验收待完成。
 
 ## 现状与目标
 
 `EmbeddedRuntimeBroker` 创建 Java `RuntimeBrokerService`，并启动独立的 JDK `RuntimeBrokerHttpServer`，默认端口为 4182。Hosted Harness 使用部署提供的 HTTP origin，拼接 `/internal/runtime-broker/v1`，并用部署的 Broker Bearer token 鉴权。独立 Managed Agent Server 已有 Spring Web 监听器，可以为 `/internal/**` 配置内部连接器。
 
-[Broker HTTP 实现](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/runtimebroker/http/RuntimeBrokerHttpServer.java) · [Hosted Harness 客户端](../../packages/cli/src/serve/managed-runtime-broker-client.ts) · [MA 内部路由](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/InternalSurfaceConfiguration.java)
+[Broker HTTP 实现](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/runtimebroker/http/RuntimeBrokerHttpController.java) · [Hosted Harness 客户端](../../packages/cli/src/serve/managed-runtime-broker-client.ts) · [MA 内部路由](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/InternalSurfaceConfiguration.java)
 
 Hosted Harness 通过已有的 Managed Agent HTTP 监听器访问 Broker，与 Session Store 共用端口。这是 Broker 的唯一 HTTP 入口。`RuntimeBrokerService` 负责运行时绑定、派发、取消、回执和恢复。
 

@@ -2,13 +2,13 @@
 
 [English](2026-11-27-managed-runtime-broker-shared-listener.md) | [简体中文](2026-11-27-managed-runtime-broker-shared-listener.zh-CN.md)
 
-Status: prelaunch proposal, 2026-11-27. Scope covers the standalone Managed Agent Server, its Qwen Code launchers, the reference systemd distribution, and the active Kubernetes Helm chart. Source baseline is Qwen Code `main` at `94b1d9dc0d42dabab71adc6f94a23eab80d95889`. Implementation and runtime acceptance are pending.
+Status: prelaunch implementation, 2026-11-27. Scope covers the standalone Managed Agent Server, its Qwen Code launchers, the reference systemd distribution, and the active Kubernetes Helm chart. Source baseline is Qwen Code `main` at `94b1d9dc0d42dabab71adc6f94a23eab80d95889`. This change includes the implementation. Real Managed, Helm, and Hosted/MySQL runtime acceptance remains pending.
 
 ## Current behavior and objective
 
 `EmbeddedRuntimeBroker` constructs the Java `RuntimeBrokerService` and starts a JDK `RuntimeBrokerHttpServer`, which defaults to port 4182. Hosted Harness uses a configured HTTP origin, appends `/internal/runtime-broker/v1`, and authenticates with the deployment's Broker Bearer token. The standalone Managed Agent server already has a Spring Web listener and an optional internal connector for `/internal/**`.
 
-[Broker HTTP implementation](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/runtimebroker/http/RuntimeBrokerHttpServer.java) · [Hosted Harness client](../../packages/cli/src/serve/managed-runtime-broker-client.ts) · [MA internal routing](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/InternalSurfaceConfiguration.java)
+[Broker HTTP implementation](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/runtimebroker/http/RuntimeBrokerHttpController.java) · [Hosted Harness client](../../packages/cli/src/serve/managed-runtime-broker-client.ts) · [MA internal routing](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/InternalSurfaceConfiguration.java)
 
 Hosted Harness reaches the Broker through the existing Managed Agent HTTP listener, alongside Session Store. This is the sole HTTP entry point for the Broker. `RuntimeBrokerService` owns runtime binding, dispatch, cancellation, receipts, and recovery.
 
