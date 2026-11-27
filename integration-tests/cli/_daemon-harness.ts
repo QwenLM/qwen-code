@@ -73,6 +73,10 @@ export interface SpawnDaemonOptions {
   token?: string;
   /** CLI binary path. Defaults to `TEST_CLI_PATH` env or `dist/cli.js`. */
   cliBin?: string;
+  /** Node executable used to launch cliBin; defaults to the runner's node.
+   * Standalone release archives ship their own runtime, so gate legs pass
+   * the archive's bin/node (win: node.exe) here. */
+  nodePath?: string;
   /** Boot deadline for the listening-on regex parse. Default 10s. */
   bootTimeoutMs?: number;
   /** Extra args appended after the standard ones. */
@@ -111,6 +115,7 @@ export async function spawnDaemon(
   const workspaceCwd = opts.workspaceCwd ?? DEFAULT_REPO_ROOT;
   const token = opts.token ?? DEFAULT_TOKEN;
   const cliBin = opts.cliBin ?? DEFAULT_CLI_BIN;
+  const nodeBin = opts.nodePath ?? process.execPath;
   const bootTimeoutMs = opts.bootTimeoutMs ?? 10_000;
   const extraArgs = opts.extraArgs ?? [];
 
@@ -142,7 +147,7 @@ export async function spawnDaemon(
         ),
       )
     : process.env;
-  const daemon = spawn(process.execPath, args, {
+  const daemon = spawn(nodeBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...inheritedEnv, ...opts.env },
   });

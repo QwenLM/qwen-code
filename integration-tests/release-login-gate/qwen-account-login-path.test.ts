@@ -152,6 +152,11 @@ describeIfCredentials('release gate: Qwen account login path', () => {
     daemon = await spawnDaemon({
       env: { QWEN_HOME: home },
       bootTimeoutMs: 60_000,
+      // Release-artifact legs point these at the unpacked standalone archive
+      // (its own node runtime + cli.js); default stays the built dist tree.
+      ...(process.env['QWEN_GATE_NODE_BIN']
+        ? { nodePath: process.env['QWEN_GATE_NODE_BIN'] }
+        : {}),
     });
   }, 90_000);
 
