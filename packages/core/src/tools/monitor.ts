@@ -44,8 +44,8 @@ import {
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
-  splitCommands,
 } from '../utils/shell-utils.js';
+import { splitCompoundCommand } from '../permissions/rule-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
@@ -229,7 +229,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const cwd =
       this.params.directory || this.config.getTargetDir?.() || process.cwd();
-    const subCommands = splitCommands(normalized.safetyCommand);
+    // #11882: segment with the same splitter the permission path uses for
+    // monitor (splitCommandForRules falls through to splitCompoundCommand for
+    // every non-run_shell_command tool), instead of the legacy `splitCommands`.
+    // Both are comment-blind here; the difference is that redirection
+    // spellings (`tail -f log &> /dev/null`) and arithmetic stay whole instead
+    // of being over-split, while separators inside `$(...)`/backtick bodies —
+    // which bash really executes — now surface as their own sub-commands in
+    // the confirmation scope, matching what the permission side already sees.
+    const subCommands = splitCompoundCommand(normalized.safetyCommand);
     const confirmableSubCommands: string[] = [];
 
     for (const sub of subCommands) {
