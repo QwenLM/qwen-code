@@ -303,8 +303,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
   "env": {
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here",
     "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here",
-    "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here",
-    "DEEPINFRA_API_KEY": "your-actual-deepinfra-key-here"
+    "DEEPINFRA_API_KEY": "your-deepinfra-key",
+    "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here"
   },
   "modelProviders": {
     "openai": [
@@ -385,7 +385,6 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
         "baseUrl": "https://api.deepinfra.com/v1/openai",
         "generationConfig": {
           "service_tier": "flex",
-          "timeout": 120000,
           "maxRetries": 3
         }
       }
