@@ -79,10 +79,14 @@ describe('extension-version-key', () => {
     ).toBe('git:https://github.com/acme/demo:abcdef1234567');
 
     expect(
-      computeVersionKey(config, {
-        type: 'local',
-        source: '/tmp/demo.zip',
-      }, 'deadbeef'),
+      computeVersionKey(
+        config,
+        {
+          type: 'local',
+          source: '/tmp/demo.zip',
+        },
+        'deadbeef',
+      ),
     ).toBe('content:demo:deadbeef');
 
     expect(

@@ -1205,7 +1205,11 @@ export class ExtensionStore {
         !!currentPolicy &&
         !currentPolicy.declarationOnly &&
         destinationExists;
-      if (input.operation === 'install' && destinationExists && !isIdempotentReuse) {
+      if (
+        input.operation === 'install' &&
+        destinationExists &&
+        !isIdempotentReuse
+      ) {
         throw new ExtensionConflictError(
           `Extension "${input.identity.name}" is installed.`,
         );
@@ -1555,7 +1559,9 @@ export class ExtensionStore {
         // the next store operation without reporting a false mutation failure.
       }
       if (input.operation === 'uninstall' && currentPolicy?.versionSlot) {
-        await fsp.rmdir(path.dirname(destinationDirectory)).catch(() => undefined);
+        await fsp
+          .rmdir(path.dirname(destinationDirectory))
+          .catch(() => undefined);
       }
       return targetSnapshot;
     });
@@ -1630,9 +1636,7 @@ export class ExtensionStore {
     snapshot: ExtensionStoreSnapshot,
     activeExtensionId: string,
     extensionName: string,
-    target:
-      | { scope: 'user' }
-      | { scope: 'workspace'; workspacePath: string },
+    target: { scope: 'user' } | { scope: 'workspace'; workspacePath: string },
   ): void {
     const normalizedName = extensionName.toLowerCase();
     const canonicalWs =

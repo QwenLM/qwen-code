@@ -61,14 +61,14 @@ Keeping `<QWEN_HOME>/extensions/` untouched for single-version global installs p
 
 Non-credentialed versioned installs compute a deterministic `versionKey` persisted in `.qwen-extension-install.json`:
 
-| Source Type | `versionKey` Formula | Idempotent Reuse |
-| --- | --- | --- |
-| `npm` | `npm:<registry>:<name>@<resolvedVersion>` | Yes |
-| `github-release` | `gh-release:<source>:<releaseTag>` | Yes |
-| `git` (public) | `git:<source>:<gitCommit \|\| ref \|\| version>` | Yes |
-| `link` | `link:<canonicalTargetPath>` | Yes |
-| `local` / `archive-url` | `content:<name>:<directoryContentSha256>` | Yes |
-| `snapshot` / `stored` HTTPS Git | None (retains random `installId`) | Intentionally isolated |
+| Source Type                     | `versionKey` Formula                             | Idempotent Reuse       |
+| ------------------------------- | ------------------------------------------------ | ---------------------- |
+| `npm`                           | `npm:<registry>:<name>@<resolvedVersion>`        | Yes                    |
+| `github-release`                | `gh-release:<source>:<releaseTag>`               | Yes                    |
+| `git` (public)                  | `git:<source>:<gitCommit \|\| ref \|\| version>` | Yes                    |
+| `link`                          | `link:<canonicalTargetPath>`                     | Yes                    |
+| `local` / `archive-url`         | `content:<name>:<directoryContentSha256>`        | Yes                    |
+| `snapshot` / `stored` HTTPS Git | None (retains random `installId`)                | Intentionally isolated |
 
 The 64-char hex `extensionId` is `sha256("v2:" + baseId + ":" + versionKey)`. When two workspaces install the exact same version (e.g., `@acme/foo@2.0.0` or the same archive content), both derive the identical `extensionId`. If the artifact already exists on disk and in `state.json`, the store commits idempotently by updating `workspaceOverrides` without creating a duplicate directory.
 

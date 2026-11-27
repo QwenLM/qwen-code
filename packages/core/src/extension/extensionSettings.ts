@@ -184,7 +184,10 @@ const getEnvFilePath = (
   if (scope === ExtensionSettingScope.WORKSPACE) {
     return (
       options?.workspaceEnvFilePath ??
-      path.join(options?.workspaceDir ?? process.cwd(), EXTENSION_SETTINGS_FILENAME)
+      path.join(
+        options?.workspaceDir ?? process.cwd(),
+        EXTENSION_SETTINGS_FILENAME,
+      )
     );
   }
   if (options?.extensionDir) {

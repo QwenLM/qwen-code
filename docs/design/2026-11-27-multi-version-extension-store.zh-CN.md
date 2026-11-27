@@ -61,14 +61,14 @@
 
 非私有凭证的多版本安装会计算确定性 `versionKey` 并写入 `.qwen-extension-install.json`：
 
-| 来源类型 | `versionKey` 计算规则 | 是否幂等复用 |
-| --- | --- | --- |
-| `npm` | `npm:<registry>:<name>@<resolvedVersion>` | 是 |
-| `github-release` | `gh-release:<source>:<releaseTag>` | 是 |
-| 公开 `git` | `git:<source>:<gitCommit \|\| ref \|\| version>` | 是 |
-| 本地 `link` | `link:<canonicalTargetPath>` | 是 |
-| `local` / `archive-url` | `content:<name>:<directoryContentSha256>` | 是 |
-| `snapshot` / `stored` HTTPS Git | 不设 `versionKey`（沿用随机 `installId`） | 刻意隔离不共享 |
+| 来源类型                        | `versionKey` 计算规则                            | 是否幂等复用   |
+| ------------------------------- | ------------------------------------------------ | -------------- |
+| `npm`                           | `npm:<registry>:<name>@<resolvedVersion>`        | 是             |
+| `github-release`                | `gh-release:<source>:<releaseTag>`               | 是             |
+| 公开 `git`                      | `git:<source>:<gitCommit \|\| ref \|\| version>` | 是             |
+| 本地 `link`                     | `link:<canonicalTargetPath>`                     | 是             |
+| `local` / `archive-url`         | `content:<name>:<directoryContentSha256>`        | 是             |
+| `snapshot` / `stored` HTTPS Git | 不设 `versionKey`（沿用随机 `installId`）        | 刻意隔离不共享 |
 
 64 位 hex `extensionId` 由 `sha256("v2:" + baseId + ":" + versionKey)` 生成。不同工作区安装同一真实版本（例如 `@acme/foo@2.0.0` 或内容完全一致的压缩包）时，会算出完全相同的 `extensionId`；若该产物已在磁盘与 `state.json` 中存在，Store 将幂等复用既有目录并仅更新 `workspaceOverrides`，不产生重复副本。
 

@@ -919,7 +919,10 @@ export class ExtensionManager {
     const endMutation = this.beginMutation('pruneUnusedVersions');
     try {
       const result = await this.extensionStore.pruneUnusedVersions(options);
-      if (!options.dryRun && (result.pruned.length > 0 || result.removedWorkspaceRefs > 0)) {
+      if (
+        !options.dryRun &&
+        (result.pruned.length > 0 || result.removedWorkspaceRefs > 0)
+      ) {
         for (const item of result.pruned) {
           this.extensionCache?.delete(item.id);
         }
@@ -2890,10 +2893,7 @@ export class ExtensionManager {
                     newExtensionName.toLowerCase(),
               );
         const isIdempotentReuse =
-          useVersionedSlot &&
-          !isUpdate &&
-          !!previous &&
-          !!previous.versionSlot;
+          useVersionedSlot && !isUpdate && !!previous && !!previous.versionSlot;
         if (isUpdate && !previous) {
           throw new Error(
             `Extension "${newExtensionName}" was not already installed, cannot update it.`,
@@ -3517,7 +3517,9 @@ export class ExtensionManager {
             stagedExtension.name !== prepared.identity.name ||
             stagedExtension.version !== prepared.version
           ) {
-            throw new Error('Prepared extension identity changed before commit.');
+            throw new Error(
+              'Prepared extension identity changed before commit.',
+            );
           }
         }
         snapshot = await this.extensionStore.commitArtifact({
@@ -3527,7 +3529,9 @@ export class ExtensionManager {
             ? { idempotent: true }
             : { stagingDirectory: prepared.stagingDirectory }),
           destinationDirectory: prepared.destinationDirectory,
-          ...(prepared.versionSlot ? { versionSlot: prepared.versionSlot } : {}),
+          ...(prepared.versionSlot
+            ? { versionSlot: prepared.versionSlot }
+            : {}),
           ...(prepared.operation === 'install'
             ? { initialActivation: prepared.initialActivation }
             : {

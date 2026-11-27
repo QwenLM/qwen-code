@@ -82,7 +82,18 @@ describe('single-store multi-version extensions', () => {
       return manager;
     };
 
-    return { root, extensionsDir, versionsDir, storeDir, sourcesDir, wsA, wsB, wsC, store, makeManager };
+    return {
+      root,
+      extensionsDir,
+      versionsDir,
+      storeDir,
+      sourcesDir,
+      wsA,
+      wsB,
+      wsC,
+      store,
+      makeManager,
+    };
   }
 
   it('coexists global v1 with workspace v2, enforces per-workspace exclusivity and no-fallback', async () => {
@@ -307,12 +318,12 @@ describe('single-store multi-version extensions', () => {
     expect(linkA.id).not.toBe(linkB.id);
     await mgrA.refreshCache();
     await mgrB.refreshCache();
-    expect(
-      mgrA.getLoadedExtensions().filter((e) => e.isActive)[0]?.path,
-    ).toBe(branchA);
-    expect(
-      mgrB.getLoadedExtensions().filter((e) => e.isActive)[0]?.path,
-    ).toBe(branchB);
+    expect(mgrA.getLoadedExtensions().filter((e) => e.isActive)[0]?.path).toBe(
+      branchA,
+    );
+    expect(mgrB.getLoadedExtensions().filter((e) => e.isActive)[0]?.path).toBe(
+      branchB,
+    );
 
     // Shared versioned artifact with isolated per-workspace .env files.
     const sharedSrc = await createLocalExtensionSource(
@@ -320,9 +331,7 @@ describe('single-store multi-version extensions', () => {
       'shared-cfg',
       '1.0.0',
       {
-        settings: [
-          { name: 'Mode', description: 'Mode', envVar: 'APP_MODE' },
-        ],
+        settings: [{ name: 'Mode', description: 'Mode', envVar: 'APP_MODE' }],
       },
     );
     const sharedA = await mgrA.installExtension(
