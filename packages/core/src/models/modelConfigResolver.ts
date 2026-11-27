@@ -354,18 +354,12 @@ export function resolveModelConfig(
   }
 
   // DeepInfra Flex queue timeout:
-  // If request is DeepInfra Flex and no explicit timeout was set by user,
-  // apply 10-minute (600,000ms) default to accommodate scheduling queues.
+  // If request targets DeepInfra with Flex tier and no explicit timeout was set
+  // by the user, apply 10-minute (600,000ms) default to accommodate queues.
   const effectiveBaseUrl = baseUrlResult?.value || modelProvider?.baseUrl;
-  const isDeepInfra = isDeepInfraModel({
-    id: modelProvider?.id,
-    baseUrl: effectiveBaseUrl,
-    envKey: apiKeyEnvKey || modelProvider?.envKey,
-    providerId: modelProvider?.id,
-  });
 
   if (
-    isDeepInfra &&
+    isDeepInfraEndpoint(effectiveBaseUrl) &&
     generationConfig.service_tier === 'flex' &&
     generationConfig.timeout === undefined
   ) {
