@@ -1861,7 +1861,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'runs ended per day',
+  'daemon.usage.dailySessionsSub': 'active sessions per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
@@ -4374,6 +4374,30 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
   'chatHeader.openArtifacts': (v) => `Artifacts (${v?.count ?? 0})`,
+  'chatHeader.openScheduledTasks': (v) => `Scheduled tasks (${v?.count ?? 0})`,
+  'chatHeader.scheduledTasksPaused': (v) =>
+    `Scheduled tasks (${v?.count ?? 0}, paused)`,
+  'environment.scheduledTasks': 'Scheduled tasks',
+  'environment.scheduledTasks.scopeDurable': 'Persistent',
+  'environment.scheduledTasks.scopeSession': 'Session',
+  'environment.scheduledTasks.scopeWakeup': 'Loop',
+  'environment.scheduledTasks.statusActive': 'Active',
+  'environment.scheduledTasks.statusPaused': 'Paused',
+  'environment.scheduledTasks.nextRun': (v) => `Next in ${v?.when ?? ''}`,
+  'environment.scheduledTasks.stop': 'Stop',
+  'environment.scheduledTasks.viewAll': 'Manage all',
+  'scheduledTasks.durableHistoricalSnapshot':
+    'This is a durable scheduled task. Showing its creation snapshot because its live status is unavailable.',
+  'scheduledTasks.sessionScopedActive':
+    'Active in this session. Stopping cancels future runs immediately.',
+  'scheduledTasks.sessionScopedPaused':
+    'Paused in this session. Stopping removes the remaining schedule.',
+  'scheduledTasks.sessionScopedCancelled':
+    'This session-scoped scheduled task is no longer active.',
+  'scheduledTasks.stopSessionTask': 'Stop task',
+  'scheduledTasks.error.cancelFailed': 'Failed to stop the scheduled task',
+  'tasks.pill.scheduled': (v) =>
+    `${v?.count ?? 0} ${(v?.count ?? 0) === 1 ? 'scheduled task' : 'scheduled tasks'}`,
   'environment.title': 'Environment',
   'environment.changes': 'Changes',
   'environment.changeCount': (v) => `${v?.count ?? 0} changed`,

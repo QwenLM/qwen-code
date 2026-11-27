@@ -16,7 +16,7 @@ export const RU_PART3: Record<
   'daemon.usage.dailyTokensTitle': 'токены',
   'daemon.usage.dailyTokensSub': 'сумма токенов за день',
   'daemon.usage.dailySessionsTitle': 'сессии',
-  'daemon.usage.dailySessionsSub': 'завершённые запуски по дням',
+  'daemon.usage.dailySessionsSub': 'активные сессии по дням',
   'delete.cannotCurrent':
     'Нельзя удалить текущую сессию, пока она выполняется.',
   'delete.action': 'Удалить',
@@ -291,6 +291,7 @@ export const RU_PART3: Record<
   'scheduledTasks.error.goalActive':
     'Нельзя запустить задачу по расписанию, пока активна цель.',
   'scheduledTasks.error.toggleFailed': 'Не удалось обновить задачу',
+  'scheduledTasks.error.cancelFailed': 'Не удалось остановить задачу',
   'scheduledTasks.error.deleteFailed': 'Не удалось удалить задачу',
   'scheduledTasks.edit': 'Изменить',
   'scheduledTasks.editTitle': 'Изменить задачу по расписанию',
@@ -334,6 +335,15 @@ export const RU_PART3: Record<
   'scheduledTasks.model': 'Модель',
   'scheduledTasks.model.workspaceDefault':
     'Модель рабочей области по умолчанию',
+  'scheduledTasks.sessionScopedActive':
+    'Активна в этой сессии. Остановка немедленно отменяет будущие запуски.',
+  'scheduledTasks.sessionScopedPaused':
+    'Приостановлена в этой сессии. Остановка удалит оставшееся расписание.',
+  'scheduledTasks.sessionScopedCancelled':
+    'Задача в рамках сессии больше не активна.',
+  'scheduledTasks.stopSessionTask': 'Остановить задачу',
+  'tasks.pill.scheduled': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'задача по расписанию', 'задачи по расписанию', 'задач по расписанию')}`,
   'scheduledTasks.model.hint':
     'Выбранная модель применяется при создании каждой новой сессии запуска.',
   'scheduledTasks.group': 'Группа сессий',

@@ -201,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'scheduledTasks'
   | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
@@ -231,6 +232,7 @@ export type WebShellEnvironmentPanelItem =
   | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  | 'scheduledTasks'
   /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';
@@ -285,6 +287,14 @@ export interface ChatHeaderRenderInfo {
    * not while unrelated right-panel tabs are open.
    */
   artifactsTabActive?: boolean;
+  /** Scheduled tasks belonging to this session, including paused entries. */
+  scheduledTaskCount?: number;
+  /** Scheduled tasks in this session that can still fire. */
+  scheduledTaskActiveCount?: number;
+  /** Earliest next fire time among active session tasks. */
+  scheduledTaskNextRunAt?: number | null;
+  /** Opens this session's scheduled-tasks section when the host includes it. */
+  onOpenScheduledTasks?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }

@@ -781,6 +781,56 @@ describe('ComposerTaskChips', () => {
     });
   });
 
+  it('renders a scheduled-task chip when activeScheduledCount > 0 and opens on click', () => {
+    const onOpenScheduledTasks = vi.fn();
+    render([], { activeScheduledCount: 2, onOpenScheduledTasks });
+
+    const scheduledChip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-scheduled-chip"]',
+    );
+    expect(scheduledChip).not.toBeNull();
+    expect(scheduledChip?.textContent).toContain('2 scheduled tasks');
+    act(() => scheduledChip?.click());
+    expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+  });
+
+  it('hides the scheduled chip rather than showing a permanently disabled one', () => {
+    render([], { activeScheduledCount: 1 });
+    expect(container.textContent).toBe('');
+  });
+
+  it('focuses and navigates the only scheduled chip imperatively and with arrow keys', () => {
+    const ref = createRef<ComposerTaskChipsHandle>();
+    const onOpenScheduledTasks = vi.fn();
+    render(
+      [],
+      {
+        activeScheduledCount: 1,
+        onOpenScheduledTasks,
+      },
+      ref,
+    );
+
+    act(() => {
+      expect(ref.current?.focus()).toBe(true);
+    });
+    const scheduled = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-scheduled-chip"]',
+    );
+    expect(document.activeElement).toBe(scheduled);
+
+    act(() => {
+      scheduled?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(scheduled);
+  });
+
   it('collapses an expanded multi-task chip when clicked again, even if blur fires with null relatedTarget', () => {
     render([shell('shell-1'), shell('shell-2')]);
     const chip = chips()[0];

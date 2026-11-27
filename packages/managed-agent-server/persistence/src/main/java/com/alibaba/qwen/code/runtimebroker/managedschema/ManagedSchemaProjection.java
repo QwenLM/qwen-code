@@ -33,7 +33,7 @@ public enum ManagedSchemaProjection {
             "tenant_id, session_id, stream_kind, stream_id, last_sequence, "
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
                     + "artifact_refs_resource_ref, "
-                    + "output_ranges_json, is_projection_pending, gmt_modified"),
+                    + "output_ranges_json, is_projection_pending, is_replay_floor_pending, gmt_modified"),
     JOURNAL_PACK(
             "pack_id, tenant_id, workspace_id, session_id, from_revision, "
                     + "through_revision, manifest_resource_ref, object_key, state, is_put_closed, "
