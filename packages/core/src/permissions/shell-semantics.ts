@@ -25,7 +25,11 @@
  *
  * Known limitations (cannot be statically analysed):
  *   - Shell variable expansion: `cat $FILE`
- *   - Command substitution: `cat $(find .)`
+ *   - Command substitution: `cat $(find .)` — the substitution body is an
+ *     argument of the root command, not an extracted operation. The
+ *     permission gap this leaves (an allow rule for the root command covering
+ *     the unseen body) is closed one layer up: `PermissionManager` downgrades
+ *     allow-rule matches on substitution-bearing commands to 'ask'.
  *   - Interpreter scripts: `python script.py`, `node x.js`
  *   - Pipe targets: `find . | xargs cat`
  *   - Complex dynamic expressions: `eval "cat $f"`
