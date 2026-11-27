@@ -719,6 +719,7 @@ export class MemoryPressureMonitor extends EventEmitter {
           const settings = this.coreConfig.getClearContextOnIdle();
           const projectRoot = this.coreConfig.getProjectRoot();
           const targetDir = this.coreConfig.getTargetDir?.() ?? projectRoot;
+          const owner = this.coreConfig.getProjectMemoryOwner?.();
           const result = microcompactHistory(
             history,
             Date.now() - 1,
@@ -731,7 +732,7 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
             {
               preserveReadFileResult: (filePath) =>
-                isManagedMemoryPath(filePath, projectRoot, targetDir),
+                isManagedMemoryPath(filePath, projectRoot, targetDir, owner),
             },
           );
           if (result.meta) {

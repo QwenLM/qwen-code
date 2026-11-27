@@ -3843,6 +3843,7 @@ export class LlmClient {
     try {
       const projectRoot = this.config.getProjectRoot();
       const targetDir = this.config.getTargetDir?.() ?? projectRoot;
+      const owner = this.config.getProjectMemoryOwner?.();
       const mcResult = microcompactHistory(
         this.getHistoryShallow(),
         lastCompletionTimestamp,
@@ -3850,7 +3851,7 @@ export class LlmClient {
         {
           ...opts,
           preserveReadFileResult: (filePath) =>
-            isManagedMemoryPath(filePath, projectRoot, targetDir),
+            isManagedMemoryPath(filePath, projectRoot, targetDir, owner),
         },
       );
       if (!mcResult.meta) {
