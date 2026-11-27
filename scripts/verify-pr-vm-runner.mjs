@@ -64,6 +64,11 @@ import {
   validateSocketPathLength,
 } from './verify-pr-vm-collector.mjs';
 import {
+  probeHostCapabilities,
+  stageLocalVmRound,
+  verifyFirecrackerDiskConfig,
+} from './verify-pr-vm-host.mjs';
+import {
   buildExecutionRecord,
   inspectPidState,
   reapOwnership,
@@ -1125,6 +1130,9 @@ export async function runHardwareRound({
   platform = `${process.platform}-${process.arch}`,
   sourceKernelPath = null,
   sourceRootfsPath = null,
+  sourceInitramfsPath = null,
+  stageAssets = false,
+  applyChown = null,
   trustedInputDigest = null,
   roundInput = null,
   modelProxy = null,
@@ -1367,59 +1375,67 @@ export async function runHardwareRound({
   }
   let kernelDigest = null;
   let rootfsDigest = null;
+  let stagedAssets = null;
+  const failBeforeLaunch = (failureErrors) => {
+    if (stagedAssets) {
+      try {
+        stagedAssets.cleanup();
+      } catch {
+        // Best-effort cleanup of unlaunched per-round staged assets.
+      }
+      stagedAssets = null;
+    }
+    return { ok: false, errors: failureErrors };
+  };
   if (isLocalVmm) {
     if (!plan.hostVsockPath) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires hostVsockPath'],
-      };
+      return failBeforeLaunch(['local VMM plan requires hostVsockPath']);
     }
     if (
       typeof launchBackend !== 'function' &&
       (!Array.isArray(plan.argv) || plan.argv.length === 0)
     ) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires non-empty argv'],
-      };
+      return failBeforeLaunch(['local VMM plan requires non-empty argv']);
     }
     if (!sourceKernelPath || !sourceRootfsPath) {
-      return {
-        ok: false,
-        errors: [
-          'local VMM backends require sourceKernelPath and sourceRootfsPath for digest verification',
-        ],
-      };
+      return failBeforeLaunch([
+        'local VMM backends require sourceKernelPath and sourceRootfsPath for digest verification',
+      ]);
+    }
+    if (stageAssets === true) {
+      try {
+        stagedAssets = stageLocalVmRound({
+          plan,
+          sourceKernelPath,
+          sourceRootfsPath,
+          sourceInitramfsPath,
+          approvedRoots,
+          vaultDir: realVault,
+          applyChown,
+        });
+      } catch (error) {
+        return failBeforeLaunch([`stage-assets-failed:${error.message}`]);
+      }
     }
     const kHash = sha256RegularFile(sourceKernelPath);
     if (kHash.error) {
-      return {
-        ok: false,
-        errors: [`sourceKernelPath rejected (${kHash.error})`],
-      };
+      return failBeforeLaunch([`sourceKernelPath rejected (${kHash.error})`]);
     }
     const rHash = sha256RegularFile(sourceRootfsPath);
     if (rHash.error) {
-      return {
-        ok: false,
-        errors: [`sourceRootfsPath rejected (${rHash.error})`],
-      };
+      return failBeforeLaunch([`sourceRootfsPath rejected (${rHash.error})`]);
     }
     const launchKernel = sha256RegularFile(plan.kernelPath);
     if (launchKernel.error || launchKernel.digest !== kHash.digest) {
-      return {
-        ok: false,
-        errors: [
-          'planned kernel must be a regular file matching sourceKernelPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'planned kernel must be a regular file matching sourceKernelPath',
+      ]);
     }
     const workDisk = plan.ownershipTemplate?.workDiskPath;
     if (!workDisk) {
-      return {
-        ok: false,
-        errors: ['local VMM plan requires ownershipTemplate.workDiskPath'],
-      };
+      return failBeforeLaunch([
+        'local VMM plan requires ownershipTemplate.workDiskPath',
+      ]);
     }
     const realSrcRootfs = realpathSync(resolve(sourceRootfsPath));
     let realWorkDisk = resolve(workDisk);
@@ -1429,36 +1445,33 @@ export async function runHardwareRound({
       // Keep lexical resolved path if working disk does not exist yet.
     }
     if (realWorkDisk === realSrcRootfs) {
-      return {
-        ok: false,
-        errors: [
-          'working disk path must be a per-round copy distinct from sourceRootfsPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk path must be a per-round copy distinct from sourceRootfsPath',
+      ]);
     }
     const launchDisk = sha256RegularFile(workDisk);
     if (launchDisk.error || launchDisk.digest !== rHash.digest) {
-      return {
-        ok: false,
-        errors: [
-          'working disk must be a regular-file copy matching sourceRootfsPath',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk must be a regular-file copy matching sourceRootfsPath',
+      ]);
     }
     if (
       launchDisk.nlink !== 1 ||
       (launchDisk.dev === rHash.dev && launchDisk.ino === rHash.ino)
     ) {
-      return {
-        ok: false,
-        errors: [
-          'working disk must be independently owned storage, not a hardlink or shared inode',
-        ],
-      };
+      return failBeforeLaunch([
+        'working disk must be independently owned storage, not a hardlink or shared inode',
+      ]);
     }
     if (typeof launchBackend !== 'function') {
       const launchError = validateDefaultLaunchInputs(plan);
-      if (launchError) return { ok: false, errors: [launchError] };
+      if (launchError) return failBeforeLaunch([launchError]);
+      const diskConfigCheck = verifyFirecrackerDiskConfig(plan, {
+        requireExists: stageAssets === true,
+      });
+      if (!diskConfigCheck.ok) {
+        return failBeforeLaunch([diskConfigCheck.error]);
+      }
     }
     kernelDigest = kHash.digest;
     rootfsDigest = rHash.digest;
@@ -1474,10 +1487,9 @@ export async function runHardwareRound({
     const maxBundleBytes =
       roundInput.maxBundleBytes ?? DEFAULT_MAX_BUNDLE_BYTES;
     if (!Number.isSafeInteger(maxBundleBytes) || maxBundleBytes <= 0) {
-      return {
-        ok: false,
-        errors: ['roundInput.maxBundleBytes must be a positive safe integer'],
-      };
+      return failBeforeLaunch([
+        'roundInput.maxBundleBytes must be a positive safe integer',
+      ]);
     }
     try {
       const entropyHex =
@@ -1701,17 +1713,14 @@ export async function runHardwareRound({
         trustedInputDigest !== null &&
         trustedInputDigest !== built.trustedInputDigest
       ) {
-        return {
-          ok: false,
-          errors: [
-            'trustedInputDigest does not match generated roundInput manifest digest',
-          ],
-        };
+        return failBeforeLaunch([
+          'trustedInputDigest does not match generated roundInput manifest digest',
+        ]);
       }
       effectiveTrustedInputDigest = built.trustedInputDigest;
       preparedInput = { ...bundleInfo, ...built };
     } catch (error) {
-      return { ok: false, errors: [`round-input-rejected:${error.message}`] };
+      return failBeforeLaunch([`round-input-rejected:${error.message}`]);
     }
   }
 
@@ -1721,7 +1730,7 @@ export async function runHardwareRound({
       `${JSON.stringify({ runId: plan.runId, revoked: false }, null, 2)}\n`,
     );
   } catch (error) {
-    return { ok: false, errors: [`token-file-rejected:${error.message}`] };
+    return failBeforeLaunch([`token-file-rejected:${error.message}`]);
   }
 
   let proxyServer = null;
@@ -2247,6 +2256,18 @@ export async function runHardwareRound({
         sourceRootfsUnchanged
           ? 'destroyed'
           : 'failed';
+      if (
+        stagedAssets &&
+        !aliveAfterReap &&
+        !supervisorAlive &&
+        workerExitEvidence === 'absent'
+      ) {
+        try {
+          stagedAssets.cleanup();
+        } catch (error) {
+          errors.push(`staged-cleanup-failed:${error.message}`);
+        }
+      }
       destroyedAt = new Date().toISOString();
     } else if (plan.backend === 'provider-vm') {
       let destroyRes = { terminated: false, diskDeleted: false };
@@ -2390,10 +2411,126 @@ async function main(argv) {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(
       'Usage:\n' +
-        '  node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--kvm] [--vfkit --seatbelt-enforcing] [--provider-configured]\n' +
+        '  node scripts/verify-pr-vm-runner.mjs probe [--firecracker-bin <path>] [--jailer-bin <path>] [--vfkit-bin <path>] [--seatbelt-profile <path>] [--vmm-uid <n>] [--vmm-gid <n>] [--provider-configured]\n' +
+        '  node scripts/verify-pr-vm-runner.mjs select --context <snapshot> [--backend <name>] [--probe | --kvm | --vfkit --seatbelt-enforcing] [--provider-configured]\n' +
         '  node scripts/verify-pr-vm-runner.mjs run --config <host-run-config.json>\n',
     );
     return 0;
+  }
+  const parseProbeFlags = (
+    args,
+    startIndex,
+    { allowSelectFlags = false } = {},
+  ) => {
+    const parsed = {
+      contextPath: null,
+      preferredBackend: null,
+      useProbe: false,
+      kvmAvailable: false,
+      vfkitAvailable: false,
+      seatbeltEnforcing: false,
+      providerConfigured: false,
+      firecrackerBin: null,
+      jailerBin: null,
+      vfkitBin: null,
+      seatbeltProfilePath: null,
+      vmmUid: 65534,
+      vmmGid: 65534,
+      error: null,
+    };
+    const takeValue = (flag, index) => {
+      const value = args[index + 1];
+      if (value === undefined || value.trim() === '') {
+        parsed.error = `missing value for ${flag}`;
+        return null;
+      }
+      return value;
+    };
+    const parsePositiveInt = (flag, raw) => {
+      if (raw === undefined || !/^[1-9]\d*$/.test(raw)) {
+        parsed.error = `${flag} must be a positive integer`;
+        return null;
+      }
+      return Number(raw);
+    };
+    for (let i = startIndex; i < args.length; i += 1) {
+      const arg = args[i];
+      if (allowSelectFlags && arg === '--context') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.contextPath = val;
+        i += 1;
+      } else if (allowSelectFlags && arg === '--backend') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.preferredBackend = val;
+        i += 1;
+      } else if (allowSelectFlags && arg === '--probe') {
+        parsed.useProbe = true;
+      } else if (allowSelectFlags && arg === '--kvm') {
+        parsed.kvmAvailable = true;
+      } else if (allowSelectFlags && arg === '--vfkit') {
+        parsed.vfkitAvailable = true;
+      } else if (allowSelectFlags && arg === '--seatbelt-enforcing') {
+        parsed.seatbeltEnforcing = true;
+      } else if (arg === '--provider-configured') {
+        parsed.providerConfigured = true;
+      } else if (arg === '--firecracker-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.firecrackerBin = val;
+        i += 1;
+      } else if (arg === '--jailer-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.jailerBin = val;
+        i += 1;
+      } else if (arg === '--vfkit-bin') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.vfkitBin = val;
+        i += 1;
+      } else if (arg === '--seatbelt-profile') {
+        const val = takeValue(arg, i);
+        if (val === null) break;
+        parsed.seatbeltProfilePath = val;
+        i += 1;
+      } else if (arg === '--vmm-uid') {
+        const val = parsePositiveInt(arg, args[(i += 1)]);
+        if (val === null) break;
+        parsed.vmmUid = val;
+      } else if (arg === '--vmm-gid') {
+        const val = parsePositiveInt(arg, args[(i += 1)]);
+        if (val === null) break;
+        parsed.vmmGid = val;
+      } else {
+        parsed.error = `unknown option ${arg}`;
+        break;
+      }
+    }
+    return parsed;
+  };
+  if (argv[0] === 'probe') {
+    const opts = parseProbeFlags(argv, 1, { allowSelectFlags: false });
+    if (opts.error) {
+      process.stderr.write(`verify-pr vm-runner probe: ${opts.error}\n`);
+      return 2;
+    }
+    const caps = probeHostCapabilities({
+      firecrackerBin: opts.firecrackerBin,
+      jailerBin: opts.jailerBin,
+      vfkitBin: opts.vfkitBin,
+      seatbeltProfilePath: opts.seatbeltProfilePath,
+      vmmUid: opts.vmmUid,
+      vmmGid: opts.vmmGid,
+      providerConfigured: opts.providerConfigured,
+    });
+    process.stdout.write(`${JSON.stringify(caps, null, 2)}\n`);
+    const anyHardware =
+      caps.kvmAvailable ||
+      (caps.vfkitAvailable && caps.seatbeltEnforcing) ||
+      caps.providerConfigured;
+    return anyHardware ? 0 : 1;
   }
   if (argv[0] === 'run') {
     let configPath = null;
@@ -2512,6 +2649,9 @@ async function main(argv) {
       platform: cfg.platform,
       sourceKernelPath: cfg.sourceKernelPath,
       sourceRootfsPath: cfg.sourceRootfsPath,
+      sourceInitramfsPath: cfg.sourceInitramfsPath ?? null,
+      stageAssets: cfg.stageAssets === true,
+      applyChown: cfg.applyChown ?? null,
       trustedInputDigest: cfg.trustedInputDigest ?? null,
       roundInput: resolvedRoundInput,
       collectorOptions: resolvedCollectorOptions,
@@ -2529,56 +2669,71 @@ async function main(argv) {
     );
     return 2;
   }
-  let contextPath = null;
-  let preferredBackend = null;
-  let kvmAvailable = false;
-  let vfkitAvailable = false;
-  let seatbeltEnforcing = false;
-  let providerConfigured = false;
-  for (let i = 1; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--context') contextPath = argv[(i += 1)] ?? null;
-    else if (arg === '--backend') preferredBackend = argv[(i += 1)] ?? null;
-    else if (arg === '--kvm') kvmAvailable = true;
-    else if (arg === '--vfkit') vfkitAvailable = true;
-    else if (arg === '--seatbelt-enforcing') seatbeltEnforcing = true;
-    else if (arg === '--provider-configured') providerConfigured = true;
-    else {
-      process.stderr.write(`verify-pr vm-runner: unknown option ${arg}\n`);
-      return 2;
-    }
+  const opts = parseProbeFlags(argv, 1, { allowSelectFlags: true });
+  if (opts.error) {
+    process.stderr.write(`verify-pr vm-runner: ${opts.error}\n`);
+    return 2;
   }
-  if (!contextPath) {
+  if (
+    opts.useProbe &&
+    (opts.kvmAvailable || opts.vfkitAvailable || opts.seatbeltEnforcing)
+  ) {
+    process.stderr.write(
+      'verify-pr vm-runner select: --probe cannot be combined with manual --kvm/--vfkit/--seatbelt-enforcing flags\n',
+    );
+    return 2;
+  }
+  if (!opts.contextPath) {
     process.stderr.write('verify-pr vm-runner select: --context is required\n');
     return 2;
   }
   let snap;
   try {
-    snap = JSON.parse(readFileSync(contextPath, 'utf8'));
+    snap = JSON.parse(readFileSync(opts.contextPath, 'utf8'));
   } catch (error) {
     process.stderr.write(
-      `verify-pr vm-runner select: could not read valid JSON context ${contextPath}: ${error.message}\n`,
+      `verify-pr vm-runner select: could not read valid JSON context ${opts.contextPath}: ${error.message}\n`,
     );
     return 1;
   }
   if (snap === null || typeof snap !== 'object' || Array.isArray(snap)) {
     process.stderr.write(
-      `verify-pr vm-runner select: context ${contextPath} must be a JSON object\n`,
+      `verify-pr vm-runner select: context ${opts.contextPath} must be a JSON object\n`,
     );
     return 1;
   }
   const executionClass =
     snap?.trustClassification?.executionClass ?? 'hardware-isolated';
+  let probe = null;
+  let kvmAvailable = opts.kvmAvailable;
+  let vfkitAvailable = opts.vfkitAvailable;
+  let seatbeltEnforcing = opts.seatbeltEnforcing;
+  let providerConfigured = opts.providerConfigured;
+  if (opts.useProbe) {
+    probe = probeHostCapabilities({
+      firecrackerBin: opts.firecrackerBin,
+      jailerBin: opts.jailerBin,
+      vfkitBin: opts.vfkitBin,
+      seatbeltProfilePath: opts.seatbeltProfilePath,
+      vmmUid: opts.vmmUid,
+      vmmGid: opts.vmmGid,
+      providerConfigured: opts.providerConfigured,
+    });
+    kvmAvailable = probe.kvmAvailable;
+    vfkitAvailable = probe.vfkitAvailable;
+    seatbeltEnforcing = probe.seatbeltEnforcing;
+    providerConfigured = probe.providerConfigured;
+  }
   const decision = selectBackend({
     executionClass,
-    preferredBackend,
+    preferredBackend: opts.preferredBackend,
     kvmAvailable,
     vfkitAvailable,
     seatbeltEnforcing,
     providerConfigured,
   });
   process.stdout.write(
-    `${JSON.stringify({ executionClass, ...decision }, null, 2)}\n`,
+    `${JSON.stringify({ executionClass, ...decision, ...(probe ? { probe } : {}) }, null, 2)}\n`,
   );
   return decision.backend ? 0 : 1;
 }
