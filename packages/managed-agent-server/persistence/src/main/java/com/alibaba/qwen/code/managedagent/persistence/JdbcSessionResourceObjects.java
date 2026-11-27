@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -13,6 +14,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -53,7 +55,7 @@ public class JdbcSessionResourceObjects {
         this.quarantineTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public JdbcSessionResourceObjects(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             ObjectProvider<ToolPublicationObjectStore> objects, ManagedAgentSettings settings) {
         this(jdbc, objects.getIfAvailable(), settings);
@@ -98,7 +100,7 @@ public class JdbcSessionResourceObjects {
         byte[] bytes;
         try (InputStream stream = store().open(text(row.get("object_key")), () -> {})) {
             bytes = stream.readAllBytes();
-        } catch (java.io.IOException error) {
+        } catch (IOException error) {
             throw new IllegalStateException("Session resource read failed", error);
         }
         if (bytes.length != ((Number) row.get("byte_length")).longValue()
@@ -191,7 +193,7 @@ public class JdbcSessionResourceObjects {
             byte[] bytes;
             try (InputStream stream = store().open(objectKey, () -> {})) {
                 bytes = stream.readAllBytes();
-            } catch (java.io.IOException error) {
+            } catch (IOException error) {
                 throw new IllegalStateException("Session resource read failed", error);
             }
             if (bytes.length != ((Number) row.get("byte_length")).longValue()

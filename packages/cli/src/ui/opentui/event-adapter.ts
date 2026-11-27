@@ -806,9 +806,7 @@ export function createEventMapper(
       }
       case 'loop_detected': {
         closeThought();
-        // ink shows a disable/keep confirmation dialog; until that dialog
-        // exists here, surface the halt itself (the dialog's "keep" outcome,
-        // which ink adds as `{type: 'info'}`).
+        // ink parity: the halt is an `{type: 'info'}` item.
         out.push({
           type: 'info',
           text: formatInteractiveLoopDetectedMessage(

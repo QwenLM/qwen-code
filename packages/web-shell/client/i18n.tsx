@@ -19,6 +19,7 @@ import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messag
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
 import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
+import { ARCHIVED_SESSIONS_MESSAGES_EN } from './components/sidebar/archived-sessions-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -313,7 +314,6 @@ const EN: Messages = {
   'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
-  'managed.question.title': 'Answer the questions',
   'managed.actions.title': 'Pending requests',
   'managed.actions.root': 'This session',
   'managed.actions.child': (v) => `Child session · ${v?.session}`,
@@ -1861,7 +1861,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.usage.dailyTokensTitle': 'tokens',
   'daemon.usage.dailyTokensSub': 'daily token totals',
   'daemon.usage.dailySessionsTitle': 'sessions',
-  'daemon.usage.dailySessionsSub': 'active session counts per day',
+  'daemon.usage.dailySessionsSub': 'runs ended per day',
   'delete.cannotCurrent':
     'Cannot delete the current session while it is running.',
   'delete.action': 'Delete',
@@ -2644,6 +2644,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.openWorkspaceTerminalFailed': 'Failed to open a terminal',
   'sidebar.openWorkspaceTerminalOpened': 'Opened a terminal at the workspace',
   'sidebar.manageWorkspace': 'Manage',
+  'sidebar.trustWorkspace': 'Trust workspace',
+  'sidebar.trustingWorkspace': 'Trusting…',
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
@@ -2680,6 +2682,13 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'}, ${v?.untrusted ?? 0} not loaded (folder not trusted). Enable security.folderTrust.enabled and trust the folder, or run qwen interactively to review.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Manage ${v?.facet ?? ''} for ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Loading hooks…',
+  'workspaceHooks.empty': 'No hooks configured for this workspace.',
+  'workspaceHooks.enabled': 'Enabled',
+  'workspaceHooks.disabled': 'Disabled',
   'sidebar.forceRemoveWorkspace': 'Force remove',
   'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -2858,11 +2867,6 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'This restored queue summary cannot recover its original attachments.',
   'queue.admissionUnknown':
     'Delivery is uncertain. Check the session before trying again.',
-  'queue.restoreUnknown': 'Restore local copy',
-  'queue.discardUnknown': 'Discard local copy',
-  'queue.continueEditing': 'Continue editing',
-  'queue.continueEditingConfirm':
-    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.commandGoalBlocked':
@@ -4420,8 +4424,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.automatic.title': 'Automatic trigger',
-  'userMessage.sendFailed': 'Failed to send',
-  'userMessage.retrySend': 'Retry sending message',
+  'userMessage.retrySend': 'Resend',
+  'userMessage.retryUncertain': 'May not have sent — click to resend',
+  'userMessage.deliveryUncertain':
+    'Message may not have sent. Click ! to resend.',
   'userMessage.edit': 'Edit message',
   'message.moreActions': 'More message actions',
   ...MESSAGE_DELETION_MESSAGES_EN,
@@ -4699,6 +4705,11 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sessionsOverview.popupBlocked':
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
+  'sessionsOverview.restoreWorktree': 'Restore snapshot',
+  'sessionsOverview.restoreWorktreeUnavailable':
+    'Snapshot is unavailable for this workspace',
+  'sessionsOverview.restoringWorktree': 'Restoring…',
+  'sessionsOverview.restoreWorktreeFailed': 'Snapshot restore failed',
   'sessionsOverview.selectAll': 'Select all',
   'sessionsOverview.titleColumn': 'Title',
   'sessionsOverview.actions': 'Actions',
@@ -5431,6 +5442,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
+  ...ARCHIVED_SESSIONS_MESSAGES_EN,
 };
 
 /**

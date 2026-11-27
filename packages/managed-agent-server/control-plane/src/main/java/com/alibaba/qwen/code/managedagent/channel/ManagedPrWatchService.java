@@ -24,8 +24,10 @@ import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelInstance;
 import com.alibaba.qwen.code.managedagent.repository.PrWatchBindingStore;
 import com.alibaba.qwen.code.managedagent.repository.PrWatchBindingStore.PrWatchBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -92,7 +94,7 @@ public class ManagedPrWatchService {
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     error.getMessage());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The PR-watch event set is not serializable.");
         }
@@ -348,7 +350,7 @@ public class ManagedPrWatchService {
                     "The PR-watch prompt exceeds the character bound.");
         }
         try {
-            com.fasterxml.jackson.databind.node.ObjectNode envelope =
+            ObjectNode envelope =
                     mapper.createObjectNode();
             envelope.put("owner", request.owner());
             envelope.put("repo", request.repo());
@@ -362,7 +364,7 @@ public class ManagedPrWatchService {
                 throw new ManagedAgentException(400, "invalid_request",
                         "The PR-watch envelope exceeds the byte bound.");
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The PR-watch envelope is not serializable.");
         }
@@ -449,7 +451,7 @@ public class ManagedPrWatchService {
         JsonNode node;
         try {
             node = mapper.readTree(binding.eventsJson());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(
                     "PR-watch binding events are not JSON", error);
         }

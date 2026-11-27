@@ -304,6 +304,6 @@ class JournalPackDeletionRegressionTest {
 
     private JournalStoreRows.HeadRow activationHead() {
         return new JournalStoreRows.HeadRow(TENANT, WORKSPACE, SESSION, "ACTIVE", false, 1, "worker", null, null,
-                1, 0, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L, EXPIRES_AT, 1L);
+                1, 0, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L, EXPIRES_AT, 1L, null);
     }
 }

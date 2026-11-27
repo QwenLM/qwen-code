@@ -32,6 +32,7 @@ import { runGit } from '../utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 
 export const WORKTREE_SNAPSHOT_SCHEMA_VERSION = 2;
+const META_READ_MAX_BYTES = 64 * 1024;
 
 export interface WorktreeSnapshotMeta {
   version: number;
@@ -72,14 +73,18 @@ export interface WorktreeSnapshotPaths {
   checkoutMatchesCapture: boolean;
 }
 
+const COMMIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 /**
  * A repo-relative path safe to join under a worktree root: relative, no
- * `..` segment, no drive/leading separator. The header is validated input
- * to a destructive restore step, so a traversal path is refused.
+ * `..` or `.` segment, no backslash or drive/leading separator. The header is
+ * validated input to a destructive restore step, so a traversal path is refused.
  */
 function isSafeRelativePath(p: string): boolean {
-  if (p.length === 0 || path.isAbsolute(p)) return false;
-  return !p.split('/').some((segment) => segment === '..' || segment === '');
+  if (p.length === 0 || path.isAbsolute(p) || p.includes('\\')) return false;
+  return !p
+    .split('/')
+    .some((segment) => segment === '..' || segment === '.' || segment === '');
 }
 
 /**
@@ -94,6 +99,10 @@ function normalizeRel(p: string): string {
   return n;
 }
 
+function canonicalArchiveMemberName(p: string): string {
+  return normalizeRel(p).replace(/\/+$/, '');
+}
+
 /**
  * Whether a normalized repo-relative path names a protected target the
  * restore must never remove: the worktree's `.git` or the session marker.
@@ -102,12 +111,16 @@ function isProtectedRel(norm: string): boolean {
   // Case-fold: on APFS/NTFS a '.GIT/config' entry aliases '.git/config', so
   // a case-sensitive comparison would let a restore remove the git link
   // (round-6 containment). Capture refuses case variants before starting tar
-  // so it cannot create an archive its own reader would reject (R8-7).
+  // so it cannot create an archive its own reader would reject (R8-7). Also
+  // block descendants of the session marker name so an archive cannot
+  // pre-create a directory at WORKTREE_SESSION_FILE.
   const lower = norm.toLowerCase();
+  const markerLower = WORKTREE_SESSION_FILE.toLowerCase();
   return (
     lower === '.git' ||
     lower.startsWith('.git/') ||
-    lower === WORKTREE_SESSION_FILE.toLowerCase()
+    lower === markerLower ||
+    lower.startsWith(`${markerLower}/`)
   );
 }
 
@@ -171,7 +184,12 @@ async function assertNoProtectedCaseVariantPaths(
     if (isExcludedFromSnapshot(rel, matcher)) continue;
     if (entry.isDirectory()) {
       await assertNoProtectedCaseVariantPaths(worktreePath, matcher, rel);
-    } else if (!entry.isFile() && !entry.isSymbolicLink()) {
+    } else if (entry.isSymbolicLink()) {
+      assertSnapshotSymlinkTargetBytes(
+        await fs.readlink(path.join(directory, entry.name)),
+        rel,
+      );
+    } else if (!entry.isFile()) {
       // node-tar silently emits no entry for FIFOs, sockets and devices.
       throw new Error(
         `Worktree snapshot: non-regular filesystem entry cannot be archived faithfully: ${rel}`,
@@ -221,6 +239,11 @@ export async function buildWorktreeSnapshotMeta(
     baseCommit: string;
   },
 ): Promise<Omit<WorktreeSnapshotMeta, 'version' | 'createdAt'>> {
+  if (!COMMIT_OID_PATTERN.test(info.baseCommit)) {
+    throw new Error(
+      `Worktree snapshot meta: invalid baseCommit id (${info.baseCommit})`,
+    );
+  }
   await fs.access(path.join(worktreePath, '.git'));
   // A hidden index bit (assume-unchanged / skip-worktree) hides a second file
   // version — a staged draft or a tracked deletion — from `git status`, so the
@@ -389,25 +412,92 @@ export async function buildWorktreeSnapshotMeta(
 // Before/after digests alone miss an A/B/A write: tar can hold the intermediate
 // bytes. Compare actual archive contents with the final checkout instead of
 // discarding a completed snapshot whose earlier bytes may still be useful.
+interface SnapshotPathKinds {
+  files: Set<string>;
+  directories: Set<string>;
+}
+
+async function readSnapshotPathKinds(
+  snapshotPath: string,
+): Promise<SnapshotPathKinds> {
+  const files = new Set<string>();
+  const directories = new Set<string>();
+  const includeParents = (relativePath: string) => {
+    let parent = '';
+    for (const part of relativePath.split('/').filter(Boolean).slice(0, -1)) {
+      parent = `${parent}${part}/`;
+      directories.add(parent);
+    }
+  };
+  let unsafeEntryError: Error | undefined;
+  await tar.t({
+    file: snapshotPath,
+    strict: true,
+    onReadEntry: (entry) => {
+      if (unsafeEntryError) return;
+      if (entry.path === '.' || /^\.\/+$/.test(entry.path)) {
+        if (entry.type !== 'Directory') {
+          unsafeEntryError = new Error(
+            'Worktree snapshot: archive member has an empty or root path',
+          );
+        }
+        return;
+      }
+      const rel = canonicalArchiveMemberName(entry.path);
+      if (!rel) {
+        unsafeEntryError = new Error(
+          'Worktree snapshot: archive member has an empty or root path',
+        );
+        return;
+      }
+      if (entry.type === 'Directory') {
+        directories.add(`${rel}/`);
+      } else {
+        files.add(rel);
+      }
+      includeParents(rel);
+    },
+  });
+  if (unsafeEntryError) throw unsafeEntryError;
+  return { files, directories };
+}
+
 async function checkoutMatchesCapture(
   worktreePath: string,
   snapshotPath: string,
   matcher: DisposableIgnoredMatcher,
   meta: CaptureWorktreeSnapshotOptions['meta'],
+  knownPaths?: SnapshotPathKinds,
 ): Promise<boolean> {
+  const known = knownPaths ?? (await readSnapshotPathKinds(snapshotPath));
   const regularFiles: string[] = [];
   const symlinks = new Map<string, string>();
+  const directories = new Set<string>();
+  const current = new Map<string, string>();
   const collect = async (prefix = ''): Promise<void> => {
     const entries = await fs.readdir(path.join(worktreePath, prefix), {
       withFileTypes: true,
     });
     for (const entry of entries) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (isExcludedFromSnapshot(rel, matcher)) continue;
+      // A restored index is allowed to ignore a force-tracked archived file.
+      // Archive membership, not that new index, decides what is restorable.
+      if (
+        isExcludedFromSnapshot(rel, matcher) &&
+        !known.files.has(rel) &&
+        (entry.isFile() ||
+          entry.isSymbolicLink() ||
+          (entry.isDirectory() && !known.directories.has(`${rel}/`)))
+      ) {
+        continue;
+      }
       if (entry.isDirectory()) {
+        directories.add(`${rel}/`);
         await collect(rel);
       } else if (entry.isSymbolicLink()) {
-        symlinks.set(rel, await fs.readlink(path.join(worktreePath, rel)));
+        const target = await fs.readlink(path.join(worktreePath, rel));
+        assertSnapshotSymlinkTargetBytes(target, rel);
+        symlinks.set(rel, target);
       } else if (entry.isFile()) {
         regularFiles.push(rel);
       } else {
@@ -419,7 +509,6 @@ async function checkoutMatchesCapture(
   };
   await collect();
 
-  const current = new Map<string, string>();
   for (const entry of await computeCarriedIdentities(
     worktreePath,
     regularFiles,
@@ -455,14 +544,22 @@ async function checkoutMatchesCapture(
   const captured = new Map<string, string>();
   const hardlinks = new Map<string, string>();
   let archiveValid = true;
+  const captureEntry = (relativePath: string, content: string): void => {
+    if (captured.has(relativePath)) {
+      archiveValid = false;
+      return;
+    }
+    captured.set(relativePath, content);
+  };
   await tar.t({
     file: snapshotPath,
     strict: true,
-    // This is the private archive just written by this process, not an
-    // untrusted restore input. Restore keeps its own decompression limits.
-    maxDecompressionRatio: Number.POSITIVE_INFINITY,
     onReadEntry: (entry) => {
-      const rel = normalizeRel(entry.path);
+      const rel = canonicalArchiveMemberName(entry.path);
+      if (!rel && entry.type !== 'Directory') {
+        archiveValid = false;
+        return;
+      }
       if (!rel || rel === '.') return;
       if (isProtectedRel(rel)) {
         archiveValid = false;
@@ -473,7 +570,7 @@ async function checkoutMatchesCapture(
         hash.update(`blob ${entry.size}\0`);
         entry.on('data', (chunk: Buffer) => hash.update(chunk));
         entry.on('end', () => {
-          captured.set(
+          captureEntry(
             rel,
             `file:${hash.digest('hex')}:${
               (entry.mode ?? 0) & 0o100 ? '1' : '0'
@@ -481,25 +578,37 @@ async function checkoutMatchesCapture(
           );
         });
       } else if (entry.type === 'SymbolicLink') {
-        captured.set(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
+        captureEntry(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
       } else if (entry.type === 'Link') {
-        hardlinks.set(rel, normalizeRel(entry.linkpath ?? ''));
-      } else if (entry.type !== 'Directory') {
+        if (hardlinks.has(rel)) {
+          archiveValid = false;
+        } else {
+          hardlinks.set(rel, canonicalArchiveMemberName(entry.linkpath ?? ''));
+        }
+      } else if (entry.type === 'Directory') {
+        captureEntry(`${rel}/`, 'directory');
+      } else {
         archiveValid = false;
       }
     },
   });
   for (const [rel, target] of hardlinks) {
     const content = captured.get(target);
-    if (content === undefined) {
+    if (content === undefined || !content.startsWith('file:')) {
       archiveValid = false;
     } else {
-      captured.set(rel, content);
+      captureEntry(rel, content);
     }
   }
-  const mismatch = [...new Set([...current.keys(), ...captured.keys()])]
+  const mismatch = [
+    ...new Set([...current.keys(), ...directories, ...captured.keys()]),
+  ]
     .sort()
-    .find((rel) => current.get(rel) !== captured.get(rel));
+    .find((rel) =>
+      rel.endsWith('/')
+        ? directories.has(rel) !== known.directories.has(rel)
+        : current.get(rel) !== captured.get(rel),
+    );
   await fs.access(path.join(worktreePath, '.git'));
   const [headCommit, branch] = await Promise.all([
     runGit(worktreePath, [
@@ -531,11 +640,9 @@ async function checkoutMatchesCapture(
  * archive a later restore would trust. Rejects on any capture error — the
  * caller must not delete the worktree without a durable snapshot.
  */
-export async function captureWorktreeSnapshot(
-  options: CaptureWorktreeSnapshotOptions,
-): Promise<WorktreeSnapshotPaths> {
-  const { worktreePath, snapshotDir, meta } = options;
-  await fs.access(path.join(worktreePath, '.git'));
+async function readSnapshotExclusions(
+  worktreePath: string,
+): Promise<DisposableIgnoredMatcher> {
   // The ignored disposable output the exclusion geometry consults, taken
   // from the SAME listing the has-work gate waives (`status --porcelain
   // --ignored=matching -z`, the `!!` records) so the two geometries cannot
@@ -602,12 +709,60 @@ export async function captureWorktreeSnapshot(
     ),
   };
   await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
-  await fs.mkdir(snapshotDir, { recursive: true });
+  return matcher;
+}
+
+export async function verifyRestoredWorktreeSnapshot(options: {
+  worktreePath: string;
+  snapshotPath: string;
+  meta: CaptureWorktreeSnapshotOptions['meta'];
+}): Promise<boolean> {
+  const matcher = await readSnapshotExclusions(options.worktreePath);
+  const knownPaths = await readSnapshotPathKinds(options.snapshotPath);
+  return checkoutMatchesCapture(
+    options.worktreePath,
+    options.snapshotPath,
+    matcher,
+    options.meta,
+    knownPaths,
+  );
+}
+
+function assertSnapshotSymlinkTargetBytes(
+  target: string,
+  relativePath: string,
+): void {
+  // The fs/tar string bridge cannot distinguish a literal U+FFFD from a
+  // decoded non-UTF-8 target. Refuse either rather than silently rewrite it.
+  if (target.includes('\uFFFD')) {
+    throw new Error(
+      `Snapshot symlink target cannot be preserved byte-for-byte: ${relativePath}`,
+    );
+  }
+}
+
+export async function captureWorktreeSnapshot(
+  options: CaptureWorktreeSnapshotOptions,
+): Promise<WorktreeSnapshotPaths> {
+  const { worktreePath, snapshotDir, meta } = options;
+  if (
+    !COMMIT_OID_PATTERN.test(meta.baseCommit) ||
+    !COMMIT_OID_PATTERN.test(meta.headCommit)
+  ) {
+    throw new Error('Worktree snapshot: invalid commit id');
+  }
+  await fs.access(path.join(worktreePath, '.git'));
+  const matcher = await readSnapshotExclusions(worktreePath);
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
     createdAt: Date.now(),
     ...meta,
   };
+  const serializedMeta = `${JSON.stringify(fullMeta, null, 2)}\n`;
+  if (Buffer.byteLength(serializedMeta, 'utf8') > META_READ_MAX_BYTES) {
+    throw new Error('Worktree snapshot metadata exceeds 64 KiB');
+  }
+  await fs.mkdir(snapshotDir, { recursive: true });
   // A session UUID may be reused (superseded records, caller-supplied id):
   // never let a later capture overwrite an earlier archive pair of the same
   // sessionId. Suffix by capture time and pid; readers glob on the
@@ -643,9 +798,14 @@ export async function captureWorktreeSnapshot(
     );
   });
 
-  await atomicWriteFile(metaPath, async (tmp) => {
-    await fs.writeFile(tmp, `${JSON.stringify(fullMeta, null, 2)}\n`, 'utf8');
-  });
+  try {
+    await atomicWriteFile(metaPath, async (tmp) => {
+      await fs.writeFile(tmp, serializedMeta, 'utf8');
+    });
+  } catch (error) {
+    await fs.rm(snapshotPath, { force: true }).catch(() => {});
+    throw error;
+  }
 
   return {
     snapshotPath,
@@ -663,6 +823,9 @@ export async function captureWorktreeSnapshot(
 export async function readWorktreeSnapshotMeta(
   metaPath: string,
 ): Promise<WorktreeSnapshotMeta> {
+  if ((await fs.stat(metaPath)).size > META_READ_MAX_BYTES) {
+    throw new Error(`Worktree snapshot metadata exceeds 64 KiB: ${metaPath}`);
+  }
   const raw = await fs.readFile(metaPath, 'utf8');
   const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== 'object') {
@@ -674,13 +837,17 @@ export async function readWorktreeSnapshotMeta(
       `Unsupported worktree snapshot version ${String(v['version'])} at ${metaPath}`,
     );
   }
+  const safeCount = (value: unknown): boolean =>
+    Number.isSafeInteger(value) && (value as number) >= 0;
   if (
     typeof v['sessionId'] !== 'string' ||
+    v['sessionId'].length === 0 ||
     typeof v['slug'] !== 'string' ||
+    v['slug'].length === 0 ||
     typeof v['baseCommit'] !== 'string' ||
     typeof v['headCommit'] !== 'string' ||
     typeof v['branch'] !== 'string' ||
-    typeof v['createdAt'] !== 'number'
+    !safeCount(v['createdAt'])
   ) {
     throw new Error(`Worktree snapshot meta at ${metaPath} is malformed`);
   }
@@ -690,8 +857,8 @@ export async function readWorktreeSnapshotMeta(
   }
   const d = dirty as Record<string, unknown>;
   if (
-    typeof d['tracked'] !== 'number' ||
-    typeof d['untracked'] !== 'number' ||
+    !safeCount(d['tracked']) ||
+    !safeCount(d['untracked']) ||
     !Array.isArray(d['deleted']) ||
     !d['deleted'].every(
       (p) =>
@@ -703,6 +870,129 @@ export async function readWorktreeSnapshotMeta(
     throw new Error(`Worktree snapshot meta at ${metaPath} is malformed`);
   }
   return parsed as WorktreeSnapshotMeta;
+}
+
+export interface SelectedWorktreeSnapshot
+  extends Pick<WorktreeSnapshotPaths, 'snapshotPath' | 'metaPath'> {
+  meta: WorktreeSnapshotMeta;
+  mtimeNs: bigint;
+}
+
+export async function selectWorktreeSnapshot(options: {
+  directory: string;
+  sessionId: string;
+  slug: string;
+  archiveKey?: string;
+}): Promise<SelectedWorktreeSnapshot | undefined> {
+  if (!path.isAbsolute(options.directory)) {
+    throw new Error('Snapshot directory must be an absolute path');
+  }
+  const archiveSuffix = '.worktree-snapshot.tar.gz';
+  const metaSuffix = '.worktree-snapshot.json';
+  const archiveKey = options.archiveKey;
+  if (
+    archiveKey !== undefined &&
+    (archiveKey.length === 0 ||
+      archiveKey.includes('..') ||
+      archiveKey.includes('/') ||
+      archiveKey.includes('\\') ||
+      !archiveKey.endsWith(archiveSuffix) ||
+      !archiveKey.startsWith(`${options.sessionId}.`))
+  ) {
+    throw new Error('Invalid worktree snapshot archive key');
+  }
+  let directoryStat;
+  try {
+    directoryStat = await fs.lstat(options.directory);
+  } catch (error) {
+    if (
+      archiveKey !== undefined &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+  if (!directoryStat.isDirectory()) {
+    throw new Error('Snapshot directory is not a directory');
+  }
+  const names = await fs.readdir(options.directory);
+  const prefix = `${options.sessionId}.`;
+  const matchingNames = names.filter(
+    (name) =>
+      name.startsWith(prefix) &&
+      (name.endsWith(archiveSuffix) || name.endsWith(metaSuffix)),
+  );
+  if (archiveKey !== undefined && !matchingNames.includes(archiveKey)) {
+    return undefined;
+  }
+  const bases = new Set(
+    (archiveKey === undefined ? matchingNames : [archiveKey]).map((name) =>
+      name.endsWith(archiveSuffix)
+        ? name.slice(0, -'.tar.gz'.length)
+        : name.slice(0, -'.json'.length),
+    ),
+  );
+  const selected: SelectedWorktreeSnapshot[] = [];
+  for (const base of [...bases].sort()) {
+    const snapshotPath = path.join(options.directory, `${base}.tar.gz`);
+    const metaPath = path.join(options.directory, `${base}.json`);
+    for (const file of [snapshotPath, metaPath]) {
+      let stat;
+      try {
+        stat = await fs.lstat(file, { bigint: true });
+      } catch (error) {
+        if (
+          archiveKey !== undefined &&
+          (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          return undefined;
+        }
+        throw error;
+      }
+      if (!stat.isFile() || stat.nlink !== 1n) {
+        throw new Error(
+          `Snapshot pair file is not an owned regular file: ${file}`,
+        );
+      }
+      if (file === metaPath && stat.size > 64n * 1024n) {
+        throw new Error(`Snapshot metadata exceeds 64 KiB: ${file}`);
+      }
+    }
+    const meta = await readWorktreeSnapshotMeta(metaPath);
+    if (
+      !COMMIT_OID_PATTERN.test(meta.baseCommit) ||
+      !COMMIT_OID_PATTERN.test(meta.headCommit)
+    ) {
+      throw new Error(`Snapshot pair has invalid commit ids: ${metaPath}`);
+    }
+    if (meta.sessionId !== options.sessionId) {
+      throw new Error(`Snapshot pair identity mismatch: ${metaPath}`);
+    }
+    if (meta.slug !== options.slug) {
+      if (archiveKey !== undefined) {
+        throw new Error(`Snapshot pair identity mismatch: ${metaPath}`);
+      }
+      continue;
+    }
+    const mtimeNs = (await fs.lstat(snapshotPath, { bigint: true })).mtimeNs;
+    selected.push({ snapshotPath, metaPath, meta, mtimeNs });
+  }
+  selected.sort(
+    (a, b) =>
+      b.meta.createdAt - a.meta.createdAt ||
+      (a.mtimeNs === b.mtimeNs ? 0 : a.mtimeNs < b.mtimeNs ? 1 : -1) ||
+      (a.snapshotPath < b.snapshotPath
+        ? -1
+        : a.snapshotPath > b.snapshotPath
+          ? 1
+          : 0),
+  );
+  return (
+    selected.find(
+      (entry) => path.basename(entry.snapshotPath) === archiveKey,
+    ) ?? (archiveKey === undefined ? selected[0] : undefined)
+  );
 }
 
 /**
@@ -740,20 +1030,62 @@ export async function restoreWorktreeSnapshot(
   const archived = new Map<string, string>();
   const hardlinks: Array<[string, string]> = [];
   const archivedSymlinks = new Map<string, string>();
+  let unsafeEntryError: Error | undefined;
   await tar.t({
     file: snapshotPath,
+    strict: true,
     onReadEntry: (entry) => {
-      const norm = normalizeRel(entry.path).replace(/\/$/, '');
-      if (norm.length === 0) return;
+      if (unsafeEntryError) return;
+      if (entry.path === '.' || /^\.\/+$/.test(entry.path)) {
+        if (entry.type !== 'Directory') {
+          unsafeEntryError = new Error(
+            `Unsafe path in snapshot archive: ${entry.path}`,
+          );
+        }
+        return;
+      }
+      const norm = canonicalArchiveMemberName(entry.path);
+      if (!norm) {
+        unsafeEntryError = new Error(
+          `Unsafe path in snapshot archive: ${entry.path}`,
+        );
+        return;
+      }
+      if (
+        entry.type !== 'File' &&
+        entry.type !== 'Directory' &&
+        entry.type !== 'SymbolicLink' &&
+        entry.type !== 'Link'
+      ) {
+        unsafeEntryError = new Error(
+          `Unsupported entry type in snapshot archive: ${entry.type}`,
+        );
+        return;
+      }
+      if (archived.has(norm)) {
+        unsafeEntryError = new Error(
+          `Duplicate path in snapshot archive: ${entry.path}`,
+        );
+        return;
+      }
       archived.set(norm, entry.type);
       if (entry.type === 'Link') {
         hardlinks.push([norm, entry.linkpath ?? '']);
       }
       if (entry.type === 'SymbolicLink') {
-        archivedSymlinks.set(norm, entry.linkpath ?? '');
+        const target = entry.linkpath ?? '';
+        try {
+          assertSnapshotSymlinkTargetBytes(target, norm);
+        } catch (error) {
+          unsafeEntryError =
+            error instanceof Error ? error : new Error(String(error));
+          return;
+        }
+        archivedSymlinks.set(norm, target);
       }
     },
   });
+  if (unsafeEntryError) throw unsafeEntryError;
   const confine = (rel: string): string => {
     const norm = normalizeRel(rel);
     if (!isSafeRelativePath(norm)) {
@@ -779,15 +1111,16 @@ export async function restoreWorktreeSnapshot(
         realParent = await fs.realpath(parent);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        const replacesTrackedFile =
+        const replacesTrackedEntry =
           code === 'ENOTDIR' &&
           archived.get(
             normalizeRel(path.relative(root, parent).split(path.sep).join('/')),
           ) === 'Directory';
-        if (code !== 'ENOENT' && !replacesTrackedFile) throw error;
-        // Missing descendants are created later. A tracked regular file can
-        // also stand where an archived Directory belongs, making a deeper
-        // realpath throw ENOTDIR; that file is removed only after all checks.
+        if (code !== 'ENOENT' && !replacesTrackedEntry) throw error;
+        // Missing descendants are created later. A tracked regular file (or a
+        // symlink to a file) can also stand where an archived Directory
+        // belongs, making a deeper realpath throw ENOTDIR; that entry is
+        // removed only after all containment and protected-path checks pass.
         // At least one real ancestor must still prove containment.
         if (parent === root) throw error;
         continue;
@@ -800,6 +1133,16 @@ export async function restoreWorktreeSnapshot(
           `Snapshot path resolves outside worktree root via symlink: ${rel}`,
         );
       }
+      const resolved = path.join(realParent, path.relative(parent, target));
+      const resolvedRel = path
+        .relative(realRoot, resolved)
+        .split(path.sep)
+        .join('/');
+      if (resolvedRel && isProtectedRel(resolvedRel)) {
+        throw new Error(
+          `Snapshot path resolves to a protected path via symlink: ${rel}`,
+        );
+      }
       return;
     }
   };
@@ -809,23 +1152,41 @@ export async function restoreWorktreeSnapshot(
   for (const [rel] of archived) {
     await assertRealContained(confine(rel), rel);
   }
-  for (const [, targetRel] of hardlinks) {
+  for (const [, rawTarget] of hardlinks) {
+    const targetRel = canonicalArchiveMemberName(rawTarget);
     const target = confine(targetRel);
+    if (archived.get(targetRel) !== 'File') {
+      throw new Error(
+        `Snapshot hardlink target is not an archived regular file: ${rawTarget}`,
+      );
+    }
     await assertRealContained(target, targetRel);
     const realTarget = await fs.realpath(target).catch(() => null);
-    if (
-      realTarget !== null &&
-      realTarget !== realRoot &&
-      !realTarget.startsWith(realRoot + path.sep)
-    ) {
-      throw new Error(
-        `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
-      );
+    if (realTarget !== null) {
+      if (
+        realTarget !== realRoot &&
+        !realTarget.startsWith(realRoot + path.sep)
+      ) {
+        throw new Error(
+          `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
+        );
+      }
+      const realTargetRel = path
+        .relative(realRoot, realTarget)
+        .split(path.sep)
+        .join('/');
+      if (realTargetRel && isProtectedRel(realTargetRel)) {
+        throw new Error(
+          `Snapshot hardlink resolves to a protected path: ${targetRel}`,
+        );
+      }
     }
   }
   // All containment checks have completed before removing anything. Clear a
-  // tracked regular file only where a Directory member explicitly replaces
-  // it, so nested descendants can be restored without following a link.
+  // tracked regular file or in-root non-protected symlink only where a
+  // Directory member explicitly replaces it, after every nested protected-path
+  // check passes, so nested descendants restore into a real directory without
+  // hitting ENOTDIR or traversing a committed symlink into another directory.
   const filesToClear: string[] = [];
   for (const [rel, type] of archived) {
     if (type !== 'Directory') continue;
@@ -856,6 +1217,32 @@ export async function restoreWorktreeSnapshot(
         );
       }
       filesToClear.push(target);
+    } else if (stat?.isSymbolicLink()) {
+      await assertRealContained(target, rel);
+      const realTarget = await fs.realpath(target).catch(() => null);
+      if (realTarget === null) {
+        throw new Error(
+          `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      if (
+        realTarget !== realRoot &&
+        !realTarget.startsWith(realRoot + path.sep)
+      ) {
+        throw new Error(
+          `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      const realRel = path
+        .relative(realRoot, realTarget)
+        .split(path.sep)
+        .join('/');
+      if (realRel && isProtectedRel(realRel)) {
+        throw new Error(
+          `Snapshot directory replacement targets a protected path: ${rel}`,
+        );
+      }
+      filesToClear.push(target);
     }
   }
   for (const target of filesToClear) {
@@ -879,18 +1266,91 @@ export async function restoreWorktreeSnapshot(
     await assertRealContained(target, rel);
     await fs.rm(target, { force: true, recursive: true });
   }
+
+  // Git does not track directories. Prune empty unarchived HEAD parent
+  // directories along deleted paths BEFORE tar.extract and archivedSymlinks
+  // so archived dir->file and dir->symlink replacements never hit ENOTDIR or
+  // traverse a newly materialized symlink to delete another directory.
+  const parents = new Set<string>();
+  for (const rel of meta.dirty.deleted) {
+    let parent = path.posix.dirname(normalizeRel(rel).replace(/\/+$/, ''));
+    while (parent !== '.' && parent !== '..') {
+      parents.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  const hasSymlinkComponent = async (rel: string): Promise<boolean> => {
+    let cursor = '';
+    for (const part of rel.split('/')) {
+      cursor = cursor ? `${cursor}/${part}` : part;
+      const stat = await fs.lstat(confine(cursor)).catch((error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw error;
+      });
+      if (stat === null) return false;
+      if (stat.isSymbolicLink()) return true;
+    }
+    return false;
+  };
+  for (const rel of [...parents].sort(
+    (left, right) => right.split('/').length - left.split('/').length,
+  )) {
+    if (archived.has(rel)) continue;
+    if (await hasSymlinkComponent(rel)) continue;
+    const target = confine(rel);
+    const stat = await fs.lstat(target).catch((error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw error;
+    });
+    if (!stat?.isDirectory()) continue;
+    await assertRealContained(target, rel);
+    const entries = await fs.readdir(target);
+    if (entries.length === 0) await fs.rmdir(target);
+  }
+
   await tar.extract({
     file: snapshotPath,
     cwd: targetWorktreePath,
     strict: true,
+    // Replace existing HEAD files so creation applies the archived mode.
+    unlink: true,
     // Keep absolute and ../ link targets (R8-5), but never materialize an
-    // archived symlink during extraction: a later member could traverse it as
-    // a parent and escape through a link created by the archive itself.
-    filter: (_path, entry) => 'type' in entry && entry.type !== 'SymbolicLink',
+    // archived SymbolicLink or Link during extraction: a later member could
+    // traverse a newly created symlink (or a hardlink to a HEAD relative
+    // symlink) as a parent and escape the worktree root.
+    filter: (_path, entry) =>
+      'type' in entry && entry.type !== 'SymbolicLink' && entry.type !== 'Link',
     // Lexical member checks and real-ancestor checks above remain the
     // OUT-OF-ROOT gate alongside the deferred link creation below.
     preservePaths: true,
   });
+  for (const [memberRel, rawTarget] of hardlinks) {
+    const targetRel = canonicalArchiveMemberName(rawTarget);
+    const memberPath = confine(memberRel);
+    const targetPath = confine(targetRel);
+    await assertRealContained(memberPath, memberRel);
+    await assertRealContained(targetPath, targetRel);
+    const targetStat = await fs.lstat(targetPath);
+    if (!targetStat.isFile()) {
+      throw new Error(
+        `Snapshot hardlink target is not a regular file: ${rawTarget}`,
+      );
+    }
+    await fs.mkdir(path.dirname(memberPath), { recursive: true });
+    const memberStat = await fs.lstat(memberPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (memberStat?.isDirectory()) {
+      throw new Error(
+        `Snapshot hardlink conflicts with a directory: ${memberRel}`,
+      );
+    }
+    if (memberStat !== null) await fs.unlink(memberPath);
+    await fs.link(targetPath, memberPath);
+  }
   for (const [rel, linkTarget] of archivedSymlinks) {
     const target = confine(rel);
     await assertRealContained(target, rel);

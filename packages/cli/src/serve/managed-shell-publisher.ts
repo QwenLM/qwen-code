@@ -483,9 +483,7 @@ export class ManagedShellPublisherRegistry
             if (!Number.isSafeInteger(generation) || generation < 1) {
               throw new Error('Invalid writer generation.');
             }
-            // The Harness always sends its generation; a worker without the
-            // capability keeps the legacy exact-match registration.
-            if (this.observation.enabled) writerGeneration = generation;
+            writerGeneration = generation;
           }
         } catch {
           res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
@@ -497,9 +495,14 @@ export class ManagedShellPublisherRegistry
           res.status(409).json({ code: 'managed_runtime_identity_conflict' });
           return;
         }
-        if (previous && writerGeneration === undefined) {
-          // Legacy registration: the original descriptor must match exactly.
-          if (JSON.stringify(previous) !== JSON.stringify(publisher)) {
+        if (writerGeneration === undefined) {
+          // A legacy client can replay its descriptor, but only a fenced
+          // writer can install after a fenced detach cleared the publisher.
+          if (
+            previous
+              ? JSON.stringify(previous) !== JSON.stringify(publisher)
+              : previousGeneration > 0
+          ) {
             res.status(409).json({ code: 'managed_runtime_identity_conflict' });
             return;
           }
@@ -507,7 +510,7 @@ export class ManagedShellPublisherRegistry
           writerGeneration !== undefined &&
           writerGeneration < previousGeneration
         ) {
-          // Phase 3b: a same-or-newer writer generation replaces the publisher;
+          // A same-or-newer writer generation replaces the publisher;
           // an older one is refused. The retained watermark fences even a
           // registration after a detach cleared the installed publisher.
           res.status(409).json({ code: 'managed_runtime_identity_conflict' });
@@ -710,10 +713,7 @@ export class ManagedShellPublisherRegistry
 
   detachSession(sessionId: string, writerGeneration?: number): boolean {
     const previousGeneration = this.sessionGenerations.get(sessionId) ?? 0;
-    if (
-      writerGeneration !== undefined &&
-      writerGeneration < previousGeneration
-    ) {
+    if ((writerGeneration ?? 0) < previousGeneration) {
       return false;
     }
     if (writerGeneration !== undefined) {

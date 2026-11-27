@@ -166,7 +166,6 @@ vi.mock('../telemetry/loggers.js', () => ({
 }));
 
 vi.mock('../telemetry/types.js', async (importOriginal) => ({
-  // services/loop-protection.ts keys its reminder texts by LoopType.
   LoopType: (await importOriginal<typeof import('../telemetry/types.js')>())
     .LoopType,
   RipgrepFallbackEvent: vi.fn(),

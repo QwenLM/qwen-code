@@ -248,7 +248,8 @@
   padding-left: 0;
 }
 
-.option {
+/* Keep action styles above the scoped preflight reset even if it loads later. */
+button.option {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -273,14 +274,14 @@
   outline-offset: 2px;
 }
 
-.optionSecondary {
+button.optionSecondary {
   border-color: var(--border);
   background: var(--background);
   color: var(--foreground);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
-.optionPrimary {
+button.optionPrimary {
   border-color: transparent;
   background: var(--primary);
   color: var(--primary-foreground);
@@ -298,7 +299,7 @@
   white-space: normal;
 }
 
-.menuTrigger {
+button.menuTrigger {
   flex-shrink: 0;
   gap: 6px;
 }

@@ -75,7 +75,7 @@
 
 ## 6. W5 — 集成测试
 
-新建 `hosted-session-suspension.integration.test.ts`，夹具仿 `hosted-harness-session.test.ts`（注册路由时传短 `idleSuspendMs`）：
+新建 `hosted-session-suspension.integration.test.ts`，夹具仿 `hosted-harness-session.suspension.test.ts`（注册路由时传短 `idleSuspendMs`）：
 
 1. 空闲 Session 到点挂起；后续 load 冷打开（写者重取、MCP/Hook 重连、placement 保留）。
 2. 已准入 prompt 重置定时器；Turn 结算后 Session 保持常驻一个完整周期。
@@ -94,7 +94,7 @@
 - `cd packages/cli && npx vitest run src/serve/hosted-session-suspension.test.ts src/serve/hosted-session-suspension.integration.test.ts`，加 core assembly 与 monitor-loop 同目录测试。
 - `packages/cli` 内 `NODE_OPTIONS=--max-old-space-size=8192 npx tsc --build`（默认堆 OOM；用项目引用，不用独立 `--noEmit`）。
 - `packages/cli`（W1 含 `packages/core`）内 `npx eslint <改动文件>` 与 `npx prettier --check <改动文件>`。
-- 全量 `hosted-harness-session.test.ts` 与 Hosted/MySQL CI 层级归 CI；本地预算保持聚焦。真实进程挂起→重开验收在 WP1 落地后跑（协调升级，无配置开关）。
+- 全量 `hosted-harness-session*.test.ts` 与 Hosted/MySQL CI 层级归 CI；本地预算保持聚焦。真实进程挂起→重开验收在 WP1 落地后跑（协调升级，无配置开关）。
 - 按 AGENTS.md 自审：开放式「假设有错」通读全 diff；连续两轮干净才停；修复重置计数。核实每个绿测试断言的是对的东西。
 - 仓库规则：ESM、无 `any`、core 从定义模块 import、测试同目录、注释只写非显而易见的 why。活跃 PR 不 force-push；本分支在 feature 完整前保持本地。
 

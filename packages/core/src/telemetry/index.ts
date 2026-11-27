@@ -38,7 +38,6 @@ export {
   logUserPrompt,
   logUserRetry,
   logToolCall,
-  logRepeatedToolFailureGuard,
   logApiRequest,
   logApiError,
   logApiCancel,
@@ -111,7 +110,6 @@ export {
   MemorySearchEvent,
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
-  RepeatedToolFailureGuardEvent,
 } from './types.js';
 export {
   makeSlashCommandEvent,
@@ -139,7 +137,6 @@ export {
   // Core metrics functions
   recordToolCallMetrics,
   recordToolExecutionMetrics,
-  recordRepeatedToolFailureGuardMetrics,
   recordTokenUsageMetrics,
   recordApiResponseMetrics,
   recordApiErrorMetrics,

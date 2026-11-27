@@ -3,6 +3,7 @@
 [English](2026-10-21-loop-protection-setting.md) | [简体中文](2026-10-21-loop-protection-setting.zh-CN.md)
 
 - **Status**: implemented on the PR branch
+- **Superseded by**: [remove loop detection](2026-11-25-remove-loop-detection.md)
 - **Date**: 2026-10-21
 - **Related**: issue #14828 (PR 2 of 2),
   [loop stop reasons](2026-10-20-loop-stop-reason.md) (PR 1, #14858),
