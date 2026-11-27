@@ -136,7 +136,7 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 
 | Reply                                                                        | Harness action                                                                                                    |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Success with `terminal: false`                                               | Continue from `cursor`                                                                                            |
+| Success with `terminal: false`                                               | Continue from `cursor`; stop if the request carried an end marker                                                 |
 | `managed_event_ingest_cursor_mismatch`                                       | Re-read the journal from the returned cursor                                                                      |
 | `managed_event_ingest_not_ready`                                             | Retry with backoff, for no longer than the lease duration                                                         |
 | `terminal: true`, `managed_event_ingest_not_owner` or a writer fence refusal | Stop pushing for this admission                                                                                   |
@@ -147,11 +147,11 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 
 - **Submission.** For a fresh prompt submission with ingest enabled and `event-ingest/1` advertised, the submission body carries `eventDelivery: { "mode": "ingest", "turnId": "..." }`.
   - A fresh submission is a drive in which the Turn has no recorded admission (`harness_event_epoch` is null) and `submit` succeeds. It covers a new Turn's first drive and its retries before any admission was recorded, including a resubmission after a withdrawn submission mark.
-  - A submit answered with `hosted_prompt_recovery_required` is not fresh, and neither is any drive of a Turn that already has an event epoch.
+  - A `submit` answered with `hosted_prompt_recovery_required` is not fresh, and neither is any drive of a Turn that already has an event epoch.
   - Delivery is decided per admission, so one Turn can start on ingest and finish on the stream after a recovery.
 - **Admission and hand-off.** `recordAdmission` gains a hand-off variant. In the same transaction it sets `dispatch_owner = 'harness:' + bootId` and `dispatch_lease_until = now + lease`. The dispatcher closes its renewal before the hand-off and returns without opening the stream. `releaseTurnLease` in `coordinate`'s `finally` then matches nothing. A Turn that is already `CANCELLING` when its admission is recorded is not handed off. The dispatcher continues on today's cancellation path, and the Harness's pushes get `not_owner`.
 - **Unchanged paths.** Recovery admission, continuation, cancellation and recovery-blocked observation open the stream as today, and their Turns remain dispatcher-owned.
-- **Cancel take-back.** `findDispatchable` and `claimTurn` also admit `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'`. The claimer becomes the owner and runs today's cancellation path, including `cancelOriginalTurn` and the stream. The cursor is shared, so the take-back neither loses nor duplicates events.
+- **Cancel take-back.** `findDispatchable` and `claimTurn` also admit `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'` regardless of `dispatch_lease_until` and `retry_after`. The Harness renews that lease every 20 s, so a claim that waited for it would never deliver the cancel. The claimer becomes the owner and runs today's cancellation path, including `cancelOriginalTurn` and the stream. The cursor is shared, so the take-back neither loses nor duplicates events.
 - **Lease lapse.** A lapsed Harness-owned lease is an ordinary lapsed lease. The sweep claims the Turn, and today's attach, takeover and recovery admission take it from there.
 
 ## 6. Harness changes
@@ -205,6 +205,8 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 - `persistence/.../AgentTurnExecution.java`: the admission hand-off, the CANCELLING take-back predicates in `findDispatchable` and `claimTurn`, and cursor advance without events.
 - `control-plane/.../HarnessCoordinator.java`: request ingest and hand off after a fresh submission. The per-envelope logic of `consumeStream` moves to a class shared by the stream and the ingest handler.
 - `adapters/.../QwenHostedHarnessConnector.java` and `contracts/.../HarnessConnector.java`: `eventDelivery` on submit, and feature detection.
+- `adapters/.../harness/HarnessFeature.java`: the `event-ingest/1` token.
+- `packages/sdk-java/qwencode/.../daemon/SubmitHarnessTurn.java`: the `eventDelivery` field of the submit body.
 - `ManagedAgentProperties.java`, `application.yml`: `qwen.managed-agent.event-ingest.enabled` (default `false`).
 
 ### Harness and Store client
@@ -254,7 +256,7 @@ Run focused Java and TypeScript tests within the module budget. The root build a
 ## 12. Risks and open questions
 
 1. **Request rate.** Each running Turn sends about one request per 250 ms tick while it produces events, plus a heartbeat every 20 s. The heartbeat replaces the dispatcher's renewal. Measure against the stream before default-on. The pusher starts at the admission cursor; envelopes it resends are ignored under the cursor rules.
-2. **Two lock families.** Store authentication locks the placement guard, Session root and head. The recording calls keep their Session-root, Turn, event-stream order. Authentication must finish, or keep the same root-first order, before recording starts ([lock simplification](2026-11-02-managed-agent-lock-simplification.md)).
+2. **Two lock families.** Store authentication locks the placement guard, Session root and head. The recording calls take the Session root, then the event stream, which the Session read locks with it, then the Turn. Authentication must finish, or keep the same root-first order, before recording starts ([lock simplification](2026-11-02-managed-agent-lock-simplification.md)).
 3. **Sealed-arm marker.** `parked` is the only request accepted from a sealed incarnation. The Harness must post it before the placement release, and implementation must confirm the seal appends no journal event after the final flush. If it does, or the marker is refused or lost, the Turn keeps its Harness owner until the lease lapses, and today's recovery then handles the sealed, unparked Turn.
 4. **Scope of ingest.** Recovery admissions and continuations remain on the stream. This includes the continuation of an approved Action. Pull scheduling replaces them, because the Harness that claims the work also delivers its events.
 5. **Clock.** The Turn lease still runs on Java instance clocks (#14248), and ingest widens the exposure: one instance writes the lease, and whichever instance serves a later request renews and checks it. An instance whose clock runs ahead can refuse a healthy renewal, and the Turn then recovers by lease lapse; one that runs behind can accept a just-expired lease. Bound the skew between instances, or move the lease to database time, before default-on.
