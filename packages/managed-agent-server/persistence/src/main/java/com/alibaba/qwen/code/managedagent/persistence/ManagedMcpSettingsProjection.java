@@ -1,15 +1,18 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,7 +24,7 @@ import java.util.function.Function;
 /**
  * The MCP-settings domain projection of the Stage H commit: the latest settings revision's
  * session-record row and the resource-reference closure its configuration names. Extracted from
- * {@link ManagedExtensionRecordStore} so that store stays within the class-size ratchet; the
+ * {@link JdbcManagedExtensionRecordStore} so that store stays within the class-size ratchet; the
  * projection rides the same commit transaction and the shared reference/body checks still live on
  * the store. Package config accumulates its retained closure across revisions, while a legacy
  * settings revision replaces its single projection row (R2-5).
@@ -42,73 +45,76 @@ class ManagedMcpSettingsProjection {
 
     void project(String tenantId, String workspaceId, String sessionId, JsonNode payload,
             Function<String, StoredResource> resources, long sequence, long occurredAt, String[] lines) {
-        ManagedExtensionRecordStore.require(sessions != null, "Configuration management admission is unavailable");
+        JdbcManagedExtensionRecordStore.require(sessions != null, "Configuration management admission is unavailable");
         JsonNode ref = payload.get("recordRef");
         StoredResource resource = resources.apply(ref.get("resourceId").textValue());
-        ManagedExtensionRecordStore.requireReference(resource, ref);
-        JsonNode settings = ManagedExtensionRecordStore.readBody(resource);
+        JdbcManagedExtensionRecordStore.requireReference(resource, ref);
+        JsonNode settings = JdbcManagedExtensionRecordStore.readBody(resource);
         try {
             ManagedMcpSettings.require(settings);
         } catch (InvalidRecordException error) {
-            throw ManagedExtensionRecordStore.rejected(error.getMessage());
+            throw JdbcManagedExtensionRecordStore.rejected(error.getMessage());
         }
-        ManagedExtensionRecordStore.require(settings.get("operationId").equals(payload.get("operationId")), "Configuration command identity conflicts");
+        JdbcManagedExtensionRecordStore.require(settings.get("operationId").equals(payload.get("operationId")), "Configuration command identity conflicts");
         JsonNode previous = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
         if (ManagedConfigInstall.isPackageConfig(settings)) {
             sessions.requireConfigurationCommit(tenantId, workspaceId, sessionId, settings);
             try {
                 ManagedConfigInstall.successor(previous, settings);
             } catch (InvalidRecordException error) {
-                throw ManagedExtensionRecordStore.rejected(error.getMessage());
+                throw JdbcManagedExtensionRecordStore.rejected(error.getMessage());
             }
             requireConfigurationBinding(settings, lines);
         } else {
-            ManagedExtensionRecordStore.require(!ManagedConfigInstall.isPackageConfig(previous), "Legacy MCP writes cannot replace package configuration");
+            JdbcManagedExtensionRecordStore.require(!ManagedConfigInstall.isPackageConfig(previous), "Legacy MCP writes cannot replace package configuration");
             sessions.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
         }
         Long settledAt = ManagedConfigInstall.barrier(settings) ? null : occurredAt;
         long revision = settings.get("revision").longValue();
-        ManagedExtensionRecordStore.require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        String key = ManagedExtensionProjection.recordKey(sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+        JdbcManagedExtensionRecordStore.require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
+        String ownerRef = JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(
+                sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
         if (previous == null) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, tenant_id, workspace_id,"
                             + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
+                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", tenantId, workspaceId,
                     sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
                     occurredAt, settledAt, sequence);
         } else {
             JsonNode predecessor = settings.get("previousRecordRef");
             String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
-                    + " WHERE session_scope_key=? AND record_key=?", String.class, scope, key);
-            ManagedExtensionRecordStore.require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
-            ManagedExtensionRecordStore.requireReference(resources.apply(previousResource), predecessor);
+                    + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=?", String.class,
+                    tenantId, sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+            JdbcManagedExtensionRecordStore.require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
+            JdbcManagedExtensionRecordStore.requireReference(resources.apply(previousResource), predecessor);
             jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
-                    + " WHERE session_scope_key=? AND record_key=? AND revision=?",
-                    revision, resource.resourceId(), settledAt, scope, key, revision - 1);
+                    + " WHERE tenant_id=? AND session_id=? AND domain=? AND record_id=? AND revision=?",
+                    revision, resource.resourceId(), settledAt, tenantId, sessionId,
+                    ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision - 1);
         }
         if (ManagedConfigInstall.isPackageConfig(settings)) {
             // Package config accumulates across revisions: the retained seed
             // stops the closure walk from re-projecting resources an earlier
             // revision already pinned.
             Set<String> retained = new HashSet<>(jdbc.queryForList(
-                    "SELECT resource_id FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
-                    String.class, scope, key));
+                    "SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
+                            + " AND owner_ref=?",
+                    String.class, tenantId, sessionId, ManagedSchemaKeys.identity(ownerRef)));
             if (retained.add(resource.resourceId())) {
-                ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                         sessionId, resource.resourceId());
             }
             // A sealed writer cannot rely on its old journal to retain the
             // recovery resources named by the active package configuration.
-            retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
+            retainPackageConfiguration(ownerRef, revision, tenantId, workspaceId,
                     sessionId, settings, resources, retained);
         } else {
             // Legacy MCP settings need no closure: replace the superseded
             // projection row so the key keeps exactly one row instead of
             // accumulating one per revision for the Session's whole life (R2-5).
-            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
-                    scope, key);
-            ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+            jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
+                    + " AND owner_ref=?", tenantId, sessionId, ManagedSchemaKeys.identity(ownerRef));
+            JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                     sessionId, resource.resourceId());
         }
     }
@@ -117,7 +123,7 @@ class ManagedMcpSettingsProjection {
     // predecessor, so a resource retained by an earlier commit already pins its whole reference
     // closure: the walk only has to name the resources this commit adds, probing existence once
     // per level instead of per resource and leaving the rows it already wrote untouched.
-    private void retainPackageConfiguration(String scope, String key, long revision,
+    private void retainPackageConfiguration(String ownerRef, long revision,
             String tenantId, String workspaceId, String sessionId, JsonNode settings,
             Function<String, StoredResource> resources, Set<String> retained) {
         List<JsonNode> level = configurationReferences(settings);
@@ -133,18 +139,18 @@ class ManagedMcpSettingsProjection {
             if (candidates.isEmpty()) {
                 continue;
             }
-            Set<String> existing = existingResources(scope, candidates.keySet());
+            Set<String> existing = existingResources(tenantId, sessionId, candidates.keySet());
             for (Map.Entry<String, JsonNode> candidate : candidates.entrySet()) {
                 String resourceId = candidate.getKey();
                 if (!existing.contains(resourceId)) {
                     continue;
                 }
                 StoredResource resource = resources.apply(resourceId);
-                ManagedExtensionRecordStore.requireReference(resource, candidate.getValue());
-                ManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
+                JdbcManagedExtensionRecordStore.requireReference(resource, candidate.getValue());
+                JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, ownerRef, revision, tenantId, workspaceId,
                         sessionId, resourceId);
                 if (RETAINED_REFERENCE_KINDS.contains(resource.kind())) {
-                    level.addAll(packageReferences(resource.kind(), ManagedExtensionRecordStore.readBody(resource)));
+                    level.addAll(packageReferences(resource.kind(), JdbcManagedExtensionRecordStore.readBody(resource)));
                 }
             }
         }
@@ -184,30 +190,31 @@ class ManagedMcpSettingsProjection {
         return refs;
     }
 
-    private Set<String> existingResources(String scope, Set<String> resourceIds) {
+    private Set<String> existingResources(String tenantId, String sessionId, Set<String> resourceIds) {
         String placeholders = String.join(",",
-                java.util.Collections.nCopies(resourceIds.size(), "?"));
+                Collections.nCopies(resourceIds.size(), "?"));
         List<Object> args = new ArrayList<>();
-        args.add(scope);
+        args.add(tenantId);
+        args.add(sessionId);
         args.addAll(resourceIds);
         return new HashSet<>(jdbc.queryForList(
-                "SELECT resource_id FROM ma_resource WHERE session_scope_key = ?"
+                "SELECT resource_id FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                         + " AND resource_id IN (" + placeholders + ")",
                 String.class, args.toArray()));
     }
 
     private static void requireConfigurationBinding(JsonNode settings, String[] lines) {
-        List<JsonNode> bindings = java.util.Arrays.stream(lines).map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+        List<JsonNode> bindings = Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
                 .filter(Objects::nonNull).map(line -> line.path("managedSession"))
                 .filter(event -> "config.bound".equals(event.path("kind").asText())).map(event -> event.path("payload")).toList();
         if (!"committed".equals(settings.path("phase").asText())) {
-            ManagedExtensionRecordStore.require(bindings.isEmpty(), "Only a committed configuration may bind");
+            JdbcManagedExtensionRecordStore.require(bindings.isEmpty(), "Only a committed configuration may bind");
             return;
         }
-        ManagedExtensionRecordStore.require(bindings.size() == 1, "Configuration binding must commit atomically");
+        JdbcManagedExtensionRecordStore.require(bindings.size() == 1, "Configuration binding must commit atomically");
         JsonNode binding = bindings.getFirst();
         ManagedExtensionRecords.closed(binding, Set.of("revision", "previousRevision", "bundleRef", "rootSnapshotRef"), "Configuration binding");
-        ManagedExtensionRecordStore.require(binding.path("revision").equals(settings.get("configRevision"))
+        JdbcManagedExtensionRecordStore.require(binding.path("revision").equals(settings.get("configRevision"))
                 && (settings.path("previousConfigRevision").asLong() == 0
                         ? binding.path("previousRevision").isNull() : binding.path("previousRevision").equals(settings.get("previousConfigRevision")))
                 && binding.get("bundleRef").equals(settings.get("bundleRef"))

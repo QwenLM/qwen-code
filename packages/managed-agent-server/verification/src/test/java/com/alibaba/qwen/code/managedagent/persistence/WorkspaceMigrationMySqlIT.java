@@ -10,10 +10,11 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -106,9 +107,9 @@ class WorkspaceMigrationMySqlIT {
                                     "SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND"
                                             + " operation_kind = 'STORAGE_MIGRATION'", Integer.class, tenant)).isOne();
         }
-        var before = jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_key");
+        var before = jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_ref");
         ManagedSchema.initialize(data);
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_key")).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation ORDER BY operation_ref")).isEqualTo(before);
     }
 
     @Test
@@ -161,7 +162,8 @@ class WorkspaceMigrationMySqlIT {
                 throw new IllegalStateException(error);
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Long.class)).isZero();
-            new WorkspaceMigrationStore(jdbc, manager, guard, new InMemoryRuntimeBindingRepository(),
+            new WorkspaceMigrationStore(jdbc, manager, guard, new JdbcRuntimeBindingRepository(data,
+                    new AesGcmSecretProtector("test", new byte[32])),
                     request.toString().getBytes(StandardCharsets.UTF_8), true,
                     new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         })).hasMessageContaining("migration_member_uninitialized");
@@ -186,7 +188,7 @@ class WorkspaceMigrationMySqlIT {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var original = create(store, transaction, "migrating", "original");
         var other = cwd ? create(store, transaction, "unrelated", "other") : null;
         var originalCwd = cwd ? com.alibaba.qwen.code.managedagent.LegacyCwdOperations.seed(jdbc, store,
@@ -198,11 +200,8 @@ class WorkspaceMigrationMySqlIT {
         var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
                 otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
         // Keep the unrelated probe outside the uncommitted fence insert's index gap.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                        + " VALUES (?, ?, ?, 'unrelated', 'storage')",
-                JdbcRuntimeBindingRepository.storageAliasKey("unrelated", "storage"),
-                JdbcRuntimeBindingRepository.storageFenceKey("unrelated"),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage"));
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id)"
+                        + " VALUES ('unrelated', 'storage')");
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
@@ -253,12 +252,12 @@ class WorkspaceMigrationMySqlIT {
         }
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_session WHERE tenant_id ="
-                                        + " X'6d6967726174696e67'",
+                                        + " 'migrating'",
                 Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM ma_request_receipt WHERE namespace ="
                                         + " 'SESSION_CREATE_ACTOR' AND tenant_id ="
-                                        + " X'6d6967726174696e67'",
+                                        + " 'migrating'",
                 Integer.class)).isEqualTo(1);
         var replay = create(store, transaction, "migrating", "original");
         assertThat(replay.replayed()).isTrue();
@@ -275,13 +274,9 @@ class WorkspaceMigrationMySqlIT {
 
     private void installMigrationFence(Connection migration) throws SQLException {
         try (var fence = migration.prepareStatement(
-                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
+                "INSERT INTO ma_storage (tenant_id, storage_id, fence_operation_id) VALUES ("
                         + " 'migrating', 'storage', ?)")) {
-            fence.setString(1, JdbcRuntimeBindingRepository.storageAliasKey("migrating", "storage"));
-            fence.setString(2, JdbcRuntimeBindingRepository.storageFenceKey("migrating"));
-            fence.setString(3, JdbcRuntimeBindingRepository.storageFenceKey("storage"));
-            fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+            fence.setBytes(1, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
             fence.executeUpdate();
         }
     }
@@ -307,13 +302,11 @@ class WorkspaceMigrationMySqlIT {
         jdbc.update(
                 "UPDATE ma_session SET retirement_operation_id = ?, retirement_generation = 1,"
                         + " retired_at = 1 WHERE tenant_id = ? AND session_id = ?", "delete", "tenant-a", "headless");
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-a", "headless");
-        String targetKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("headless");
-        String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.DELETE, scopeKey, targetKey, "delete");
+        String operationRef = ManagedIdentityRefs.operationRef(
+                ManagedSchemaContract.OperationKind.DELETE.name(), "tenant-a", "SESSION", "headless", "headless", "delete");
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
-                operationKey, scopeKey, scopeKey, targetKey, "tenant-a", "headless");
+                "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, target_id, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, 'SESSION', ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
+                operationRef, "headless", "headless", "tenant-a", "headless");
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
@@ -349,7 +342,7 @@ class WorkspaceMigrationMySqlIT {
 
     @Test
     void baselineRefusesAnIncompleteCatalogWithoutAddingOtherTables() {
-        jdbc.execute("CREATE TABLE ma_operation (operation_key CHAR(64) PRIMARY KEY)");
+        jdbc.execute("CREATE TABLE ma_operation (operation_ref VARBINARY(1024) PRIMARY KEY)");
         assertThatThrownBy(() -> ManagedSchema.initialize(data)).isInstanceOf(IllegalStateException.class);
         assertThat(jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema"
@@ -358,10 +351,8 @@ class WorkspaceMigrationMySqlIT {
 
     private void seed(JdbcTemplate writer, String tenant, String session, String state) {
         writer.update(
-                "INSERT INTO ma_session (tenant_key, session_key, session_scope_key, tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, deleted_at) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, ?)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, state, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, deleted_at) VALUES (?, ?, 'qwen-code', ?, 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, ?)",
+                tenant, session, state, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF, "DELETED".equals(state) ? 1L : null);
         ManagedReceipts.insertCreation(writer, tenant, new byte[]{1}, session, "digest", session, null, 1);
         writer.update(

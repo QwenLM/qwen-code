@@ -8,6 +8,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
+import { runWithTurnSkillSnapshot } from '../skills/turn-skill-snapshot.js';
 import {
   parseRule,
   parseRules,
@@ -236,6 +238,66 @@ const PROTO_KEYS = [
 /** The session allow list, which has no public accessor. */
 const sessionAllowRules = (pm: PermissionManager) =>
   (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
+
+it.each(['read_file', 'run_shell_command'])(
+  'enforces source and staged Read restrictions for %s',
+  async (toolName) => {
+    const source = path.resolve('/project/skills/fixture/SKILL.md');
+    const staged = path.resolve('/snapshot/0/SKILL.md');
+    const request = (name: string) => {
+      const filePath = path.join(path.dirname(staged), name);
+      return toolName === 'read_file'
+        ? { toolName, filePath }
+        : { toolName, command: `cat "${filePath}"` };
+    };
+    const deny = makePm({
+      permissionsDeny: ['Read(./skills/fixture/private.txt)'],
+    });
+    const ask = makePm({
+      permissionsAsk: ['Read(./skills/fixture/review.txt)'],
+    });
+    const stagedFile = path
+      .join(path.dirname(staged), 'local.txt')
+      .replaceAll(path.sep, '/');
+    const stagedDeny = makePm({
+      permissionsDeny: [
+        `Read(${stagedFile.startsWith('/') ? '/' : ''}${stagedFile})`,
+      ],
+    });
+
+    await runWithTurnSkillSnapshot(
+      {
+        version: 1,
+        id: 'fixture',
+        digest: 'fixture',
+        skills: [
+          {
+            name: 'fixture',
+            description: 'fixture',
+            body: 'fixture',
+            level: 'project',
+            filePath: staged,
+            sourceFilePath: source,
+          },
+        ],
+      },
+      async () => {
+        await expect(
+          evaluatePermissionRules(deny, 'allow', request('private.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(ask, 'allow', request('review.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: true });
+        await expect(
+          evaluatePermissionRules(ask, 'ask', request('public.txt')),
+        ).resolves.toEqual({ finalPermission: 'ask', pmForcedAsk: false });
+        await expect(
+          evaluatePermissionRules(stagedDeny, 'allow', request('local.txt')),
+        ).resolves.toEqual({ finalPermission: 'deny', pmForcedAsk: false });
+      },
+    );
+  },
+);
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -862,6 +924,11 @@ describe('splitCompoundCommand', () => {
       'cat >\r\necho hi',
       ['cat >\r', 'echo hi'],
     ],
+    [
+      'a CR target behind the clobber operator',
+      'cat >|\r\necho hi',
+      ['cat >|\r', 'echo hi'],
+    ],
   ])('splits on a newline with %s', async (_label, command, parts) => {
     expect(split(command)).toEqual(parts);
   });
@@ -959,6 +1026,37 @@ describe('splitCompoundCommandSegments', () => {
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
+
+  // `>|` is the clobber override, not a pipe: bash runs it as one command
+  // that writes the file. Splitting at its `|` dropped the write.
+  it('keeps a clobber redirect inside its command', async () => {
+    expect(segments("echo '{}' >| .qwen/settings.json")).toEqual([
+      { command: "echo '{}' >| .qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments("echo '{}' >|.qwen/settings.json")).toEqual([
+      { command: "echo '{}' >|.qwen/settings.json", terminator: '' },
+    ]);
+    expect(segments('echo hi >| out.txt && cat out.txt')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '&&' },
+      { command: 'cat out.txt', terminator: '' },
+    ]);
+  });
+
+  it('still splits a real pipe after a clobber redirect', async () => {
+    expect(segments('echo hi >| out.txt | cat')).toEqual([
+      { command: 'echo hi >| out.txt', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
+
+  // An escaped `\>` is a literal argument (bash prints `hi >`), so the `|`
+  // after it really is a pipe.
+  it('still splits the pipe after an escaped `>`', async () => {
+    expect(segments('echo hi \\>| cat')).toEqual([
+      { command: 'echo hi \\>', terminator: '|' },
+      { command: 'cat', terminator: '' },
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────
@@ -997,6 +1095,21 @@ describe('resolvePathPattern', () => {
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
     expect(resolve('/Users/alice/file')).toBe('/project/Users/alice/file');
   });
+
+  // A Windows absolute path carries its own root. Joined onto cwd it became
+  // `<cwd>/D:/probe/**`, which no candidate path ever matched (#17802).
+  it.each([
+    ['drive letter, forward slashes', 'D:/probe/**'],
+    ['drive letter, backslashes', 'D:\\probe\\**'],
+    ['`//` prefix + drive letter', '//D:/probe/**'],
+    ['`//` prefix + drive letter, backslashes', '//D:\\probe\\**'],
+  ])('resolves %s to the drive-rooted pattern', (_label, pattern) => {
+    expect(resolve(pattern)).toBe('D:/probe/**');
+  });
+
+  it('resolves a UNC root to its forward-slash form', async () => {
+    expect(resolve('\\\\server\\share\\**')).toBe('//server/share/**');
+  });
 });
 
 // ─── matchesPathPattern ──────────────────────────────────────────────────────
@@ -1014,6 +1127,19 @@ describe('matchesPathPattern', () => {
     expect(matches('.env', '/project/.env')).toBe(true);
     expect(matches('*.env', '/project/.env')).toBe(true);
   });
+
+  // The three spellings a Windows user can write for one absolute directory.
+  // Every row was `false` before, so a `deny` on `D:` silently did not apply
+  // and an "Always Allow" entry never stopped the repeat prompt (#17802).
+  it.each(['D:/probe/**', 'D:\\probe\\**', '//D:/probe/**'])(
+    'matches a Windows drive path against %s',
+    async (pattern) => {
+      expect(matches(pattern, 'D:\\probe\\p.txt')).toBe(true);
+      expect(matches(pattern, 'D:/probe/nested/p.txt')).toBe(true);
+      expect(matches(pattern, 'D:\\other\\p.txt')).toBe(false);
+      expect(matches(pattern, '/project/probe/p.txt')).toBe(false);
+    },
+  );
 
   // A line terminator is an ordinary word character to bash, so a redirect
   // target can end in one, and picomatch's `.`-based `**` body matches none of
@@ -2005,6 +2131,18 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate(sh(command))).toBe('allow');
     });
 
+    // R7-9: an unresolvable -c payload may be the option terminator, so a
+    // wrapper wildcard must not auto-allow the unreadable spelling while
+    // the readable twin asks.
+    it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
+      expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
+      expect(await pm.evaluate(mon("sh -c $(printf -- --) 'echo run'"))).toBe(
+        'ask',
+      );
+      expect(await pm.evaluate(mon("bash -c 'echo hi'"))).toBe('allow');
+    });
+
     // The comment fast path is sound only when the scanned string is what the
     // shell executes: true for run_shell_command, not for monitor, where
     // normalizePermissionContext() analyses the quote-stripped `safetyCommand`
@@ -2920,6 +3058,27 @@ describe('buildPermissionRules', () => {
     it('falls back to bare display name when no filePath', async () => {
       expect(build({ toolName: 'read_file' })).toEqual(['Read']);
     });
+
+    // A Windows dirPath carries no leading separator, so without the full `//`
+    // prefix "Always Allow" persisted `Read(D:\proj\docs/**)` — a rule that
+    // could never match again, re-prompting for the same directory (#17802).
+    it.each([
+      [
+        'read_file',
+        'D:/Workspace/proj/docs/guide.md',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+      [
+        'glob',
+        'D:\\Workspace\\proj\\docs',
+        'Read(//D:/Workspace/proj/docs/**)',
+      ],
+    ])(
+      'writes a `//` rule for the Windows path %s',
+      (toolName, filePath, rule) => {
+        expect(build({ toolName, filePath })).toEqual([rule]);
+      },
+    );
   });
 
   describe('generated rules round-trip through parseRule and matchesRule', () => {
@@ -3444,6 +3603,32 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  // B1: a `|` inside the redirect operator is a filename character. Before the
+  // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
+  // clobber and the reported target lost its leading `|`, so `|/../X`
+  // normalised to `X` and this deny never matched while the same write was
+  // denied on base.
+  it('deny rule matches a write hidden behind a quoted clobber operator', async () => {
+    const ctx = sh('echo \'{}\' >"|/../".qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
+  // The same filename rule with the other spellings: a single-quoted or escaped
+  // `|`, and a quoted word ending in `>` running straight into the redirect
+  // (`'>'>"|/../"…`), where the operator match must use the masked spelling so
+  // a literal `|` cannot be read as the clobber.
+  it.each<[title: string, command: string]>([
+    ['single-quoted', "echo '{}' >'|/../'.qwen/settings.json"],
+    ['escaped', "echo '{}' >\\|/../.qwen/settings.json"],
+    ['quoted word before', "echo '{}' '>'>\"|/../\".qwen/settings.json"],
+  ])(
+    'a %s pipe is not a clobber: the protected write is denied',
+    async (_title, command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
   it('deny rule matches a redirect on the `cd` segment itself', async () => {
     const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
@@ -3479,6 +3664,23 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['df -hT / 2>&1', 'allow'],
     ['df -hT / >&2', 'allow'],
     ['printf TXT > other.txt', 'allow'],
+    // `>|` is the clobber override: the same write as `>`. The `|` used to
+    // split it into two segments, neither of which carried the write, so
+    // `Bash(*)` allowed a protected-path write with no rule seeing it.
+    ['printf TXT >| protected.txt', 'deny'],
+    ['printf TXT >|protected.txt', 'deny'],
+    ['printf TXT 1>| protected.txt', 'deny'],
+    ['printf TXT 2>|protected.txt', 'deny'],
+    ['printf TXT >| other.txt', 'allow'],
+    ['printf "TXT >| protected.txt"', 'allow'],
+    // A quoted or escaped `|` ends the word, so the `>` glued to it is a real
+    // redirect. bash writes the file, and the analysis has to report the same
+    // write or the deny below never fires.
+    ['echo hi "|">protected.txt', 'deny'],
+    ["echo hi '|'>protected.txt", 'deny'],
+    ['echo hi \\|>protected.txt', 'deny'],
+    ['echo hi "|" >protected.txt', 'deny'],
+    ['echo hi >"|"', 'allow'],
   ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
     const pm = repoPm({
       permissionsAllow: ['Bash(*)'],

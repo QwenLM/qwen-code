@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,9 +31,11 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /** Java 11 transport dedicated to the private Hosted Harness profile. */
@@ -45,6 +48,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             "qwen.daemon.managedRuntimeRecovery";
 
     private static final int PROTOCOL_VERSION = 1;
+    private static final Duration UNATTACHED_STATUS_TIMEOUT = Duration.ofSeconds(2);
     private static final Pattern UUID_PATTERN = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
                     + "[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -109,6 +113,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final Set<HarnessEventStream> streams =
             ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private volatile Consumer<HarnessSessionRef> attachmentRetirementListener;
 
     private HostedHarnessClient(Builder builder) {
         this.baseUrl = normalizeBaseUri(builder.baseUri);
@@ -165,6 +170,130 @@ public final class HostedHarnessClient implements AutoCloseable {
     public HostedHarnessCapabilities capabilities() {
         ensureOpen();
         return capabilities;
+    }
+
+    /**
+     * Registers the consumer notified with the exact reference this client
+     * retires — a heartbeat's definitive 404, a proven generation change,
+     * or a teardown. A notice can arrive after a newer reference replaced
+     * the retired one, so the consumer must match by identity before
+     * evicting anything of its own.
+     */
+    public void onAttachmentRetirement(Consumer<HarnessSessionRef> listener) {
+        this.attachmentRetirementListener = listener;
+    }
+
+    public Map<String, Object> prepareManagedPackage(Map<String, Object> metadata, InputStream source) {
+        Map<String, Object> result = managedPackageRequest("prepare", metadata, source);
+        requireUuid(JsonSupport.requiredString(result, "preparationId", "Package preparation"), "preparationId");
+        String digest = JsonSupport.requiredString(result, "packageDigest", "Package preparation");
+        if (!digest.matches("[a-f0-9]{64}")) {
+            throw new DaemonProtocolException("Invalid prepared package digest");
+        }
+        long length = JsonSupport.requiredNonNegativeLong(result, "byteLength", "Package preparation");
+        if (length > 100L * 1024 * 1024) {
+            throw new DaemonProtocolException("Prepared package exceeds 100 MiB");
+        }
+        return result;
+    }
+
+    public Map<String, Object> inspectManagedPackage(Map<String, Object> metadata, InputStream source) {
+        return managedPackageRequest("inspect", metadata, source);
+    }
+
+    public Map<String, Object> previewManagedPackage(Map<String, Object> metadata, InputStream source) {
+        return managedPackageRequest("preview", metadata, source);
+    }
+
+    private Map<String, Object> managedPackageRequest(String action, Map<String, Object> metadata, InputStream source) {
+        ensureOpen();
+        if (!capabilities.getFeatures().contains("managed-package-preparation/1")) {
+            throw new DaemonProtocolException("Managed package preparation is unavailable");
+        }
+        String path = "/internal/hosted-harness/v1/managed-packages/" + action
+                + "?metadata=" + encodeQuery(JsonSupport.encode(metadata));
+        HttpRequest request = sessionRequestBuilder(path, (String) null)
+                .header("Content-Type", "application/octet-stream")
+                .header("Accept", "application/json")
+                .timeout(Duration.ofMinutes(10))
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new PackageInputStream(source))).build();
+        try {
+            var raw = httpClient.send(request, HttpSupport.bodyHandler(8 * 1024 * 1024));
+            validateGeneration(raw.headers(), raw.statusCode());
+            var response = HttpSupport.consume(raw, "Managed package " + action);
+            DaemonClient.requireStatus(response, "prepare".equals(action) ? 201 : 200, "Managed package " + action);
+            return JsonSupport.parseObject(response.getBody(), "Managed package " + action);
+        } catch (IOException error) {
+            throw new DaemonTransportException("Managed package preparation transport failed", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new DaemonTransportException("Managed package preparation was interrupted", error);
+        }
+    }
+
+    public InputStream managedPackageArchive(String preparationId, Map<String, Object> scope) {
+        ensureOpen();
+        String id = requireUuid(preparationId, "preparationId");
+        String path = "/internal/hosted-harness/v1/managed-packages/" + id + "/archive?scope="
+                + encodeQuery(JsonSupport.encode(scope));
+        try {
+            var response = httpClient.send(sessionRequestBuilder(path, (String) null)
+                    .header("Accept", "application/octet-stream").header("Accept-Encoding", "identity")
+                    .timeout(Duration.ofMinutes(10)).GET().build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            try {
+                validateGeneration(response.headers(), response.statusCode());
+                if (response.statusCode() != 200) {
+                    throw new DaemonHttpException("Prepared package archive", response.statusCode(),
+                            HttpSupport.readError(response.body(), "Prepared package archive"));
+                }
+                List<String> encodings = response.headers().allValues("Content-Encoding");
+                if (encodings.size() > 1 || encodings.size() == 1 && !"identity".equalsIgnoreCase(encodings.get(0))) {
+                    throw new DaemonProtocolException("Prepared package archive used an unsupported encoding");
+                }
+                long length = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+                if (length < 0 || length > 100L * 1024 * 1024) {
+                    throw new DaemonProtocolException("Invalid prepared package archive length");
+                }
+                PackageInputStream input = new PackageInputStream(response.body());
+                input.deadline = scheduler.schedule(() -> closeQuietly(input), 10, TimeUnit.MINUTES);
+                return input;
+            } catch (RuntimeException error) {
+                closeQuietly(response.body());
+                throw error;
+            }
+        } catch (IOException error) {
+            throw new DaemonTransportException("Prepared package archive transport failed", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new DaemonTransportException("Prepared package archive was interrupted", error);
+        }
+    }
+
+    private static final class PackageInputStream extends java.io.FilterInputStream {
+        private long remaining = 100L * 1024 * 1024;
+        private ScheduledFuture<?> deadline;
+        PackageInputStream(InputStream input) { super(java.util.Objects.requireNonNull(input)); }
+        @Override public int read() throws IOException {
+            int value = super.read();
+            if (value >= 0 && --remaining < 0) {
+                throw new IOException("Managed package exceeds 100 MiB");
+            }
+            return value;
+        }
+        @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+            int count = in.read(bytes, offset, length);
+            if (count > 0 && (remaining -= count) < 0) {
+                throw new IOException("Managed package exceeds 100 MiB");
+            }
+            return count;
+        }
+        @Override public void close() throws IOException {
+            if (deadline != null) {
+                deadline.cancel(false);
+            }
+            super.close();
+        }
     }
 
     /** Observes process-global admission without attaching or acquiring a Session. */
@@ -277,7 +406,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
-        requireModelConfigurationCapability(request.toJson());
+        requireSessionConfigurationCapabilities(request.toJson());
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send("/session", "POST", request.toJson(), null);
@@ -325,7 +454,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
-    private void requireModelConfigurationCapability(Map<String, Object> request) {
+    private void requireSessionConfigurationCapabilities(Map<String, Object> request) {
+        if (request.containsKey("memoryStoreId")
+                && !capabilities.getFeatures().contains("session-memory/1")) {
+            throw new DaemonProtocolException("Hosted personal memory capability is required");
+        }
         if (request.containsKey("modelConfigDigest")
                 && !capabilities.getFeatures().contains("session-model-config/1")) {
             throw new DaemonProtocolException("Hosted Session model configuration capability is required");
@@ -345,7 +478,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
-        requireModelConfigurationCapability(request.toJson());
+        requireSessionConfigurationCapabilities(request.toJson());
         if (request.getRecoveryCleanupPromptId() != null
                 && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
             throw new DaemonProtocolException("Hosted cleanup-only load capability is required");
@@ -877,6 +1010,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public Map<String, Object> clientFilesOperation(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/client-files";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/client-files",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return JsonSupport.parseObject(response.getBody(), operation);
+    }
+
     public Map<String, Object> mcpManagementOperation(HarnessSessionRef session, String operationId) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(operationId, "operationId");
@@ -915,6 +1058,53 @@ public final class HostedHarnessClient implements AutoCloseable {
         return result;
     }
 
+    public Map<String, Object> runtimeSkillCandidates(HarnessSessionRef session) {
+        return runtimeSkillRead(session, "/extensions/skills/candidates");
+    }
+
+    public Map<String, Object> runtimeSkillSnapshot(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/extensions/skills/snapshot";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/extensions/skills/snapshot",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation, Duration.ofMinutes(10));
+        DaemonClient.requireStatus(response, 200, operation);
+        return runtimeSkillResponse(response, ref, operation);
+    }
+
+    public Map<String, Object> runtimeSkillArchive(HarnessSessionRef session, String operationId, String preparationId,
+            String bindingId, String generation, long offset) {
+        String id = requireUuid(preparationId, "preparationId");
+        String op = requireUuid(operationId, "operationId");
+        if (bindingId == null || !CLIENT_ID_PATTERN.matcher(bindingId).matches() || generation == null
+                || !generation.matches("[1-9][0-9]{0,15}") || offset < 0 || offset > 100L * 1024 * 1024) {
+            throw new IllegalArgumentException("Invalid Runtime Skill archive request");
+        }
+        return runtimeSkillRead(session, "/extensions/skills/archives/" + id + "?operationId=" + op
+                + "&bindingId=" + encodeQuery(bindingId) + "&generation=" + generation + "&offset=" + offset);
+    }
+
+    private Map<String, Object> runtimeSkillRead(HarnessSessionRef session, String suffix) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "GET /session/:id/extensions/skills";
+        HttpSupport.Response response = sendRead(sessionPath(ref.getHarnessSessionId()) + suffix, ref, operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return runtimeSkillResponse(response, ref, operation);
+    }
+
+    private Map<String, Object> runtimeSkillResponse(HttpSupport.Response response, HarnessSessionRef session, String operation) {
+        Map<String, Object> result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!session.getHarnessSessionId().equals(result.get("sessionId"))) {
+            throw new DaemonProtocolException("Runtime Skill response names another Session");
+        }
+        Map<String, Object> owner = JsonSupport.requiredObject(result, "owner", operation);
+        String binding = JsonSupport.requiredString(owner, "bindingId", operation);
+        String generation = JsonSupport.requiredString(owner, "generation", operation);
+        if (!CLIENT_ID_PATTERN.matcher(binding).matches() || !generation.matches("[1-9][0-9]{0,15}")) {
+            throw new DaemonProtocolException("Invalid Runtime Skill owner");
+        }
+        return result;
+    }
+
     private Map<String, Object> extensionMutation(HarnessSessionRef session, String suffix, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(JsonSupport.requiredString(body, "operationId", "Extension apply"), "operationId");
@@ -932,6 +1122,38 @@ public final class HostedHarnessClient implements AutoCloseable {
         } catch (DaemonProtocolException error) {
             throw new MutationOutcomeUnknownException(operation, error);
         }
+    }
+
+    /** Instance-scoped work: these calls never create or load a Session attachment. */
+    public Map<String, Object> submitSideQuery(Map<String, Object> body) {
+        return sideQueryCall("/side-queries", body, 202, requireBoundedRecoveryText((String) body.get("queryId"), "queryId"));
+    }
+
+    public Map<String, Object> readSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/status",
+                Map.of("claim", claim), 200, queryId);
+    }
+
+    public Map<String, Object> cancelSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/cancel",
+                Map.of("claim", claim), 202, queryId);
+    }
+
+    private Map<String, Object> sideQueryCall(String path, Map<String, Object> body, int expectedStatus, String queryId) {
+        if (!capabilities().getFeatures().contains("side-query/1")) {
+            throw new DaemonProtocolException("Hosted side-query capability is required");
+        }
+        String operation = "POST " + path;
+        var response = sendMutation(path, body, capabilities.getBootId(), null, operation);
+        requireMutationStatus(response, expectedStatus, operation);
+        var result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!queryId.equals(result.get("queryId")) || !(result.get("active") instanceof Boolean)
+                || !List.of("accepted", "running", "settled").contains(result.get("state"))) {
+            throw new DaemonProtocolException("Invalid side-query response");
+        }
+        return result;
     }
 
     public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {
@@ -1338,28 +1560,11 @@ public final class HostedHarnessClient implements AutoCloseable {
         long observedClock = observed != null ? observed.sendClock() : 0;
         boolean observedSettled = observed != null && observed.isSettled();
         String operation = "GET /session/:id/status";
-        HttpSupport.Response response = sendRead(
-                sessionPath(ref.getHarnessSessionId()) + "/status"
-                        + (targetPromptId == null ? "" : "?promptId=" + encodeQuery(targetPromptId)), ref,
+        HttpSupport.Response response = sendRead(statusPath(ref.getHarnessSessionId(), targetPromptId),
+                ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        HarnessSessionStatus status = parseStatus(response, ref.getHarnessSessionId(), targetPromptId,
                 operation);
-        DaemonClient.requireStatus(response, 200, operation);
-        Map<String, Object> json = JsonSupport.parseObject(response.getBody(),
-                "Hosted Harness status response");
-        String responseSessionId = parseWireUuid(
-                JsonSupport.requiredString(json, "sessionId", "status"),
-                "status.sessionId");
-        if (!ref.getHarnessSessionId().equals(responseSessionId)) {
-            throw new DaemonProtocolException(
-                    "Hosted Harness status sessionId does not match");
-        }
-        boolean active = JsonSupport.requiredBoolean(json,
-                "hasActivePrompt", "status");
-        HarnessSessionStatus status = new HarnessSessionStatus(responseSessionId, active, json);
-        if (targetPromptId != null && status.getRecovery() != null
-                && !targetPromptId.equals(status.getRecovery().getPromptId())) {
-            throw new DaemonProtocolException("Hosted recovery promptId does not match");
-        }
-        if (targetPromptId == null && !active && observedSettled) {
+        if (targetPromptId == null && !status.hasActivePrompt() && observedSettled) {
             // Clear only the exact record the snapshot read, and only while
             // no send attempt has opened or closed since: the answer
             // describes the evaluation instant, so an attempt that
@@ -1369,6 +1574,51 @@ public final class HostedHarnessClient implements AutoCloseable {
                             && current.isSettled()
                             && current.sendClock() == observedClock
                             ? null : current);
+        }
+        return status;
+    }
+
+    /**
+     * Reads the committed recovery evidence of a Session that this client did
+     * not attach, without loading it. Returns null when the Session is not
+     * resident in this Harness, or the Harness only answers its attachment.
+     * The status exchange is bounded to two seconds or the configured
+     * request timeout, whichever is shorter.
+     */
+    public HarnessSessionStatus getUnattachedStatus(String harnessSessionId, String promptId) {
+        ensureOpen();
+        String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
+        String targetPromptId = promptId == null ? null : requireUuid(promptId, "promptId");
+        String operation = "GET /session/:id/status";
+        HttpSupport.Response response = sendRead(statusPath(sessionId, targetPromptId), sessionId, null,
+                operation);
+        return response.getStatusCode() == 404 ? null
+                : parseStatus(response, sessionId, targetPromptId, operation);
+    }
+
+    private static String statusPath(String sessionId, String targetPromptId) {
+        return sessionPath(sessionId) + "/status"
+                + (targetPromptId == null ? "" : "?promptId=" + encodeQuery(targetPromptId));
+    }
+
+    private static HarnessSessionStatus parseStatus(HttpSupport.Response response, String sessionId,
+            String targetPromptId, String operation) {
+        DaemonClient.requireStatus(response, 200, operation);
+        Map<String, Object> json = JsonSupport.parseObject(response.getBody(),
+                "Hosted Harness status response");
+        String responseSessionId = parseWireUuid(
+                JsonSupport.requiredString(json, "sessionId", "status"),
+                "status.sessionId");
+        if (!sessionId.equals(responseSessionId)) {
+            throw new DaemonProtocolException(
+                    "Hosted Harness status sessionId does not match");
+        }
+        boolean active = JsonSupport.requiredBoolean(json,
+                "hasActivePrompt", "status");
+        HarnessSessionStatus status = new HarnessSessionStatus(responseSessionId, active, json);
+        if (targetPromptId != null && status.getRecovery() != null
+                && !targetPromptId.equals(status.getRecovery().getPromptId())) {
+            throw new DaemonProtocolException("Hosted recovery promptId does not match");
         }
         return status;
     }
@@ -1442,7 +1692,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean v2 = version == 2;
         if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
-                || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
+                || "hosted-workspace-shell/3".equals(request.get("toolProfile"))
+                || "hosted-workspace-shell/4".equals(request.get("toolProfile"))
+                || "hosted-workspace-mcp/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-files/1".equals(request.get("toolProfile")))) {
             throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
         }
         if (v2 ? !capabilities.getLifecycleV2Profiles().contains(request.get("toolProfile"))
@@ -1727,6 +1980,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (observedAttachment != null
                 && attachments.remove(sessionId, observedAttachment)) {
             observedAttachment.cancel();
+            notifyAttachmentRetirement(observedAttachment.session);
+        }
+    }
+
+    private void notifyAttachmentRetirement(HarnessSessionRef ref) {
+        Consumer<HarnessSessionRef> listener = attachmentRetirementListener;
+        if (listener != null) {
+            listener.accept(ref);
         }
     }
 
@@ -2257,15 +2518,25 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private HttpSupport.Response sendRead(String path,
             HarnessSessionRef session, String operation) {
+        return sendRead(path, session.getHarnessSessionId(),
+                session.getHarnessClientId(), operation);
+    }
+
+    private HttpSupport.Response sendRead(String path, String sessionId,
+            String clientId, String operation) {
         try {
-            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null,
-                    session.getHarnessClientId());
+            boolean unattached = clientId == null;
+            Duration timeout = unattached && requestTimeout.compareTo(UNATTACHED_STATUS_TIMEOUT) > 0
+                    ? UNATTACHED_STATUS_TIMEOUT : requestTimeout;
+            HttpResponse<HttpSupport.Body> raw = send(path, "GET", null, clientId,
+                    timeout, new AtomicBoolean(), unattached);
             validateGeneration(raw.headers(), raw.statusCode());
             return HttpSupport.consume(raw, operation);
         } catch (HostedHarnessGenerationException e) {
-            // Same rule as the heartbeat entrances: the peer restarted,
-            // so every local record for it is dead, ledger included.
-            discardLocalSessionState(session.getHarnessSessionId());
+            // Only attachment-backed reads can retire local replay identity.
+            if (clientId != null) {
+                discardLocalSessionState(sessionId);
+            }
             throw e;
         } catch (IOException e) {
             throw new DaemonTransportException(
@@ -2395,6 +2666,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             Map<String, Object> body, String clientId, Duration timeout,
             AtomicBoolean dispatched)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, timeout, dispatched, false);
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout,
+            AtomicBoolean dispatched, boolean boundResponseBody)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
@@ -2410,7 +2688,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpRequest request = builder.build();
         CompletableFuture<HttpResponse<HttpSupport.Body>> pending;
         try {
-            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler());
+            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler(path.contains("/extensions/skills/")
+                    ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES));
         } catch (RejectedExecutionException e) {
             // sendAsync surfaces a submit-time rejection synchronously —
             // for a saturated-but-running pool and a terminated one alike —
@@ -2426,7 +2705,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         // failure from here on is mid-flight.
         dispatched.set(true);
         try {
-            return pending.get();
+            return boundResponseBody ? pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS) : pending.get();
+        } catch (TimeoutException e) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("Hosted Harness response timed out");
         } catch (InterruptedException e) {
             pending.cancel(true);
             throw e;
@@ -2520,9 +2802,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         if (!heartbeatInterval.isZero()) {
             long delay = saturatedMillis(heartbeatInterval);
-            replacement.task = scheduler.scheduleWithFixedDelay(
+            ScheduledFuture<?> task = scheduler.scheduleWithFixedDelay(
                     () -> scheduleHeartbeat(replacement), delay, delay,
                     TimeUnit.MILLISECONDS);
+            replacement.task = task;
+            // Removal may have cancelled the attachment before its future
+            // was available. Complete that cancellation after publication.
+            if (replacement.cancelled.get()) {
+                task.cancel(false);
+            }
         }
     }
 
@@ -2557,11 +2845,9 @@ public final class HostedHarnessClient implements AutoCloseable {
                                     == 404
                             && "hosted_session_not_found".equals(
                                     ((DaemonHttpException) e)
-                                            .getErrorCode())
-                            && attachments.remove(
-                                    state.session.getHarnessSessionId(),
-                                    state)) {
-                        state.cancel();
+                                            .getErrorCode())) {
+                        discardObservedAttachment(
+                                state.session.getHarnessSessionId(), state);
                     }
                 } finally {
                     state.heartbeatInFlight.set(false);
@@ -2577,6 +2863,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (state != null && state.matches(session)
                 && attachments.remove(session.getHarnessSessionId(), state)) {
             state.cancel();
+            notifyAttachmentRetirement(session);
         }
     }
 

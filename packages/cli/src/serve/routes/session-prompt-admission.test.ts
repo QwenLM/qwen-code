@@ -12,8 +12,10 @@ vi.mock('./session-pr-backfill.js', () => ({
 
 import {
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
+  DAEMON_USER_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -103,6 +105,14 @@ beforeEach(() => {
 
 describe('classifyPromptRequest', () => {
   const runtime = { workspaceCwd: '/ws', primary: true, trusted: true };
+  const workflowOrigin = {
+    channelName: 'telegram',
+    chatId: 'launch-chat',
+    senderId: 'launch-user',
+    threadId: 'launch-thread',
+    userInitiated: true,
+    backgroundWorkflowBlocked: true,
+  };
   afterEach(() => {
     revokeChannelWorkerPromptAuthorization('worker-token');
   });
@@ -116,11 +126,13 @@ describe('classifyPromptRequest', () => {
         idempotencyKey: 'k',
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           [CHANNEL_BOUND_RELAY_META_KEY]: true,
           [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
           [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
           [SUBMITTED_PROMPT_META_KEY]: 'typed',
           [DAEMON_SUBMITTED_PROMPT_META_KEY]: 'typed',
+          [DAEMON_USER_PROMPT_META_KEY]: false,
           kept: 1,
         },
       },
@@ -134,6 +146,7 @@ describe('classifyPromptRequest', () => {
       {
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
         },
       },
@@ -259,7 +272,7 @@ describe('classifyPromptRequest', () => {
     'classifies a worker prompt as a channel turn only for a marker of exactly true (marker: $marker)',
     ({ marker, channelPrompt, requested }) => {
       registerChannelWorkerPromptAuthorization('worker-token', '/ws');
-      const { classification } = classifyPromptRequest(
+      const { classification, forwardedBody } = classifyPromptRequest(
         {
           _meta: {
             ...(marker !== undefined
@@ -267,6 +280,7 @@ describe('classifyPromptRequest', () => {
               : {}),
             [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
             [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
           },
         },
         runtime,
@@ -277,11 +291,29 @@ describe('classifyPromptRequest', () => {
       // off (`requestedChannelPrompt`).
       expect(classification).toStrictEqual({
         channelPrompt,
+        ...(channelPrompt ? { channelWorkflowOrigin: workflowOrigin } : {}),
         promptDisplayText: 'shown',
         requestedChannelPrompt: requested,
       });
+      expect(forwardedBody).toEqual({});
     },
   );
+
+  it('removes the history-recording opt-out from the forwarded request', () => {
+    const prompt = [{ type: 'text', text: 'machine command' }];
+    const body = { prompt, suppressInputHistory: true };
+    const { classification, forwardedBody } = classifyPromptRequest(
+      body,
+      runtime,
+    );
+
+    expect(classification).toEqual({
+      channelPrompt: false,
+      requestedChannelPrompt: false,
+    });
+    expect(forwardedBody).toEqual({ prompt });
+    expect(body).toHaveProperty('suppressInputHistory', true);
+  });
 
   it('drops a display text that is not a string, even from the worker', () => {
     registerChannelWorkerPromptAuthorization('worker-token', '/ws');
@@ -393,7 +425,34 @@ describe('admitSessionPrompt', () => {
       classification: { channelPrompt: true, requestedChannelPrompt: false },
     });
     expect(calls[0]!.context['channelPrompt']).toBe(true);
+    expect(calls[0]!.context).not.toHaveProperty('channelWorkflowOrigin');
     expect(mockBind).not.toHaveBeenCalled();
+  });
+
+  // The child records the origin on any workflow the turn starts; without
+  // it a detached workflow's result has no chat to go back to.
+  it('forwards the launch origin of a trusted channel turn to the bridge', () => {
+    const { runtime, calls } = fakeRuntime();
+    const channelWorkflowOrigin = {
+      channelName: 'dingtalk',
+      chatId: 'launch-chat',
+      senderId: 'alice',
+      userInitiated: true as const,
+    };
+    admitSessionPrompt(deps, {
+      runtime,
+      sessionId: freshSessionId(),
+      prompt: reviewPrompt,
+      request: {},
+      classification: {
+        channelPrompt: true,
+        channelWorkflowOrigin,
+        requestedChannelPrompt: false,
+      },
+    });
+    expect(calls[0]!.context['channelWorkflowOrigin']).toEqual(
+      channelWorkflowOrigin,
+    );
   });
 
   it.each([false, true])(

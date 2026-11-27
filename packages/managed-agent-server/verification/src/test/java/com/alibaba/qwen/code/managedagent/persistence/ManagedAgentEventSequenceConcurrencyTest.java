@@ -56,7 +56,7 @@ class ManagedAgentEventSequenceConcurrencyTest {
                 new DataSourceTransactionManager(source));
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     @ParameterizedTest
@@ -108,7 +108,7 @@ class ManagedAgentEventSequenceConcurrencyTest {
         jdbc.update("DELETE FROM ma_public_event WHERE tenant_id = ? AND session_id = ?",
                 TENANT, turn.sessionId());
         jdbc.update("DELETE FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                        + " AND stream_kind = 'SESSION' AND stream_id = X''",
+                        + " AND stream_kind = 'SESSION' AND stream_id = ''",
                 TENANT, turn.sessionId());
 
         assertThatThrownBy(() -> transactions.executeWithoutResult(status ->

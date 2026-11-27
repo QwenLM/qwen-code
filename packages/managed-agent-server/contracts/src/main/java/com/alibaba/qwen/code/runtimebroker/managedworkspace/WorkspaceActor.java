@@ -11,9 +11,9 @@ public final class WorkspaceActor {
     private final String actorId;
 
     public WorkspaceActor(String tenantId, String actorId) {
-        this.tenantId = WorkspaceValues.requireIdentifier(tenantId,
+        this.tenantId = WorkspaceValues.requireTenantIdentifier(tenantId,
                 "tenantId");
-        this.actorId = WorkspaceValues.requireText(actorId, "actorId");
+        this.actorId = WorkspaceValues.requireActor(actorId, "actorId");
     }
 
     public String getTenantId() {

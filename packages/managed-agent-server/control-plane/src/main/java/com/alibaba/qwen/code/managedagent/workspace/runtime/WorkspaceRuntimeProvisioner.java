@@ -2,6 +2,9 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -18,9 +21,16 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     private final RuntimeProvisioner delegate;
     private final WorkspaceRuntimeResolver resolver;
     private final WorkspaceExecutionStore executionStore;
+    private final RuntimeBindingRepository bindings;
 
     public WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore executionStore) {
+        this(delegate, resolver, executionStore, null);
+    }
+
+    public WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
+            WorkspaceExecutionStore executionStore, RuntimeBindingRepository bindings) {
+        this.bindings = bindings;
         this.delegate = delegate;
         this.resolver = resolver;
         this.executionStore = executionStore;
@@ -38,7 +48,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         }
         var resolved = resolver.resolve(harnessSessionId, scope.getLifecycleAuthority());
         if (!resolved.scope().equals(scope)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         var selected = delegate.createRequest(scope, isolationKey);
         return new RuntimeProvisionRequest(scope, isolationKey, selected.getProvisionerKind(), resolved.binding().getStorageId());
@@ -84,9 +94,9 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         }
         if (request.getIsolationKey() != null) {
             var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
-            if (!resolved.scope().equals(request.getScope())
+            if (!WorkspaceRuntimeResolver.matchesRecordedScope(resolved.scope(), request.getScope())
                     || !resolved.binding().getStorageId().equals(request.getStorageId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return;
         }
@@ -107,15 +117,23 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public boolean supportsDrainedStopKind(String kind) {
+        return delegate.supportsDrainedStopKind(kind);
+    }
+
+    @Override
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         return delegate.supportsDrainedStop(binding);
     }
 
     @Override
-    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
-        if (binding.getRequest().isManagedContext() ? !executionStore.canStopDrained(binding)
-                : executionStore.hasHolder(binding)) {
-            return CompletableFuture.failedFuture(new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        boolean external = WorkspaceExecutionProfile
+                .isExternalWorkspaceRequest(binding.getRequest());
+        if (external ? bindings == null || !executionStore.canStopExternalDrained(binding, bindings)
+                : binding.getRequest().isManagedContext() ? !executionStore.canStopDrained(binding)
+                        : executionStore.hasHolder(binding)) {
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(
                     409, "workspace_close_execution_unsettled", "Original Workspace holder remains.", false));
         }
         return delegate.stopDrained(binding);

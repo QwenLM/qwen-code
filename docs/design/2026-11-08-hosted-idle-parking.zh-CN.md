@@ -4,6 +4,8 @@
 
 状态：供讨论的提案，尚未接受。本文是 [#16320](https://github.com/QwenLM/qwen-code/issues/16320) 的第 6 步（第 1–5 步已合入），在 [#15082](https://github.com/QwenLM/qwen-code/issues/15082) 下讨论。它扩展 [Kubernetes 共享 Hosted Harness 池](2026-10-21-managed-harness-kubernetes.zh-CN.md)中的无损释放。代码引用基于 `main` 的 `0807f5d391`。只写 `:line`（行号）的引用指最近一次点名的文件。
 
+后续的[无状态 Hosted Harness 提案](2026-11-16-managed-stateless-harness.zh-CN.md)以本文的空闲计时、Java 缓存恢复、并发和结果未知处理为基线，将目标扩展到按请求常驻。它明确记录了初始 Store 协议、placement、MCP/Hook 生命周期和默认值上的不同选择。两份文档仍然都是提案；后续计划不代表本文的阶段已经实现，也不代表待决问题已经被接受。下文测量仍是历史证据，启用实现之前必须重新测量。
+
 ## parking 要消除什么
 
 Session 留在 Hosted Harness 中加载时，即使什么都没运行，也在消耗平台工作量。#16320 实测每个常驻 Session 每分钟 51–56 条语句。这些工作量的来源如下：

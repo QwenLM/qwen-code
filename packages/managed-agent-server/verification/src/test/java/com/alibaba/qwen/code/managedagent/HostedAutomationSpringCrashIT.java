@@ -119,10 +119,9 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenant = "hosted-automation-spring-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("fixture"));
         startFixture(root, tenant);
@@ -207,6 +206,7 @@ class HostedAutomationSpringCrashIT {
             fixtureInternalPort = reservePort();
             fixturePublicPort = reservePort();
         }
+        brokerPort = fixtureInternalPort;
         Child child = startChild(root, tenant, fixtureInternalPort,
                 fixturePublicPort, brokerPort, fixtureInternalPort);
         fixture = child.process();
@@ -412,10 +412,9 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-fire-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("fire"));
         startFixture(root, tenantName);
         startHarness();
@@ -484,11 +483,9 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-kill-watermark-"
-                + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(
                 temporary.resolve("kill-watermark"));
         startFixture(root, tenantName);
@@ -560,10 +557,9 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-kill-answer-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path root = Files.createDirectories(temporary.resolve("kill-answer"));
         startFixture(root, tenantName);
         startHarness();
@@ -686,10 +682,9 @@ class HostedAutomationSpringCrashIT {
                         System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
         temporary = temporary.toRealPath();
-        String tenantName = "hosted-automation-race-" + UUID.randomUUID();
+        String tenantName = UUID.randomUUID().toString();
         startModel();
         harnessPort = reservePort();
-        brokerPort = reservePort();
         Path rootA = Files.createDirectories(temporary.resolve("race-a"));
         Path rootB = Files.createDirectories(temporary.resolve("race-b"));
         startFixture(rootA, tenantName);

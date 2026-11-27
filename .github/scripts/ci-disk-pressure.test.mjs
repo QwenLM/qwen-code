@@ -458,3 +458,68 @@ describe('ci.yml disk-pressure evidence', () => {
     }
   });
 });
+
+// The disk floor admits a job on free bytes and inodes; CPU contention is a
+// different axis. The load gate is a backstop against an unrunnable host, not a
+// predictor of the RPC flake that turned green shards red on this pool
+// (`Timeout calling "onTaskUpdate"` with 902 of 902 tests passing in main runs
+// 43018456551 and 43016357976) — the measured green and red load bands overlap.
+// Both gates must stay hard failures placed before the work they protect, and
+// the load gate must stay off the lanes that cannot read /proc/loadavg.
+describe('ci.yml host load gate', () => {
+  it('refuses an unrunnable host before the suites, on Linux self-hosted only', () => {
+    const gate = step('Host load gate (self-hosted)');
+
+    assert.match(
+      gate.if,
+      /runner\.environment == 'self-hosted' && runner\.os == 'Linux'/,
+    );
+    assert.match(gate.if, /needs\.test_build\.result == 'success'/);
+    assert.match(gate.if, /steps\.ci_profile\.outputs\.ci_profile == 'full'/);
+    assert.equal(
+      gate.run,
+      'bash .github/scripts/check-host-load.sh',
+      'the gate must run the script, not an inline approximation of it',
+    );
+    // A softened gate admits the host it exists to refuse, and the
+    // job then spends the test step's whole budget failing as a test.
+    assert.equal(gate['continue-on-error'], undefined);
+    assert.doesNotMatch(gate.run, /\|\| true/);
+    // The ceiling is operator-tunable without a PR, like the worker cap and
+    // the retry count beside it.
+    assert.equal(
+      gate.env.HOST_LOAD_MAX_RATIO,
+      "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}",
+    );
+    // Its own wait must not be able to consume the step budget it protects.
+    assert.ok(gate['timeout-minutes'] <= 3);
+  });
+
+  it('runs after the unpack and before the suites it protects', () => {
+    // The load that matters is the load the suites will run under; a reading
+    // taken before the install is minutes stale by the time they start.
+    //
+    // Order comes from `step()`, which throws when a name is missing, not from
+    // `names.indexOf(...)`: a renamed step made indexOf return -1, every
+    // `gate > -1` comparison true, and the test green with the step gone.
+    const position = (name) => testSteps.indexOf(step(name));
+    // The two provisioning steps are apt/network installs whose duration
+    // follows the contention this gate measures, so a sample taken above them
+    // can be minutes stale when the suites start.
+    assert.ok(
+      position('Unpack the built tree') <
+        position('Host load gate (self-hosted)'),
+      'the load gate must sample after the unpack',
+    );
+    assert.ok(
+      position('Provision linters for real-binary tests') <
+        position('Host load gate (self-hosted)'),
+      'the load gate must sample after the tooling provisioning',
+    );
+    assert.ok(
+      position('Host load gate (self-hosted)') <
+        position('Run tests and generate reports'),
+      'the load gate must sample before the suites it protects',
+    );
+  });
+});

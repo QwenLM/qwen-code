@@ -2,9 +2,11 @@ package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
@@ -65,7 +68,7 @@ class RuntimeProviderPluginsTest {
 
     @Test
     void builtinProvidersAreTrulyOptionalOnTheApplicationClasspath() throws Exception {
-        for (String selected : List.of("none", "local", "external", "kubernetes", "ssh", "static", "local,ssh", "full", "fixture")) {
+        for (String selected : List.of("none", "local", "external", "ssh", "static", "local,ssh", "full", "fixture")) {
             try (var loader = isolated(selected)) {
                 withContextLoader(loader, () -> {
                     var registry = loader.loadClass(REGISTRY).getConstructor().newInstance();
@@ -73,7 +76,6 @@ class RuntimeProviderPluginsTest {
                     var implementations = Map.of(
                             "local", List.of("local-process", "local.LocalProcessRuntimeProvisioner"),
                             "external", List.of("external-scratch", "external.ExternalRuntimeProvisioner"),
-                            "kubernetes", List.of("kubernetes-workspace", "kubernetes.ResidentWorkspaceProvisioner"),
                             "ssh", List.of("ssh-process", "ssh.SshRuntimeProvisioner"),
                             "static", List.of("static", "staticruntime.StaticRuntimeProvisioner"));
                     for (var entry : implementations.entrySet()) {
@@ -149,7 +151,6 @@ class RuntimeProviderPluginsTest {
                 broker.setToken("fixture-broker-token");
                 broker.setWorkspaceCwd("/remote/workspace");
                 broker.setWorkspaceId("fixture-workspace");
-                broker.setPort(0);
                 settings.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
                 settings.validateRuntimeProvider();
                 Class<?> preflight = Class.forName("com.alibaba.qwen.code.managedagent.preflight.ManagedAgentPreflight");
@@ -163,24 +164,23 @@ class RuntimeProviderPluginsTest {
                         .doesNotContain("not installed", "unknown provisioner");
                 Class<?> fixture = loader.loadClass("example.FixtureProvider");
                 try (var runtime = broker(settings)) {
-                    assertThat(runtime.getBaseUri()).isNotNull();
                     assertThat(fixture.getField("created").getInt(null)).isEqualTo(1);
                     assertThat(fixture.getField("closed").getInt(null)).isZero();
                     assertThat(fixture.getField("endpoint").get(null)).isEqualTo("http://127.0.0.1:9");
                 }
                 assertThat(fixture.getField("closed").getInt(null)).isEqualTo(1);
-                broker.setPort(-1);
-                assertThatThrownBy(() -> broker(settings)).hasMessageContaining("listener could not start");
-                assertThat(fixture.getField("created").getInt(null)).isEqualTo(2);
-                assertThat(fixture.getField("closed").getInt(null)).isEqualTo(2);
             });
         }
     }
 
     private static EmbeddedRuntimeBroker broker(ManagedAgentProperties settings) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:plugins-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return new EmbeddedRuntimeBroker(mock(AgentStateStore.class), settings,
-                new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository());
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source));
     }
 
     private static URLClassLoader isolated(String selected) throws Exception {
@@ -188,7 +188,7 @@ class RuntimeProviderPluginsTest {
         for (String entry : System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"))
                 .split(java.util.regex.Pattern.quote(File.pathSeparator))) {
             Path path = Path.of(entry).toAbsolutePath().normalize();
-            if (path.endsWith("test-classes") || Arrays.stream(new String[]{"local", "external", "kubernetes", "ssh", "static"})
+            if (path.endsWith("test-classes") || Arrays.stream(new String[]{"local", "external", "ssh", "static"})
                     .anyMatch(kind -> !selected.equals("full") && !Arrays.asList(selected.split(",")).contains(kind) && (path.endsWith("runtime-" + kind + "/target/classes")
                             || path.getFileName().toString().matches("qwen-managed-agent-runtime-" + kind + "-.+\\.jar")))) {
                 continue;

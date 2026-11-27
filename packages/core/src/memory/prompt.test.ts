@@ -15,6 +15,7 @@ import {
 } from './index-budget.js';
 import {
   buildManagedAutoMemoryPrompt,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
   buildAutoMemoryIndexContext,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
@@ -1202,7 +1203,6 @@ describe('managed auto-memory prompt helpers', () => {
       );
 
       for (const rule of [
-        'Saving a memory is a two-step process:',
         'You MUST access memory when the user explicitly asks',
         'Keep one independently retrievable fact or rule per file.',
         'Keep the name, description, type, category, keywords, and usage_scenarios fields',
@@ -1213,19 +1213,19 @@ describe('managed auto-memory prompt helpers', () => {
       }
       if (tier === 'multi') {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`',
+          'Write the memory to its own file inside the directory chosen by its `<scope>`',
         );
         expect(prompt).toContain(
-          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory',
+          'The runtime rebuilds the PROJECT and TEAM indexes from topic files.',
         );
         expect(prompt).toContain('in any of your memory directories');
         expect(prompt).toContain('— never save them to TEAM');
       } else {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file under the matching type subdirectory',
+          'Write the memory to its own file under the matching type subdirectory',
         );
         expect(prompt).toContain(
-          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path)`,
+          'The runtime rebuilds the index from these files.',
         );
       }
     },
@@ -1244,5 +1244,120 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result.trimEnd().endsWith('</system-reminder>')).toBe(true);
     expect(result).not.toContain('</system-reminder> early');
     expect(result).toContain('<\\/system-reminder>');
+  });
+
+  it.each([
+    [64_000, 100, 12_500, false],
+    [127_999, 100, 12_500, false],
+    [128_000, 200, 25_000, true],
+    [undefined, 200, 25_000, true],
+  ] as const)(
+    'bounds the loaded project index for a %s-token model',
+    (window, maxLines, maxChars, includesLaterTopic) => {
+      const memoryDir = '/tmp/project-memory';
+      const index = Array.from(
+        { length: 160 },
+        (_, i) => `- [Topic ${i}](memory-${i}.md) — ${'中'.repeat(105)}`,
+      ).join('\n');
+      const catalog = buildAutoMemoryIndexContext(
+        memoryDir,
+        index + INDEX_TRUNCATION_NOTICE,
+        undefined,
+        undefined,
+        window,
+      );
+      const projectIndex = catalog
+        .split(`## ${memoryDir}/MEMORY.md\n\n`)[1]!
+        .split('</system-reminder>')[0]!
+        .trim();
+      expect(projectIndex.split('\n').length).toBeLessThanOrEqual(maxLines);
+      expect(projectIndex.length).toBeLessThanOrEqual(maxChars);
+      expect(projectIndex).toContain('memory-0.md');
+      expect(projectIndex.includes('memory-140.md')).toBe(includesLaterTopic);
+      expect(projectIndex).toContain(INDEX_TRUNCATION_WARNING);
+    },
+  );
+});
+
+describe("the main session's resident auto-memory policy", () => {
+  const PROJECT_DIR = '/home/user/.qwen/projects/app/memory';
+  const USER = { memoryDir: '/home/user/.qwen/memories' };
+  const TEAM = { memoryDir: '/repo/.qwen/team-memory' };
+  const resident = buildResidentAutoMemoryPrompt(PROJECT_DIR, USER, TEAM);
+
+  // What a session must have to save and use memories correctly; the full
+  // guidance stays with the background agents' prompts.
+  it.each([
+    ['the user tier', 'USER memory (cross-project'],
+    ['the project tier', 'PROJECT memory (this project only'],
+    ['the team tier', 'TEAM memory (this project, shared'],
+    [
+      'saving and updating immediately',
+      'remember or update a memory, save the change now',
+    ],
+    [
+      'forget and the user index update',
+      'Remove its index pointer separately for USER memory.',
+    ],
+    [
+      'the user type and its scope',
+      '`user` (role, goals, expertise, preferences) goes to USER',
+    ],
+    [
+      'the feedback scope',
+      'PROJECT for conventions every contributor must follow',
+    ],
+    ['absolute dates', 'Convert relative dates to absolute ones'],
+    ['the reference scope', 'PROJECT, or USER for personal resources'],
+    ['the body structure', '**Why:** and **How to apply:** lines'],
+    ['secrets stay out of TEAM', 'Never save API keys, tokens, credentials'],
+    [
+      'the generated team index',
+      'Write only the topic file because the TEAM index is generated',
+    ],
+    ['what not to save', 'temporary details even when asked'],
+    ['the frontmatter template', 'the lists `keywords` and `usage_scenarios`'],
+    ['the category list', 'Pick one category from basic_information'],
+    ['metadata limits', 'keep it within 64 characters'],
+    ['the same-directory index', "in the same directory's `MEMORY.md`"],
+    [
+      'no body or frontmatter in the index',
+      'Use only pointers under ~150 characters, without frontmatter',
+    ],
+    ['the generated project index', 'The runtime generates the PROJECT index'],
+    ['deduplication', 'Check the current catalog for duplicates first'],
+    ['when to read memory', 'asks to check, recall, or remember'],
+    [
+      'ignoring memory',
+      'If asked to ignore memory, do not read, apply, cite, or mention it',
+    ],
+    [
+      'checking stale memory',
+      'Check the current state before relying on a memory or recommending anything it names',
+    ],
+  ])('keeps %s', (_what, anchor) => {
+    expect(resident).toContain(anchor);
+  });
+
+  it('leaves out the detailed type guidance', () => {
+    expect(resident).not.toContain('<types>');
+    expect(resident).not.toMatch(/\bskill\b/);
+  });
+
+  // The resident policy is carried on each request; pin the compact budget.
+  it('stays within its budget', () => {
+    const solo = buildResidentAutoMemoryPrompt(PROJECT_DIR, USER, undefined);
+    const full = buildManagedAutoMemoryPrompt(
+      PROJECT_DIR,
+      null,
+      USER,
+      undefined,
+      {
+        includeIndexes: false,
+      },
+    );
+
+    expect(solo.length).toBeLessThanOrEqual(3_000);
+    expect(solo.length).toBeLessThan(full.length / 3);
   });
 });

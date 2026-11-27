@@ -5,18 +5,31 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
-import { MOD_TIMEOUT_MS, MOD_MAX_BYTES, MOD_MAX_DEPTH } from './types.js';
+import {
+  MOD_TIMEOUT_MS,
+  MOD_MAX_BYTES,
+  MOD_MAX_DEPTH,
+  MOD_MODEL_EFFORTS,
+} from './types.js';
 import {
   validateToolInput,
   validToolResult,
   validToolCheck,
 } from './tool-events.js';
-import { INVALIDATABLE_EVENTS, validateRenderTree } from './render-tree.js';
+import {
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_PINNED_PROPS,
+  MOD_ROW_SITES,
+  invalidRenderText,
+  validateRenderTree,
+  type ModRenderSite,
+} from './render-tree.js';
 
 export const MOD_METHODS = [
   'clock.now',
   'clock.sleep',
   'command.register',
+  'model.complete',
   'prompt.submit',
   'session.cwd',
   'session.id',
@@ -27,6 +40,10 @@ export const MOD_METHODS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
   'turn.abort',
   'ui.invalidate',
   'ui.log',
@@ -36,6 +53,7 @@ export const MOD_EVENTS = [
   'clock.sleep',
   'command.register',
   'command.run',
+  'model.complete',
   'prompt.submit',
   'session.cwd',
   'session.end',
@@ -48,6 +66,10 @@ export const MOD_EVENTS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
   'tool.call',
   'tool.check',
   'turn.abort',
@@ -58,10 +80,20 @@ export const MOD_EVENTS = [
   'ui.render',
 ] as const;
 // Events only some hosts raise: the load request names the sites a host
-// draws, and whether it raises `prompt.submit`.
+// draws, whether it raises `prompt.submit` and the tool events, and whether it
+// keeps a store.
+export const MOD_TOOL_EVENTS: readonly ModEvent[] = ['tool.call', 'tool.check'];
+export const MOD_STORE_EVENTS: readonly ModEvent[] = [
+  'store.delete',
+  'store.get',
+  'store.keys',
+  'store.set',
+];
 export const MOD_HOST_EVENTS: readonly ModEvent[] = [
   'prompt.submit',
   'ui.render',
+  ...MOD_TOOL_EVENTS,
+  ...MOD_STORE_EVENTS,
 ];
 // `$` methods that read rather than dispatch, so no hook hears them.
 export const MOD_READS = ['ui.resolve'] as const;
@@ -84,6 +116,14 @@ export const record = (value: unknown): value is ModInput =>
 const only = (value: ModInput, keys: readonly string[]) =>
   Object.keys(value).every((key) => keys.includes(key));
 const text = (value: unknown) => typeof value === 'string';
+const commandName = (value: unknown) =>
+  typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value);
+const COMMAND_FLAGS = [
+  'immediate',
+  'isHidden',
+  'isTerminalOnly',
+  'isWorkspaceFree',
+] as const;
 const amount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const count = (value: unknown): value is number =>
@@ -146,6 +186,173 @@ export function promptSubmitCall(value: unknown, plugin: string): ModInput {
   };
 }
 
+// Claude Code's ceilings: a reply's tokens (the model's own limit may be
+// lower, which the host judges) and a timer's longest wait.
+export const MOD_MODEL_MAX_TOKENS = 64_000;
+const MAX_TIMER_MS = 2_147_483_647;
+const MODEL_REQUEST_KEYS = [
+  'model',
+  'prompt',
+  'system',
+  'maxTokens',
+  'effort',
+  'timeoutMs',
+] as const;
+
+// A string, or blocks of `{ text, cache? }` with `cache` true when given.
+function textBlocks(value: unknown): value is Array<Record<string, unknown>> {
+  return (
+    Array.isArray(value) &&
+    value.length <= 1000 &&
+    value.every(
+      (block) =>
+        record(block) &&
+        only(block, ['text', 'cache']) &&
+        text(block['text']) &&
+        (block['cache'] === undefined || block['cache'] === true),
+    )
+  );
+}
+
+function modelText(
+  value: unknown,
+  key: string,
+): { text: string; blocks?: Array<{ text: string; cache?: true }> } {
+  if (text(value)) return { text: value };
+  if (!textBlocks(value))
+    throw new Error(
+      `Mod model.complete takes ${key} as a string or a list of { text, cache? } blocks.`,
+    );
+  const blocks = value.map((block) => ({
+    text: block['text'] as string,
+    ...(block['cache'] === true && { cache: true as const }),
+  }));
+  return { text: blocks.map((block) => block.text).join(''), blocks };
+}
+
+function modelLimits(value: ModInput): void {
+  const maxTokens = value['maxTokens'];
+  if (
+    maxTokens !== undefined &&
+    !(Number.isSafeInteger(maxTokens) && Number(maxTokens) > 0)
+  )
+    throw new Error(
+      'Mod model.complete takes maxTokens as a positive whole number.',
+    );
+  if (Number(maxTokens) > MOD_MODEL_MAX_TOKENS)
+    throw new Error(
+      `Mod model.complete maxTokens ${maxTokens} is over the limit of ${MOD_MODEL_MAX_TOKENS}.`,
+    );
+  if (
+    value['effort'] !== undefined &&
+    !(MOD_MODEL_EFFORTS as readonly unknown[]).includes(value['effort'])
+  )
+    throw new Error(
+      `Mod model.complete takes effort as one of ${MOD_MODEL_EFFORTS.join(', ')}.`,
+    );
+  const timeoutMs = value['timeoutMs'];
+  if (
+    timeoutMs !== undefined &&
+    !(
+      Number.isSafeInteger(timeoutMs) &&
+      Number(timeoutMs) > 0 &&
+      Number(timeoutMs) <= MAX_TIMER_MS
+    )
+  )
+    throw new Error(
+      `Mod model.complete takes timeoutMs as a whole number from 1 to ${MAX_TIMER_MS}.`,
+    );
+}
+
+/**
+ * The event input a `$.model.complete(request)` call raises, in Claude Code's
+ * `ModelCompleteInput`: the caller's blocks joined into `prompt` and `system`
+ * and kept beside them as given.
+ */
+export function modelCompleteCall(value: unknown): ModInput {
+  if (!record(value) || !only(value, MODEL_REQUEST_KEYS))
+    throw new Error(
+      'Mod model.complete takes { model, prompt, system?, maxTokens?, effort?, timeoutMs? }.',
+    );
+  if (!text(value['model']) || !value['model'].trim())
+    throw new Error('Mod model.complete needs a model.');
+  modelLimits(value);
+  const prompt = modelText(value['prompt'], 'prompt');
+  const system =
+    value['system'] === undefined
+      ? undefined
+      : modelText(value['system'], 'system');
+  return {
+    model: value['model'],
+    prompt: prompt.text,
+    ...(system && { system: system.text }),
+    ...(prompt.blocks && { promptBlocks: prompt.blocks }),
+    ...(system?.blocks && { systemBlocks: system.blocks }),
+    ...(value['maxTokens'] !== undefined && { maxTokens: value['maxTokens'] }),
+    ...(value['effort'] !== undefined && { effort: value['effort'] }),
+    ...(value['timeoutMs'] !== undefined && { timeoutMs: value['timeoutMs'] }),
+  };
+}
+
+// What a hook passes down: the request as text, its blocks beside it.
+function validateModelInput(value: ModInput): void {
+  if (
+    !only(value, [
+      'model',
+      'prompt',
+      'system',
+      'promptBlocks',
+      'systemBlocks',
+      'maxTokens',
+      'effort',
+      'timeoutMs',
+    ]) ||
+    !text(value['model']) ||
+    !value['model'].trim() ||
+    !text(value['prompt']) ||
+    !(
+      value['system'] === undefined ||
+      value['system'] === null ||
+      value['system'] === false ||
+      text(value['system'])
+    ) ||
+    (value['promptBlocks'] !== undefined &&
+      !textBlocks(value['promptBlocks'])) ||
+    (value['systemBlocks'] !== undefined && !textBlocks(value['systemBlocks']))
+  )
+    throw new Error(
+      'Mod model.complete takes { model, prompt, system?, promptBlocks?, systemBlocks?, maxTokens?, effort?, timeoutMs? } with prompt and system as text.',
+    );
+  modelLimits(value);
+}
+
+// Claude Code's `ModelCompleteResult`, answered by a hook or by the host.
+export function validModelResult(value: unknown): boolean {
+  if (
+    !record(value) ||
+    !record(value['usage']) ||
+    !only(value['usage'], TURN_TOKENS) ||
+    !TURN_TOKENS.every((key) => count((value['usage'] as ModInput)[key]))
+  )
+    return false;
+  if (value['isAnswered'] === true)
+    return only(value, ['isAnswered', 'text', 'usage']) && text(value['text']);
+  if (value['isAnswered'] !== false) return false;
+  if (value['reason'] === 'api-error')
+    return (
+      only(value, ['isAnswered', 'reason', 'status', 'error', 'usage']) &&
+      (value['status'] === null ||
+        (Number.isInteger(value['status']) &&
+          Number(value['status']) >= 100 &&
+          Number(value['status']) <= 599)) &&
+      text(value['error'])
+    );
+  return (
+    only(value, ['isAnswered', 'reason', 'usage']) &&
+    (value['reason'] === 'empty-reply' || value['reason'] === 'aborted')
+  );
+}
+
 export function validateInput(
   event: ModEvent,
   value: unknown,
@@ -173,17 +380,30 @@ export function validateInput(
         'Mod prompt.submit takes { text, context } as a list of texts; origin, wait and turnId are pinned.',
       );
   } else if (event === 'command.register') {
+    const aliases = value['aliases'];
     if (
-      Object.keys(value).some(
-        (key) => !['name', 'description', 'argumentHint'].includes(key),
-      ) ||
-      typeof value['name'] !== 'string' ||
-      !/^[a-zA-Z0-9_-]{1,64}$/.test(value['name']) ||
+      !only(value, [
+        'name',
+        'description',
+        'argumentHint',
+        'aliases',
+        ...COMMAND_FLAGS,
+      ]) ||
+      !commandName(value['name']) ||
       typeof value['description'] !== 'string' ||
       !value['description'].trim() ||
       value['description'].length > 2000 ||
       (value['argumentHint'] !== undefined &&
-        typeof value['argumentHint'] !== 'string')
+        typeof value['argumentHint'] !== 'string') ||
+      (aliases !== undefined &&
+        !(
+          Array.isArray(aliases) &&
+          aliases.length <= 8 &&
+          aliases.every(commandName)
+        )) ||
+      COMMAND_FLAGS.some(
+        (flag) => value[flag] !== undefined && value[flag] !== true,
+      )
     )
       throw new Error('Invalid Mod command specification.');
   } else if (event === 'ui.log') {
@@ -222,6 +442,10 @@ export function validateInput(
       throw new Error(
         'Mod ui.invalidate takes ui.render or a cached-answer event.',
       );
+  } else if (event === 'model.complete') {
+    validateModelInput(value);
+  } else if (MOD_STORE_EVENTS.includes(event)) {
+    validateStoreInput(event, value, original);
   } else if (event === 'ui.render') {
     validateRenderInput(value, original);
   } else if (!isDeepStrictEqual(value, original))
@@ -230,7 +454,37 @@ export function validateInput(
     throw new Error('Mod event is too large.');
 }
 
-// The envelope and `props.view` are pinned; the other props keep their kind.
+// A store call names its key; a hook above may write another value, never
+// another key.
+function validateStoreInput(
+  event: ModEvent,
+  value: ModInput,
+  original: ModInput,
+): void {
+  const fields =
+    event === 'store.keys'
+      ? []
+      : event === 'store.set'
+        ? ['key', 'value']
+        : ['key'];
+  if (
+    !only(value, fields) ||
+    (event !== 'store.keys' && !text(value['key'])) ||
+    (event === 'store.set' && value['value'] === undefined)
+  )
+    throw new Error(
+      event === 'store.keys'
+        ? 'Mod store.keys takes no arguments.'
+        : event === 'store.set'
+          ? 'Mod store.set takes a string key and a JSON value.'
+          : `Mod ${event} takes a string key.`,
+    );
+  if (Object.keys(original).length && value['key'] !== original['key'])
+    throw new Error('Mod hook changed pinned event fields.');
+}
+
+// The envelope and each site's pinned props are pinned; the other props keep
+// their kind, and a row's text keeps a tree's text rules.
 function validateRenderInput(value: ModInput, original: ModInput): void {
   const props = value['props'];
   const before = original['props'] as ModInput;
@@ -241,7 +495,9 @@ function validateRenderInput(value: ModInput, original: ModInput): void {
     !only(value, ['surface', 'component', 'requestId', 'viewport', 'props']) ||
     !record(props) ||
     !isDeepStrictEqual(Object.keys(props).sort(), Object.keys(before).sort()) ||
-    !isDeepStrictEqual(props['view'], before['view'])
+    (
+      MOD_RENDER_PINNED_PROPS[original['component'] as ModRenderSite] ?? []
+    ).some((key) => !isDeepStrictEqual(props[key], before[key]))
   )
     throw new Error('Mod hook changed pinned event fields.');
   for (const key of Object.keys(before)) {
@@ -251,6 +507,14 @@ function validateRenderInput(value: ModInput, original: ModInput): void {
       throw new Error(
         `Mod ui.render props.${key} is ${kindOf(props[key])}, not ${kindOf(before[key])}.`,
       );
+  }
+  // Checked only once rewritten: the reply's own text may hold anything.
+  if (
+    MOD_ROW_SITES.has(original['component'] as string) &&
+    props['text'] !== before['text']
+  ) {
+    const why = invalidRenderText(props['text'] as string);
+    if (why) throw new Error(`Mod ui.render props.text ${why}.`);
   }
 }
 
@@ -291,8 +555,10 @@ export function validateResult(
   else if (event === 'tool.check') valid = validToolCheck(value);
   else if (event === 'command.run')
     valid =
-      Object.keys(value).every((key) => key === 'text') &&
-      (value['text'] === undefined || typeof value['text'] === 'string');
+      only(value, ['text', 'isTextDisplayOnly']) &&
+      (value['text'] === undefined || typeof value['text'] === 'string') &&
+      (value['isTextDisplayOnly'] === undefined ||
+        value['isTextDisplayOnly'] === true);
   else if (echoed)
     valid =
       Object.keys(value).every((key) => key === echoed) &&
@@ -309,8 +575,10 @@ export function validateResult(
             isDeepStrictEqual(value['origin'], input?.['origin']));
   else if (event === 'turn.complete')
     valid =
-      only(value, ['text', 'usage']) &&
+      only(value, ['text', 'usage', 'by']) &&
       text(value['text']) &&
+      (value['by'] === undefined ||
+        (Array.isArray(value['by']) && value['by'].every(text))) &&
       (value['usage'] === undefined || validTurnUsage(value['usage']));
   else {
     valid =
@@ -367,11 +635,21 @@ const TURN_TOKENS = [
   'cache_creation_input_tokens',
 ] as const;
 
+// Cache writes by lifetime, which Anthropic's API reports and Qwen Code does
+// not, may still ride on a hook's answer.
+const TURN_CACHE_WRITES = [
+  'ephemeral_5m_input_tokens',
+  'ephemeral_1h_input_tokens',
+] as const;
+
 function validTurnUsage(value: unknown): boolean {
   return (
     record(value) &&
-    only(value, [...TURN_TOKENS, 'model']) &&
+    only(value, [...TURN_TOKENS, ...TURN_CACHE_WRITES, 'model']) &&
     TURN_TOKENS.every((key) => count(value[key])) &&
+    TURN_CACHE_WRITES.every(
+      (key) => value[key] === undefined || count(value[key]),
+    ) &&
     text(value['model'])
   );
 }
@@ -393,8 +671,14 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'session.usage': validUsage,
   'session.version': (value) =>
     record(value) && typeof value['version'] === 'string',
+  'store.delete': (value) => value === undefined,
+  // Any JSON value, or undefined for a key never set.
+  'store.get': () => true,
+  'store.keys': (value) => Array.isArray(value) && value.every(text),
+  'store.set': (value) => value === undefined,
   'turn.abort': (value) => value === undefined,
   'ui.invalidate': (value) => value === undefined,
+  'model.complete': validModelResult,
 };
 
 export class ModTimeoutError extends Error {
@@ -438,10 +722,16 @@ export class ModBudget {
   }
 }
 
+export interface ModModelScope {
+  signal: AbortSignal;
+  deadline: number;
+}
+
 export interface ModInvocation {
   id: number;
   epoch: number;
   parent?: ModInvocation;
+  modelScope?: ModModelScope;
   closed: boolean;
   plugin: number;
   event: ModEvent;

@@ -22,6 +22,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
@@ -117,6 +119,8 @@ import type {
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
   SetUserLanguageResult,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -268,6 +272,44 @@ export interface DaemonChannelObservedContacts {
   }>;
 }
 
+export interface DaemonChannelQrLoginActions {
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+}
+
+/**
+ * What the channels hook hands its consumers: the identity is the tab's own, so
+ * a caller cannot supply one per call. Advertising the wider contract here
+ * would promise an attribution the hook does not honour — and with no tab id
+ * attached, honouring a caller's would attribute the login to a peer tab.
+ */
+export interface DaemonChannelQrLoginHandlers {
+  start(name: string): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
+  release(loginId: string): Promise<void>;
+}
+
 export interface DaemonChannelPairingActions {
   list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
   approve(
@@ -289,6 +331,8 @@ export interface DaemonChannelPairingActions {
 /** One recorded fire of a recurring scheduled task, newest last in
  * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
 export interface DaemonScheduledTaskRun {
+  /** Distinguishes runs of the same task at the same timestamp. */
+  runId?: string;
   /** Fire time (epoch ms). */
   at: number;
   /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
@@ -435,6 +479,10 @@ export interface DaemonGoal {
   hasActivePrompt: boolean;
   /** Canonical lifecycle state; UI controls must use its goalId/revision. */
   snapshot: GoalSnapshotV2;
+  /** The owning workspace's cwd, tagged client-side by the Goals page (in
+   * every listing branch) so opening a goal's session restores it in that
+   * workspace's context. Absent when the daemon advertises no workspaces. */
+  workspaceCwd?: string;
 }
 
 /** The `GET /goals` payload. */
@@ -508,6 +556,19 @@ export interface DaemonAutofixPrWatchList {
   unreadable?: Array<{ pr: number; error: string }>;
 }
 
+/** Input history kinds persisted per workspace on the daemon. */
+export type DaemonInputHistoryKind = 'prompt' | 'shell';
+
+/** Result of `GET /workspace/input-history` (or workspace-qualified). */
+export type DaemonInputHistoryResult =
+  | { notModified: true }
+  | {
+      notModified: false;
+      kind: DaemonInputHistoryKind;
+      entries: string[];
+      revision: string;
+    };
+
 /** One entry of a Channel's event journal (`GET .../channels/events`). */
 export type DaemonChannelEventEntry = DaemonChannelEvent;
 
@@ -553,6 +614,7 @@ export interface DaemonWorkspaceActions
   activateSubscription(options?: {
     workspaceCwd?: string;
     signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,
@@ -620,6 +682,7 @@ export interface DaemonWorkspaceActions
   stopChannel(name: string): Promise<DaemonChannelMutationResult>;
   restartChannel(name: string): Promise<DaemonChannelMutationResult>;
   channelPairing: DaemonChannelPairingActions;
+  channelQrLogin: DaemonChannelQrLoginActions;
 
   // MCP
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
@@ -762,22 +825,48 @@ export interface DaemonWorkspaceActions
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
+  /** Reject before executing a prompt or recording a run when this daemon
+   * cannot safely select the exact expected owner. */
+  assertScheduledTaskOwnerSelection(
+    expectedSessionId?: string | null,
+  ): Promise<void>;
+  /** The optional expected owner disambiguates same-id records; null means
+   * unbound, while omitting it retains compatibility for unique ids. */
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
   /** Run now. Persistent tasks are only recorded here and are executed by the
    * caller; per-run tasks are dispatched into a fresh daemon session. */
   runScheduledTask(
     id: string,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+  deleteScheduledTask(
+    id: string,
+    workspaceId?: string,
+    expectedSessionId?: string | null,
+  ): Promise<void>;
 
   /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
   listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** Workspace-scoped prompt/shell input history (`workspace_input_history`). */
+  loadInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    limit?: number;
+    workspaceId?: string;
+    ifNoneMatch?: string;
+  }): Promise<DaemonInputHistoryResult>;
+  recordInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    entry: string;
+    workspaceId?: string;
+  }): Promise<void>;
 
   /** The provider workspace's Channel event journal, newest last. A scoped
    * workspace reads its own through its client. */
@@ -785,8 +874,10 @@ export interface DaemonWorkspaceActions
     query?: DaemonChannelEventsQuery,
   ): Promise<DaemonChannelEventList>;
 
-  // Goals (session-scoped runtimes, listed workspace-wide)
-  listGoals(): Promise<DaemonGoalList>;
+  // Goals (session-scoped runtimes, listed workspace-wide). `workspaceId` as
+  // for `listScheduledTasks`: the aggregated Web Shell view fans `listGoals`
+  // out over every operable workspace; undefined targets the primary surface.
+  listGoals(workspaceId?: string): Promise<DaemonGoalList>;
   controlGoal(
     sessionId: string,
     request: GoalControlRequest,
@@ -904,4 +995,24 @@ export interface DaemonWorkspaceActions
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
+
+  // Workspace artifact library
+  artifactLibrary(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<DaemonWorkspaceArtifactLibraryResult>;
+  artifactLibraryStream(
+    workspaceSelector: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent>;
 }
+
+export type {
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
+} from '@qwen-code/sdk/daemon';

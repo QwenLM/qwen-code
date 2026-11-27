@@ -64,7 +64,7 @@ class HostedHookCancelFaultGatesIT {
     private static final String PROOF = "FG13_HOOK_TOOL_PROOF";
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "hook-fault-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
@@ -357,7 +357,7 @@ class HostedHookCancelFaultGatesIT {
                 + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -381,7 +381,6 @@ class HostedHookCancelFaultGatesIT {
                         "--qwen.managed-agent.harness.token=" + TOKEN,
                         "--qwen.managed-agent.harness.capability-digest=" + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -453,8 +452,8 @@ class HostedHookCancelFaultGatesIT {
         JsonNode ref = hookExecution(session).path("resultRef");
         assertThat(ref.isNull()).as("hook result ref").isFalse();
         String body = jdbc.queryForObject("SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                String.class, tenant, session,
                 ref.path("resourceId").asText(), tenant, session);
         return json.readTree(body);
     }

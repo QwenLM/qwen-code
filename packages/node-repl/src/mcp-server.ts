@@ -86,7 +86,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
 
   const server = new McpServer(
     { name: 'node-repl', version: resolvePackageVersion() },
-    { instructions: NODE_REPL_INSTRUCTIONS },
+    { instructions: NODE_REPL_INSTRUCTIONS, maxToolInputElements: 100_000 },
   );
 
   server.registerTool(

@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -34,7 +35,6 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -61,7 +61,7 @@ public final class PublicationJournalFixture {
 
     public final JdbcTemplate jdbc;
     public final DataSourceTransactionManager manager;
-    public final ManagedSessionStore sessions;
+    public final JdbcManagedSessionStore sessions;
     public final JdbcRuntimeBindingRepository bindings;
     public final JdbcToolExecutionRepository executions;
     public final ToolPublicationStore store;
@@ -71,7 +71,11 @@ public final class PublicationJournalFixture {
     public long revision;
     public long sequence;
     public String commitDigest;
-    public WorkspaceCsiReservationStore.Reservation csiReservation;
+    private String journalWorkspaceId = "workspace-1";
+    /** The attested external Shell binding, when this is that placement. */
+    public RuntimeBindingRecord externalBinding;
+    /** The operator's storage revision; the producer must offer this one. */
+    public static final long REGISTRATION_REVISION = 7;
 
     private PublicationJournalFixture(DataSource source) {
         this(source, null, null);
@@ -79,13 +83,13 @@ public final class PublicationJournalFixture {
 
     private PublicationJournalFixture(DataSource source,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
+            JdbcManagedToolResultStore results) {
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null,
+                new JdbcManagedExtensionRecordStore(jdbc), null,
                 null, null, objects, results, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
@@ -94,55 +98,116 @@ public final class PublicationJournalFixture {
     }
 
     public static PublicationJournalFixture create(DataSource source) {
-        return create(source, null);
+        return create(source, null, null);
     }
 
-    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration) {
-        return create(source, registration, null, null);
-    }
-
-    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration,
+    public static PublicationJournalFixture create(DataSource source,
             com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
+            JdbcManagedToolResultStore results) {
         PublicationJournalFixture fixture =
                 new PublicationJournalFixture(source, objects, results);
-        fixture.populate(source, registration, false);
+        fixture.populate(false, false);
+        return fixture;
+    }
+
+    static PublicationJournalFixture createWithExecutionDiagnostics(DataSource source,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
+            JdbcManagedToolResultStore results) {
+        var fixture = new PublicationJournalFixture(source, objects, results);
+        fixture.populate(false, true);
         return fixture;
     }
 
     public static PublicationJournalFixture createSessionIsolated(DataSource source) {
         var fixture = new PublicationJournalFixture(source);
-        fixture.populate(source, null, true);
+        fixture.populate(true, false);
         return fixture;
     }
 
-    private void populate(DataSource source, WorkspaceCsiRegistration registration, boolean sessionIsolated) {
-        boolean csi = registration != null;
-        var scope = new RuntimeScope("tenant-1", "workspace-1", csi ? "1" : "generation-1",
-                "/workspace", csi ? "sha256:" + "a".repeat(64) : "capability", csi || sessionIsolated ? "session" : "workspace");
-        var runtime = bindings.findOrCreate(csi
-                ? new RuntimeProvisionRequest(scope, "session-1", "kubernetes-workspace", registration.storageId())
-                : new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
+    /**
+     * The same reserved original on the registered external foreground-Shell
+     * placement (#15512 slice C): durable registered storage, one attested
+     * worker per Harness Session, and its own capability digest. The caller
+     * supplies the origin the real worker stand-in listens on, so the saved
+     * lease is the one that process answers for.
+     */
+    public static PublicationJournalFixture createExternalShell(DataSource source,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
+            JdbcManagedToolResultStore results, URI workerOrigin) {
+        var fixture = new PublicationJournalFixture(source, objects, results);
+        fixture.populateExternalShell(source, workerOrigin);
+        return fixture;
+    }
+
+    /**
+     * The external lane's placement rows, then the same journal evidence the
+     * ordinary original commits. Only the Runtime placement differs: the
+     * reservation, the writer lease and the tool.intent are the production
+     * chain either way, which is what makes a producer case here an
+     * end-to-end one rather than a second copy of that chain.
+     */
+    private void populateExternalShell(DataSource source, URI workerOrigin) {
+        var registrations = new com.alibaba.qwen.code.managedagent.persistence
+                .ExternalStorageRegistrationStore(jdbc, manager);
+        registrations.registerExternalStorage("tenant-1", "register",
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence
+                                .ExternalStorageRegistration.ExternalStorageIdentity(
+                                        "provider", "physical", REGISTRATION_REVISION),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence
+                                .ExternalStorageRegistration.StorageAlias(
+                                        "workspace-1", "/aliases/workspace-1", "/workspace")));
+        new com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore(jdbc, manager)
+                .materialize("tenant-1", "workspace-1", "Name", "actor", "materialize");
+        var scope = new RuntimeScope("tenant-1", "workspace-1", "1", "/workspace",
+                com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST,
+                "session");
+        var request = new RuntimeProvisionRequest(scope, "session-1",
+                com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner.KIND,
+                "workspace-1");
+        var runtime = bindings.findOrCreate(request);
         runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
-        if (csi) {
-            var csiStore = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
-            csiStore.register(registration);
-            csiReservation = csiStore.reserve(registration, bindings, runtime, UUID.randomUUID().toString());
-            var seed = runtime.getProvisionSeed();
-            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
-                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-            runtime = bindings.compareAndSet(runtime, runtime.withAttestation(lease,
-                    new RuntimeResourceHandle("kubernetes-workspace", 1, Map.of("fixture", "local-db")),
-                    Instant.now(), Instant.now()));
-            var nativeSessions = new JdbcRuntimeSessionRepository(source);
-            var acquiring = bindings.admitSession(nativeSessions, new RuntimeSessionRecord(
-                    new RuntimeSession("session-1", "runtime-1", "bootstrap", scope), "binding-1", 1,
-                    RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-            nativeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
-        } else {
-            runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
-        }
+        var seed = runtime.getProvisionSeed();
+        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), workerOrigin,
+                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+        runtime = bindings.compareAndSet(runtime, runtime.withAttestation(lease,
+                new RuntimeResourceHandle(
+                        com.alibaba.qwen.code.runtimebroker.provisioning.external
+                                .ExternalWorkspaceProvisioner.KIND,
+                        com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                                .EXTERNAL_SHELL_HANDLE_VERSION,
+                        Map.of("provider", "provider", "physicalKey", "physical",
+                                "revision", REGISTRATION_REVISION)),
+                Instant.now(), Instant.now()));
         assertThat(runtime).isNotNull();
+        externalBinding = runtime;
+        var nativeSessions = new JdbcRuntimeSessionRepository(source);
+        var acquiring = bindings.admitSession(nativeSessions, new RuntimeSessionRecord(
+                new RuntimeSession("session-1", "runtime-1", "bootstrap", scope), "binding-1", 1,
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        nativeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        journalEvidence("workspace-1", false);
+    }
+
+    private void populate(boolean sessionIsolated, boolean diagnostics) {
+        var scope = new RuntimeScope("tenant-1", "workspace-1", "generation-1",
+                "/workspace", "capability", sessionIsolated ? "session" : "workspace");
+        var runtime = bindings.findOrCreate(
+                new RuntimeProvisionRequest(scope, sessionIsolated ? "session-1" : null));
+        runtime = bindings.claimOperation(runtime.getBindingId(), "owner", Duration.ofMinutes(1));
+        runtime = bindings.compareAndSet(runtime, runtime.withState(RuntimeBindingRecord.State.READY, null, Instant.now()));
+        assertThat(runtime).isNotNull();
+        journalEvidence("workspace-1", diagnostics);
+    }
+
+    /**
+     * The reserved original's journal evidence: the publication binding, its
+     * argument and checkpoint resources, the admitted execution, the writer
+     * lease, and the committed activation plus tool.intent the reservation
+     * reads back. Every placement lane needs exactly this chain.
+     */
+    private void journalEvidence(String workspaceId, boolean diagnostics) {
+        journalWorkspaceId = workspaceId;
         binding = JSON.createObjectNode()
                 .put("publication", ToolPublicationContract.PROTOCOL)
                 .put("publicationId", "pub-1").put("turnId", "turn-1")
@@ -154,9 +219,9 @@ public final class PublicationJournalFixture {
                 .put("capturePolicy", "complete_required")
                 .put("writerId", "writer-1").put("writerGeneration", 1)
                 .put("activationId", ACTIVATION_ID).put("activationEpoch", 1)
-                .put("intentSequence", 2);
+                .put("intentSequence", diagnostics ? 3 : 2);
         binding.set("sessionKey", JSON.createObjectNode()
-                .put("tenantId", "tenant-1").put("workspaceId", "workspace-1")
+                .put("tenantId", "tenant-1").put("workspaceId", workspaceId)
                 .put("sessionId", "session-1"));
         String payload =
                 "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\"}}";
@@ -177,7 +242,7 @@ public final class PublicationJournalFixture {
                 .put("schemaVersion", 1).put("engine", "managed")
                 .put("turnId", "turn-1").put("promptId", "runtime-prompt-1")
                 .put("activationId", ACTIVATION_ID)
-                .put("coveredSequence", 2)
+                .put("coveredSequence", diagnostics ? 3 : 2)
                 .set("sessionKey", binding.get("sessionKey")));
         checkpoint.set("continuation",
                 JSON.createObjectNode().put("phase", "await_runtime"));
@@ -206,8 +271,37 @@ public final class PublicationJournalFixture {
         new TransactionTemplate(manager).executeWithoutResult(status ->
                 sessions.acquireWriter("tenant-1", "session-1", WRITER_TOKEN,
                         new ManagedSessionStoreModels.AcquireWriterRequest(
-                                "workspace-1", "writer-1", 300000L)));
+                                workspaceId, "writer-1", 300000L)));
         append("session.create", "{}\n{}\n", 0, List.of(), null);
+        if (diagnostics) {
+            append("activate", event(1, "activation.changed", activation("active")) + COMMIT_MARKER, 1, List.of(), null);
+            ObjectNode call = JSON.createObjectNode().put("id", "model-1").put("name", "run_shell_command");
+            call.putObject("args").put("command", "printf hi");
+            ObjectNode message = JSON.createObjectNode().put("uuid", "batch-1").put("type", "assistant");
+            message.putObject("message").putArray("parts").addObject().set("functionCall", call);
+            ObjectNode evidence = executionEvidence("event-2");
+            ObjectNode messageRef = ref("assistant-1", "managed-message", message);
+            ObjectNode evidenceRef = ref("diagnostics-2", ManagedActivityDiagnostics.KIND, evidence);
+            ObjectNode messagePayload = JSON.createObjectNode().put("messageId", "batch-1").put("role", "assistant").putNull("parentMessageId");
+            messagePayload.set("contentRef", messageRef);
+            messagePayload.set("diagnosticsRef", evidenceRef);
+            append("commitMessage", event(2, "message.committed", messagePayload) + COMMIT_MARKER, 1,
+                    List.of(resource(messageRef, message), resource(evidenceRef, evidence)), null,
+                    ManagedActivityDiagnostics.commitDigest(messageRef.path("digest").asText(), evidenceRef));
+            ObjectNode fact = ManagedActivityDiagnostics.request("tenant-1", "session-1", "batch-1", 0, call, 2, 2000)
+                    .put("executionCallId", "execution-1").put("toolKind", "builtin").put("admission", "allowed");
+            fact.remove(List.of("requestSequence", "requestedAt"));
+            ObjectNode intentEvidence = executionEvidence("event-3");
+            intentEvidence.withArray("observations").add(fact);
+            ObjectNode intentEvidenceRef = ref("diagnostics-3", ManagedActivityDiagnostics.KIND, intentEvidence);
+            ObjectNode intent = intentPayload(binding.get("argsRef")).put("ordinal", 0);
+            intent.set("diagnosticsRef", intentEvidenceRef);
+            append("tool.dispatch", event(3, "tool.intent", intent) + COMMIT_MARKER, 1,
+                    List.of(resource(binding.get("argsRef"), args), resource(binding.get("checkpointRef"), checkpoint),
+                            resource(intentEvidenceRef, intentEvidence)), "checkpoint-1",
+                    ManagedActivityDiagnostics.commitDigest(binding.path("argsRef").path("digest").asText(), intentEvidenceRef));
+            return;
+        }
         append("tool.dispatch",
                 event(1, "activation.changed", activation("active"))
                         + event(2, "tool.intent",
@@ -216,6 +310,15 @@ public final class PublicationJournalFixture {
                 List.of(resource(binding.get("argsRef"), args),
                         resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
+    }
+
+    private static ObjectNode executionEvidence(String source) {
+        ObjectNode evidence = JSON.createObjectNode().put("schemaVersion", 1).put("reducerVersion", 1)
+                .put("epochId", "publication-epoch").put("startEventId", "event-2").put("sourceEventId", source)
+                .put("omittedObservationCount", 0);
+        evidence.putArray("observations");
+        evidence.putArray("coverageReasons");
+        return evidence;
     }
 
     public ToolPublicationStore newStore(long bytes, long count) {
@@ -330,11 +433,17 @@ public final class PublicationJournalFixture {
     public void append(String operation, String records, int events,
             List<ManagedSessionStoreModels.CommitResource> resources,
             String checkpointId) {
+        append(operation, records, events, resources, checkpointId, digest(records));
+    }
+
+    private void append(String operation, String records, int events,
+            List<ManagedSessionStoreModels.CommitResource> resources,
+            String checkpointId, String contentDigest) {
         String nextDigest = events == 0 ? null : digest(records);
         var request = new ManagedSessionStoreModels.CommitTransactionRequest(
-                "workspace-1", "writer-1", 1, revision, sequence,
+                journalWorkspaceId, "writer-1", 1, revision, sequence,
                 "transaction-" + revision, operation, "command-" + revision,
-                digest(records), events == 0 ? 0 : sequence + 1,
+                contentDigest, events == 0 ? 0 : sequence + 1,
                 sequence + events, events, nextDigest, commitDigest,
                 nextDigest, events == 0 ? 0 : 1, checkpointId,
                 events == 0 ? 2 : events + 1,

@@ -386,6 +386,23 @@ mkdir "\${release_state}/bin"
 echo "NPM_CONFIG_PREFIX=\${release_state}" >> "\${GITHUB_ENV}"
 echo "\${release_state}/bin" >> "\${GITHUB_PATH:?}"
 `;
+const canonicalPreflightBootstrap = `set -euo pipefail
+bootstrap=$(mktemp -d "\${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+trap 'rm -rf -- "$bootstrap"' EXIT
+export GH_CONFIG_DIR="$bootstrap/gh"
+mkdir -p "$GH_CONFIG_DIR"
+for script in prepare-release-runner.sh check-disk-floor.sh; do
+  for attempt in 1 2 3; do
+    if gh api "repos/\${GITHUB_REPOSITORY}/contents/.github/scripts/\${script}?ref=\${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script" && [ -s "$bootstrap/$script" ]; then
+      break
+    fi
+    [ "$attempt" -lt 3 ] || exit 1
+    sleep 2
+  done
+done
+bash "$bootstrap/prepare-release-runner.sh"
+node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"`;
 const releaseRunnerScript = readFileSync(
   '.github/scripts/prepare-release-runner.sh',
   'utf8',
@@ -451,20 +468,50 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       );
       expect(checkoutIndex, id).toBeGreaterThan(0);
-      // Every caller must reach the same pinned cleanup implementation.
-      expect(job.steps[restoreIndex]?.uses, id).toBe(
-        '$/.github/actions/prepare-release-runner',
-      );
+      // Every caller must run the same pinned inline preflight bootstrap
+      // instead of a '$/' self-repository action (which downloads the full
+      // ~100 MB repo archive during Set up job).
+      const restoreStep = job.steps[restoreIndex];
+      expect(restoreStep?.uses, id).toBeUndefined();
+      expect(restoreStep?.['working-directory'], id).toBe('${{ runner.temp }}');
+      expect(restoreStep?.shell, id).toBe('bash');
+      expect(restoreStep?.env, id).toEqual({
+        GH_TOKEN: '${{ github.token }}',
+        WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      });
+      expect(restoreStep?.run, id).toBe(canonicalPreflightBootstrap);
     }
     // Full-body equality also catches early exits or a commented-out wipe.
     expect(releaseRunnerScript).toBe(canonicalWipe);
+    // No job may reintroduce a '$/' self-repository action reference.
+    for (const [id, job] of Object.entries(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        expect(String(step.uses ?? ''), id).not.toMatch(/^\$\//);
+      }
+    }
     // Pool-routed jobs inherit root-owned leftovers whether or not they
-    // check out, so the exemption above must never extend to them.
+    // check out, so every one must run the same first-step inline preflight.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
       if (!isPoolRouted(job)) {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      const restoreIndex = (job.steps ?? []).findIndex(
+        (step) => step.name === 'Restore workspace ownership',
+      );
+      expect(restoreIndex, id).toBe(0);
+      const restoreStep = job.steps[restoreIndex];
+      expect(restoreStep?.if, id).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(restoreStep?.uses, id).toBeUndefined();
+      expect(restoreStep?.['working-directory'], id).toBe('${{ runner.temp }}');
+      expect(restoreStep?.shell, id).toBe('bash');
+      expect(restoreStep?.env, id).toEqual({
+        GH_TOKEN: '${{ github.token }}',
+        WORKFLOW_SHA: '${{ github.workflow_sha }}',
+      });
+      expect(restoreStep?.run, id).toBe(canonicalPreflightBootstrap);
       expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
@@ -530,16 +577,16 @@ describe('release workflow', () => {
     ]);
   });
 
-  it('uses shallow history only for validation jobs', () => {
+  it('uses shallow history for prepare and validation jobs', () => {
     const checkoutDepth = (id) =>
       releaseYaml.jobs[id].steps.find((step) =>
         String(step.uses ?? '').includes('actions/checkout'),
       ).with['fetch-depth'];
 
-    expect(checkoutDepth('prepare')).toBe(0);
     expect(checkoutDepth('publish')).toBe(0);
     expect(checkoutDepth('build_release')).toBe(0);
     for (const id of [
+      'prepare',
       'quality_static',
       'quality_build',
       'quality_typecheck',
@@ -575,6 +622,9 @@ describe('release workflow', () => {
       expect(scriptCheckout.with, jobId).toEqual({
         ref: '${{ github.workflow_sha }}',
         'fetch-depth': 1,
+        // A blob-less sparse checkout fetches missing blobs while checking
+        // out, after the action's retryable fetch has already succeeded.
+        filter: 'blob:limit=1g',
         'persist-credentials': false,
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
@@ -597,6 +647,23 @@ describe('release workflow', () => {
         }
       }
     }
+  });
+
+  it('keeps every sparse checkout blob inside the retryable fetch', () => {
+    // The YAML pin above cannot tell a filter that omits objects from one
+    // that keeps them: `blob:none` and `tree:0` both leave the checkout
+    // fetching from the promisor remote after the action's retries are spent.
+    // Only a size-bounded blob filter above GitHub's file-size limit admits
+    // every blob the sparse set can need.
+    let swept = 0;
+    for (const job of Object.values(releaseYaml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.name !== 'Checkout release workflow scripts') continue;
+        swept += 1;
+        expect(step.with.filter, step.name).toMatch(/^blob:limit=\d+[kmg]$/);
+      }
+    }
+    expect(swept).toBeGreaterThan(0);
   });
 
   it('re-pins trusted runners before every step that runs one', () => {
@@ -992,6 +1059,95 @@ describe('release workflow', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'fetches version tags in a shallow checkout before resolving the release version',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-shallow-tags-'));
+      const origin = join(directory, 'origin.git');
+      const seed = join(directory, 'seed');
+      const shallow = join(directory, 'shallow');
+      const bin = join(directory, 'bin');
+      const seenTags = join(directory, 'seen-tags');
+      const output = join(directory, 'github-output');
+      const gitEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Test',
+        GIT_AUTHOR_EMAIL: 'test@example.com',
+        GIT_COMMITTER_NAME: 'Test',
+        GIT_COMMITTER_EMAIL: 'test@example.com',
+      };
+      const runGit = (cwd, args) => {
+        const res = spawnSync('git', args, {
+          cwd,
+          env: gitEnv,
+          encoding: 'utf8',
+        });
+        expect(res.status, res.stderr).toBe(0);
+        return res.stdout.trim();
+      };
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'node'),
+        '#!/bin/sh\n' +
+          'git tag -l "v*" > "$SEEN_TAGS"\n' +
+          'echo \'{"releaseTag":"v0.28.5","releaseVersion":"0.28.5","npmTag":"latest","previousReleaseTag":"v0.28.4"}\'\n',
+        { mode: 0o755 },
+      );
+      writeFileSync(output, '');
+      try {
+        runGit(directory, ['init', '--bare', origin]);
+        runGit(origin, ['config', 'uploadpack.allowFilter', 'true']);
+        runGit(directory, ['init', seed]);
+        writeFileSync(join(seed, 'README.md'), 'one\n');
+        runGit(seed, ['add', 'README.md']);
+        runGit(seed, ['commit', '-m', 'first']);
+        runGit(seed, ['tag', 'v0.28.4']);
+        writeFileSync(join(seed, 'README.md'), 'two\n');
+        runGit(seed, ['add', 'README.md']);
+        runGit(seed, ['commit', '-m', 'second']);
+        runGit(seed, ['remote', 'add', 'origin', origin]);
+        runGit(seed, ['push', 'origin', 'HEAD:refs/heads/main', '--tags']);
+
+        runGit(directory, [
+          'clone',
+          '--depth=1',
+          '--no-tags',
+          '--branch',
+          'main',
+          `file://${origin}`,
+          shallow,
+        ]);
+        expect(runGit(shallow, ['rev-parse', '--is-shallow-repository'])).toBe(
+          'true',
+        );
+        expect(runGit(shallow, ['tag', '-l', 'v*'])).toBe('');
+
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'resolve-version'],
+          {
+            cwd: shallow,
+            encoding: 'utf8',
+            env: {
+              ...gitEnv,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_NIGHTLY: 'false',
+              IS_PREVIEW: 'false',
+              MANUAL_VERSION: 'v0.28.5',
+              SEEN_TAGS: seenTags,
+              GITHUB_OUTPUT: output,
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(seenTags, 'utf8').trim()).toBe('v0.28.4');
+        expect(readFileSync(output, 'utf8')).toContain('RELEASE_TAG=v0.28.5');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'aborts notify-failure instead of filing a duplicate when gh is unreachable',
     () => {
       const directory = mkdtempSync(join(tmpdir(), 'release-notify-'));
@@ -1101,9 +1257,187 @@ describe('release workflow', () => {
         expect(fallback.if).toBe(
           "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
         );
+        expect(fallback.run).toContain("--label 'autofix/skip'");
+        expect(fallback.run).not.toContain('autofix/approved');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
+    },
+  );
+
+  function runNotifyFailureWithExistingIssue({
+    author,
+    excludedLabel,
+    releaseTag = 'v1.2.3',
+    priorRun = 'https://github.example/run/2',
+    commentFails = false,
+  }) {
+    const directory = mkdtempSync(join(tmpdir(), 'release-notify-reuse-'));
+    const bin = join(directory, 'bin');
+    const ghLog = join(directory, 'gh-calls');
+    const issues = join(directory, 'issues.json');
+    const output = join(directory, 'github-output');
+    mkdirSync(bin);
+    writeFileSync(output, '');
+    const labels = [{ name: 'type/bug' }];
+    if (excludedLabel) labels.push({ name: excludedLabel });
+    writeFileSync(
+      issues,
+      JSON.stringify([
+        {
+          number: 15672,
+          url: 'https://github.example/QwenLM/qwen-code/issues/15672',
+          labels,
+          author: { login: author },
+          title: `Release Failed for ${releaseTag} on 2026-11-26`,
+          body: `The release workflow failed.\n\nRun: ${priorRun}\n`,
+        },
+      ]),
+    );
+    writeFileSync(
+      join(bin, 'gh'),
+      '#!/bin/sh\n' +
+        'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+        'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+        '  case "$*" in\n' +
+        '    *no:assignee*) echo true ;;\n' +
+        '    *) cat "$GH_ISSUES" ;;\n' +
+        '  esac\n' +
+        '  exit 0\n' +
+        'fi\n' +
+        'if [ "$1" = issue ] && [ "$2" = comment ] && [ "$GH_COMMENT_FAILS" = true ]; then\n' +
+        '  exit 1\n' +
+        'fi\n' +
+        'if [ "$1" = issue ] && [ "$2" = create ]; then\n' +
+        "  echo 'https://github.example/QwenLM/qwen-code/issues/9999'\n" +
+        'fi\n' +
+        'exit 0\n',
+      { mode: 0o755 },
+    );
+    try {
+      const result = spawnSync(
+        'bash',
+        [releaseStepScriptAbsolutePath, 'notify-failure'],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GH_CALL_LOG: ghLog,
+            GH_ISSUES: issues,
+            GH_COMMENT_FAILS: String(commentFails),
+            GITHUB_OUTPUT: output,
+            GH_REPO: 'QwenLM/qwen-code',
+            RELEASE_TAG: releaseTag,
+            DETAILS_URL: 'https://github.example/run/2',
+            PREPARE_RESULT: 'success',
+            QUALITY_RESULT: 'failure',
+            INTEGRATION_NONE_RESULT: 'skipped',
+            INTEGRATION_DOCKER_RESULT: 'skipped',
+            PUBLISH_RESULT: 'skipped',
+            BUG_LABEL: 'type/bug',
+            READY_FOR_AGENT_LABEL: 'status/ready-for-agent',
+            AUTOFIX_APPROVED_LABEL: 'autofix/approved',
+          },
+        },
+      );
+      return {
+        result,
+        calls: readFileSync(ghLog, 'utf8'),
+        output: readFileSync(output, 'utf8'),
+      };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(process.platform === 'win32').each([
+    {
+      name: 'reuses the app-authored',
+      author: 'app/github-actions',
+      outcome: 'reuse',
+    },
+    {
+      name: 'replaces the human-authored',
+      author: 'some-maintainer',
+      outcome: 'replace',
+    },
+    {
+      name: 'records but does not dispatch for an autofix-skipped',
+      author: 'app/github-actions',
+      excludedLabel: 'autofix/skip',
+      outcome: 'excluded',
+    },
+    {
+      name: 'records but does not dispatch for an in-progress',
+      author: 'app/github-actions',
+      excludedLabel: 'autofix/in-progress',
+      outcome: 'excluded',
+    },
+  ])(
+    '$name release-failure issue while preserving ownership and evidence',
+    ({ author, excludedLabel, outcome }) => {
+      const { result, calls, output } = runNotifyFailureWithExistingIssue({
+        author,
+        excludedLabel,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      if (outcome === 'reuse') {
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).not.toContain('issue create');
+        expect(calls).toContain('issue_number=15672');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/15672\n',
+        );
+      } else if (outcome === 'replace') {
+        expect(result.stdout).toContain(
+          'was opened by some-maintainer; creating a workflow-owned issue instead.',
+        );
+        expect(calls).toContain('issue create');
+        expect(calls).not.toContain('issue comment 15672');
+        expect(calls).toContain('issue_number=9999');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/9999\n',
+        );
+      } else {
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).not.toContain('issue create');
+        expect(calls).not.toContain('workflow run');
+        expect(calls).not.toContain('--add-label');
+        expect(output).toBe(
+          'issue_url=https://github.example/QwenLM/qwen-code/issues/15672\n',
+        );
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    ['https://github.example/run/2', 15672],
+    ['https://github.example/run/20', 9999],
+  ])('matches unknown release versions by run URL (%s)', (priorRun, issue) => {
+    const { result, calls } = runNotifyFailureWithExistingIssue({
+      author: 'app/github-actions',
+      releaseTag: 'N/A',
+      priorRun,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toContain(`issue_number=${issue}`);
+    if (issue === 9999) expect(calls).not.toContain('issue comment 15672');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'hands an excluded issue comment failure to the workflow fallback',
+    () => {
+      const { result, calls, output } = runNotifyFailureWithExistingIssue({
+        author: 'app/github-actions',
+        excludedLabel: 'autofix/skip',
+        commentFails: true,
+      });
+      expect(result.status).toBe(1);
+      expect(calls).toContain('issue comment 15672');
+      expect(calls).not.toContain('workflow run');
+      expect(output).toBe('');
     },
   );
 
@@ -1137,7 +1471,7 @@ describe('release workflow', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'closes the workflow-owned failure issue once a later attempt succeeds',
+    'reconciles unadopted duplicates and reports linked-only matches',
     () => {
       const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
       const bin = join(directory, 'bin');
@@ -1150,9 +1484,53 @@ describe('release workflow', () => {
           {
             number: 15672,
             url: 'https://github.example/QwenLM/qwen-code/issues/15672',
-            labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
-            author: { login: 'github-actions[bot]' },
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            assignees: [{ login: 'maintainer' }],
             title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+          {
+            number: 15673,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15673',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-27',
+          },
+          {
+            number: 15674,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15674',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-28',
+          },
+          {
+            number: 15675,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15675',
+            labels: [{ name: 'status/need-information' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-29',
+          },
+          {
+            number: 15676,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15676',
+            labels: [{ name: 'status/need-retesting' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-10-30',
+          },
+          {
+            number: 15677,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15677',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'app/github-actions' },
+            linkedPr: true,
+            title: 'Release Failed for v1.2.3 on 2026-10-31',
+          },
+          {
+            number: 15678,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15678',
+            labels: [{ name: 'autofix/in-progress' }],
+            author: { login: 'app/github-actions' },
+            title: 'Release Failed for v1.2.3 on 2026-11-01',
           },
         ]),
       );
@@ -1161,8 +1539,15 @@ describe('release workflow', () => {
         '#!/bin/sh\n' +
           'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
           'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
-          '  cat "$GH_ISSUES"\n' +
+          '  case "$*" in\n' +
+          '    *-linked:pr*) jq -c \'map(select(.linkedPr != true))\' "$GH_ISSUES" ;;\n' +
+          '    *linked:pr*) jq -c \'map(select(.linkedPr == true))\' "$GH_ISSUES" ;;\n' +
+          '    *) cat "$GH_ISSUES" ;;\n' +
+          '  esac\n' +
           '  exit 0\n' +
+          'fi\n' +
+          'if [ "$1" = issue ] && [ "$2" = close ] && [ "$3" = 15673 ]; then\n' +
+          '  exit 1\n' +
           'fi\n' +
           'if [ "$1" = issue ] && [ "$2" = edit ]; then\n' +
           '  case "$*" in\n' +
@@ -1173,34 +1558,72 @@ describe('release workflow', () => {
         { mode: 0o755 },
       );
       try {
+        const environment = {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GH_CALL_LOG: ghLog,
+          GH_ISSUES: issues,
+          GH_REPO: 'QwenLM/qwen-code',
+          RELEASE_TAG: 'v1.2.3',
+          DETAILS_URL: 'https://github.example/run/1',
+          RUN_ATTEMPT: '2',
+        };
         const result = spawnSync(
           'bash',
           [releaseStepScriptAbsolutePath, 'reconcile-failure'],
-          {
-            cwd: directory,
-            encoding: 'utf8',
-            env: {
-              ...process.env,
-              PATH: `${bin}:${process.env.PATH}`,
-              GH_CALL_LOG: ghLog,
-              GH_ISSUES: issues,
-              GH_REPO: 'QwenLM/qwen-code',
-              RELEASE_TAG: 'v1.2.3',
-              DETAILS_URL: 'https://github.example/run/1',
-              RUN_ATTEMPT: '2',
-            },
-          },
+          { cwd: directory, encoding: 'utf8', env: environment },
         );
         expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677 was not reconciled because it is linked to a pull request.',
+        );
         const calls = readFileSync(ghLog, 'utf8');
-        expect(calls).toContain('issue comment 15672');
+        for (const adopted of [15672, 15675, 15676, 15677, 15678]) {
+          expect(calls).not.toContain(`issue comment ${adopted}`);
+          expect(calls).not.toContain(`issue edit ${adopted}`);
+          expect(calls).not.toContain(`issue close ${adopted}`);
+        }
+        expect(calls).toContain('issue comment 15673');
+        expect(calls).toContain('issue comment 15674');
         expect(calls).toContain(
-          'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+          'issue close 15673 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).toContain(
+          'issue close 15674 --repo QwenLM/qwen-code --reason not planned',
         );
         expect(calls).not.toContain('issue create');
         // One absent label must not abort the remaining removals or the close.
         expect(calls).toContain('--remove-label status/ready-for-agent');
         expect(calls).toContain('--remove-label autofix/in-progress');
+
+        writeFileSync(
+          issues,
+          JSON.stringify([
+            {
+              number: 15677,
+              url: 'https://github.example/QwenLM/qwen-code/issues/15677',
+              labels: [{ name: 'type/bug' }],
+              author: { login: 'app/github-actions' },
+              linkedPr: true,
+              title: 'Release Failed for v1.2.3 on 2026-10-31',
+            },
+          ]),
+        );
+        writeFileSync(ghLog, '');
+        const linkedOnly = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          { cwd: directory, encoding: 'utf8', env: environment },
+        );
+        expect(linkedOnly.status, linkedOnly.stderr).toBe(0);
+        expect(linkedOnly.stdout).toContain(
+          'https://github.example/QwenLM/qwen-code/issues/15677',
+        );
+        expect(linkedOnly.stdout).toContain('linked to a pull request');
+        expect(linkedOnly.stdout).not.toContain('nothing to reconcile');
+        const linkedCalls = readFileSync(ghLog, 'utf8');
+        expect(linkedCalls).not.toContain('issue comment 15677');
+        expect(linkedCalls).not.toContain('issue close 15677');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -1607,6 +2030,7 @@ describe('release workflow', () => {
     // run never reached, words a test merely printed).
     const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
     const tally = ' Tests  10614 passed (10614)';
+    const unhandled = '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯';
     const passedThrough =
       '::warning title=Workspace tests passed through a Vitest transport timeout::';
     const stands =
@@ -1622,14 +2046,14 @@ describe('release workflow', () => {
       // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, killed by a signal',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
@@ -1637,7 +2061,7 @@ describe('release workflow', () => {
       // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1648,7 +2072,7 @@ describe('release workflow', () => {
       // them the oncall is told one of four things happened when none did.
       [
         'transport timeout counted twice against one unhandled error',
-        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
       ],
@@ -1660,13 +2084,13 @@ describe('release workflow', () => {
       // The count sees both, because it never looks at the header.
       [
         'transport timeout beside a suffix-less crash header',
-        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
       [
         'transport timeout beside a bare string throw',
-        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1677,18 +2101,18 @@ describe('release workflow', () => {
       // unmoved by them.
       [
         'transport timeout beside Error: lines a test printed',
-        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
-      // `--workspaces` prints one summary per workspace into one log, so both
-      // figures are whole-file sums: a passing tally cannot cover a later
-      // workspace's crash, and two transport deaths in two workspaces still
-      // pass.
+      // `--workspaces` prints one summary per workspace into one log, so the
+      // `Errors` figure is a whole-file sum: a passing tally cannot cover a
+      // later workspace's crash, and two transport deaths in two workspaces
+      // still pass.
       [
         'tally, then a later workspace crashing',
-        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1697,14 +2121,14 @@ describe('release workflow', () => {
       // one of them (run 33713579913).
       [
         'four transport deaths, four unhandled errors',
-        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        `${unhandled}\n${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
         1,
         passedThrough,
         0,
       ],
       [
         'two workspaces, both lost to the transport',
-        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  5 passed (5)\n     Errors  1 error\n${unhandled}\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1713,13 +2137,13 @@ describe('release workflow', () => {
       // line at all, no passing tally, or a failing tally.
       [
         'transport timeout, no error summary to count',
-        `${timeout}\n${tally}`,
+        `${unhandled}\n${timeout}\n${tally}`,
         1,
         stands,
       ],
       [
         'transport timeout, no tally to back it',
-        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        `${unhandled}\nError: [vitest-worker]: Timeout calling "onTaskUpdate"`,
         1,
         stands,
       ],
@@ -1728,7 +2152,7 @@ describe('release workflow', () => {
       // count is all transport.
       [
         'error summary with no tally to back it',
-        `${timeout}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1745,7 +2169,7 @@ describe('release workflow', () => {
       // beside a real transport death do not inflate it into a mismatch.
       [
         'transport timeout, and Timeout calling printed by a test',
-        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1758,14 +2182,56 @@ describe('release workflow', () => {
       // earned — the false-red this PR exists to remove, back again.
       [
         'transport timeout, and a summary-shaped line a test printed',
-        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // Console output is echoed at column 0, so a test that prints the
+      // transport's exact prefix outside the unhandled-error section must not
+      // move the count. A whole-file grep reads two here against one counted
+      // error and refuses the pass the run earned; the anchored count reads
+      // one and grants it.
+      [
+        'transport timeout, and the transport prefix printed outside the section',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // The pass must be earned by at least one unhandled error Vitest itself
+      // counted. A log with no `Errors` summary and a transport prefix printed
+      // outside any section used to satisfy `0 == 0` and pass a shard whose
+      // only "evidence" was a test's own output.
+      [
+        'transport prefix printed, no error summary to count',
+        `${tally}\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        stands,
+      ],
+      // The opener needs Vitest's ruler on both sides: the bare words are a
+      // phrase a test can print, not the section header.
+      [
+        'transport timeout, and the bare section words printed',
+        `Unhandled Errors\n${timeout}\n${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // A test can print a line that merely starts with the section header.
+      // The opener must match Vitest's ruler-shaped line, not any line that
+      // contains the words, or the printed copy opens a pseudo-section and the
+      // transport line after it is counted twice against one real error.
+      [
+        'transport timeout, and a printed near-miss of the section header',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\nUnhandled Errors: a test printed this\n${timeout}`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, failing tally',
-        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1774,7 +2240,7 @@ describe('release workflow', () => {
       // across the whole log rather than trusted to the branch above.
       [
         'passing tally in one workspace, failing tally in another',
-        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -2510,9 +2976,11 @@ describe('release workflow', () => {
     );
     expect(dockerIntegrationScript).toContain('exec 7>&-');
     expect(dockerIntegrationScript).toContain('exec 8>&-');
-    expect(dockerIntegrationScript).toContain('integration-tests cli 9>&-');
     expect(dockerIntegrationScript).toContain(
-      'integration-tests interactive 9>&-',
+      'QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-',
+    );
+    expect(dockerIntegrationScript).toContain(
+      'for suite in cli interactive; do',
     );
   });
 
@@ -2582,6 +3050,22 @@ describe('release workflow', () => {
     );
   });
 
+  it('keeps the Docker retry budget below the integration_docker job timeout', () => {
+    const budget = Number(
+      /^DOCKER_TEST_STEP_BUDGET_SECONDS=(\d+)$/m.exec(
+        dockerIntegrationScript,
+      )?.[1],
+    );
+    expect(Number.isInteger(budget)).toBe(true);
+    expect(budget).toBeGreaterThan(0);
+    // The step starts several minutes into the job — 7m50s and 5m54s on the
+    // two measured release runs — so the budget must keep that margin below
+    // the job's timeout-minutes.
+    expect(budget).toBeLessThanOrEqual(
+      releaseYaml.jobs.integration_docker['timeout-minutes'] * 60 - 600,
+    );
+  });
+
   const dockerIntegrationScriptAbsolutePath = join(
     process.cwd(),
     '.github/scripts/run-release-docker-integration.sh',
@@ -2608,6 +3092,16 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    buildFails = false,
+    suiteFailures = 0,
+    failSuite = 'cli',
+    suiteSeconds = 0,
+    retrySuiteSeconds = suiteSeconds,
+    preLoopSeconds = 0,
+    postGateFailAt = 2,
+    dockerPsFails = false,
+    dockerPsIds = '',
+    aptMirror = '',
     aptDefaultRate,
     aptAliyunRate,
     aptTunaRate,
@@ -2628,11 +3122,28 @@ describe('release workflow', () => {
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     stub('git', 'echo 0123456789abcdef0123456789abcdef01234567');
     stub('node', 'echo ghcr.io/qwenlm/qwen-code:0.0.0-test');
+    // Virtual clock: each stubbed vitest run advances it by
+    // STUB_SUITE_SECONDS so a case can model an attempt's duration without
+    // wall-clock waits.
+    stub(
+      'date',
+      `offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+echo $(( \${STUB_DATE_START:-1000000} + offset ))`,
+    );
     stub('timeout', 'shift; exec "$@"');
     stub('flock', `printf 'flock %s\\n' "$*" >> "$CALLS_LOG"`);
     stub(
       'docker',
       `printf 'docker %s\\n' "$*" >> "$CALLS_LOG"
+if [ "$1" = 'ps' ] && [ "$DOCKER_PS_FAILS" = '1' ]; then
+  echo 'ERROR: cannot connect to the Docker daemon' >&2
+  exit 1
+fi
+if [ "$1" = 'ps' ] && [ -n "$DOCKER_PS_IDS" ]; then
+  printf '%s\n' "$DOCKER_PS_IDS"
+  exit 0
+fi
 if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   if [ "$3" = '--format' ]; then
     echo sha256:fakeimageid
@@ -2669,9 +3180,35 @@ exit 0`,
     );
     stub(
       'npm',
-      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"`,
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + \${BUILD_SECONDS:-0} ))" > "$CALLS_LOG.clock"
+if [ "$BUILD_FAILS" = '1' ] && [ "$1" = 'run' ] && [ "$2" = 'build:sandbox' ]; then
+  exit 1
+fi`,
     );
-    stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npx',
+      `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
+suite=cli
+case "$*" in
+  *" interactive") suite=interactive ;;
+esac
+attempts_file="$CALLS_LOG.npx-\${suite}-attempts"
+attempts=0
+if [ -f "$attempts_file" ]; then attempts=$(cat "$attempts_file"); fi
+attempts=$((attempts + 1))
+printf '%s' "$attempts" > "$attempts_file"
+seconds=\${STUB_SUITE_SECONDS:-0}
+if [ "$attempts" -gt 1 ]; then seconds=\${RETRY_SUITE_SECONDS:-$seconds}; fi
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + seconds ))" > "$CALLS_LOG.clock"
+if [ "\${SUITE_FAILURES:-0}" -gt 0 ] && [ "$suite" = "$FAIL_SUITE" ] && [ "$attempts" -le "$SUITE_FAILURES" ]; then
+  exit 1
+fi`,
+    );
     // Deterministic stand-in for the probe's range reads so the suite stays
     // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
     // projection per URL, default slow + one fast mirror.
@@ -2698,7 +3235,7 @@ esac`,
           'count=$((count + 1))\n' +
           'printf \'%s\' "$count" > "$count_file"\n' +
           'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-unset}" >> "$CALLS_LOG"\n' +
-          'if [ "$count" -gt 1 ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
+          'if [ "$count" -ge "${POST_GATE_FAIL_AT:-2}" ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
           '  exit "$POST_GATE_EXIT"\n' +
           'fi\n' +
           'exit "${GATE_EXIT:-0}"\n',
@@ -2721,6 +3258,17 @@ esac`,
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
         BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        BUILD_FAILS: buildFails ? '1' : '0',
+        SUITE_FAILURES: String(suiteFailures),
+        FAIL_SUITE: failSuite,
+        STUB_DATE_START: '1000000',
+        STUB_SUITE_SECONDS: String(suiteSeconds),
+        RETRY_SUITE_SECONDS: String(retrySuiteSeconds),
+        BUILD_SECONDS: String(preLoopSeconds),
+        POST_GATE_FAIL_AT: String(postGateFailAt),
+        DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
+        DOCKER_PS_IDS: dockerPsIds,
+        APT_MIRROR: aptMirror,
         CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
         CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
         CURL_TUNA_RATE: String(aptTunaRate ?? 0),
@@ -2756,11 +3304,34 @@ esac`,
         encoding: 'utf8',
         env,
       });
-      return { result, calls: readFileSync(callsLog, 'utf8'), dockerRoot };
+      const clockPath = `${callsLog}.clock`;
+      const modelledSeconds = existsSync(clockPath)
+        ? Number(readFileSync(clockPath, 'utf8'))
+        : 0;
+      return {
+        result,
+        calls: readFileSync(callsLog, 'utf8'),
+        dockerRoot,
+        modelledSeconds,
+      };
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'uses the runner apt mirror without probing and preserves the CI label',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptMirror: 'mirrors.cloud.aliyuncs.com',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain('apt probe:');
+      expect(calls).toContain(
+        '--label org.qwen-code.ci.sandbox=true --build-arg APT_MIRROR=mirrors.cloud.aliyuncs.com',
+      );
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'selects the fast apt mirror and preserves the CI label in the build flags',
@@ -2816,6 +3387,388 @@ esac`,
       expect(
         lines.filter((line) => line.startsWith('npx vitest')),
       ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'labels an image build failure instead of letting it read as a test failure',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        buildFails: true,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('sandbox image build failed for');
+      expect(result.stdout).toContain('-release-0123456789abcdef');
+      expect(result.stdout).toContain(
+        'the Docker integration tests did not run',
+      );
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a failed Docker suite once within the job budget',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        dockerPsIds: 'cid-alpha\ncid-beta',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines.filter(
+        (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+      );
+      expect(cliRuns).toHaveLength(2);
+      const firstCli = lines.indexOf(cliRuns[0]);
+      const secondCli = lines.lastIndexOf(cliRuns[1]);
+      expect(secondCli).toBeGreaterThan(firstCli);
+      // The retry removes this job's containers before the second attempt.
+      expect(
+        lines
+          .slice(firstCli, secondCli)
+          .filter((line) => line.startsWith('docker rm -f')),
+      ).toEqual(['docker rm -f cid-alpha cid-beta']);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries the suite that failed, not the one before it',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lane red when the retried Docker suite fails again',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 2,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a suite that fails late in the step when the retry fits the job',
+    () => {
+      // interactive always runs after cli, so its attempt starts well into
+      // the step. The gate must measure this attempt, not cli's time too.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2000s; retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lane red when the motivating 38-minute cli failure repeats',
+    () => {
+      // The nightly incident was deterministic — the sandbox $HOME crash —
+      // so the retry reproduces its two red attempts instead of absorbing
+      // them into a green lane.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 2,
+        suiteSeconds: 2317,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a retry the pre-suite work and the remaining suite no longer fit',
+    () => {
+      // 2000s of pre-suite work — the build, prunes, and lock waits all
+      // charge the step — plus 2 * 3001s for cli and the ~21-minute
+      // interactive reserve is past the step's 6600s share of the job.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        suiteSeconds: 3001,
+        preLoopSeconds: 2000,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 3001s (5001s of the 6600s step budget already spent, 3001s charged for the retry, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      // Only the EXIT trap reclaims; the refused retry must not announce
+      // itself, reclaim containers, or sample the floor a third time.
+      expect(
+        lines.filter((line) => line.startsWith('docker ps -aq')),
+      ).toHaveLength(1);
+      expect(
+        lines.filter((line) => line.startsWith('disk-floor')),
+      ).toHaveLength(2);
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a retry that only fits if it fails as fast as the first attempt',
+    () => {
+      // 5000s of pre-suite work plus a 120s cli failure leaves room only for
+      // a retry that fails just as fast. A recovering retry spends the
+      // suite's own ~40 minutes, so the gate must refuse it.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 2400,
+        preLoopSeconds: 5000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 120s (5120s of the 6600s step budget already spent, 2400s charged for the retry, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a recovering retry and models it at its full length',
+    () => {
+      const { result, calls, modelledSeconds } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 1272,
+        preLoopSeconds: 472,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 120s; retrying once');
+      // pre-suite 472s + failed cli 120s + the 1272s retry + interactive 120s.
+      expect(modelledSeconds).toBe(1984);
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a retry that exactly fits the step budget',
+    () => {
+      // 540s of pre-suite work plus a 2400s cli failure leaves 2940s spent;
+      // the 2400s retry charge and the 1260s interactive reserve then model
+      // the step at exactly 6600s. Equality fits; only a strict overrun is
+      // refused.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 2400,
+        preLoopSeconds: 540,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2400s; retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an interactive retry when the step has no room left for it',
+    () => {
+      // cli's 2400s plus the interactive attempt's 2400s already fill 4800s
+      // of the 6600s step budget, so the retry would overrun the job even
+      // though no later suite needs a reserve.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2400,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 2400s (4800s of the 6600s step budget already spent, 2400s charged for the retry)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
+          ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    're-samples the post-build disk floor before retrying a suite',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines
+        .map((line, index) =>
+          line.startsWith('npx vitest') && line.endsWith(' cli') ? index : -1,
+        )
+        .filter((index) => index >= 0);
+      expect(cliRuns).toHaveLength(2);
+      const postGates = lines
+        .map((line, index) =>
+          line === `disk-floor ${dockerRoot} floor=3145728 inodes=unset`
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      const reclaims = lines
+        .map((line, index) =>
+          line.startsWith('docker ps -aq') &&
+          index > cliRuns[0] &&
+          index < cliRuns[1]
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      // The pre-build sample charges the build floor; the pre-vitest and
+      // pre-retry samples charge the POST knob. The retry reclaims first and
+      // gates the filesystem the reclaimed attempt left behind.
+      expect(reclaims).toHaveLength(1);
+      expect(postGates).toHaveLength(2);
+      expect(postGates[0]).toBeLessThan(cliRuns[0]);
+      expect(postGates[1]).toBeGreaterThan(reclaims[0]);
+      expect(postGates[1]).toBeLessThan(cliRuns[1]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stops before a retry when the pre-retry disk floor trips',
+    () => {
+      // The reclaim leaves container-layer residue the cleanup cannot
+      // remove, so a retry may not start below the floor the first attempt
+      // was admitted on.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        postGateExit: '1',
+        postGateFailAt: 3,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-retry checkpoint');
+      expect(result.stdout).not.toContain('retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'warns when the pre-retry container listing fails',
+    () => {
+      const { result } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        dockerPsFails: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        'failed to list release containers for test-owner',
+      );
+      expect(result.stdout).toContain('failed after 0s; retrying once');
     },
   );
 
@@ -2916,6 +3869,7 @@ esac`,
       // actually reads, so the operator is not sent to the job-start gate's
       // variables.
       expect(result.stdout).toContain('docker data root floor gate failed');
+      expect(result.stdout).toContain('failed at the pre-build checkpoint');
       expect(result.stdout).toContain('DISK_FLOOR_DOCKER_MIN_FREE_KB');
     },
   );
@@ -3008,6 +3962,7 @@ esac`,
         postGateExit: '1',
       });
       expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-vitest checkpoint');
       expect(calls).toContain('npm run build:sandbox');
       expect(calls).toContain('flock --unlock 7');
       expect(calls).not.toContain('npx vitest');
@@ -3563,17 +4518,10 @@ esac`,
     );
   });
 
-  it('force-pushes the release branch so a retry replaces a failed attempt', () => {
-    // A failed attempt leaves release/<tag> on an older head, and the
-    // retry's divergent bump commit makes a plain push fail as
-    // non-fast-forward, blocking every retry of the release. Force is safe
-    // only while nothing for this version has shipped, so the push is
-    // pinned INSIDE the dry-run guard: the dry-run contract (release.yml's
-    // dispatch input) promises no branch is created, and no other test
-    // pins this guard — a force push outside it would turn a dry run into
-    // a destructive overwrite of the remote branch.
+  it('pushes new release branches without replacing an existing release', () => {
+    expect(releaseStepScript).not.toContain('git push --force');
     expect(releaseStepScript).toMatch(
-      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
   });
 
@@ -3595,22 +4543,23 @@ esac`,
     ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
-  it('serializes publish jobs per release tag', () => {
+  it('serializes publish jobs per npm channel', () => {
     // The pre-push re-validation below is only sound while at most one
-    // publish job pushes and publishes a given version at a time; --force
-    // removed the non-fast-forward rejection that used to serialize the
-    // push itself. The group must sit on the publish job — in-progress
-    // runs are never cancelled, and of queued same-tag runs only the
+    // publish job pushes and publishes on a given channel at a time.
+    // The group must sit on the publish job — in-progress
+    // runs are never cancelled, and of queued same-channel runs only the
     // latest survives, but whichever run reaches the push re-validates
-    // first — and it must be keyed by the computed tag, which only exists
-    // as a prepare output, plus is_dry_run, so a dry run (which ships
-    // nothing) never queues ahead of the real release for the same tag.
+    // first — and it must be keyed by the npm channel this run publishes to,
+    // which only exists as a prepare output, plus is_dry_run, so a dry run
+    // (which ships nothing) never queues ahead of the real release for the
+    // same channel. Channel rather than tag is deliberate: a newer version
+    // must not publish on the same channel while an older one resumes.
     // timeout-minutes bounds the hold a wedged publish (a stalled npm
     // publish or asset upload) keeps on the group: without it the GitHub
-    // default of 360 minutes leaves same-tag retries queued behind it,
+    // default of 360 minutes leaves same-channel retries queued behind it,
     // unable to run, fail, or notify.
     expect(workflow).toMatch(
-      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n(?: {6}#[^\n]*\n)* {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.npm_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
     );
   });
 
@@ -3632,12 +4581,11 @@ esac`,
     );
   });
 
-  it('re-validates that the version is still unshipped right before force-pushing', () => {
+  it('re-validates that the version is still unshipped before pushing a new release branch', () => {
     // prepare computed and validated the version minutes to hours before
     // this push (the validation jobs and the production-release approval
     // gate sit in between). A concurrent same-version run can ship in that
-    // window; the force push would then replace the branch tip that the
-    // shipped npm packages, tag, and merge to main anchor to. Pin the
+    // window before this run has created its release branch. Pin the
     // re-validation of prepare's invariant directly before the push, and
     // pinned to the script that owns the published-package list so the
     // guard cannot silently drift from it: the call must sit inside the
@@ -3673,6 +4621,30 @@ esac`,
     expect(pushReleaseBranchStep.env.RELEASE_VERSION).toBe(
       '${{ needs.prepare.outputs.release_version }}',
     );
+    // The resume arm verifies the reused commit is the release source or
+    // its direct single-parent version commit. Without RELEASE_SHA wired
+    // into the step the provenance check can never pass and every resume
+    // is refused.
+    expect(pushReleaseBranchStep.env.RELEASE_SHA).toBe(
+      '${{ needs.prepare.outputs.release_sha }}',
+    );
+    // The resume-time channel guard must ride the same workflow-pinned
+    // script (neither its comparison code nor its npm probes may come from
+    // the selected release ref), run before the write credential is
+    // exported, and turn its decisive exit 1 into the version_refusal
+    // marker.
+    const resumeGuardCall =
+      'node .release-workflow/scripts/assert-release-version.mjs --assert-channel-resumable --version="${RELEASE_VERSION}" --tag="${NPM_TAG}"';
+    const resumeGuard = releaseStepScript.indexOf(resumeGuardCall);
+    expect(resumeGuard).toBeGreaterThan(
+      releaseStepScript.indexOf('if [[ "${IS_DRY_RUN}" == "false" ]]'),
+    );
+    expect(resumeGuard).toBeLessThan(
+      releaseStepScript.indexOf('export GH_TOKEN="${CI_BOT_PAT}"'),
+    );
+    expect(releaseStepScript).toMatch(
+      /node \.release-workflow\/scripts\/assert-release-version\.mjs --assert-channel-resumable --version="\$\{RELEASE_VERSION\}" --tag="\$\{NPM_TAG\}" \|\| channel_status=\$\?[\s\S]*?if \[\[ "\$\{channel_status\}" -eq 1 \]\]; then\n {10}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {10}exit 1\n {8}fi/,
+    );
     expect(pushReleaseBranchStep.run).toContain('push-release-branch');
     const guard = releaseStepScript.indexOf(
       'node .release-workflow/scripts/assert-release-version.mjs --assert-unreleased="${RELEASE_VERSION}" || guard_status=$?',
@@ -3685,7 +4657,7 @@ esac`,
     );
     expect(
       releaseStepScript.indexOf(
-        'git push --force --set-upstream origin "${release_branch_name}" --follow-tags',
+        'git push --set-upstream origin "${release_branch_name}" --follow-tags',
       ),
     ).toBeGreaterThan(guard);
   });
@@ -3773,6 +4745,78 @@ esac`,
       );
       expect(result.status).toBe(3);
       expect(result.stdout).toContain('has already shipped');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'decides the resume verdict without the release checkout dependencies',
+    () => {
+      // The publish job installs the selected ref's lockfile into the
+      // release checkout, and a bare require('semver') from
+      // .release-workflow/scripts/ walks up into that node_modules. Plant a
+      // copy that reports every version as not-ahead: a guard loading it
+      // would resume a release whose channel already moved past it, in the
+      // first step carrying a write-scoped token. The verdict must survive
+      // the poisoning, so it can only come from the pinned script itself.
+      const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'resume-')));
+      const pinned = join(workspace, '.release-workflow');
+      mkdirSync(join(pinned, 'scripts'), { recursive: true });
+      for (const file of [
+        'assert-release-version.mjs',
+        'release-packages.mjs',
+        'workspaces.js',
+      ]) {
+        writeFileSync(
+          join(pinned, 'scripts', file),
+          readFileSync(join('scripts', file)),
+        );
+      }
+      writeFileSync(
+        join(pinned, 'package.json'),
+        JSON.stringify({ workspaces: ['packages/*'] }),
+      );
+      mkdirSync(join(pinned, 'packages/example'), { recursive: true });
+      writeFileSync(
+        join(pinned, 'packages/example/package.json'),
+        JSON.stringify({ name: '@qwen-code/example' }),
+      );
+      const poisoned = join(workspace, 'node_modules', 'semver');
+      mkdirSync(poisoned, { recursive: true });
+      writeFileSync(
+        join(poisoned, 'package.json'),
+        JSON.stringify({ name: 'semver', main: 'index.js' }),
+      );
+      writeFileSync(
+        join(poisoned, 'index.js'),
+        'module.exports = { parse: (value) => ({ value }), gt: () => false };\n',
+      );
+      const bin = join(workspace, 'bin');
+      mkdirSync(bin);
+      const runGuard = (distTag) => {
+        writeFileSync(join(bin, 'npm'), `#!/bin/sh\necho "${distTag}"\n`, {
+          mode: 0o755,
+        });
+        return spawnSync(
+          process.execPath,
+          [
+            join(pinned, 'scripts', 'assert-release-version.mjs'),
+            '--assert-channel-resumable',
+            '--version=1.2.3',
+            '--tag=latest',
+          ],
+          {
+            cwd: workspace,
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          },
+        );
+      };
+      const ahead = runGuard('9.9.9');
+      expect(ahead.status, ahead.stderr).toBe(1);
+      expect(ahead.stdout).toContain('past 1.2.3');
+      const behind = runGuard('1.2.2');
+      expect(behind.status, behind.stderr).toBe(0);
+      rmSync(workspace, { recursive: true, force: true });
     },
   );
 
@@ -4067,15 +5111,22 @@ describe('release artifact handoff', () => {
       '${{ needs.build_release.outputs.release_commit }}',
     );
     expect(restore.if).toBe("${{ needs.build_release.result == 'success' }}");
+    expect(step('publish', 'Prepare release branch').if).toBe(
+      "${{ needs.build_release.result != 'success' }}",
+    );
+    // A resume rebuilds through these two steps so the trusted
+    // reset/checkout pair between them also covers the retry path.
     for (const name of [
-      'Prepare release branch',
       'Build Bundle and Prepare Package',
       'Build Standalone Archives',
     ]) {
       expect(step('publish', name).if).toBe(
-        "${{ needs.build_release.result != 'success' }}",
+        "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}",
       );
     }
+    expect(releaseStepScript).toContain(
+      'git switch -C "${release_branch_name}" "${release_commit}"',
+    );
     expect(publish.steps.indexOf(restore)).toBeLessThan(
       publish.steps.indexOf(
         step('publish', 'Conditionally push release branch'),

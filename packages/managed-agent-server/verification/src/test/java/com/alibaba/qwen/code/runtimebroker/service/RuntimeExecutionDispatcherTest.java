@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
@@ -49,6 +50,39 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RuntimeExecutionDispatcherTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void measuredAcknowledgementHonorsTheSessionOwnerOnSharedWorkspace(boolean foreignOwner) {
+        var fixture = new Fixture();
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null, "local-process", "storage");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getLease()).thenReturn(fixture.lease);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(1L);
+        var session = new RuntimeSession(foreignOwner ? "other-harness" : "harness", "runtime", "bootstrap", scope);
+        when(fixture.sessions.findById(scope, "runtime")).thenReturn(new RuntimeSessionRecord(session,
+                "binding", 1, RuntimeSessionRecord.State.READY, 0, Instant.now()));
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call",
+                "argsDigest", "sha256:" + "a".repeat(64), "resultProtocol", 4);
+        var result = Map.<String, Object>of("executionStatus", "success", "responseParts", java.util.List.of());
+        var execution = new ToolExecutionRecord("execution", "idempotency", "binding", 1,
+                "harness", "runtime", "turn", "call", "sha256:" + "a".repeat(64), reference,
+                ToolExecutionRecord.State.SETTLED, "success", result, 1, false, null, null, 0, 0, Instant.now());
+        when(fixture.transport.acknowledgeV4(fixture.lease, session, reference, result, null))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        var acknowledged = fixture.dispatcher.acknowledgePersistedTools(fixture.binding, execution).toCompletableFuture();
+        if (foreignOwner) {
+            var failure = assertThrows(java.util.concurrent.CompletionException.class, acknowledged::join);
+            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
+            verify(fixture.transport, never()).acknowledgeV4(any(), any(), any(), any(), any());
+        } else {
+            acknowledged.join();
+            verify(fixture.transport).acknowledgeV4(fixture.lease, session, reference, result, null);
+        }
+    }
+
     @Test
     @Timeout(15)
     void concurrentDispatchesShareReservationWhileClaimIsPending() throws Exception {
@@ -165,6 +199,8 @@ class RuntimeExecutionDispatcherTest {
         private final ToolExecutionRepository executions = mock(ToolExecutionRepository.class);
         private final RuntimeProvisioner provisioner = mock(RuntimeProvisioner.class);
         private final RuntimeTransport transport = mock(RuntimeTransport.class);
+        private final RuntimeSessionRepository sessions = mock(RuntimeSessionRepository.class);
+        private final RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         private final ScheduledExecutorService renewalScheduler = mock(ScheduledExecutorService.class);
         private final ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
@@ -180,8 +216,6 @@ class RuntimeExecutionDispatcherTest {
         private Fixture() {
             var registry = mock(RuntimeBindingRegistry.class);
             var bindings = mock(RuntimeBindingRepository.class);
-            var sessions = mock(RuntimeSessionRepository.class);
-            var binding = mock(RuntimeBindingRecord.class);
             var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                     WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
             when(binding.getRequest()).thenReturn(new RuntimeProvisionRequest(scope, "harness", "local"));
@@ -208,6 +242,60 @@ class RuntimeExecutionDispatcherTest {
                     provisioner, transport, mock(RuntimePublicationVerifier.class), "broker", LEASE,
                     Duration.ofMinutes(30), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
                     scheduler, renewalScheduler, closed);
+        }
+    }
+
+    @Test
+    void anExternalShellDispatchPassesTheFilesGate() {
+        var fixture = new Fixture();
+        // Bind the external Shell placement: same provisioner, session
+        // isolation and storage identity as files, but the Shell digest.
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.EXTERNAL_SHELL_CAPABILITY_DIGEST, "session");
+        var request = new RuntimeProvisionRequest(scope, "harness", "external-workspace", "workspace");
+        when(fixture.binding.getRequest()).thenReturn(request);
+        when(fixture.binding.getBindingId()).thenReturn("binding");
+        when(fixture.binding.getGeneration()).thenReturn(1L);
+        when(fixture.prepared.isCancelRequested()).thenReturn(false);
+        // The test premise: the placement is admitted as an external Shell.
+        assertTrue(WorkspaceExecutionProfile.isExternalWorkspaceRequest(request),
+                "The request must be an external Workspace");
+        assertTrue(WorkspaceExecutionProfile.isExternalShellRequest(request),
+                "The request must be an external Shell");
+        // A Tool v3 Shell dispatch carries the publication grant and names
+        // run_shell_command — the exact shape the files gate used to refuse.
+        Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+        when(fixture.prepared.getReference()).thenReturn(reference);
+        Map<String, Object> payload = Map.of("toolName", "run_shell_command",
+                "input", Map.of("command", "printf hi"));
+        // The capture map the dispatcher derives from the grant's binding.
+        var grant = new com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant(
+                "pub-1", "token", "http://127.0.0.1:1",
+                Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "runtime"),
+                        "turnId", "turn", "executionCallId", "execution", "bindingGeneration", 1L),
+                System.currentTimeMillis() + 60_000);
+        // The executing record carries the Shell dispatch's own reference;
+        // settle synchronously so the dispatch never reaches result polling.
+        when(fixture.executing.getReference()).thenReturn(reference);
+        Map<String, Object> settled = Map.of("state", "settled",
+                "result", Map.of("executionStatus", "not_started"));
+        when(fixture.transport.executeV3(eq(fixture.lease), eq(fixture.session), eq(reference),
+                eq(payload), any())).thenReturn(CompletableFuture.completedFuture(settled));
+
+        try {
+            fixture.dispatcher.beginDispatch(fixture.context, fixture.prepared, payload, grant);
+            // The dispatch reached the transport, not the files-gate refusal.
+            verify(fixture.transport).executeV3(eq(fixture.lease), eq(fixture.session), eq(reference),
+                    eq(payload), any());
+            // The synchronous settle completes the dispatch before
+            // beginDispatch returns, so the outcome — not the membership —
+            // is the assertion.
+            verify(fixture.state).settleExecution(fixture.executing,
+                    Map.of("executionStatus", "not_started"));
+        } catch (RuntimeException failure) {
+            throw new AssertionError("The files gate refused the Shell dispatch: "
+                    + failure.getMessage(), failure);
         }
     }
 }

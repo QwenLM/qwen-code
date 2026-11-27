@@ -64,6 +64,9 @@ export interface BranchWorktreePreparationJournal {
   markerCreated: boolean;
   sidecarCreated: boolean;
   phase: BranchWorktreePreparationPhase;
+  /** Repo-relative paths the dirty carry applied; the rollback gate
+   * exempts exactly these. Absent on journals from older builds. */
+  carriedPaths?: string[];
 }
 
 const PREPARATION_PHASES = new Set<BranchWorktreePreparationPhase>([
@@ -367,7 +370,10 @@ function isPreparationJournal(
     typeof record['markerCreated'] === 'boolean' &&
     typeof record['sidecarCreated'] === 'boolean' &&
     typeof record['phase'] === 'string' &&
-    PREPARATION_PHASES.has(record['phase'] as BranchWorktreePreparationPhase)
+    PREPARATION_PHASES.has(record['phase'] as BranchWorktreePreparationPhase) &&
+    (record['carriedPaths'] === undefined ||
+      (Array.isArray(record['carriedPaths']) &&
+        record['carriedPaths'].every((x) => typeof x === 'string')))
   );
 }
 
@@ -433,7 +439,10 @@ export function recoverBranchWorktreePreparations(args: {
         journalRepoTop !== runtimeRepoTop ||
         path.resolve(journal.repoTop, '.qwen', 'worktrees', journal.slug) !==
           path.resolve(journal.worktreePath) ||
-        journal.worktreeBranch !== worktreeBranchForSlug(journal.slug)
+        // Detached managed worktrees record '' (no branch ref); named
+        // ones must still match their canonical worktree-<slug> branch.
+        (journal.worktreeBranch !== '' &&
+          journal.worktreeBranch !== worktreeBranchForSlug(journal.slug))
       ) {
         args.warn?.('branch worktree recovery journal identity mismatch', {
           targetSessionId: journal.targetSessionId,
@@ -491,6 +500,7 @@ export function recoverBranchWorktreePreparations(args: {
           await worktreeService.finalizePreparedUserWorktreeBranch(
             journal.slug,
             journal.baseCommit,
+            journal.worktreeBranch !== '',
           );
         if (!finalized.success) {
           args.warn?.('branch worktree recovery could not finalize branch', {
@@ -564,6 +574,8 @@ export function recoverBranchWorktreePreparations(args: {
             );
             args.assertGenerationOpen?.();
           },
+          journal.worktreeBranch !== '',
+          journal.carriedPaths,
         );
         if (!removed.success) {
           args.warn?.('branch worktree recovery refused cleanup', {
@@ -597,6 +609,7 @@ export function recoverBranchWorktreePreparations(args: {
           await worktreeService.finalizePreparedUserWorktreeBranch(
             journal.slug,
             journal.baseCommit,
+            journal.worktreeBranch !== '',
           );
         if (!finalized.success) {
           args.warn?.('branch worktree recovery could not finalize branch', {
@@ -694,6 +707,12 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
       ? await fs.realpath(args.snapshot.worktree.path).catch(() => null)
       : null;
     const managedRoot = path.join(canonicalRepoTop, '.qwen', 'worktrees');
+    const workspaceManagedRoot = path.join(workspaceCwd, '.qwen', 'worktrees');
+    const workspaceOwnsCheckout =
+      isWithinRoot(canonicalCheckoutTop, workspaceManagedRoot) &&
+      sidecar?.workspaceCwd !== undefined &&
+      (await fs.realpath(sidecar.workspaceCwd).catch(() => null)) ===
+        workspaceCwd;
     const markerOwner = await readWorktreeSessionMarker(canonicalCheckoutTop);
     if (
       workspaceCommonDir === null ||
@@ -702,7 +721,8 @@ export async function resolveBranchWorktreeBaseCheckout(args: {
       sidecarPath !== canonicalCheckoutTop ||
       snapshotPath !== canonicalCheckoutTop ||
       markerOwner !== args.sessionId ||
-      !isWithinRoot(canonicalCheckoutTop, managedRoot)
+      (!workspaceOwnsCheckout &&
+        !isWithinRoot(canonicalCheckoutTop, managedRoot))
     ) {
       return null;
     }

@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.RelayRow;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.TurnLine;
@@ -16,6 +16,8 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.ObjectProvider;
 
@@ -45,7 +47,7 @@ class ChildResultRelayTest {
     private static final String CHILD = UUID.randomUUID().toString();
     private static final String RUN = "run-1";
 
-    private ChildResultRelayStore store;
+    private JdbcChildResultRelayStore store;
     private ManagedAgentService sessions;
     private RuntimeBrokerService broker;
     private RecordingHarness harness;
@@ -149,7 +151,7 @@ class ChildResultRelayTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        store = mock(ChildResultRelayStore.class);
+        store = mock(JdbcChildResultRelayStore.class);
         sessions = mock(ManagedAgentService.class);
         broker = mock(RuntimeBrokerService.class);
         ObjectProvider<com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations> provider =
@@ -167,19 +169,19 @@ class ChildResultRelayTest {
         // — answers the row unchanged; a snapshot's merge is its discard.
         when(childWorkspaces.requestFinish(anyString(), anyString(),
                 anyString(), anyString())).thenAnswer(args -> {
-                    ChildWorkspaceStore.Row before = childWorkspaces.find(
+                    JdbcChildWorkspaceStore.Row before = childWorkspaces.find(
                             args.getArgument(0), args.getArgument(1),
                             args.getArgument(2));
                     if (before == null) {
                         return null;
                     }
                     String asked = args.getArgument(3);
-                    String finish = ChildWorkspaceStore.MERGE.equals(asked)
-                            && before.snapshot() ? ChildWorkspaceStore.DISCARD
+                    String finish = JdbcChildWorkspaceStore.MERGE.equals(asked)
+                            && before.snapshot() ? JdbcChildWorkspaceStore.DISCARD
                                     : asked;
                     if (finish.equals(before.finishRequest())
-                            || ChildWorkspaceStore.DISCARD.equals(finish)
-                                    && ChildWorkspaceStore.DISCARD_PINNED
+                            || JdbcChildWorkspaceStore.DISCARD.equals(finish)
+                                    && JdbcChildWorkspaceStore.DISCARD_PINNED
                                             .equals(before.finishRequest())) {
                         return before;
                     }
@@ -262,7 +264,7 @@ class ChildResultRelayTest {
         when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(false);
         when(store.edgeMessages(anyString(), anyString(), anyString(),
                 any())).thenReturn(
-                    new ChildResultRelayStore.EdgeMessages(0, 0, List.of()));
+                    new JdbcChildResultRelayStore.EdgeMessages(0, 0, List.of()));
         when(store.readResource(TENANT, PARENT, "resource-body")).thenReturn(
                 "{\"kind\":\"child_agent\","
                         + "\"inputRef\":{\"resourceId\":\"resource-input\"},"
@@ -1455,17 +1457,17 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0, Set.of(), now,
+                new JdbcChildResultRelayStore.JournalTurns(0, Set.of(), now,
                         null));
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 1,
+                new JdbcChildResultRelayStore.EdgeMessages(0, 1,
                         List.of("msg_1:message")));
         relay.scan();
         assertThat(harness.operations).isEmpty();
         assertThat(row.get().attempts()).isZero();
         // Seen by the next read (and settled): the settlement proceeds.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now, null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
@@ -1482,9 +1484,9 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), 42L,
-                        new ChildResultRelayStore.SettledTurn(
+                        new JdbcChildResultRelayStore.SettledTurn(
                                 "msg_1:message", "error", "session_message",
                                 42L)));
         when(store.childRunBody(TENANT, PARENT, RUN)).thenReturn(json(
@@ -1538,7 +1540,7 @@ class ChildResultRelayTest {
     void holdsAChildWhileAMessageOnItsEdgeOwesItsHandover() {
         watching();
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(1, 1, List.of()));
+                new JdbcChildResultRelayStore.EdgeMessages(1, 1, List.of()));
         relay.scan();
         assertThat(harness.operations).isEmpty();
         assertThat(row.get().state()).isEqualTo("watching");
@@ -1552,7 +1554,7 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1, Set.of(), now - 60_000L,
+                new JdbcChildResultRelayStore.JournalTurns(1, Set.of(), now - 60_000L,
                         null));
         relay.scan();
         assertThat(harness.operations).isEmpty();
@@ -1568,10 +1570,10 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now - 31 * 60_000L, null));
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 1,
+                new JdbcChildResultRelayStore.EdgeMessages(0, 1,
                         List.of("msg_1:message")));
         relay.scan();
         assertThat(harness.operations)
@@ -1583,6 +1585,27 @@ class ChildResultRelayTest {
         verify(store, never()).terminalResultText(TENANT, CHILD, "turn-1");
     }
 
+    // #18149 Stage 3: an Action-parked child Turn stays RUNNING, so a park
+    // that outlives the message-turn bound with a message still waiting is
+    // a wait, never the bound's failure.
+    @Test
+    void waitsOutAParkedChildPastTheMessageTurnBound() {
+        watching();
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "RUNNING", null,
+                AgentStateStore.HARNESS_ACTION_PARKED, true, "epoch-1"));
+        holdsMessages();
+        when(store.journalTurns(TENANT, CHILD)).thenReturn(
+                new JdbcChildResultRelayStore.JournalTurns(1,
+                        Set.of("msg_1:message"), now - 31 * 60_000L, null));
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isZero();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                anyLong(), anyLong(), anyLong());
+    }
+
     // The settlement names the messages it saw, so the parent refuses it
     // over one opened after the relay's reads (a message accepted in that
     // window would otherwise be closed away unread).
@@ -1590,7 +1613,7 @@ class ChildResultRelayTest {
     void namesTheMessagesItSawOnTheSettlement() {
         watching();
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 2, List.of()));
+                new JdbcChildResultRelayStore.EdgeMessages(0, 2, List.of()));
         relay.scan();
         assertThat(harness.operations.getFirst())
                 .containsEntry("kind", "commit_result")
@@ -1618,8 +1641,8 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
-                        new ChildResultRelayStore.SettledTurn(
+                new JdbcChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
+                        new JdbcChildResultRelayStore.SettledTurn(
                                 "msg_1:message", "completed",
                                 "session_message", 42L)));
         when(store.journalTurnText(TENANT, CHILD, "msg_1:message"))
@@ -1643,12 +1666,12 @@ class ChildResultRelayTest {
         watching();
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
-                        new ChildResultRelayStore.SettledTurn(
+                new JdbcChildResultRelayStore.JournalTurns(0, Set.of(), 42L,
+                        new JdbcChildResultRelayStore.SettledTurn(
                                 "msg_1:message", "error", "session_message",
                                 42L)));
         when(store.edgeMessages(TENANT, PARENT, RUN, CHILD)).thenReturn(
-                new ChildResultRelayStore.EdgeMessages(0, 1, List.of()));
+                new JdbcChildResultRelayStore.EdgeMessages(0, 1, List.of()));
         relay.scan();
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
@@ -1790,13 +1813,13 @@ class ChildResultRelayTest {
                         + "\"workspaceMode\":\"worktree\"}");
     }
 
-    private static ChildWorkspaceStore.Row workspaceRow(String state,
+    private static JdbcChildWorkspaceStore.Row workspaceRow(String state,
             String finish, String outcome, List<String> conflicts,
             String result) {
-        return new ChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
+        return new JdbcChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
                 "workspace", 1, "storage", ".", ".", ".", "b".repeat(40),
                 result, null, null, state, finish, outcome, conflicts, null,
-                null, null, 1, 0, 0, 0, 0, ChildWorkspaceStore.WORKTREE);
+                null, null, 1, 0, 0, 0, 0, JdbcChildWorkspaceStore.WORKTREE);
     }
 
     // ---- #13753 I3: snapshot runs ----
@@ -1808,17 +1831,17 @@ class ChildResultRelayTest {
                         + "\"workspaceMode\":\"snapshot\"}");
     }
 
-    private static ChildWorkspaceStore.Row snapshotRow(String state,
+    private static JdbcChildWorkspaceStore.Row snapshotRow(String state,
             String finish, String outcome) {
-        return new ChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
+        return new JdbcChildWorkspaceStore.Row(TENANT, PARENT, RUN, WORKSPACE_ID,
                 "workspace", 1, "storage", ".", ".", ".", "b".repeat(40),
                 null, null, null, state, finish, outcome, List.of(), null,
-                null, null, 1, 0, 0, 0, 0, ChildWorkspaceStore.SNAPSHOT);
+                null, null, 1, 0, 0, 0, 0, JdbcChildWorkspaceStore.SNAPSHOT);
     }
 
-    private static ChildWorkspaceStore.Row withFinish(
-            ChildWorkspaceStore.Row row, String finish) {
-        return new ChildWorkspaceStore.Row(row.tenantId(),
+    private static JdbcChildWorkspaceStore.Row withFinish(
+            JdbcChildWorkspaceStore.Row row, String finish) {
+        return new JdbcChildWorkspaceStore.Row(row.tenantId(),
                 row.parentSessionId(), row.childRunId(),
                 row.childWorkspaceId(), row.workspaceId(),
                 row.workspaceGeneration(), row.storageId(),
@@ -1840,8 +1863,8 @@ class ChildResultRelayTest {
     void aWorktreeRunCreatesItsChildOnlyOnceItsWorkspaceIsReady() {
         worktreeRun("sent");
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                JdbcChildWorkspaceStore.WORKTREE)).thenReturn(
+                workspaceRow(JdbcChildWorkspaceStore.PREPARING, null, null,
                         List.of(), null));
         relay.scan();
         // Preparing: looked at again on the heartbeat, at no cost, with
@@ -1855,8 +1878,8 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("creating");
 
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                JdbcChildWorkspaceStore.WORKTREE)).thenReturn(
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenReturn(
@@ -1872,8 +1895,8 @@ class ChildResultRelayTest {
     void aSnapshotRunPreparesItsCopyAndCreatesItsChildIsolated() {
         snapshotRun("sent");
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
-                        ChildWorkspaceStore.PREPARING, null, null));
+                JdbcChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
+                        JdbcChildWorkspaceStore.PREPARING, null, null));
         relay.scan();
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 5_000L), anyLong(), anyLong());
@@ -1881,8 +1904,8 @@ class ChildResultRelayTest {
                 anyString(), anyString(), anyString(), Mockito.anyBoolean());
 
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
-                        ChildWorkspaceStore.READY, null, null));
+                JdbcChildWorkspaceStore.SNAPSHOT)).thenReturn(snapshotRow(
+                        JdbcChildWorkspaceStore.READY, null, null));
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenReturn(
                     new CommandAdmission(CHILD, null, "accepted", false));
@@ -1890,7 +1913,7 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("binding");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         verify(childWorkspaces, never()).request(anyString(), anyString(),
-                anyString(), Mockito.eq(ChildWorkspaceStore.WORKTREE));
+                anyString(), Mockito.eq(JdbcChildWorkspaceStore.WORKTREE));
     }
 
     // A mode this relay does not serve is never run as shared: the run
@@ -1947,17 +1970,17 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                snapshotRow(ChildWorkspaceStore.READY, null, null));
+                snapshotRow(JdbcChildWorkspaceStore.READY, null, null));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("commit_result", "accept");
         assertThat((String) harness.operations.get(0).get("receipt"))
                 .doesNotContain("workspace");
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         verify(childWorkspaces, never()).requestFinish(anyString(),
                 anyString(), anyString(),
-                Mockito.eq(ChildWorkspaceStore.MERGE));
+                Mockito.eq(JdbcChildWorkspaceStore.MERGE));
         verify(store, never()).scheduleRetry(any(RelayRow.class), anyString(),
                 anyLong(), anyLong(), anyLong());
         assertThat(row.get().state()).isEqualTo("delivering");
@@ -1973,10 +1996,10 @@ class ChildResultRelayTest {
                         null));
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                snapshotRow(ChildWorkspaceStore.READY, null, null));
+                snapshotRow(JdbcChildWorkspaceStore.READY, null, null));
         relay.scan();
         verify(childWorkspaces, never()).requestFinish(anyString(),
                 anyString(), anyString(), anyString());
@@ -1989,7 +2012,7 @@ class ChildResultRelayTest {
     void aSnapshotNeverHoldsAQuotaAStopOrAGiveUpForAMerge() {
         snapshotRun("sent");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                snapshotRow(ChildWorkspaceStore.READY, null, null));
+                snapshotRow(JdbcChildWorkspaceStore.READY, null, null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
@@ -2006,14 +2029,14 @@ class ChildResultRelayTest {
         // A stop that cancelled the message turn after a completed task.
         harness.operations.clear();
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-2",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-2",
                                 "cancelled", "session_message", now)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2033,9 +2056,9 @@ class ChildResultRelayTest {
 
         verify(childWorkspaces, never()).requestFinish(anyString(),
                 anyString(), anyString(),
-                Mockito.eq(ChildWorkspaceStore.MERGE));
+                Mockito.eq(JdbcChildWorkspaceStore.MERGE));
         verify(childWorkspaces, Mockito.times(3)).requestFinish(TENANT,
-                PARENT, RUN, ChildWorkspaceStore.DISCARD);
+                PARENT, RUN, JdbcChildWorkspaceStore.DISCARD);
         verify(store, never()).scheduleRetry(any(RelayRow.class), anyString(),
                 anyLong(), anyLong(), anyLong());
     }
@@ -2043,18 +2066,18 @@ class ChildResultRelayTest {
     @Test
     void aWorktreeRunWhoseWorkspaceCannotBeReadySettlesNeverStarted() {
         worktreeRun("sent");
-        for (ChildWorkspaceStore.Row unusable : List.of(
-                workspaceRow(ChildWorkspaceStore.FAILED, null,
+        for (JdbcChildWorkspaceStore.Row unusable : List.of(
+                workspaceRow(JdbcChildWorkspaceStore.FAILED, null,
                         "child_workspace_layout", List.of(), null),
-                workspaceRow(ChildWorkspaceStore.BLOCKED, null,
+                workspaceRow(JdbcChildWorkspaceStore.BLOCKED, null,
                         "child_workspace_diverged", List.of(), null),
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.DISCARD, null, List.of(), null))) {
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.DISCARD, null, List.of(), null))) {
             harness.operations.clear();
             row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                     "creating", "owner", now + 30_000, 0, 0, null, now, now));
             when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE))
+                JdbcChildWorkspaceStore.WORKTREE))
                     .thenReturn(unusable);
             when(childWorkspaces.find(TENANT, PARENT, RUN))
                     .thenReturn(unusable);
@@ -2070,7 +2093,7 @@ class ChildResultRelayTest {
         // Each is asked to discard (a repeated discard is the same request),
         // so nothing it created outlives the run.
         verify(childWorkspaces, Mockito.times(3)).requestFinish(TENANT, PARENT,
-                RUN, ChildWorkspaceStore.DISCARD);
+                RUN, JdbcChildWorkspaceStore.DISCARD);
         verify(sessions, never()).createChildSession(anyString(), anyString(),
                 anyString(), anyString(), anyString(), Mockito.anyBoolean());
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
@@ -2086,7 +2109,7 @@ class ChildResultRelayTest {
             row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                     "creating", "owner", now + 30_000, 0, 0, null, now, now));
             when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE))
+                JdbcChildWorkspaceStore.WORKTREE))
                     .thenThrow(refusal(code));
             relay.scan();
             assertThat(row.get().state()).as(code).isEqualTo("done");
@@ -2103,23 +2126,23 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE))
+                JdbcChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                workspaceRow(JdbcChildWorkspaceStore.PREPARING, null, null,
                         List.of(), null));
         relay.scan();
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
     }
 
     @Test
     void aWorktreeCreationRefusedAfterReadySettlesNeverStarted() {
         worktreeRun("sent");
-        ChildWorkspaceStore.Row ready = workspaceRow(ChildWorkspaceStore.READY,
+        JdbcChildWorkspaceStore.Row ready = workspaceRow(JdbcChildWorkspaceStore.READY,
                 null, null, List.of(), null);
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE)).thenReturn(ready);
+                JdbcChildWorkspaceStore.WORKTREE)).thenReturn(ready);
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(ready);
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenThrow(
@@ -2131,8 +2154,10 @@ class ChildResultRelayTest {
                         .containsEntry("stopReason", "creation_failed")
                         .containsEntry("started", false));
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
-        // Any other refusal is retried as before.
+                JdbcChildWorkspaceStore.DISCARD);
+        // child_parent_unavailable settles immediately: the parent's profile
+        // cannot admit a child, so retrying would defer the refusal until the
+        // parent's Turn deadline.
         harness.operations.clear();
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2140,8 +2165,11 @@ class ChildResultRelayTest {
                 .createChildSession(TENANT, PARENT, RUN, "audit the diff",
                         "review", true);
         relay.scan();
-        assertThat(harness.operations).isEmpty();
-        assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
     }
 
     @Test
@@ -2156,24 +2184,24 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                workspaceRow(JdbcChildWorkspaceStore.PREPARING, null, null,
                         List.of(), null));
         relay.scan();
         assertThat(row.get().state()).isEqualTo("orphaned");
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
 
         // A merge already running refuses the discard: that lands, and the
         // run is still classified.
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGING,
-                        ChildWorkspaceStore.MERGE, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGING,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(),
                         "c".repeat(40)));
         Mockito.doThrow(refusal("child_workspace_finishing")).when(childWorkspaces)
                 .requestFinish(TENANT, PARENT, RUN,
-                        ChildWorkspaceStore.DISCARD);
+                        JdbcChildWorkspaceStore.DISCARD);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("orphaned");
     }
@@ -2192,7 +2220,7 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.BLOCKED, null,
+                workspaceRow(JdbcChildWorkspaceStore.BLOCKED, null,
                         "child_workspace_git", List.of(), null));
         relay.scan();
         verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
@@ -2217,8 +2245,8 @@ class ChildResultRelayTest {
                 .thenReturn("child result");
         // A store-faithful find: the recorded request is visible to the
         // next read in the same pass.
-        AtomicReference<ChildWorkspaceStore.Row> workspace =
-                new AtomicReference<>(workspaceRow(ChildWorkspaceStore.READY,
+        AtomicReference<JdbcChildWorkspaceStore.Row> workspace =
+                new AtomicReference<>(workspaceRow(JdbcChildWorkspaceStore.READY,
                         null, null, List.of(), null));
         when(childWorkspaces.find(TENANT, PARENT, RUN))
                 .thenAnswer(ignored -> workspace.get());
@@ -2226,10 +2254,10 @@ class ChildResultRelayTest {
             workspace.set(withFinish(workspace.get(), args.getArgument(3)));
             return workspace.get();
         }).when(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         relay.scan();
         verify(childWorkspaces, Mockito.times(1)).requestFinish(TENANT,
-                PARENT, RUN, ChildWorkspaceStore.MERGE);
+                PARENT, RUN, JdbcChildWorkspaceStore.MERGE);
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 5_000L), anyLong(), anyLong());
         assertThat(harness.operations).isEmpty();
@@ -2238,8 +2266,8 @@ class ChildResultRelayTest {
     @Test
     void aWorktreeGiveUpKeepsTheMergeItsChildAsked() {
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 63, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
@@ -2253,8 +2281,8 @@ class ChildResultRelayTest {
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
 
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         dueAgain();
         relay.scan();
@@ -2280,8 +2308,8 @@ class ChildResultRelayTest {
             paths.add("d".repeat(700) + "/\u0001" + index);
         }
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.CONFLICTED,
-                        ChildWorkspaceStore.MERGE, "conflicted", paths,
+                workspaceRow(JdbcChildWorkspaceStore.CONFLICTED,
+                        JdbcChildWorkspaceStore.MERGE, "conflicted", paths,
                         "c".repeat(40)));
         relay.scan();
         var receipt = new ObjectMapper().readTree(
@@ -2309,14 +2337,14 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         // The merge is asked and the child's close admitted (the merge runs
         // once the child is closed); nothing commits while the outcome is
         // owed, and the wait costs no attempt.
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 5_000L), anyLong(), anyLong());
@@ -2325,8 +2353,8 @@ class ChildResultRelayTest {
 
         String pin = "refs/qwen/child-workspaces/" + WORKSPACE_ID + "/result";
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.CONFLICTED,
-                        ChildWorkspaceStore.MERGE, "conflicted",
+                workspaceRow(JdbcChildWorkspaceStore.CONFLICTED,
+                        JdbcChildWorkspaceStore.MERGE, "conflicted",
                         List.of("src/a.ts", "b.md"), "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations)
@@ -2346,8 +2374,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.DISCARDED,
-                        ChildWorkspaceStore.DISCARD, "conflicted",
+                workspaceRow(JdbcChildWorkspaceStore.DISCARDED,
+                        JdbcChildWorkspaceStore.DISCARD, "conflicted",
                         List.of("src/a.ts", "b.md"), "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations.get(0).get("receipt")).isEqualTo(receipt);
@@ -2362,21 +2390,21 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         String pin = "refs/qwen/child-workspaces/" + WORKSPACE_ID + "/result";
-        Map<ChildWorkspaceStore.Row, String> cases = new java.util.LinkedHashMap<>();
-        cases.put(workspaceRow(ChildWorkspaceStore.MERGED,
-                ChildWorkspaceStore.MERGE, "merged", List.of(), "c".repeat(40)),
+        Map<JdbcChildWorkspaceStore.Row, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                JdbcChildWorkspaceStore.MERGE, "merged", List.of(), "c".repeat(40)),
                 "\"outcome\":\"merged\",\"code\":\"merged\"}");
-        cases.put(workspaceRow(ChildWorkspaceStore.BLOCKED,
-                ChildWorkspaceStore.MERGE, "child_workspace_diverged",
+        cases.put(workspaceRow(JdbcChildWorkspaceStore.BLOCKED,
+                JdbcChildWorkspaceStore.MERGE, "child_workspace_diverged",
                 List.of(), "c".repeat(40)),
                 "\"outcome\":\"blocked\",\"code\":\"child_workspace_diverged\","
                         + "\"resultRef\":\"" + pin + "\"}");
-        cases.put(workspaceRow(ChildWorkspaceStore.BLOCKED,
-                ChildWorkspaceStore.MERGE, "child_workspace_unsafe_config",
+        cases.put(workspaceRow(JdbcChildWorkspaceStore.BLOCKED,
+                JdbcChildWorkspaceStore.MERGE, "child_workspace_unsafe_config",
                 List.of(), null),
                 "\"outcome\":\"blocked\",\"code\":\"child_workspace_unsafe_config\"}");
-        cases.put(workspaceRow(ChildWorkspaceStore.DISCARDED,
-                ChildWorkspaceStore.DISCARD, "discarded", List.of(), null),
+        cases.put(workspaceRow(JdbcChildWorkspaceStore.DISCARDED,
+                JdbcChildWorkspaceStore.DISCARD, "discarded", List.of(), null),
                 "\"outcome\":\"discarded\",\"code\":\"discarded\"}");
         cases.forEach((workspace, tail) -> {
             harness.operations.clear();
@@ -2403,22 +2431,22 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.DISCARD, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.DISCARD, null, List.of(), null));
         Mockito.doThrow(refusal("child_workspace_conflict")).when(childWorkspaces)
                 .requestFinish(TENANT, PARENT, RUN,
-                        ChildWorkspaceStore.MERGE);
+                        JdbcChildWorkspaceStore.MERGE);
         relay.scan();
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         assertThat(harness.operations).isEmpty();
         // Any other refusal is not the row's settled order: it surfaces.
         Mockito.reset(childWorkspaces);
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         Mockito.doThrow(refusal("child_workspace_not_ready")).when(childWorkspaces)
                 .requestFinish(TENANT, PARENT, RUN,
-                        ChildWorkspaceStore.MERGE);
+                        JdbcChildWorkspaceStore.MERGE);
         dueAgain();
         relay.scan();
         assertThat(harness.operations).isEmpty();
@@ -2438,7 +2466,7 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
@@ -2446,7 +2474,7 @@ class ChildResultRelayTest {
         // The merge is asked all the same, so a parent's close meanwhile
         // pins the work; the close it needs waits for a host that can.
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
         assertThat(harness.operations).isEmpty();
@@ -2463,23 +2491,23 @@ class ChildResultRelayTest {
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         // A message still waits for the turn that reads it.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         // Recorded while the child still runs, so a parent's close pins the
         // work; the child is not closed and nothing settles.
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
         assertThat(harness.operations).isEmpty();
         // A row already asked is never asked again.
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         relay.scan();
         verify(childWorkspaces, Mockito.times(1)).requestFinish(anyString(),
                 anyString(), anyString(), anyString());
@@ -2489,7 +2517,7 @@ class ChildResultRelayTest {
     void aStopAfterACompletedTaskMergesItsWorkBeforeItSettles() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
@@ -2498,23 +2526,23 @@ class ChildResultRelayTest {
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         // The stop cancelled the message turn that followed the task.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-2",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-2",
                                 "cancelled", "session_message", now)));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(childWorkspaces, never()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT,
-                RUN, ChildWorkspaceStore.MERGE);
+                RUN, JdbcChildWorkspaceStore.MERGE);
         assertThat(harness.operations).isEmpty();
 
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2526,7 +2554,7 @@ class ChildResultRelayTest {
     void aStopStillStoppingMessagesRecordsTheCompletedTasksMerge() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
@@ -2535,16 +2563,16 @@ class ChildResultRelayTest {
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         // A message still waits: the stop stops it first and looks again.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         assertThat(harness.operations).isEmpty();
         // Recorded meanwhile, so a parent's close pins the task's work.
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
     }
@@ -2561,18 +2589,18 @@ class ChildResultRelayTest {
                         null));
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-2",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-2",
                                 "completed", "session_message", now)));
         when(store.journalTurnText(TENANT, CHILD, "turn-2"))
                 .thenReturn("message answer");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 300_000L), anyLong(), anyLong());
         assertThat(harness.operations).isEmpty();
@@ -2584,16 +2612,16 @@ class ChildResultRelayTest {
     void aStopNeverAsksAMergeBeforeALostCreationReplays() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
                 new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
                         null));
-        ChildWorkspaceStore.Row ready = workspaceRow(ChildWorkspaceStore.READY,
+        JdbcChildWorkspaceStore.Row ready = workspaceRow(JdbcChildWorkspaceStore.READY,
                 null, null, List.of(), null);
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(ready);
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE)).thenReturn(ready);
+                JdbcChildWorkspaceStore.WORKTREE)).thenReturn(ready);
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review", true)).thenReturn(
                     new CommandAdmission(CHILD, null, "accepted", false));
@@ -2611,19 +2639,19 @@ class ChildResultRelayTest {
     void aStopBindsALostCreationBeforeAskingItsWorkspaceToFinish() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
                 new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
                         null));
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-2",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-2",
                                 "cancelled", "session_message", now)));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
@@ -2643,11 +2671,11 @@ class ChildResultRelayTest {
         when(store.childRunBody(TENANT, PARENT, RUN)).thenReturn(json(
                 "{\"run\":{\"state\":\"failed\"}}"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         assertThat(harness.operations).isEmpty();
         assertThat(row.get().state()).isEqualTo("done");
     }
@@ -2663,21 +2691,21 @@ class ChildResultRelayTest {
         when(store.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         // A message the child never answered, past the wait's bound.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now - 31 * 60_000L, null));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childWorkspaces, never()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         assertThat(harness.operations).isEmpty();
 
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2698,13 +2726,13 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("x".repeat(64 * 1024 + 1));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         relay.scan();
         // The request and the close are durable for a host that runs the
         // merge; this one looks again rarely, never at an attempt's cost.
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 300_000L), anyLong(), anyLong());
@@ -2716,8 +2744,8 @@ class ChildResultRelayTest {
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("child result");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         relay.scan();
         verify(store, Mockito.times(2)).scheduleRetry(any(RelayRow.class),
                 anyString(), Mockito.eq(now + 300_000L), anyLong(), anyLong());
@@ -2728,14 +2756,14 @@ class ChildResultRelayTest {
     void aStoppedWorktreeRunDiscardsItsWorkspace() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         // Nothing minted yet, the Workspace still preparing.
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.PREPARING, null, null,
+                workspaceRow(JdbcChildWorkspaceStore.PREPARING, null, null,
                         List.of(), null));
         relay.scan();
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("close_scope");
         assertThat(row.get().state()).isEqualTo("done");
@@ -2745,13 +2773,13 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "CANCELLED", now + 1, null, true, "epoch-1"));
         relay.scan();
         verify(childWorkspaces, Mockito.times(2)).requestFinish(TENANT, PARENT,
-                RUN, ChildWorkspaceStore.DISCARD);
+                RUN, JdbcChildWorkspaceStore.DISCARD);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("close_scope");
@@ -2762,14 +2790,14 @@ class ChildResultRelayTest {
     void aStopWaitsForTheMergeItsChildAskedBeforeItSettles() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-2", "CANCELLED", now + 1, null, true, "epoch-1"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         relay.scan();
         verify(childWorkspaces, never()).requestFinish(anyString(), anyString(),
                 anyString(), anyString());
@@ -2780,8 +2808,8 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("watching");
 
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2796,14 +2824,14 @@ class ChildResultRelayTest {
     void aParentCloseReleasesAStopHeldByAnOwedMerge() {
         worktreeRun("sent");
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "CANCELLED", now + 1, null, true, "epoch-1"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.DISCARD_PINNED, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.DISCARD_PINNED, null, List.of(),
                         null));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2817,7 +2845,7 @@ class ChildResultRelayTest {
     void aFailedWorktreeChildDiscardsAndACompletedOneKeepsItsWork() {
         worktreeRun("sent");
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2828,15 +2856,15 @@ class ChildResultRelayTest {
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("fail");
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
 
         // A later Turn that fails while the merge an earlier completed Turn
         // asked for waits never replaces that merge, and the failure is
         // told only once the merge has its outcome.
         harness.operations.clear();
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         relay.scan();
@@ -2845,8 +2873,8 @@ class ChildResultRelayTest {
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
                 Mockito.eq(now + 5_000L), anyLong(), anyLong());
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.CONFLICTED,
-                        ChildWorkspaceStore.MERGE, "conflicted",
+                workspaceRow(JdbcChildWorkspaceStore.CONFLICTED,
+                        JdbcChildWorkspaceStore.MERGE, "conflicted",
                         List.of("a"), "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2858,7 +2886,7 @@ class ChildResultRelayTest {
         // before it settles the quota.
         harness.operations.clear();
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2870,18 +2898,18 @@ class ChildResultRelayTest {
         relay.scan();
         assertThat(harness.operations).isEmpty();
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         // While the merge is owed the wait never re-reads the result text.
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY,
-                        ChildWorkspaceStore.MERGE, null, List.of(), null));
+                workspaceRow(JdbcChildWorkspaceStore.READY,
+                        JdbcChildWorkspaceStore.MERGE, null, List.of(), null));
         relay.scan();
         verify(store, Mockito.times(1)).terminalResultText(TENANT, CHILD,
                 "turn-1");
         assertThat(harness.operations).isEmpty();
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         relay.scan();
         assertThat(harness.operations).extracting(op -> op.get("kind"))
@@ -2893,11 +2921,11 @@ class ChildResultRelayTest {
         // A discard asked first keeps its place: nothing is waited for.
         harness.operations.clear();
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         Mockito.doThrow(refusal("child_workspace_conflict")).when(childWorkspaces)
                 .requestFinish(TENANT, PARENT, RUN,
-                        ChildWorkspaceStore.MERGE);
+                        JdbcChildWorkspaceStore.MERGE);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
@@ -2912,15 +2940,15 @@ class ChildResultRelayTest {
                 .containsEntry("stopReason", "quota_exceeded");
         assertThat(row.get().state()).isEqualTo("done");
         verify(childWorkspaces, Mockito.atLeast(2)).requestFinish(TENANT,
-                PARENT, RUN, ChildWorkspaceStore.MERGE);
+                PARENT, RUN, JdbcChildWorkspaceStore.MERGE);
         verify(childWorkspaces, Mockito.times(1)).requestFinish(TENANT, PARENT,
-                RUN, ChildWorkspaceStore.DISCARD);
+                RUN, JdbcChildWorkspaceStore.DISCARD);
     }
 
     @Test
     void aWorktreeGiveUpAfterACompletedTurnMergesItsWork() {
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 63, 0, null, now, now));
@@ -2932,30 +2960,30 @@ class ChildResultRelayTest {
                 .thenReturn(null);
         relay.scan();
         verify(childWorkspaces, atLeastOnce()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         // The merge lands before the give-up's failure is told.
         assertThat(row.get().state()).isEqualTo("watching");
         assertThat(harness.operations).isEmpty();
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.MERGED,
-                        ChildWorkspaceStore.MERGE, "merged", List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.MERGED,
+                        JdbcChildWorkspaceStore.MERGE, "merged", List.of(),
                         "c".repeat(40)));
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("fail");
         verify(childWorkspaces, never()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
     }
 
     @Test
     void aCreationJudgedUnableToStartRetriesWhenItsChildExists() {
         worktreeRun("sent");
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE))
+                JdbcChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         // The creation committed, then its answer was lost.
         when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
@@ -2975,10 +3003,10 @@ class ChildResultRelayTest {
     void aWorktreeGiveUpWithALostCreationDiscardsInsteadOfMerging() {
         worktreeRun("sent");
         when(childWorkspaces.request(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.WORKTREE))
+                JdbcChildWorkspaceStore.WORKTREE))
                 .thenThrow(refusal("child_workspace_unsupported"));
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         // The creation committed, then its answer was lost; the child's
         // task Turn completed.
@@ -2990,9 +3018,9 @@ class ChildResultRelayTest {
                 "creating", "owner", now + 30_000, 63, 0, null, now, now));
         relay.scan();
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
         verify(childWorkspaces, never()).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.MERGE);
+                JdbcChildWorkspaceStore.MERGE);
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("fail");
         assertThat(row.get().state()).isEqualTo("unknown");
@@ -3001,7 +3029,7 @@ class ChildResultRelayTest {
     @Test
     void aWorktreeGiveUpAsksItsWorkspaceToDiscard() {
         when(childWorkspaces.find(TENANT, PARENT, RUN)).thenReturn(
-                workspaceRow(ChildWorkspaceStore.READY, null, null, List.of(),
+                workspaceRow(JdbcChildWorkspaceStore.READY, null, null, List.of(),
                         null));
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 63, 0, null, now, now));
@@ -3011,7 +3039,7 @@ class ChildResultRelayTest {
         assertThat(harness.operations).extracting(op -> op.get("kind"))
                 .containsExactly("fail");
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
-                ChildWorkspaceStore.DISCARD);
+                JdbcChildWorkspaceStore.DISCARD);
     }
 
     @Test
@@ -3059,7 +3087,7 @@ class ChildResultRelayTest {
     @Test
     void aStopRequestedRunWithNothingMintedSettlesUnstarted() {
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         relay.scan();
         verify(sessions, never()).createChildSession(anyString(),
                 anyString(), anyString(), anyString(), anyString());
@@ -3079,7 +3107,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "RUNNING", null, null, true, "epoch-1"));
         relay.scan();
@@ -3116,7 +3144,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
@@ -3137,14 +3165,14 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-1",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-1",
                                 "completed", "hosted-harness", now)));
         relay.scan();
         assertThat(harness.messageOperations).hasSize(1);
@@ -3158,9 +3186,9 @@ class ChildResultRelayTest {
         // The message turn ended cancelled: the stop's end, never the
         // task's earlier result.
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                        new JdbcChildResultRelayStore.SettledTurn("msg_1:message",
                                 "cancelled", "session_message", now + 2)));
         relay.scan();
         assertThat(harness.messageOperations).hasSize(1);
@@ -3177,12 +3205,12 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "RUNNING", null, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         relay.scan();
         verify(sessions).cancelChildTurn(TENANT, PARENT, CHILD, RUN,
@@ -3195,9 +3223,9 @@ class ChildResultRelayTest {
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "CANCELLED", now + 1, null, true, "epoch-1"));
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("turn-1",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-1",
                                 "cancelled", "hosted-harness", now + 1)));
         relay.scan();
         assertThat(harness.operations)
@@ -3212,12 +3240,12 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "CANCELLED", now, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         relay.scan();
         assertThat(harness.messageOperations)
@@ -3236,12 +3264,12 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "RUNNING", null, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
         List<Integer> stopsSeenByTheCancel = new ArrayList<>();
         Mockito.doAnswer(ignored -> {
@@ -3258,21 +3286,24 @@ class ChildResultRelayTest {
         assertThat(row.get().attempts()).isEqualTo(1);
     }
 
-    // A child waiting on its recovery takes no stop yet: the heartbeat asks
-    // again without spending an attempt.
-    @Test
-    void aStopTheChildCannotTakeYetSpendsNoAttempt() {
+    // A child waiting on its recovery, closing, or out of cold-open slots
+    // takes no stop yet: the heartbeat asks again without spending an
+    // attempt.
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_turn_recovery_required",
+            "hosted_session_closing", "hosted_session_open_busy"})
+    void aStopTheChildCannotTakeYetSpendsNoAttempt(String refusalCode) {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now, null));
-        harness.refuseMessageCode = "hosted_turn_recovery_required";
+        harness.refuseMessageCode = refusalCode;
         relay.scan();
         assertThat(row.get().attempts()).isZero();
         verify(store).scheduleRetry(any(RelayRow.class), anyString(),
@@ -3287,15 +3318,15 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now - 40 * 60_000L, null, true,
                 "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(1,
+                new JdbcChildResultRelayStore.JournalTurns(1,
                         Set.of("msg_1:message"), now - 31 * 60_000L,
-                        new ChildResultRelayStore.SettledTurn("turn-1",
+                        new JdbcChildResultRelayStore.SettledTurn("turn-1",
                                 "completed", "hosted-harness",
                                 now - 40 * 60_000L)));
         relay.scan();
@@ -3313,14 +3344,14 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                        new JdbcChildResultRelayStore.SettledTurn("msg_1:message",
                                 "completed", "session_message", now + 2)));
         when(store.journalTurnText(TENANT, CHILD, "msg_1:message"))
                 .thenReturn("the updated answer");
@@ -3338,14 +3369,14 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "COMPLETED", now + 1, null, true, "epoch-1"));
         holdsMessages();
         when(store.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(0,
+                new JdbcChildResultRelayStore.JournalTurns(0,
                         Set.of("msg_1:message"), now,
-                        new ChildResultRelayStore.SettledTurn("msg_1:message",
+                        new JdbcChildResultRelayStore.SettledTurn("msg_1:message",
                                 "error", "session_message", now + 2)));
         relay.scan();
         assertThat(harness.messageOperations).isEmpty();
@@ -3361,7 +3392,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "FAILED", now + 1, "provider_error", true,
                 "epoch-1"));
@@ -3382,7 +3413,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "ACCEPTED", null, null, false, null));
         relay.scan();
@@ -3401,7 +3432,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "FAILED", now + 1,
                 "managed_runtime_recovery_incomplete", true, "epoch-1"));
@@ -3422,7 +3453,7 @@ class ChildResultRelayTest {
         // the child's Turn failed before its admission landed. The stop
         // binds the child first, then settles it named on the next pass.
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "CANCELLED", now + 1, null, false, null));
@@ -3449,7 +3480,7 @@ class ChildResultRelayTest {
         // The settling revision is refused (a mint landed first, or the
         // parent's writer faltered): nothing is classified, the row defers.
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, false));
+                new JdbcChildResultRelayStore.StopState(true, false));
         harness.refuseKind = "close_scope";
         relay.scan();
         assertThat(harness.operations).isEmpty();
@@ -3464,7 +3495,7 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.stopState(TENANT, PARENT, RUN)).thenReturn(
-                new ChildResultRelayStore.StopState(true, true));
+                new JdbcChildResultRelayStore.StopState(true, true));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
                 "turn-1", "RUNNING", null, null, true, "epoch-1"));
         relay.scan();
@@ -3481,5 +3512,119 @@ class ChildResultRelayTest {
                 .getAnnotation(
                         org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler()).isEqualTo("childRelayScheduler");
+    }
+
+    // #17261: the child whose Session load failed before it ever acquired a
+    // Runtime. The coordinator settles that Turn FAILED with no dispatch sent,
+    // so no binding will ever appear — and `watching`, the only arm that reads
+    // the child's Turn, is unreachable from `binding`. Retrying the binding
+    // alone hid a decided failure behind ~4.7 h of backoff while the parent's
+    // Turn ran to its deadline with no output at all. The binding arm has to
+    // read the Turn and settle the proven pre-admission terminal shape at once,
+    // on the FIRST attempt, carrying the child's own error code.
+    @Test
+    void aChildThatFailedBeforeBindingSettlesAtOnceWithItsOwnErrorCode() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn("intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "FAILED", now + 1L, "hosted_harness_unavailable",
+                false, null));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+        // The diagnosis survives on the ledger: an operator reading the row
+        // sees the child's real cause, not a generic deadline.
+        assertThat(row.get().lastError())
+                .contains("hosted_harness_unavailable")
+                .contains("before admission");
+        // Settled on the first pass — no attempt budget was spent waiting.
+        verify(store, never()).defer(any(RelayRow.class), anyString(),
+                anyLong(), any(), anyLong(), anyLong());
+    }
+
+    // The other half of the same guard: a child still on its way is a genuine
+    // wait. An enqueued ACCEPTED Turn shares `!dispatched()` with the terminal
+    // failure, and a RUNNING or dispatched Turn may still bind — neither may
+    // be settled as never-started just because no binding is visible yet.
+    @Test
+    void aChildStillOnItsWayKeepsWaitingForItsBinding() {
+        for (TurnLine live : List.of(
+                new TurnLine("turn-1", "ACCEPTED", null, null, false, null),
+                new TurnLine("turn-1", "RUNNING", null, null, true, "epoch-1"),
+                new TurnLine("turn-1", "FAILED", now + 1L, "child_failed",
+                        true, "epoch-1"))) {
+            harness.operations.clear();
+            row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                    "binding", "owner", now + 30_000, 0, 0, null, now, now));
+            when(store.latestTurn(TENANT, CHILD)).thenReturn(live);
+            when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                    .thenReturn(null);
+            relay.scan();
+            assertThat(row.get().state()).as(live.status()).isEqualTo("binding");
+            assertThat(row.get().lastError()).as(live.status())
+                    .isEqualTo("child runtime binding is not visible yet");
+            assertThat(harness.operations).as(live.status()).isEmpty();
+            verify(childCloses, never()).admitChildClose(TENANT, PARENT, CHILD,
+                    RUN);
+        }
+    }
+
+    // A child with no Turn at all is still the original wait: nothing has
+    // decided anything, so the binding arm must not invent a verdict.
+    @Test
+    void aChildWithoutAnyTurnYetKeepsWaitingForItsBinding() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(row.get().lastError())
+                .isEqualTo("child runtime binding is not visible yet");
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // The guard reads the READY-only binding, so a child whose binding
+    // RETIRED lands in the same arm as one that never bound. Its terminal
+    // Turn looks undispatched only until the historical row is read: the
+    // give-up chain re-checks dispatch evidence against the AnyState
+    // binding and must still tell the started failure, never the
+    // never-started one, for a child that really ran (#17261's guard must
+    // not regress R23/R25).
+    @Test
+    void aRetiredBindingsTerminalChildStillTakesTheStartedPairing() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn("intent");
+        // Undispatched and terminal: exactly the shape the new guard admits.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(new TurnLine(
+                "turn-1", "CANCELLED", now + 1L, null, false, null));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        RuntimeBindingRecord retired = mock(RuntimeBindingRecord.class);
+        when(retired.getBindingId()).thenReturn("binding-1");
+        when(retired.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
+                .thenReturn(retired);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("dispatch_started", "attach", "fail");
+        assertThat(harness.operations.get(2))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true)
+                .containsEntry("childSessionId", CHILD);
     }
 }

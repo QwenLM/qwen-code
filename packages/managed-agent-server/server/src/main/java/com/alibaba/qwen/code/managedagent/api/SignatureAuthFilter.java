@@ -1,27 +1,43 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.InvalidMediaTypeException;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.Principal;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * Authenticates the tenant/actor header pair with an HMAC signature so the
@@ -56,10 +72,15 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         if (security.getMode() != BrokerSecurity.Mode.SIGNED) {
             return true;
         }
+        String path = PublicSurface.pathWithinApplication(request);
+        // The terminal upgrade authenticates with the single-use ticket, not
+        // the signature headers a browser WebSocket cannot set.
+        if (PublicSurface.terminalUpgrade(request)) {
+            return true;
+        }
         // Coverage follows the routed path (as the tenant filter does); the
         // canonical string still signs the raw request URI.
-        return !PublicSurface.covers(
-                PublicSurface.pathWithinApplication(request));
+        return !PublicSurface.covers(path);
     }
 
     @Override
@@ -85,7 +106,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         }
         // getHeader signs the first value while the controllers bind the
         // comma-joined pair, so a repeated key must be refused outright.
-        if (java.util.Collections.list(
+        if (Collections.list(
                 request.getHeaders(IDEMPOTENCY_HEADER)).size() > 1) {
             reject(request, response, HttpServletResponse.SC_BAD_REQUEST,
                     "invalid_request",
@@ -170,10 +191,10 @@ public class SignatureAuthFilter extends OncePerRequestFilter
             }
 
             @Override
-            public jakarta.servlet.ServletInputStream getInputStream() {
-                java.io.ByteArrayInputStream source =
-                        new java.io.ByteArrayInputStream(body);
-                return new jakarta.servlet.ServletInputStream() {
+            public ServletInputStream getInputStream() {
+                ByteArrayInputStream source =
+                        new ByteArrayInputStream(body);
+                return new ServletInputStream() {
                     @Override
                     public boolean isFinished() {
                         return source.available() == 0;
@@ -186,7 +207,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
 
                     @Override
                     public void setReadListener(
-                            jakarta.servlet.ReadListener listener) {
+                            ReadListener listener) {
                     }
 
                     @Override
@@ -202,9 +223,9 @@ public class SignatureAuthFilter extends OncePerRequestFilter
             }
 
             @Override
-            public java.io.BufferedReader getReader() {
-                return new java.io.BufferedReader(
-                        new java.io.InputStreamReader(getInputStream(),
+            public BufferedReader getReader() {
+                return new BufferedReader(
+                        new InputStreamReader(getInputStream(),
                                 StandardCharsets.UTF_8));
             }
 
@@ -229,12 +250,12 @@ public class SignatureAuthFilter extends OncePerRequestFilter
             }
 
             @Override
-            public java.util.Enumeration<String> getHeaders(String name) {
+            public Enumeration<String> getHeaders(String name) {
                 if (HttpHeaders.CONTENT_TYPE.equalsIgnoreCase(name)) {
                     String pinned = pinJsonUtf8(super.getHeader(name));
-                    return java.util.Collections.enumeration(
-                            pinned == null ? java.util.List.of()
-                                    : java.util.List.of(pinned));
+                    return Collections.enumeration(
+                            pinned == null ? List.of()
+                                    : List.of(pinned));
                 }
                 return super.getHeaders(name);
             }
@@ -258,14 +279,14 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         MediaType parsed;
         try {
             parsed = MediaType.parseMediaType(contentType);
-        } catch (org.springframework.http.InvalidMediaTypeException error) {
+        } catch (InvalidMediaTypeException error) {
             return contentType;
         }
         if (!"application".equalsIgnoreCase(parsed.getType())) {
             return contentType;
         }
         String subtype = parsed.getSubtype()
-                .toLowerCase(java.util.Locale.ROOT);
+                .toLowerCase(Locale.ROOT);
         if (!subtype.equals("json") && !subtype.endsWith("+json")) {
             return contentType;
         }
@@ -301,25 +322,27 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         String content = request.getContentType();
         return content != null && content.equalsIgnoreCase(MediaType.APPLICATION_OCTET_STREAM_VALUE)
                 && ("POST".equals(request.getMethod())
-                && (path.matches("/v1/agents/workspaces/[^/]+/extensions")
-                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish"))
+                && (path.matches("/v1/agents/workspaces/[^/]+/extensions(?:/imports(?:/preview)?)?")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports/preview"))
                 || "PUT".equals(request.getMethod())
                 && path.matches("/v1/agents/workspaces/[^/]+/extensions/ext_[a-f0-9-]{36}/packages/[a-f0-9]{64}"));
     }
 
     private void authenticateArchive(HttpServletRequest request, HttpServletResponse response, FilterChain chain,
             String tenantId, String actorId, String signature, String timestamp) throws IOException, ServletException {
-        long maximum = com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.MAX_ARCHIVE_BYTES;
+        long maximum = ManagedExtensionPackages.MAX_ARCHIVE_BYTES;
         if (request.getContentLengthLong() > maximum) {
             reject(request, response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
                     "payload_too_large", "Extension archive exceeds 100 MiB.");
             return;
         }
-        java.nio.file.Path temporary = java.nio.file.Files.createTempFile("qwen-extension-auth-", ".part");
+        Path temporary = Files.createTempFile("qwen-extension-auth-", ".part");
         try {
             var digest = DigestUtils.getSha256Digest();
             long total = 0;
-            try (var output = java.nio.file.Files.newOutputStream(temporary)) {
+            try (var output = Files.newOutputStream(temporary)) {
                 byte[] buffer = new byte[64 * 1024];
                 int count;
                 while ((count = request.getInputStream().read(buffer)) != -1) {
@@ -334,19 +357,19 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                 }
             }
             String expected = PREFIX + signDigest(request.getMethod(), request.getRequestURI(), request.getQueryString(),
-                    tenantId, actorId, timestamp, org.apache.commons.codec.binary.Hex.encodeHexString(digest.digest()),
+                    tenantId, actorId, timestamp, Hex.encodeHexString(digest.digest()),
                     request.getHeader(IDEMPOTENCY_HEADER));
             if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII),
                     signature.trim().getBytes(StandardCharsets.US_ASCII))) {
                 reject(request, response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_signature", "The request signature is invalid.");
                 return;
             }
-            try (var input = java.nio.file.Files.newInputStream(temporary)) {
-                var stream = new jakarta.servlet.ServletInputStream() {
+            try (var input = Files.newInputStream(temporary)) {
+                var stream = new ServletInputStream() {
                     private boolean finished;
                     @Override public boolean isFinished() { return finished; }
                     @Override public boolean isReady() { return true; }
-                    @Override public void setReadListener(jakarta.servlet.ReadListener listener) { }
+                    @Override public void setReadListener(ReadListener listener) { }
                     @Override public int read() throws IOException {
                         int value = input.read();
                         finished = value == -1;
@@ -359,7 +382,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                     }
                 };
                 chain.doFilter(new HttpServletRequestWrapper(request) {
-                    @Override public jakarta.servlet.ServletInputStream getInputStream() { return stream; }
+                    @Override public ServletInputStream getInputStream() { return stream; }
                     @Override public Principal getUserPrincipal() {
                         return new AuthenticatedTenantActor() {
                             @Override public String tenantId() { return tenantId; }
@@ -370,7 +393,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                 }, response);
             }
         } finally {
-            java.nio.file.Files.deleteIfExists(temporary);
+            Files.deleteIfExists(temporary);
         }
     }
 
@@ -386,12 +409,12 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     // under-declared body cannot outgrow the bound. The presize hint from
     // the declared length is capped at the chunk size: a client-controlled
     // Content-Length must not pin the full bound before a byte arrives.
-    private static byte[] readBounded(java.io.InputStream source, long max,
+    private static byte[] readBounded(InputStream source, long max,
             long declared) throws IOException {
         int hint = (int) Math.min(8192L, Math.min(Math.max(declared, 0),
                 Math.min(max, Integer.MAX_VALUE - 8L)));
-        java.io.ByteArrayOutputStream buffer =
-                new java.io.ByteArrayOutputStream(hint);
+        ByteArrayOutputStream buffer =
+                new ByteArrayOutputStream(hint);
         byte[] chunk = new byte[8192];
         long total = 0;
         int read;

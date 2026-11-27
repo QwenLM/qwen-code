@@ -32,6 +32,7 @@ let root: string;
 let boot: ManagedExternalContextBoot;
 let publication: ManagedExternalPublication | undefined;
 const closers: Array<() => Promise<void>> = [];
+const captureId = 'capture-a';
 const request = {
   reference: {
     sessionId: 'runtime-session-a',
@@ -202,17 +203,16 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
     );
   });
 
-  it('exposes publication on a separate port only after admission, with closed lease and revision checks', async () => {
+  async function startWorker() {
     const original = Server.prototype.listen;
-    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
-      this: Server,
-      ...args: unknown[]
-    ) {
-      const callback = args.find((arg) => typeof arg === 'function') as
-        | (() => void)
-        | undefined;
-      return Reflect.apply(original, this, [0, '127.0.0.1', callback]);
-    } as typeof Server.prototype.listen);
+    const listen = vi
+      .spyOn(Server.prototype, 'listen')
+      .mockImplementation(function (this: Server, ...args: unknown[]) {
+        const callback = args.find((arg) => typeof arg === 'function') as
+          | (() => void)
+          | undefined;
+        return Reflect.apply(original, this, [0, '127.0.0.1', callback]);
+      } as typeof Server.prototype.listen);
     const parsed = await admitted();
     const worker = await startManagedRuntimeAttestationWorker(
       parsed,
@@ -221,9 +221,21 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       true,
     );
     closers.push(worker.close);
+    expect(listen).toHaveBeenNthCalledWith(1, 43190, '0.0.0.0');
+    expect(listen).toHaveBeenNthCalledWith(
+      2,
+      43191,
+      '0.0.0.0',
+      expect.any(Function),
+    );
+    expect(worker.ready.publication?.paths).toEqual([
+      '/internal/managed-runtime/v2/publication:begin',
+      '/internal/managed-runtime/v2/publication:read',
+      '/internal/managed-runtime/v2/publication:renew',
+      '/internal/managed-runtime/v2/publication:stop-drained',
+    ]);
     expect(worker.ready.publication?.url).toBeDefined();
     expect(worker.ready.publication?.url).not.toBe(worker.ready.url);
-    const endpoint = `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:begin`;
     const headers = {
       authorization: `Bearer ${boot.token}`,
       'cache-control': 'no-store',
@@ -233,37 +245,121 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       'X-Qwen-Managed-Storage-Revision': '1',
       'X-Qwen-Managed-Runtime-Incarnation': boot.runtimeIncarnation,
     };
+    return { worker, headers };
+  }
+
+  it('shares publication channels across main and legacy listeners with closed identity checks', async () => {
+    const { worker, headers } = await startWorker();
+    const origins = [worker.ready.url, worker.ready.publication!.url];
     const body = JSON.stringify({
       protocolVersion: 2,
       ...request,
       expiresAt: Date.now() + 60_000,
+      captureId,
     });
-    for (const [header, value, status] of [
-      ['authorization', 'Bearer incorrect', 401],
-      ['X-Qwen-Managed-Lease-Id', 'unknown', 409],
-      ['X-Qwen-Managed-Storage-Revision', '2', 409],
-      ['X-Qwen-Managed-Runtime-Incarnation', 'stale', 409],
-    ] as const) {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { ...headers, [header]: value },
-        body,
+    let channelId: string | undefined;
+    for (const origin of origins) {
+      const endpoint = `${origin}/internal/managed-runtime/v2/publication:begin`;
+      for (const [header, value, status] of [
+        ['authorization', 'Bearer incorrect', 401],
+        ['X-Qwen-Managed-Lease-Id', 'unknown', 409],
+        ['X-Qwen-Managed-Lease-Epoch', '2', 409],
+        ['X-Qwen-Managed-Storage-Revision', '2', 409],
+        ['X-Qwen-Managed-Runtime-Incarnation', 'stale', 409],
+      ] as const) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { ...headers, [header]: value },
+          body,
+        });
+        expect(response.status).toBe(status);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.text()).not.toContain(root);
+      }
+      const response = await fetch(endpoint, { method: 'POST', headers, body });
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result).toEqual({
+        protocolVersion: 2,
+        channelId: channelId ?? expect.any(String),
       });
-      expect(response.status).toBe(status);
-      expect(response.headers.get('cache-control')).toBe('no-store');
-      expect(await response.text()).not.toContain(root);
+      channelId = result.channelId;
+      const read = await fetch(
+        `${origin}/internal/managed-runtime/v2/publication:read`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            protocolVersion: 2,
+            channelId,
+            streamId: 'stdout',
+            sequence: 0,
+            acknowledgedSequence: -1,
+          }),
+        },
+      );
+      expect(read.status).toBe(200);
+      expect(await read.json()).toEqual({
+        protocolVersion: 2,
+        state: 'pending',
+      });
     }
-    const response = await fetch(endpoint, { method: 'POST', headers, body });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      protocolVersion: 2,
-      channelId: expect.any(String),
-    });
-    const unavailable = await fetch(
-      `${worker.ready.url}/internal/managed-runtime/v2/publication:begin`,
-      { method: 'POST', headers, body },
+  });
+
+  it('replays the same zero-channel drain proof on both listeners and closes main execution', async () => {
+    const { worker, headers } = await startWorker();
+    let proof: unknown;
+    for (const origin of [worker.ready.url, worker.ready.publication!.url]) {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/publication:stop-drained`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ protocolVersion: 2, channel: 'all' }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const result = await response.json();
+      expect(result).toEqual({
+        protocolVersion: 2,
+        state: 'drained',
+        proof:
+          proof ??
+          expect.objectContaining({
+            kind: 'external-publication',
+            digest: expect.any(String),
+            byteLength: expect.any(Number),
+          }),
+        receipts: [],
+      });
+      proof = result.proof;
+    }
+    const input = { file_path: 'late.txt', content: 'must not be written' };
+    const late = await fetch(
+      `${worker.ready.url}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          protocolVersion: 2,
+          reference: {
+            ...request.reference,
+            argsDigest: managedToolDigest(input),
+          },
+          toolName: 'write_file',
+          input,
+        }),
+      },
     );
-    expect(unavailable.status).toBe(404);
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({
+      code: 'managed_context_unavailable',
+      error: 'Managed Runtime worker is closing.',
+    });
+    await expect(
+      fs.stat(path.join(boot.mountRoot, 'late.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 
@@ -279,8 +375,8 @@ describe.skipIf(process.platform === 'win32')(
         'publication is closed',
       );
       const expiresAt = Date.now() + 60_000;
-      const id = await publication!.begin(request, expiresAt);
-      expect(await publication!.begin(request, expiresAt)).toBe(id);
+      const id = await publication!.begin(request, expiresAt, captureId);
+      expect(await publication!.begin(request, expiresAt, captureId)).toBe(id);
       await expect(
         publication!.begin(
           {
@@ -288,6 +384,7 @@ describe.skipIf(process.platform === 'win32')(
             reference: { ...request.reference, argsDigest: 'b'.repeat(64) },
           },
           expiresAt,
+          captureId,
         ),
       ).rejects.toThrow('publication is closed');
       await expect(
@@ -302,8 +399,48 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    it("revives a lapsed channel on the owning dispatch's re-begin and renewal", async () => {
+      const expiresAt = Date.now() + 1_000;
+      const id = await publication!.begin(request, expiresAt, captureId);
+      // A lapsed horizon is the state a Broker outage leaves behind: the
+      // channel's own drain paths now refuse.
+      vi.spyOn(Date, 'now').mockReturnValue(expiresAt + 1);
+      await expect(publication!.read(id, 'stdout', 0, -1)).rejects.toThrow(
+        'publication is closed',
+      );
+      // The recovered dispatch re-runs begin on the same execution with the
+      // identical captured input and its own fresh horizon, which revives the
+      // channel instead of refusing it.
+      const fresh = expiresAt + 2;
+      expect(await publication!.begin(request, fresh + 60_000, captureId)).toBe(
+        id,
+      );
+      // Renewal revives a lapsed channel the same way.
+      vi.spyOn(Date, 'now').mockReturnValue(fresh + 60_001);
+      await expect(publication!.read(id, 'stdout', 0, -1)).rejects.toThrow(
+        'publication is closed',
+      );
+      await publication!.renew(id, fresh + 120_000);
+      // A different captured input on the same execution is still the
+      // closed-lane refusal.
+      await expect(
+        publication!.begin(
+          {
+            ...request,
+            capture: { ...request.capture, bindingGeneration: '2' },
+          },
+          fresh + 120_000,
+          captureId,
+        ),
+      ).rejects.toThrow('publication is closed');
+    });
+
     it('captures real binary stdout/stderr with bounded replay and refuses drain until acknowledged EOF', async () => {
-      const channelId = await publication!.begin(request, Date.now() + 60_000);
+      const channelId = await publication!.begin(
+        request,
+        Date.now() + 60_000,
+        captureId,
+      );
       const { sink, identity } = await publication!.prepare(request);
       const handle = await ShellExecutionService.executeLaunch(
         {
@@ -377,6 +514,7 @@ describe.skipIf(process.platform === 'win32')(
             capture: { ...request.capture, executionCallId: 'later' },
           },
           Date.now() + 60_000,
+          captureId,
         ),
       ).rejects.toThrow('publication is closed');
     });
@@ -384,7 +522,7 @@ describe.skipIf(process.platform === 'win32')(
 );
 
 it.skipIf(process.platform === 'win32')(
-  'persists replayable drain proof after real executor capture and acknowledgements',
+  'persists replayable drain proof after real executor capture without an acknowledgement',
   async () => {
     publication = new ManagedExternalPublication(root, boot);
     const ledger = ManagedRuntimeLedger.create({
@@ -417,6 +555,7 @@ it.skipIf(process.platform === 'win32')(
     const channelId = await publication.begin(
       { ...request, reference },
       Date.now() + 60_000,
+      captureId,
     );
     await executor.executeV3({
       reference,
@@ -451,15 +590,10 @@ it.skipIf(process.platform === 'win32')(
         sequence++;
       }
     }
-    expect(await publication.stopDrained(executor)).toEqual({
-      state: 'unknown',
-    });
-    executor.acknowledgeV3(reference, {
-      executionCallId: request.capture.executionCallId,
-      manifest: result.capture!.manifest,
-      deliveryStatus: 'committed',
-      historyRevision: 1,
-    });
+    // This lane retires on the drained stop itself. Its worker holds no
+    // control-plane credential, so no ACK ever reaches its journal and waiting
+    // for one would refuse every close; the acknowledged EOF sequences above
+    // are the whole proof it needs.
     const drained = await publication.stopDrained(executor);
     expect(drained).toMatchObject({
       state: 'drained',

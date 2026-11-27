@@ -18,6 +18,11 @@ import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/manage
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
+  enableManagedSessionDiagnostics,
+  getManagedSessionDiagnostics,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { MANAGED_MODEL_STATISTICS_KINDS } from '@qwen-code/qwen-code-core/managed-runtime/managed-model-statistics.js';
+import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -99,7 +104,6 @@ function fixture(
     head: {
       ...KEY,
       state: 'SEALED',
-      storageVersion: 1,
       writerId: 'writer',
       writerGeneration: 1,
       writerLeaseUntil: null,
@@ -287,6 +291,9 @@ function fixture(
 async function hostedModelFixture(
   settled = true,
   turn?: (session: ManagedSession) => Promise<void>,
+  options: {
+    diagnostics?: boolean;
+  } = {},
 ) {
   const f = fixture();
   f.transactions.length = 0;
@@ -332,6 +339,7 @@ async function hostedModelFixture(
     },
   });
   try {
+    if (options.diagnostics) await enableManagedSessionDiagnostics(session);
     await session.authority.submitInput(
       {
         operation: 'submitInput',
@@ -389,6 +397,49 @@ async function hostedModelFixture(
       'usageRef',
     ),
   };
+}
+
+async function diagnosticResourceFixture(kind: string) {
+  if (kind === MANAGED_MODEL_STATISTICS_KINDS.main) {
+    const f = await hostedModelFixture(true, undefined, {
+      diagnostics: true,
+    });
+    return { ...f, diagnosticRef: f.usageRef };
+  }
+  let diagnosticRef: ManagedSessionDurableRef | undefined;
+  const f = await hostedModelFixture(true, async (session) => {
+    await enableManagedSessionDiagnostics(session);
+    diagnosticRef = await getManagedSessionDiagnostics(
+      session.authority,
+    )!.publish(
+      kind,
+      kind === MANAGED_MODEL_STATISTICS_KINDS.hook
+        ? {
+            operationId: 'hook-operation',
+            occurrenceId: 'hook-occurrence',
+            originTurnId: 'prompt',
+            eventName: 'AfterModel',
+            model: 'hook-model',
+          }
+        : {},
+    );
+    await session.sink.write({
+      uuid: 'diagnostic-reference',
+      parentUuid: null,
+      sessionId: SESSION,
+      timestamp: '2026-10-02T00:00:00.000Z',
+      cwd: '/original/cwd',
+      version: 'hosted-harness/1',
+      type: 'system',
+      subtype: 'slash_command',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/diagnostics',
+        outputHistoryItems: [{ diagnosticRef }],
+      },
+    });
+  });
+  return { ...f, diagnosticRef: diagnosticRef! };
 }
 
 async function shellFixture(
@@ -942,6 +993,11 @@ function hostedHistoryFixture(
   return { ...f, historyRef };
 }
 
+const HOSTED_PROFILES = [
+  'hosted-workspace-files/1',
+  'hosted-workspace-external-files/1',
+];
+
 describe('migration profile evidence', () => {
   it('refuses absolute Hosted history during migration', async () => {
     const f = hostedHistoryFixture({}, '/original/cwd/absent.txt');
@@ -1334,6 +1390,39 @@ describe('verifyRecoverySession', () => {
       expect(f.complete.has(ref.resourceId)).toBe(true);
     }
   });
+
+  it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
+    'verifies committed diagnostic resource %s',
+    async (kind) => {
+      const f = await diagnosticResourceFixture(kind);
+      expect(f.diagnosticRef.kind).toBe(kind);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: 'not_captured',
+      });
+      expect(f.io.read).toHaveBeenCalledWith(f.diagnosticRef);
+      expect(f.complete.has(f.diagnosticRef.resourceId)).toBe(true);
+    },
+  );
+
+  it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
+    'refuses missing and corrupted diagnostic resource bytes for %s',
+    async (kind) => {
+      const missing = await diagnosticResourceFixture(kind);
+      missing.resources.delete(missing.diagnosticRef.resourceId);
+      await expect(
+        verifyRecoverySession(missing.source, missing.io),
+      ).rejects.toThrow('missing_resource');
+      const corrupt = await diagnosticResourceFixture(kind);
+      const bytes = Buffer.from(
+        corrupt.resources.get(corrupt.diagnosticRef.resourceId)!,
+      );
+      bytes[0] ^= 1;
+      corrupt.resources.set(corrupt.diagnosticRef.resourceId, bytes);
+      await expect(
+        verifyRecoverySession(corrupt.source, corrupt.io),
+      ).rejects.toThrow('resource bytes conflict');
+    },
+  );
 
   it.each(['routeRef', 'usageRef'] as const)(
     'refuses a missing or corrupted Hosted model %s',
@@ -1834,8 +1923,13 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-external-files/1' },
+    { toolProfile: 'hosted-workspace-files/4' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/3', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/4', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-team-lead/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
@@ -1847,7 +1941,6 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each([
-    { toolProfile: 'hosted-workspace-files/4' },
     { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
@@ -1856,6 +1949,68 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       /unsupported Hosted profile|invalid frozen Hosted definition/u,
     );
+  });
+
+  it.each([
+    { hookCatalog: {} },
+    { agentDefinition: {} },
+    { initialSelection: {} },
+    { lineage: {} },
+    { childWorkspaces: true },
+    { planMode: true },
+  ])('refuses excluded external file recovery options: %j', async (extra) => {
+    const f = fixture({
+      toolProfile: 'hosted-workspace-external-files/1',
+      ...extra,
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported Hosted profile',
+    );
+  });
+
+  it.each(HOSTED_PROFILES)(
+    'admits a well-formed Session Skills ref on a %s definition',
+    async (toolProfile) => {
+      const bytes = Buffer.from(
+        JSON.stringify([{ name: 'added', description: 'Added', body: 'BODY' }]),
+      );
+      const sessionSkillsRef: ManagedSessionDurableRef = {
+        resourceId: 'session-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      f.resources.set(sessionSkillsRef.resourceId, bytes);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: 'not_captured',
+      });
+      expect(f.complete.has(sessionSkillsRef.resourceId)).toBe(true);
+    },
+  );
+
+  it.each(
+    HOSTED_PROFILES.flatMap((toolProfile) =>
+      [{}, { resourceId: 'session-skills', kind: 'managed-agent-skills' }].map(
+        (sessionSkillsRef) => ({ toolProfile, sessionSkillsRef }),
+      ),
+    ),
+  )(
+    'refuses a malformed Session Skills ref on a %j definition',
+    async ({ toolProfile, sessionSkillsRef }) => {
+      const f = fixture({ toolProfile, sessionSkillsRef });
+      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+        'unsupported Hosted profile',
+      );
+    },
+  );
+
+  it('does not admit external files into migration', async () => {
+    const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow('unsupported migration profile');
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {
@@ -2118,4 +2273,29 @@ describe('migration profile eligibility', () => {
       verifyRecoverySession({ ...f.source, head: null }, f.io, 'migration'),
     ).rejects.toThrow('uninitialized migration member');
   });
+});
+
+it('restores committed execution diagnostic source resources', async () => {
+  const { enableManagedExecutionDiagnostics } = await import(
+    '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js'
+  );
+  const f = await hostedModelFixture(true, async (session) => {
+    await enableManagedExecutionDiagnostics(session);
+    await session.sink.write({
+      uuid: 'diag-assistant',
+      parentUuid: null,
+      sessionId: SESSION,
+      timestamp: '2026-11-07T00:00:00.000Z',
+      type: 'assistant',
+      cwd: '/original/cwd',
+      version: 'hosted-harness/1',
+      daemonPromptId: 'prompt',
+      message: { role: 'model', parts: [{ text: 'done' }] },
+    });
+  });
+  await expect(verifyRecoverySession(f.source, f.io)).resolves.toBeDefined();
+  const diagnostics = [...f.resources.keys()].filter(
+    (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
+  );
+  expect(diagnostics).toHaveLength(1);
 });

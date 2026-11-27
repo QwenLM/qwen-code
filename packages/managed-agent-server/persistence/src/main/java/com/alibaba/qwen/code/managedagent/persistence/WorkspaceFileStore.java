@@ -3,12 +3,15 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -16,22 +19,29 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Semaphore;
 
 @Component
 public class WorkspaceFileStore {
     private LocalWorkspaceFiles localFiles;
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public void configureLocalFiles(LocalWorkspaceFiles value) { localFiles = value; }
 
-    private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
+    private WorktreeFiles worktreeFiles;
+    @Autowired
+    public void configureWorktreeFiles(WorktreeFiles value) { worktreeFiles = value; }
 
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private final SshWorkspaceFiles ssh;
     private final ManagedAgentSettings properties;
@@ -39,9 +49,9 @@ public class WorkspaceFileStore {
     private final TransactionTemplate transaction;
     private final TransactionTemplate readTransaction;
     private final ObjectMapper mapper;
-    private final java.util.concurrent.Semaphore reads = new java.util.concurrent.Semaphore(4);
+    private final Semaphore reads = new Semaphore(4);
 
-    public WorkspaceFileStore(ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard,
+    public WorkspaceFileStore(JdbcManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard,
             SshWorkspaceFiles ssh, ManagedAgentSettings properties, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         this.registry = registry;
@@ -59,7 +69,7 @@ public class WorkspaceFileStore {
     }
 
     public record QueryResult(String scopeRevision, String directory, List<Entry> entries, boolean truncated,
-            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+            @JsonInclude(JsonInclude.Include.NON_NULL)
             Integer maxUploadBytes) {
     }
 
@@ -94,7 +104,7 @@ public class WorkspaceFileStore {
         var result = exchange(tenant, actor, locator, revision, request);
         try {
             Entry[] entries = mapper.convertValue(result.files().get("entries"), Entry[].class);
-            if (entries == null || entries.length > 50 || java.util.Arrays.stream(entries).anyMatch(entry -> entry == null
+            if (entries == null || entries.length > 50 || Arrays.stream(entries).anyMatch(entry -> entry == null
                     || entry.path() == null || entry.name() == null || entry.kind() == null || !List.of("file", "directory").contains(entry.kind()))) {
                 throw unavailable();
             }
@@ -117,7 +127,7 @@ public class WorkspaceFileStore {
         var file = result.files();
         try {
             String text = (String) file.get("text");
-            byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
             if (bytes.length == 0 || bytes.length > 24576 || text.indexOf('\0') >= 0
                     || !path.equals(file.get("path")) || !DigestUtils.sha256Hex(bytes).equals(file.get("sha256"))) {
                 throw unavailable();
@@ -209,8 +219,8 @@ public class WorkspaceFileStore {
         Map<String, Object> sessionFileScope = null;
         long worktreeRevision = 0;
         if (locator.sessionId() != null) {
-            SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
-            var worktree = SessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenant, locator.sessionId());
+            JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
+            var worktree = JdbcSessionWorktreeStore.descriptor(worktreeFiles, jdbc, tenant, locator.sessionId());
             if (worktree != null) {
                 String prefix = ".qwen-managed-worktrees/" + worktree.worktreeId();
                 if (!binding.getCwdRelative().equals(prefix) && !binding.getCwdRelative().startsWith(prefix + "/")) {
@@ -219,34 +229,34 @@ public class WorkspaceFileStore {
                 worktreeRevision = worktree.revision();
                 var root = lock ? guard.fileRoot(binding) : guard.fileRootForRead(binding);
                 try {
-                    var identity = java.nio.file.Files.readAttributes(java.nio.file.Path.of((String) root.get("root"))
-                            .resolve(".qwen-managed-worktrees").resolve(worktree.worktreeId()), "unix:dev,ino", java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                    SessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
+                    var identity = Files.readAttributes(Path.of((String) root.get("root"))
+                            .resolve(".qwen-managed-worktrees").resolve(worktree.worktreeId()), "unix:dev,ino", LinkOption.NOFOLLOW_LINKS);
+                    JdbcSessionWorktreeStore.requireReady(worktreeFiles, jdbc, tenant, locator.sessionId());
                     sessionFileScope = Map.of("sessionId", locator.sessionId(), "contextDigest", binding.getContextDigest(),
                             "worktreeId", worktree.worktreeId(), "worktreeRevision", worktreeRevision, "cwdRelative", binding.getCwdRelative(),
                             "worktreeRootIdentity", Map.of("device", Long.toUnsignedString(((Number) identity.get("dev")).longValue()),
                                     "inode", Long.toUnsignedString(((Number) identity.get("ino")).longValue())));
-                } catch (java.io.IOException error) {
+                } catch (IOException error) {
                     throw unavailable();
                 }
             }
         }
-        var rows = jdbc.queryForList("SELECT storage_kind, registration_json, registration_revision, mount_revision, fence_operation_id FROM ma_storage WHERE alias_key = ?"
-                + (lock ? " FOR UPDATE" : ""),
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, binding.getStorageId()));
+        var rows = jdbc.queryForList("SELECT storage_kind, registration_json, registration_revision, mount_revision, fence_operation_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?" + (lock ? " FOR UPDATE" : ""),
+                tenant, binding.getStorageId());
         if (rows.size() != 1 || rows.getFirst().get("fence_operation_id") != null) {
             throw unavailable();
         }
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id FROM ma_storage_owner"
-                + " WHERE storage_key = (SELECT physical_key FROM ma_storage WHERE alias_key = ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, binding.getStorageId()));
+                + " WHERE physical_id = (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)",
+                tenant, binding.getStorageId());
         try {
             var identity = locator.sessionId() == null ? List.of(actor, binding.getContextDigest(), rows, owner)
                     : List.of(actor, binding.getContextDigest(), rows, owner, locator.sessionId(), worktreeRevision);
             String revision = DigestUtils.sha256Hex(mapper.writeValueAsBytes(identity));
             Long mountRevision = owner.size() == 1 && owner.getFirst().get("mount_revision") instanceof Number value ? value.longValue() : null;
             return new Scope(binding, (String) rows.getFirst().get("storage_kind"), revision, sessionFileScope, mountRevision);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(error);
         }
     }
@@ -259,8 +269,9 @@ public class WorkspaceFileStore {
 
     private ContextBinding sessionBinding(String tenant, String actor, String sessionId, boolean lock) {
         var bindings = jdbc.query("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                        + " AND status <> 'DELETED'" + (lock ? " FOR UPDATE" : ""),
-                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId);
+                        + " AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)"
+                        + (lock ? " FOR UPDATE" : ""),
+                (result, row) -> ManagedAgentStore.readBinding(result), tenant, sessionId, actor);
         if (bindings.size() != 1 || bindings.getFirst() == null
                 || !registry.accessOf(tenant, actor, bindings.getFirst().getWorkspaceId()).canCreate()) {
             throw sessionNotFound();

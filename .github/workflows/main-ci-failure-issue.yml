@@ -20,9 +20,12 @@ on:
     # Daily Java and Desktop checks report main regressions through the same
     # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
+    # The Managed loop verification lane covers the same agent loop end to end
+    # on push and nightly, so both of its main-side runs report here too.
     workflows:
       - 'E2E Tests'
       - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'
@@ -45,13 +48,16 @@ jobs:
     # A job that hits its execution cap concludes `cancelled`, so a
     # failure-only gate let timed-out main runs hide for weeks (#16214);
     # the live step keeps a plain concurrency supersede out (#16272).
+    # The schedule arm below is name-scoped, so a watched workflow with a
+    # cron trigger has to appear in its fromJSON list as well — being in
+    # `workflow_run.workflows` alone gets its nightly red filtered out here.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
@@ -389,8 +395,18 @@ jobs:
           # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
           # test pins the equality. There the same annotation class auto-reruns
           # a PR's red check; here it suppresses the issue failure record.
+          # Deterministic configuration errors are deliberately absent: a
+          # re-run cannot change a repository variable, so they file instead.
           # Full rationale → qwen-autofix.md#af-076
-          INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
+          # The built-tree handoff is anchored to the RETRY step's name: the
+          # artifact fetch expiring is a host routing fault, not the commit's
+          # code, and clears on a re-run that lands elsewhere (#16927). The
+          # first attempt is continue-on-error and the retry covers it on
+          # failure, so its annotation stays on the check run after a
+          # recovery — admitting it would file nothing for a real assertion
+          # failure carrying that residue. A bare 'has timed out after' would
+          # also swallow a hung test or install step, which must keep filing.
+          INFRA_FAILURE_SIGNATURES: "lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within|QWEN_CI_RPC_RETRY must be a non-negative integer|Host load gate breached|Disk floor breached|The action 'Retry downloading the built tree' has timed out"
         run: |-
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
 
@@ -523,8 +539,9 @@ jobs:
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
           echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
 
-  # Every ISSUE write happens here, as the reporting bot — the one other write
-  # is rerun_infra's rerun, which holds no PAT. This job deliberately checks
+  # Every ISSUE write happens here, as the reporting bot when its PAT is
+  # configured and as github-actions[bot] otherwise — the one other write is
+  # rerun_infra's rerun, which holds no PAT. This job deliberately checks
   # out nothing and runs no repository code: it consumes the failure summary
   # the job above produced.
   file_issue:
@@ -552,11 +569,16 @@ jobs:
       - name: 'Create or comment on the workflow issue'
         id: 'issue'
         env:
-          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          # The reporting PAT is optional. When it is absent the job still
+          # records the failure with the workflow token instead of dying on
+          # an unauthenticated gh — a red main that nobody is told about is
+          # the silence this workflow exists to prevent.
+          BOT_PAT: '${{ secrets.CI_DEV_BOT_PAT }}'
+          WORKFLOW_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_ID: '${{ github.event.workflow.id }}'
-          BOT_LOGIN: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          CONFIGURED_BOT_LOGIN: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           ISSUE_BODY: '${{ needs.analyze.outputs.comment_body }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           SIGNATURE_TITLE: '${{ needs.analyze.outputs.signature_title }}'
@@ -565,6 +587,21 @@ jobs:
           RUN_AT: '${{ github.event.workflow_run.updated_at }}'
         run: |-
           set -euo pipefail
+          # Every lookup below filters issues by the identity that writes
+          # them, so the token and the login have to be chosen together: a
+          # workflow-token filing searched under the bot's login would certify
+          # a false miss and mint a duplicate issue on every recurrence.
+          if [[ -n "${BOT_PAT:-}" ]]; then
+            export GH_TOKEN="${BOT_PAT}"
+            BOT_LOGIN="${CONFIGURED_BOT_LOGIN}"
+            LIST_BOT_LOGIN="${BOT_LOGIN}"
+          else
+            export GH_TOKEN="${WORKFLOW_TOKEN}"
+            BOT_LOGIN='github-actions[bot]'
+            # gh issue list formats GitHub App authors differently from REST.
+            LIST_BOT_LOGIN='app/github-actions'
+            echo '::warning::CI_DEV_BOT_PAT is not configured; recording this failure as github-actions[bot] with the workflow token.'
+          fi
           if [[ "${PROVISIONAL}" == 'true' ]]; then
             # Heads every route's body — both create paths and both
             # comment-on-existing paths — so it must not assume this issue is
@@ -625,7 +662,7 @@ jobs:
           done
           [[ "${lookup_ok}" == true ]] || exit 1
           family_tsv="${RUNNER_TEMP}/family.tsv"
-          if ! jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" \
+          if ! jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" \
             "${title_filter}" "${open_issues}" > "${family_tsv}"; then
             # An unreadable listing must not read as an empty family: the
             # signature route would certify a false miss and file a duplicate.
@@ -732,7 +769,7 @@ jobs:
               if [[ "${lookup_ok}" != true ]]; then
                 echo '::warning::Could not scan closed issues for the test markers; the signature route cannot certify a miss.'
                 signature_unresolved=true
-              elif ! existing_issue="$(jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+              elif ! existing_issue="$(jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
                 map(select(.author.login == $bot)
                   | select(.title == $title or (.title | startswith($title + " — ")) or ((.body // "") | contains($scope)))
                   | select((.body // "") as $b | any($ms[]; . as $m | $b | contains($m))))
@@ -949,7 +986,7 @@ jobs:
             # (test markers, no workflow marker) is never reopened as one.
             issue_match="$(gh issue list --repo "${REPO}" --state closed \
               --json number,title,author,body --limit 1000 \
-              | jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg marker "${marker}" '
+              | jq -r --arg bot "${LIST_BOT_LOGIN}" --arg title "${title}" --arg marker "${marker}" '
                 map(select(.author.login == $bot) | select(
                   .title == $title or
                   (.title | startswith($title + " on ")) or

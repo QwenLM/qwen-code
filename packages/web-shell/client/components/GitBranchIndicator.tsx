@@ -147,11 +147,13 @@ export function GitBranchChipContent({
   branch,
   status,
   compact,
+  showDetails = true,
   worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact: boolean;
+  showDetails?: boolean;
   worktree?: boolean;
 }) {
   const { t } = useI18n();
@@ -160,7 +162,7 @@ export function GitBranchChipContent({
   return (
     <>
       <span className={styles.gitBranchIconWrap}>
-        <span className={styles.gitBranchIcon}>
+        <span className={styles.gitBranchIcon} data-web-shell-git-branch-icon>
           {worktree ? (
             <GitForkIcon size={14} strokeWidth={1.5} />
           ) : s.detached ? (
@@ -169,16 +171,26 @@ export function GitBranchChipContent({
             <GitBranchIcon />
           )}
         </span>
-        {compact && tone && (
+        {tone && (
           <span
             className={styles.gitBranchBadgeDot}
             data-tone={tone}
+            data-compact={compact ? 'true' : undefined}
+            data-details-collapsed={
+              !compact && !showDetails ? 'true' : undefined
+            }
             aria-hidden="true"
           />
         )}
       </span>
-      <span className={styles.gitBranchText}>{branch}</span>
-      {!compact && (
+      <span
+        className={styles.gitBranchText}
+        data-web-shell-git-branch-label
+        data-compact={compact ? 'true' : undefined}
+      >
+        {branch}
+      </span>
+      {!compact && showDetails && (
         <span className={styles.gitBranchIndicators} aria-hidden="true">
           {s.operation && (
             <span className={styles.gitBranchOperation}>
@@ -214,12 +226,14 @@ export function GitBranchIndicator({
   branch,
   status,
   compact = false,
+  showDetails = true,
   onOpenDiff,
   worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
+  showDetails?: boolean;
   onOpenDiff?: () => void;
   worktree?: boolean;
 }) {
@@ -249,6 +263,7 @@ export function GitBranchIndicator({
       branch={branch}
       status={status}
       compact={compact}
+      showDetails={showDetails}
       worktree={worktree}
     />
   );

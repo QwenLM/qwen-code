@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY packages/sdk-java/qwencode packages/sdk-java/qwencode
 COPY packages/managed-agent-server packages/managed-agent-server
 COPY packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json packages/core/src/managed-runtime/contracts/
+COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/
 
 RUN mvn --batch-mode --no-transfer-progress \
       -f packages/sdk-java/qwencode/pom.xml \
@@ -51,6 +52,6 @@ COPY --from=build /tmp/qwen-managed-agent-server.jar \
 # or the deliberately unauthenticated
 # QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true override.
 
-EXPOSE 8080 4182
+EXPOSE 8080
 USER 10001
 ENTRYPOINT ["java", "-jar", "/app/qwen-managed-agent-server.jar"]

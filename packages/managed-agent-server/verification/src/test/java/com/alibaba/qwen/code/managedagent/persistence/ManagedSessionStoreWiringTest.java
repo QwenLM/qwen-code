@@ -1,14 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -32,7 +28,6 @@ import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class ManagedSessionStoreWiringTest {
     private final DataSource source = mock(DataSource.class);
@@ -42,16 +37,13 @@ class ManagedSessionStoreWiringTest {
                 .withUserConfiguration(Transactions.class, factory ? Factory.class : Imported.class)
                 .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> new JdbcTemplate(source));
         if (!missing.equals("records")) {
-            runner = runner.withBean(ManagedExtensionRecordStore.class, () -> mock(ManagedExtensionRecordStore.class));
+            runner = runner.withBean(JdbcManagedExtensionRecordStore.class, () -> mock(JdbcManagedExtensionRecordStore.class));
         }
         if (!missing.equals("actions")) {
-            runner = runner.withBean(ManagedActionStore.class, () -> mock(ManagedActionStore.class));
+            runner = runner.withBean(JdbcManagedActionStore.class, () -> mock(JdbcManagedActionStore.class));
         }
         if (!missing.equals("rules")) {
             runner = runner.withBean(HarnessRules.class, () -> mock(HarnessRules.class));
-        }
-        if (!missing.equals("reader")) {
-            runner = runner.withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new);
         }
         if (!missing.equals("credentials")) {
             runner = runner.withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound);
@@ -64,17 +56,15 @@ class ManagedSessionStoreWiringTest {
     void springAndFactoryConstructionKeepRequiredDependenciesAndTransactionProxy(boolean factory) {
         runner(factory, "").run(context -> {
             assertThat(context).hasNotFailed();
-            var store = context.getBean(ManagedSessionStore.class);
+            var store = context.getBean(JdbcManagedSessionStore.class);
             assertThat(AopUtils.isAopProxy(store)).isTrue();
             Object target = AopTestUtils.getUltimateTargetObject(store);
             assertThat(field(target, "lifecycleAuthorization", "harnessRules")).isSameAs(context.getBean(HarnessRules.class));
-            assertThat(field(target, "storeRows", "readerVersion")).isSameAs(context.getBean(StorageReadPolicy.class));
             assertThat(field(target, "fencing", "credentials")).isSameAs(context.getBean(WriterCredentialPolicy.class));
             assertThat(field(target, "lifecycleAuthorization", "lifecycleExecution")).isNull();
             assertThat(field(target, "lifecycleAuthorization", "lifecycleSessions")).isNull();
             assertThat(field(target, "resourceReads", "publicationObjects")).isNull();
             assertThat(field(target, "commits", "toolResults")).isNull();
-            assertThat(field(target, "fencing", "csiBindings")).isNull();
             assertThat(field(target, "commits", "journalEventTransport")).isNull();
         });
     }
@@ -83,24 +73,23 @@ class ManagedSessionStoreWiringTest {
     @ValueSource(booleans = {false, true})
     void optionalDependenciesReachTheirOwners(boolean factory) {
         var objects = mock(ToolPublicationObjectStore.class);
-        var results = mock(ManagedToolResultStore.class);
+        var results = mock(JdbcManagedToolResultStore.class);
         var transport = mock(JournalEventTransport.class);
         runner(factory, "")
                 .withBean(ToolPublicationObjectStore.class, () -> objects)
-                .withBean(ManagedToolResultStore.class, () -> results)
+                .withBean(JdbcManagedToolResultStore.class, () -> results)
                 .withBean(JournalEventTransport.class, () -> transport)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    Object target = AopTestUtils.getUltimateTargetObject(context.getBean(ManagedSessionStore.class));
+                    Object target = AopTestUtils.getUltimateTargetObject(context.getBean(JdbcManagedSessionStore.class));
                     assertThat(field(target, "resourceReads", "publicationObjects")).isSameAs(objects);
                     assertThat(field(target, "commits", "toolResults")).isSameAs(results);
                     assertThat(field(target, "commits", "journalEventTransport")).isSameAs(transport);
-                    assertThat(field(target, "fencing", "journalEventTransport")).isSameAs(transport);
                 });
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"records", "actions", "rules", "reader", "credentials"})
+    @ValueSource(strings = {"records", "actions", "rules", "credentials"})
     void requiredDependenciesStillFailStartup(String missing) {
         for (boolean factory : new boolean[] {false, true}) {
             runner(factory, missing).run(context -> assertThat(context).hasFailed());
@@ -112,10 +101,10 @@ class ManagedSessionStoreWiringTest {
     void lifecycleDependenciesAreEnabledOnlyAsAPair(int present) {
         for (boolean factory : new boolean[] {false, true}) {
             var runner = runner(factory, "");
-            var execution = mock(WorkspaceExecutionStore.class);
+            var execution = mock(JdbcWorkspaceExecutionStore.class);
             var sessions = mock(SessionQueryStore.class);
             if ((present & 1) != 0) {
-                runner = runner.withBean(WorkspaceExecutionStore.class, () -> execution)
+                runner = runner.withBean(JdbcWorkspaceExecutionStore.class, () -> execution)
                         .withBean(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles.class,
                                 () -> mock(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles.class));
             }
@@ -124,40 +113,21 @@ class ManagedSessionStoreWiringTest {
             }
             runner.run(context -> {
                 assertThat(context).hasNotFailed();
-                Object target = AopTestUtils.getUltimateTargetObject(context.getBean(ManagedSessionStore.class));
+                Object target = AopTestUtils.getUltimateTargetObject(context.getBean(JdbcManagedSessionStore.class));
                 assertThat(field(target, "lifecycleAuthorization", "lifecycleExecution")).isSameAs(present == 3 ? execution : null);
                 assertThat(field(target, "lifecycleAuthorization", "lifecycleSessions")).isSameAs(present == 3 ? sessions : null);
             });
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"same", "foreign", "non-jdbc"})
-    void csiRequiresTheOriginalJdbcDataSource(String kind) {
-        RuntimeBindingRepository bindings;
-        if (kind.equals("non-jdbc")) {
-            bindings = mock(RuntimeBindingRepository.class);
-        } else {
-            var jdbcBindings = mock(JdbcRuntimeBindingRepository.class);
-            when(jdbcBindings.usesDataSource(source)).thenReturn(kind.equals("same"));
-            bindings = jdbcBindings;
-        }
-        runner(false, "").withBean(RuntimeBindingRepository.class, () -> bindings).run(context -> {
-            assertThat(context).hasNotFailed();
-            Object target = AopTestUtils.getUltimateTargetObject(context.getBean(ManagedSessionStore.class));
-            assertThat(field(target, "fencing", "csiBindings")).isSameAs(kind.equals("same") ? bindings : null);
-        });
-    }
-
     @Test
     void standaloneDefaultsRemainAndPostConstructionInjectionIsGone() {
-        var store = new ManagedSessionStore(new JdbcTemplate(source));
+        var store = new JdbcManagedSessionStore(new JdbcTemplate(source));
         assertThat(field(store, "lifecycleAuthorization", "harnessRules")).isNull();
-        assertThat(field(store, "storeRows", "readerVersion")).isNotNull();
         ((WriterCredentialPolicy) field(store, "fencing", "credentials")).require("tenant", "workspace", "session", "token");
-        assertThat(Arrays.stream(ManagedSessionStore.class.getDeclaredMethods()))
+        assertThat(Arrays.stream(JdbcManagedSessionStore.class.getDeclaredMethods()))
                 .noneMatch(method -> method.isAnnotationPresent(Autowired.class));
-        assertThat(Arrays.stream(ManagedSessionStore.class.getDeclaredConstructors())
+        assertThat(Arrays.stream(JdbcManagedSessionStore.class.getDeclaredConstructors())
                 .filter(constructor -> constructor.isAnnotationPresent(Autowired.class))).hasSize(1);
     }
 
@@ -175,19 +145,19 @@ class ManagedSessionStoreWiringTest {
     }
 
     @Configuration(proxyBeanMethods = false)
-    @Import(ManagedSessionStore.class)
+    @Import(JdbcManagedSessionStore.class)
     static class Imported { }
 
     @Configuration(proxyBeanMethods = false)
     static class Factory {
         @Bean
-        ManagedSessionStore journal(JdbcTemplate jdbc, ManagedExtensionRecordStore records, ManagedActionStore actions,
-                HarnessRules rules, StorageReadPolicy reader, WriterCredentialPolicy credentials,
-                @Nullable WorkspaceExecutionStore execution, @Nullable SessionQueryStore sessions,
-                @Nullable ToolPublicationObjectStore objects, @Nullable ManagedToolResultStore results,
-                @Nullable JournalEventTransport transport, @Nullable RuntimeBindingRepository bindings) {
-            return new ManagedSessionStore(jdbc, records, actions, rules, reader, execution, sessions,
-                    objects, results, transport, credentials, bindings);
+        JdbcManagedSessionStore journal(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore records, JdbcManagedActionStore actions,
+                HarnessRules rules, WriterCredentialPolicy credentials,
+                @Nullable JdbcWorkspaceExecutionStore execution, @Nullable SessionQueryStore sessions,
+                @Nullable ToolPublicationObjectStore objects, @Nullable JdbcManagedToolResultStore results,
+                @Nullable JournalEventTransport transport) {
+            return new JdbcManagedSessionStore(jdbc, records, actions, rules, execution, sessions,
+                    objects, results, transport, credentials, null);
         }
     }
 }

@@ -6,7 +6,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.h2.jdbcx.JdbcDataSource;
@@ -139,7 +139,7 @@ class ManagedHookAdmissionIndexTest {
                             jdbc.queryForObject(
                                     "SELECT COUNT(*) FROM"
                                             + " ma_session_record WHERE"
-                                            + " session_id = ? AND hook_once_key_hash IS NOT NULL",
+                                            + " session_id = ? AND hook_once_key IS NOT NULL",
                                     Integer.class,
                                     sessionId))
                     .isEqualTo(2);
@@ -154,27 +154,26 @@ class ManagedHookAdmissionIndexTest {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         // A row written past the store's checks, as a concurrent writer
         // that skipped them would, collides with the committed projection.
-        for (String column : List.of("hook_once_key_hash", "hook_occurrence_hash")) {
+        for (String column : List.of("hook_once_key", "hook_occurrence_id")) {
             assertThatThrownBy(
                             () ->
                                     jdbc.update(
-                                            "INSERT INTO ma_session_record (session_scope_key,"
-                                                + " record_key, tenant_id, workspace_id,"
-                                                + " session_id, domain, record_id, operation_hash,"
+                                            "INSERT INTO ma_session_record ("
+                                                + "tenant_id, workspace_id,"
+                                                + " session_id, domain, record_id, operation_id,"
                                                 + " revision, record_resource_id, gmt_create,"
-                                                + " hook_once_key_hash, hook_occurrence_hash,"
-                                                + " hook_ordinal) SELECT session_scope_key, ?,"
+                                                + " hook_once_key, hook_occurrence_id,"
+                                                + " hook_ordinal) SELECT"
                                                 + " tenant_id, workspace_id, session_id, domain,"
                                                 + " 'duplicate', ?, 1, record_resource_id,"
                                                 + " gmt_create, "
-                                                    + (column.equals("hook_once_key_hash")
-                                                            ? "hook_once_key_hash, 'x', 0"
-                                                            : "NULL, hook_occurrence_hash,"
+                                                    + (column.equals("hook_once_key")
+                                                            ? "hook_once_key, 'x', 0"
+                                                            : "NULL, hook_occurrence_id,"
                                                                   + " hook_ordinal")
                                                     + " FROM ma_session_record"
                                                     + " WHERE session_id = ? AND record_id = ?",
-                                            ExtensionRecordJournal.sha256("duplicate-" + column),
-                                            ExtensionRecordJournal.sha256("operation-" + column),
+                                            "operation-" + column,
                                             sessionId,
                                             "execution-1"))
                     .as(column)
@@ -198,7 +197,7 @@ class ManagedHookAdmissionIndexTest {
         // A once key the checks found free is taken before the insert lands.
         ObjectNode execution = history.execution(5);
         history.interleaveOnceKey("once-5");
-        Logger log = (Logger) LoggerFactory.getLogger(ManagedExtensionRecordStore.class);
+        Logger log = (Logger) LoggerFactory.getLogger(JdbcManagedExtensionRecordStore.class);
         ListAppender<ILoggingEvent> logged = new ListAppender<>();
         logged.start();
         log.addAppender(logged);
@@ -281,7 +280,7 @@ class ManagedHookAdmissionIndexTest {
                         ManagedAgentException.class,
                         error ->
                                 assertThat(error.getCode())
-                                        .isEqualTo(ManagedExtensionRecordStore.ERROR_REJECTED))
+                                        .isEqualTo(JdbcManagedExtensionRecordStore.ERROR_REJECTED))
                 .hasMessageContaining(message);
     }
 

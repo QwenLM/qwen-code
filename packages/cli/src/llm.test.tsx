@@ -26,23 +26,27 @@ import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
   main,
+  persistRunUsageOnExit,
   registerLspHotReload,
   setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
+import type { ChatRecord, Config, UiEvent } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  EVENT_API_RESPONSE,
+  InputFormat,
+  OutputFormat,
+  persistSessionUsage,
+  Storage,
+  uiTelemetryService,
+} from '@qwen-code/qwen-code-core';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
 import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
-import {
-  ApprovalMode,
-  InputFormat,
-  OutputFormat,
-  Storage,
-} from '@qwen-code/qwen-code-core';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -64,6 +68,7 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockConstructExtensionFileWatcher = vi.hoisted(() => vi.fn());
 const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
@@ -71,6 +76,7 @@ const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
 const mockAssertFullIcuAvailable = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockPersistSessionUsage = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
   () =>
     (..._args: unknown[]) =>
@@ -91,6 +97,7 @@ const mockSelectTuiRenderer = vi.hoisted(() =>
   })),
 );
 const mockStartOpenTuiUI = vi.hoisted(() => vi.fn());
+const mockSetTuiRendererOfRecord = vi.hoisted(() => vi.fn());
 
 const sessionRegistryConfigStub = {
   getTargetDir: () => '/tmp/project',
@@ -166,8 +173,20 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     registerSession: (...args: unknown[]) => mockRegisterSession(...args),
+    // The exit-persist test must not write to the developer's own ~/.qwen.
+    persistSessionUsage: mockPersistSessionUsage,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: mockPersistSessionUsage,
+  }),
+);
 
 vi.mock('./config/config.js', () => ({
   loadCliConfig: vi.fn().mockResolvedValue({
@@ -335,6 +354,9 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
 
 vi.mock('./config/extension-file-watcher.js', () => ({
   ExtensionFileWatcher: class {
+    constructor() {
+      mockConstructExtensionFileWatcher();
+    }
     startWatching() {}
     restartWatching() {}
     stopWatching() {}
@@ -358,6 +380,13 @@ vi.mock('./ui/opentui/renderer-selection.js', async (importOriginal) => {
     selectTuiRenderer: mockSelectTuiRenderer,
   };
 });
+
+// The dispatch records the renderer that actually mounted; spy on the writer
+// so deleting either record call (OpenTUI success / ink fallback) is caught.
+vi.mock('./ui/tui-renderer-of-record.js', () => ({
+  setTuiRendererOfRecord: mockSetTuiRendererOfRecord,
+  getTuiRendererOfRecord: vi.fn(() => undefined),
+}));
 
 function withLspDisabledConfig<T extends object>(
   config: T,
@@ -1486,6 +1515,53 @@ describe('llm.tsx main function', () => {
     },
   );
 
+  it.each([undefined, 'memory-override'])(
+    'binds the daemon ACP memory base from its launch environment (%s)',
+    async (override) => {
+      const runtimeBase = join(llmTestHome, 'daemon-runtime');
+      const memoryBase = override ? join(llmTestHome, override) : undefined;
+      vi.stubEnv('QWEN_CODE_SERVE', '1');
+      vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', 'trusted-test-parent');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      vi.stubEnv('QWEN_RUNTIME_DIR', runtimeBase);
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', memoryBase);
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = join(llmTestHome, 'foreign');
+        return {
+          errors: [],
+          merged: { advanced: {}, security: { auth: {} }, ui: {} },
+          setValue: vi.fn(),
+          forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never;
+      });
+      const reachedBinding = new Error('stop after daemon memory binding');
+      const bindProjectMemoryToWorkspace = vi.fn(() => {
+        throw reachedBinding;
+      });
+      vi.mocked(loadCliConfig).mockResolvedValue({
+        bindProjectMemoryToWorkspace,
+      } as unknown as Config);
+
+      try {
+        await expect(main()).rejects.toBe(reachedBinding);
+        expect(bindProjectMemoryToWorkspace).toHaveBeenCalledWith(
+          memoryBase ?? runtimeBase,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   // Regression for #8653 (placement): relaunchAppInChildProcess spawns with
   // {...process.env} captured at call time, so scrubbing BEFORE the handoff
   // would strip the loader the respawned child still needs to boot. The
@@ -2240,7 +2316,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -2902,7 +2982,16 @@ describe('llm.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
+    const cleanupRegistrations: Array<{
+      handler: () => unknown;
+      options?: { first?: boolean };
+    }> = [];
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(
+      (handler, options) => {
+        cleanupRegistrations.push({ handler, options });
+        return () => {};
+      },
+    );
     const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
       .mock.calls.length;
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
@@ -2972,9 +3061,30 @@ describe('llm.tsx main function', () => {
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
+      shutdown: vi.fn(),
+      shutdownExecutionEnvironments: vi.fn(),
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+
+    uiTelemetryService.reset();
+    uiTelemetryService.addEvent(
+      {
+        'event.name': EVENT_API_RESPONSE,
+        'event.timestamp': new Date().toISOString(),
+        response_id: 'validated-exit-response',
+        model: 'exit-model',
+        duration_ms: 1,
+        input_token_count: 5,
+        output_token_count: 0,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        total_token_count: 5,
+        prompt_id: 'validated-exit-prompt',
+      } as UiEvent,
+      'validated-exit',
+    );
+    mockPersistSessionUsage.mockClear();
 
     process.env['SANDBOX'] = '1';
     try {
@@ -3018,12 +3128,43 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
       settingsArg,
     );
+
+    // The usage hook must be registered with the actual startup client
+    // before both shutdown hooks. Direct helper tests cannot prove this wiring.
+    const usageIndex = cleanupRegistrations.findIndex(
+      (_, index) => cleanupRegistrations[index + 1]?.options?.first === true,
+    );
+    expect(usageIndex).toBeGreaterThanOrEqual(0);
+    const usageHandler = cleanupRegistrations[usageIndex]?.handler;
+    expect(usageHandler).toBeTypeOf('function');
+    await usageHandler?.();
+    expect(mockPersistSessionUsage).toHaveBeenCalledTimes(1);
+    const persistedExit = mockPersistSessionUsage.mock.calls[0]?.[0];
+    expect(persistedExit?.sessionId).toBe('test-session-id');
+    expect(persistedExit?.project).toBe('/');
+    expect(persistedExit?.metrics.models['exit-model']?.api.totalRequests).toBe(
+      1,
+    );
+    expect(persistedExit?.metrics.models['exit-model']?.tokens.prompt).toBe(5);
+    expect(configStub.shutdown).not.toHaveBeenCalled();
+    await cleanupRegistrations[usageIndex + 1]?.handler?.();
+    await cleanupRegistrations[usageIndex + 2]?.handler?.();
+    expect(configStub.shutdownExecutionEnvironments).toHaveBeenCalledOnce();
+    expect(configStub.shutdown).toHaveBeenCalledOnce();
+    expect(mockPersistSessionUsage.mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(configStub.shutdown).mock.invocationCallOrder[0]!,
+    );
+
     const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
       .calls[cleanupRegistrationStart]?.[0];
     expect(housekeepingCleanup).toBeTypeOf('function');
@@ -3076,6 +3217,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
   let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
+    mockConstructExtensionFileWatcher.mockClear();
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
     initialSigintListeners = process.listeners(
@@ -3127,7 +3269,10 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
   // Drives main() to the renderer dispatch: interactive config, no
   // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
-  const interactiveMainSetup = async (screenReader = false) => {
+  const interactiveMainSetup = async (
+    screenReader = false,
+    acpFlag?: 'acp' | 'experimentalAcp',
+  ) => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -3154,7 +3299,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
+      getExperimentalZedIntegration: () => acpFlag !== undefined,
       getScreenReader: () => screenReader,
       getMemoryFileCount: () => 0,
       getWarnings: () => [],
@@ -3162,6 +3307,9 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
+      getProjectRoot: () => '/bootstrap/proj',
+      shutdownExecutionEnvironments: vi.fn(),
+      shutdown: vi.fn(),
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
@@ -3202,8 +3350,8 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
-      acp: undefined,
-      experimentalAcp: undefined,
+      acp: acpFlag === 'acp' || undefined,
+      experimentalAcp: acpFlag === 'experimentalAcp' || undefined,
       extensions: undefined,
       listExtensions: undefined,
       openaiLogging: undefined,
@@ -3244,6 +3392,73 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     });
   };
 
+  it.each(['acp', 'experimentalAcp'] as const)(
+    'does not construct the interactive extension watcher in %s mode',
+    async (acpFlag) => {
+      await interactiveMainSetup(false, acpFlag);
+      mockRunAcpAgent.mockClear();
+      mockRunAcpAgent.mockResolvedValue(undefined);
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+
+      expect(mockRunAcpAgent).toHaveBeenCalledOnce();
+      expect(mockConstructExtensionFileWatcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['acp', 'experimentalAcp'] as const)(
+    'does not register the process-wide exit usage persist hook in %s mode',
+    async (acpFlag) => {
+      await interactiveMainSetup(false, acpFlag);
+      mockRunAcpAgent.mockClear();
+      mockRunAcpAgent.mockResolvedValue(undefined);
+      mockPersistSessionUsage.mockClear();
+      uiTelemetryService.reset();
+
+      const cleanupModule = await import('./utils/cleanup.js');
+      const cleanupHandlers: Array<() => void | Promise<void>> = [];
+      vi.mocked(cleanupModule.registerCleanup).mockImplementation((fn) => {
+        cleanupHandlers.push(fn);
+        return () => {};
+      });
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+      expect(mockRunAcpAgent).toHaveBeenCalledOnce();
+
+      // Simulate a hosted session that recorded live spend and already closed
+      // via persistSessionUsageOnClose + removeSession (leaving its live event
+      // in process-wide #liveMetrics). Running every exit cleanup handler must
+      // not append a duplicate process-wide exit record.
+      uiTelemetryService.addEvent(
+        {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': new Date().toISOString(),
+          model: 'acp-exit-guard-model',
+          duration_ms: 15,
+          input_token_count: 10,
+          output_token_count: 5,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          tool_token_count: 0,
+          total_token_count: 15,
+          execution_id: 'acp-live-exec-1',
+        } as Parameters<typeof uiTelemetryService.addEvent>[0],
+        'hosted-sess-1',
+      );
+      uiTelemetryService.removeSession('hosted-sess-1');
+      for (const handler of cleanupHandlers) {
+        await handler();
+      }
+      expect(mockPersistSessionUsage).not.toHaveBeenCalled();
+    },
+  );
+
   it('strict mode fails loudly when the OpenTUI entry declines to start', async () => {
     await interactiveMainSetup();
     selectOpentui(true);
@@ -3252,6 +3467,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await expect(main()).rejects.toThrow(
       /QWEN_TUI_RENDERER_STRICT forbids the ink fallback/,
     );
+    expect(mockConstructExtensionFileWatcher).toHaveBeenCalledOnce();
     // The dispatch rejected before the ink UI could mount.
     expect(mockStartPostRenderPrefetches).not.toHaveBeenCalled();
   });
@@ -3273,10 +3489,27 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     // only falls through to startInteractiveUI, proven by the post-render
     // prefetch hook inside it running.
     mockStartOpenTuiUI.mockResolvedValue(false);
+    mockSetTuiRendererOfRecord.mockClear();
 
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+    // The fallback must record ink as the renderer of record, not leave the
+    // requested opentui on record (which would mislabel /about and /bug).
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('ink');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('opentui');
+  });
+
+  it('records opentui as the renderer of record when the entry starts', async () => {
+    await interactiveMainSetup();
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(true);
+    mockSetTuiRendererOfRecord.mockClear();
+
+    await main();
+
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('opentui');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('ink');
   });
 
   it('probes ICU on the interactive path before the UI renders', async () => {
@@ -3331,21 +3564,18 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
   });
 
-  it('hands the screen-reader flag to the renderer gate', async () => {
+  it('passes the resolved screen-reader Config to the selected Native entry', async () => {
     await interactiveMainSetup(/* screenReader */ true);
     selectOpentui(false);
-    mockStartOpenTuiUI.mockResolvedValue(false);
-
+    mockStartOpenTuiUI.mockResolvedValue(true);
     await main();
-
-    // The gate is what keeps a screen-reader session on ink; dropping this
-    // argument would silently serve OpenTUI, which has no SR render path.
     expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
       undefined,
       undefined,
       expect.anything(),
-      true,
     );
+    const config = mockStartOpenTuiUI.mock.calls.at(-1)![0] as Config;
+    expect(config.getScreenReader()).toBe(true);
   });
 });
 
@@ -3525,6 +3755,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: true,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3654,6 +3886,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3784,6 +4018,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3922,6 +4158,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: false,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(
@@ -5254,5 +5492,61 @@ describe('startInteractiveUI', () => {
       await vi.advanceTimersByTimeAsync(90_000);
       expect(performCheck.mock.calls.length).toBe(afterCleanup);
     });
+  });
+});
+
+describe('persistRunUsageOnExit', () => {
+  const config = {
+    getSessionId: () => 'exit-session',
+    getProjectRoot: () => '/exit/project',
+  } as unknown as Config;
+  const apiResponseEvent = (tokens: number) =>
+    ({
+      'event.name': EVENT_API_RESPONSE,
+      'event.timestamp': new Date().toISOString(),
+      response_id: `r-${tokens}`,
+      model: 'm',
+      duration_ms: 1,
+      input_token_count: tokens,
+      output_token_count: 0,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      total_token_count: tokens,
+      prompt_id: 'exit-session',
+    }) as UiEvent;
+
+  beforeEach(() => {
+    uiTelemetryService.reset();
+    vi.mocked(persistSessionUsage).mockClear();
+  });
+
+  it('writes nothing for a run whose only traffic was replayed', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('persists only this run after a resume replayed history', () => {
+    uiTelemetryService.addReplayedEvent(apiResponseEvent(1000), 'exit-session');
+    uiTelemetryService.addEvent(apiResponseEvent(5), 'exit-session');
+
+    persistRunUsageOnExit(config);
+
+    expect(persistSessionUsage).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(persistSessionUsage).mock.calls[0]?.[0] as {
+      sessionId: string;
+      metrics: {
+        models: Record<
+          string,
+          { api: { totalRequests: number }; tokens: { prompt: number } }
+        >;
+      };
+    };
+    expect(arg.sessionId).toBe('exit-session');
+    expect(arg.metrics.models['m']!.api.totalRequests).toBe(1);
+    // The replayed 1000 tokens never reached the persisted counters.
+    expect(arg.metrics.models['m']!.tokens.prompt).toBe(5);
   });
 });

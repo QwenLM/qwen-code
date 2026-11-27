@@ -23,7 +23,6 @@ import {
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
-  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -36,6 +35,7 @@ import {
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import type { ModelPreferences } from '@qwen-code/qwen-code-core/models/model-preferences.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import type { Mem0Settings } from './mem0-settings.js';
@@ -94,6 +94,8 @@ export interface SettingDefinition {
   // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
   // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
+  /** What a dialog toggle writes when the setting is unset and has no default. */
+  unsetToggleValue?: boolean;
   description?: string;
   parentKey?: string;
   key?: string;
@@ -394,8 +396,51 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: 1024,
         description:
-          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers, including sessions in other workspaces that start sub-sessions in this one.',
         showInDialog: false,
+      },
+      sessionPrWatch: {
+        type: 'object',
+        label: 'Session PR Watch',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: {},
+        description:
+          "PR-state transitions delivered to the sessions bound to a pull request. Off until events are subscribed. Honored from user, system, and system-defaults settings only — a workspace settings file must not spend daemon-wide gh budget or inject prompts across workspaces; a hosted GitHub channel's prWatchEvents is the trust-gated per-workspace path.",
+        showInDialog: false,
+        properties: {
+          events: {
+            type: 'array',
+            label: 'PR Watch Events',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: [] as string[],
+            description:
+              'Transition types to deliver: ci_failure, merge_conflict, head_change, state_change. Empty (the default) runs no view and delivers nothing. QWEN_SESSION_PR_WATCH_EVENTS overrides this as a comma-separated list; an unrecognized entry is dropped with a warning and the recognized members still apply. Files under a served project may not set either this key or its environment override.',
+            showInDialog: false,
+            items: { type: 'string' },
+          },
+          wakeDormant: {
+            type: 'boolean',
+            label: 'PR Watch Wake Dormant',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: true,
+            description:
+              "Restore a dormant bound session to deliver a transition. When false, the transition stays queued until that session's next live turn, bounded by the watch's retention (7 days) and per-PR pending cap (16 entries); older or overflow entries are dropped. QWEN_SESSION_PR_WATCH_WAKE_DORMANT overrides this.",
+            showInDialog: false,
+          },
+          actions: {
+            type: 'object',
+            label: 'PR Watch Actions',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: {} as Record<string, string>,
+            description:
+              'Operator instruction templates keyed by event type, optionally prefixed with a role (review, verify, fix). Without it, delivery is the single most recently active binder and the generic prompt. An unrecognized key, an empty template or one over 2000 code points refuses the boot. Settings-only: no environment override.',
+            showInDialog: false,
+          },
+        },
       },
     },
   },
@@ -699,6 +744,24 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
+      displayLanguage: {
+        type: 'enum',
+        label: 'Language: Display Translation',
+        category: 'General',
+        requiresRestart: true,
+        default: 'off',
+        description:
+          "Show the model's replies and opened thoughts translated into this language in the terminal and the Web Shell. " +
+          'The model answers as usual; the stored conversation, what the model reads and copied text keep the original. ' +
+          'Each translated block costs one call to the fast model, or the session model when none is set. ' +
+          'Works without installing anything or turning on experimental features.',
+        showInDialog: true,
+        options: [
+          { value: 'off', label: 'Off' },
+          { value: 'zh-CN', label: 'Simplified Chinese' },
+          { value: 'en', label: 'English' },
+        ],
+      },
       terminalBell: {
         type: 'boolean',
         label: 'Terminal Bell Notification',
@@ -791,12 +854,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'off',
         description:
-          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
+          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside an isolated boundary instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a hardened container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`, host tmux probes) unavailable for that run rather than ending the review; "tiered" classifies PR trust and high-risk changed files into `trusted-shared-kernel` (hardened container, no host fallback) vs `hardware-isolated` (firecracker / vfkit / provider-vm, fail-closed with no downgrade to container or host); "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
         showInDialog: true,
         options: [
           { value: 'off', label: 'Off (run the reviewed code directly)' },
-          { value: 'auto', label: 'Auto (container when one is available)' },
+          { value: 'auto', label: 'Auto (hardened container when available)' },
           { value: 'required', label: 'Required (never run it unsandboxed)' },
+          {
+            value: 'tiered',
+            label:
+              'Tiered (trust-classified container vs hardware-isolated, fail-closed)',
+          },
         ],
       },
       effort: {
@@ -1746,7 +1814,7 @@ const SETTINGS_SCHEMA = {
     label: 'Vision Model',
     category: 'Model',
     requiresRestart: false,
-    default: '',
+    default: '' as string,
     description:
       'Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.',
     showInDialog: true,
@@ -1778,14 +1846,14 @@ const SETTINGS_SCHEMA = {
     type: 'integer',
     label: 'Vision Bridge Timeout (ms)',
     category: 'Model',
-    // Read once in the Config constructor with no setter, so a mid-session
-    // change only takes effect on restart.
+    // Read once in the Config constructor; only `/model --vision --timeout`
+    // also updates the running session, so other edits need a restart.
     requiresRestart: true,
     default: undefined as number | undefined,
     minimum: 1,
     maximum: 2_147_483_647,
     description:
-      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.',
+      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. Set with /model --vision --timeout <seconds>.',
     showInDialog: false,
   },
 
@@ -1846,7 +1914,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+          'Default thinking effort for models without a saved effort. Each provider maps it to the tiers it supports. Leave unset to use the model/provider default.',
         showInDialog: true,
         options: [
           { value: 'low', label: 'Low' },
@@ -1859,6 +1927,31 @@ const SETTINGS_SCHEMA = {
         jsonSchemaOverride: {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
+        },
+      },
+      preferences: {
+        type: 'object',
+        label: 'Model Preferences',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as ModelPreferences | undefined,
+        description:
+          'Saved reasoning effort and context window per model route.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: {
+            type: 'object',
+            properties: {
+              reasoning: {
+                type: 'object',
+                properties: {
+                  effort: { type: 'string', enum: REASONING_EFFORT_TIERS },
+                },
+              },
+              contextWindow: { type: 'integer', minimum: 1 },
+            },
+          },
         },
       },
       catalogRefresh: {
@@ -1996,39 +2089,14 @@ const SETTINGS_SCHEMA = {
           'Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.',
         showInDialog: false,
       },
-      skipLoopDetection: {
-        type: 'boolean',
-        label: 'Skip Loop Detection',
-        category: 'Model',
-        requiresRestart: false,
-        default: true,
-        description:
-          'Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard. Whether these guards remind or stop is set by model.loopProtection.',
-        showInDialog: false,
-      },
-      loopProtection: {
-        type: 'enum',
-        label: 'Loop Protection',
-        category: 'Model',
-        requiresRestart: true,
-        default: 'warn',
-        description:
-          'What a loop detector does when it fires. "warn" (default) reminds the model once and does not stop the turn, except for content and thought repetition, which happens mid-stream where no reminder can be delivered; "stop" keeps every stop point: the always-on guards (identical calls, shell inspection, invalid tool parameters, and stuck repetition past the adaptive cap) remind the model once when the turn reaches their reminder point before the stop, and the opt-in heuristics stop without a reminder; "off" neither reminds nor stops and only records telemetry. Budgets (an explicit model.maxToolCallsPerTurn and the 1000-call backstop of the adaptive default) and the duplicate provider tool-call id guard stop in every mode, so under "warn" and "off" a stuck turn runs until a budget stops it. Applies to the CLI, subagents and daemon/ACP sessions; model.skipLoopDetection still decides whether the heuristic detectors run.',
-        showInDialog: false,
-        options: [
-          { value: 'warn', label: 'Remind only' },
-          { value: 'stop', label: 'Stop after a reminder' },
-          { value: 'off', label: 'Off' },
-        ],
-      },
       maxToolCallsPerTurn: {
         type: 'integer',
         label: 'Max Tool Calls Per Turn',
         category: 'Model',
         requiresRestart: false,
-        default: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        default: undefined as number | undefined,
         description:
-          'Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it acts only when the model repeats the same call (a stuck loop; see model.loopProtection); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.',
+          'Hard per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh count). The turn stops on the first tool call past the cap. Daemon/ACP sessions check the cap once per tool batch, before execution: a batch that would cross it is skipped whole. Unset (the default), 0 or a negative value means no cap.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -2167,7 +2235,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as 'ephemeral' | '1h' | undefined,
             description:
-              "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
+              "Default cache_control retention. Applies to Anthropic cache anchors and to qwen4 DashScope cache breakpoints. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
             parentKey: 'generationConfig',
             showInDialog: false,
             options: [
@@ -2198,6 +2266,22 @@ const SETTINGS_SCHEMA = {
               },
               additionalProperties: false,
             },
+          },
+          imageDetail: {
+            type: 'enum',
+            label: 'Image Detail',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as 'low' | 'high' | 'auto' | undefined,
+            description:
+              "Detail level stamped on each image_url part for providers that read the OpenAI `detail` field. Undefined leaves the decision to the server (qwen4-max defaults to 'high', ~16K image tokens per image); 'low' trades resolution for tokens (~2.5K on qwen4-max), 'high' forces full resolution, 'auto' lets the provider choose.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'low', label: 'Low (fewer tokens)' },
+              { value: 'high', label: 'High (full resolution)' },
+              { value: 'auto', label: 'Auto' },
+            ],
           },
           splitToolMedia: {
             type: 'boolean',
@@ -3429,7 +3513,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+          'Allow the bundled ripgrep binary. When true (the default), a healthy system-level "rg" is preferred and the bundled binary is used only if PATH rg is missing or cannot run. When false, only the system-level "rg" command is used. This setting is only effective when tools.useRipgrep is true.',
         showInDialog: false,
       },
       workflowsEnabled: {
@@ -4117,6 +4201,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
+  enableDelegatedPromptHooks: {
+    type: 'boolean',
+    label: 'Enable Delegated Prompt Hooks',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: false,
+    description:
+      'Treat prompts from other sessions as messages checked by UserPromptSubmit hooks in the receiving session.',
+    showInDialog: false,
+  },
+
   stopHookBlockingCap: {
     type: 'number',
     label: 'Stop Hook Blocking Cap',
@@ -4443,7 +4538,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+          'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
         showInDialog: true,
       },
       liveVoice: {
@@ -4590,9 +4685,31 @@ const SETTINGS_SCHEMA = {
         label: 'Unified Agent Loop',
         category: 'Experimental',
         requiresRestart: true,
+        default: undefined as boolean | undefined,
+        unsetToggleValue: true,
+        description:
+          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents run on the shared loop, while the Hosted Harness keeps its own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless, ACP sessions, both TUIs and subagents included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+        showInDialog: true,
+      },
+      eventBusAgentLoop: {
+        type: 'boolean',
+        label: 'Event-Bus Agent Loop',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: undefined as boolean | undefined,
+        unsetToggleValue: true,
+        description:
+          'Run the shared agent loop on the event-bus architecture. Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents by default; other surfaces keep their current loop internals. When unset, headless sessions and the Ink TUI run on the kernel, and the other surfaces on the shared loop use its procedural path. `true` selects the kernel, and `false` selects the procedural path, including for headless and the Ink TUI. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+        showInDialog: true,
+      },
+      modelAvailabilityTracking: {
+        type: 'boolean',
+        label: 'Model Availability Tracking',
+        category: 'Experimental',
+        requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn; an explicit retry also re-probes skipped models. The primary model is still attempted on every request. Permanent quota exhaustion still fails fast and is not treated as a transient capacity skip. When disabled, the fallback chain behaves exactly as before.',
         showInDialog: true,
       },
       agentCollaboration: {
@@ -4800,10 +4917,26 @@ const SETTINGS_SCHEMA = {
     description:
       'Configuration for general-purpose git worktrees created by the ' +
       'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
-      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
-      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+      'parameter, and the startup `--worktree` flag) and for Web Shell ' +
+      'session worktrees. Does NOT affect Agent Arena worktrees — see ' +
+      '`agents.arena.worktreeBaseDir` for those.',
     showInDialog: false,
     properties: {
+      defaultForNewSessions: {
+        type: 'boolean',
+        label: 'Default Worktree For New Web Shell Sessions',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true (the default), a new Web Shell session in a trusted ' +
+          'Git workspace starts in an isolated worktree: the composer ' +
+          'defaults to Worktree mode and the worktree is created when the ' +
+          'first message is sent. Set to false to default to the current ' +
+          'branch instead. Only affects the Web Shell composer default; ' +
+          'explicit mode selection and the daemon API are unchanged.',
+        showInDialog: false,
+      },
       symlinkDirectories: {
         type: 'array',
         label: 'Symlink Directories Into Worktrees',
@@ -4822,6 +4955,23 @@ const SETTINGS_SCHEMA = {
           'source dirs and existing destination paths are silently ' +
           'skipped (no overwrite, no failure).',
         showInDialog: false,
+      },
+      maxRetained: {
+        type: 'integer',
+        label: 'Maximum Retained Session Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 15,
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
+        description:
+          'Keep this many recent eligible session worktrees per uniquely ' +
+          'owned management root. Live and pinned chats are preserved and ' +
+          'do not consume that quota. Set to 0 to disable automatic sweeping ' +
+          'without disabling explicit snapshot restore. Roots with ambiguous ' +
+          'ownership or unreadable settings are preserved. Does not apply to ' +
+          'tool/agent worktrees or delete orphan snapshots.',
+        showInDialog: true,
       },
     },
   },

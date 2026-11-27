@@ -9,6 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,6 +18,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,12 +35,10 @@ const workflowFiles = readdirSync(workflowsDir).filter((f) =>
   /\.ya?ml$/.test(f),
 );
 
-// Single shared recipe for the review-config bot login; every suite that pins
-// it reads this constant so the extraction cannot drift between call sites.
-const botLogin =
-  parse(workflow)
-    .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
-    ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
+// The gates compare the requested reviewer against this repository-variable
+// expression; the literal remains the offline fallback.
+const botLogin = 'qwen-code-review-bot';
+const botLoginExpression = `(vars.REVIEW_BOT_LOGIN || '${botLogin}')`;
 
 // The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
 // never exported (R4-1), so the replay's forge stub can only DISCOVER it by
@@ -122,10 +122,29 @@ describe('qwen pr review runner routing', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && (github.event_name != \'pull_request_target\' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
     expect(runsOn).not.toContain('ecs-agent');
+    // A fork pull_request_target payload never reaches the persistent pool:
+    // the PR's own install/build runs in this job, and `off` containment on
+    // a shared host exposes CI_BOT_PAT + the model key AND persists whatever
+    // a postinstall plants. Comment/dispatch triggers keep the pool (no fork
+    // payload); the sandbox preflight is their fail-closed backstop.
+    expect(runsOn).toContain(
+      "github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The hosted toolchain setup must fire on every shape the routing sends
+    // to ubuntu-latest, the fork payload included — a hosted runner has no
+    // pool-preinstalled node.
+    const setupNode = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Setup Node.js for hosted review',
+    );
+    expect(setupNode.if).toContain(
+      "(github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository)",
+    );
   });
 
   it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
@@ -3014,6 +3033,132 @@ describe('review worktree prebuild (issue #10108)', () => {
   });
 });
 
+describe('review execution sandbox opt-in (#9556)', () => {
+  // `required` opts the PR's own install/build/test into the #9556 execution
+  // sandbox, but only where the runner can honour it: the policy comes from
+  // the preflight's outputs. Read the key and the policy vocabulary out of the
+  // CLI source so a rename on either side reds this test instead of silently
+  // resolving to `off` (the default) with CI green — the failure mode the
+  // expression-length and unpullable-image incidents already taught us.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/sandboxed-exec.ts',
+    'utf8',
+  );
+  const envName = source.match(/env\['(QWEN_REVIEW_SANDBOX)'\]/)?.[1];
+  const policies = source
+    .match(/const POLICIES[^=]*=\s*\[([^\]]+)\]/)?.[1]
+    ?.split(',')
+    .map((p) => p.trim().replace(/'/g, ''));
+
+  it('sets the policy the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_SANDBOX');
+    // The literal is the preflight's output, not a constant: `required` on a
+    // runner that cannot satisfy it fails the PR's own install rather than
+    // containing it.
+    expect(review.env[envName]).toBe(
+      '${{ steps.review_sandbox.outputs.policy }}',
+    );
+    expect(policies).toContain('required');
+    expect(policies).toContain('off');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+
+  it('decides the policy from a probe that runs before any reviewed command', () => {
+    const steps = doc.jobs['review-pr'].steps;
+    const preflightIndex = steps.findIndex(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
+    expect(preflightIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeLessThan(reviewIndex);
+    const preflight = steps[preflightIndex];
+    expect(preflight.id).toBe('review_sandbox');
+    expect(preflight['continue-on-error']).toBeUndefined();
+    // A daemon round trip, not presence on PATH: a client with no daemon is
+    // the shape that then refuses every reviewed command inside the prebuild.
+    expect(preflight.run).toContain('info > /dev/null');
+    // The binary is pinned in step env, like the other sandboxed jobs: the
+    // export is derived from its stdout, so a PATH shadow must not steer it.
+    expect(preflight.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
+    // The image resolves through the repo's resolver, so a tag that is not on
+    // GHCR is caught here instead of being reported as the PR's broken install.
+    expect(preflight.run).toContain('resolve-sandbox-image.mjs');
+    expect(preflight.run).toContain('sandboxImageUri');
+    // The decision is published, not implied: the output feeds `Run review`,
+    // and the summary line is how a run that ran uncontained says so.
+    expect(preflight.run).toContain('policy=$policy" >> "$GITHUB_OUTPUT"');
+    expect(preflight.run).toContain('sandbox_policy=$policy');
+    expect(preflight.run).toContain('::warning::');
+    // `off` is the default and the only fallback: a policy the CLI cannot
+    // parse resolves to `off` too, so anything else here would silently pick
+    // the wrong side.
+    expect(preflight.run).toMatch(/policy='off'/);
+    expect(preflight.run).toMatch(/policy='required'/);
+  });
+
+  it('binds the resolved image through the step output, not $GITHUB_ENV', () => {
+    // Later steps can append $GITHUB_ENV; only the expression context is
+    // unsteerable, so the consumer must bind the resolver's OUTPUT and pin the
+    // endpoint the daemon resolves through (#9527).
+    expect(review.env.QWEN_SANDBOX_IMAGE).toBe(
+      '${{ steps.review_sandbox.outputs.image }}',
+    );
+    expect(review.env.DOCKER_HOST).toBe('');
+    expect(review.env.DOCKER_CONTEXT).toBe('default');
+  });
+
+  it('refuses a fork-head review when containment cannot be required', () => {
+    // `off` hands the PR's own install/build/test this step's GH_TOKEN and
+    // OPENAI_API_KEY. On the persistent pool a same-repo head keeps the
+    // documented fail-open behaviour; a cross-repository head (or an
+    // unreadable one — deleted fork, payload-less trigger) must fail closed
+    // instead. On a GitHub-hosted runner the disposable VM bounds the
+    // fallback, so the refusal is scoped to self-hosted.
+    const preflight = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    expect(preflight.env.HEAD_REPO).toBe(
+      '${{ github.event.pull_request.head.repo.full_name }}',
+    );
+    expect(preflight.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
+    // Payload-less triggers resolve the head repo through the read-only job
+    // token, never CI_BOT_PAT: this step must not need the write credential.
+    expect(preflight.env.GH_TOKEN).toBe('${{ github.token }}');
+    expect(preflight.run).toContain(
+      'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"',
+    );
+    const refusalStart = preflight.run.indexOf(
+      `if [ "$policy" != 'required' ] && [ "\${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "\${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then`,
+    );
+    expect(refusalStart).toBeGreaterThan(-1);
+    const refusal = preflight.run.slice(
+      refusalStart,
+      preflight.run.indexOf('echo "sandbox_policy=$policy"'),
+    );
+    expect(refusal).toContain('exit 1');
+    expect(refusal).toContain('::error::');
+    // The refusal precedes the policy output, so a refused run can never
+    // feed `off` into 'Run review'.
+    expect(refusalStart).toBeLessThan(
+      preflight.run.indexOf('echo "policy=$policy" >> "$GITHUB_OUTPUT"'),
+    );
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
@@ -3334,12 +3479,11 @@ describe('qwen pr review concurrency routing', () => {
     );
   });
 
-  it('gates the review_requested jobs on the published bot login', () => {
+  it('gates the review_requested jobs on the configurable bot login', () => {
     // The group expression no longer names the requested reviewer; the
-    // job-level gates still must. Pin the surviving literal against the
-    // review-config constant so a bot rename cannot desync the sites.
+    // job-level gates still must use the same configurable identity.
     expect(parse(workflow).jobs['precheck-pr'].if).toContain(
-      `github.event.requested_reviewer.login == '${botLogin}'`,
+      `github.event.requested_reviewer.login == ${botLoginExpression}`,
     );
   });
 });
@@ -3358,12 +3502,18 @@ describe('review_requested burst coalescing (#8945)', () => {
     [
       String.raw`\(\s*github\.event_name != 'pull_request_target' \|\|`,
       String.raw`\s*github\.event\.action != 'review_requested' \|\|`,
-      String.raw`\s*github\.event\.requested_reviewer\.login == '${botLogin}'\s*\)`,
+      String.raw`\s*github\.event\.requested_reviewer\.login == `,
+      String.raw`\(vars\.REVIEW_BOT_LOGIN \|\| 'qwen-code-review-bot'\)\s*\)`,
     ].join(''),
   );
 
-  it('resolves the bot login from review-config, not a paraphrase', () => {
-    expect(botLogin).toBe('qwen-code-ci-bot');
+  it('resolves the bot login through the repository variable', () => {
+    const setConstants = doc.jobs['review-config'].steps.find(
+      (s) => s.name === 'Set review constants',
+    );
+    expect(setConstants.run).toBe(
+      'echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || \'qwen-code-review-bot\' }}" >> "$GITHUB_OUTPUT"',
+    );
   });
 
   it('filters non-bot review_requested events before authorize spends compute', () => {
@@ -3378,7 +3528,7 @@ describe('review_requested burst coalescing (#8945)', () => {
     const cond = doc.jobs['review-config'].if;
     expect(cond).toContain("github.event.action == 'review_requested'");
     expect(cond).toContain(
-      `github.event.requested_reviewer.login == '${botLogin}'`,
+      `github.event.requested_reviewer.login == ${botLoginExpression}`,
     );
   });
 });
@@ -4100,7 +4250,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           'for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
-          '  echo "qwen-code-ci-bot"; exit 0',
+          '  echo "qwen-code-review-bot"; exit 0',
           'fi',
           // The never-started guard asks this run's job list whether review-pr
           // ever got a runner. It runs the step's REAL --jq filter over the
@@ -4586,7 +4736,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.status, body).toBe(0);
           expect(r.posted, body).toBe('');
@@ -4607,7 +4762,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         // — see the attribute-by-TIME test below.
         const cases = {
           stale: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             BEFORE,
             COMPOSED_REVIEW_BODIES[0],
@@ -4619,7 +4774,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             COMPOSED_REVIEW_BODIES[0],
           ),
           pending: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             null,
             COMPOSED_REVIEW_BODIES[0],
@@ -4655,7 +4810,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.posted, body).not.toBe('');
         }
@@ -4679,7 +4839,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             MID_RERUN,
             COMPOSED_REVIEW_BODIES[0],
@@ -4703,7 +4863,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+            reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
           });
           expect(r.posted, scenario).not.toBe('');
           expect(r.stdout, scenario).toContain(
@@ -4727,7 +4887,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4743,7 +4903,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4767,7 +4927,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'OLDSHA',
             AFTER,
             COMPOSED_REVIEW_BODIES[0],
@@ -7905,23 +8065,62 @@ describe('stale agent-home reclaim guard (#16616)', () => {
     return run.slice(0, end);
   };
 
-  const runGuard = (runnerTemp, { sudoBlocked = false, binDir } = {}) => {
+  const runGuard = (
+    runnerTemp,
+    {
+      sudoBlocked = false,
+      sudoDeletes = false,
+      sudoChownRepairs = false,
+      chmodBlocked = false,
+      binDir,
+    } = {},
+  ) => {
     binDir = binDir ?? join(runnerTemp, 'stub-bin');
     mkdirSync(binDir, { recursive: true });
-    if (sudoBlocked) {
+    // A chmod that always fails leaves a mode-0555 copy unremovable, which is
+    // the shape the drain reports rather than deletes.
+    if (chmodBlocked) {
+      const chmodStub = join(binDir, 'chmod');
+      writeFileSync(chmodStub, '#!/bin/sh\nexit 1\n');
+      chmodSync(chmodStub, 0o755);
+    }
+    if (sudoBlocked || sudoDeletes || sudoChownRepairs) {
       const sudoStub = join(binDir, 'sudo');
-      writeFileSync(sudoStub, '#!/bin/sh\nexit 1\n');
+      writeFileSync(
+        sudoStub,
+        // 'deletes' emulates the reclaim a passwordless-sudo pool member
+        // performs: make the target writable for this uid, then delete it.
+        // Keyed on the subcommand, because the ladder calls it twice — a stub
+        // that deleted on both legs would keep the primary reclaim's case
+        // green after that leg was deleted. 'repairs' emulates the fallback's
+        // shape instead — the sudo rm leg fails and the chown leg is what
+        // hands the directory back, leaving the unprivileged retry to remove
+        // it.
+        sudoDeletes
+          ? '#!/bin/sh\n[ "$2" = rm ] || exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
+          : sudoChownRepairs
+            ? '#!/bin/sh\n[ "$2" = rm ] && exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last"\n'
+            : '#!/bin/sh\nexit 1\n',
+      );
       chmodSync(sudoStub, 0o755);
     }
     return spawnSync('bash', ['-c', guardBody()], {
       env: {
         ...process.env,
         RUNNER_TEMP: runnerTemp,
-        ...(sudoBlocked ? { PATH: `${binDir}:/usr/bin:/bin` } : {}),
+        ...(sudoBlocked || sudoDeletes || sudoChownRepairs || chmodBlocked
+          ? { PATH: `${binDir}:/usr/bin:/bin` }
+          : {}),
       },
       encoding: 'utf8',
     });
   };
+
+  // A same-parent rename of a mode-0555 directory needs only the parent's
+  // write bit on Linux; BSD-derived kernels also rewrite the moved
+  // directory's `..` entry and answer EACCES. The review pool is Linux-only,
+  // so the case runs where the mechanism it pins actually exists.
+  const renamesForeignDir = process.platform === 'linux';
 
   it('reclaims a stale home and leaves a fresh runner-writable one', () => {
     const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
@@ -7953,6 +8152,11 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       expect(out.status).toBe(1);
       expect(out.stdout).toContain('stale qwen-home survives cleanup');
       expect(out.stdout).toContain(stale);
+      // The read-only parent is what refuses the rename, so the success line
+      // must not appear: an ungated echo would tell the operator a leftover
+      // was preserved at a path that was never created, right above the
+      // ::error:: that aborts the job.
+      expect(out.stdout).not.toContain('moved it to');
     } finally {
       chmodSync(runnerTemp, 0o755);
       rmSync(runnerTemp, { recursive: true, force: true });
@@ -7966,6 +8170,220 @@ describe('stale agent-home reclaim guard (#16616)', () => {
     expect(run).toContain('[ ! -w "$QWEN_HOME" ] || [ ! -x "$QWEN_HOME" ]');
     expect(run).toContain('fresh qwen-home is not writable');
   });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'escalates to sudo before quarantining a home rm cannot unlink',
+    () => {
+      // Rung order is load-bearing: quarantining a home that sudo could have
+      // deleted would strand the previous run's home on every review. A
+      // mode-0555 directory is unlinkable for this uid but reclaimable by
+      // the sudo stub, so the quarantine must not fire.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoDeletes: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        expect(
+          readdirSync(runnerTemp).filter((n) =>
+            n.startsWith('qwen-home.stale-'),
+          ),
+        ).toEqual([]);
+        // The fresh home must accept the settings write that killed #16610.
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'quarantines a home neither rm nor sudo can delete instead of failing',
+    () => {
+      // The pool members without passwordless sudo: the job still has write
+      // access to RUNNER_TEMP, and a same-parent rename needs only that, so
+      // the review proceeds on a fresh home and the leftover is preserved
+      // (and named) under a timestamped path.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('moved it to');
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A quarantined home may already be gone; rm below is best-effort.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'retries the unlink after the sudo chown fallback hands the home back',
+    () => {
+      // The chown leg exists for the shape where sudo rm fails but sudo can
+      // still take the directory over, leaving the unprivileged retry to
+      // remove it. Deleting that leg strands the home and hands the review
+      // to the quarantine rung it was not meant to need.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{}');
+      chmodSync(stale, 0o555);
+      try {
+        const out = runGuard(runnerTemp, { sudoChownRepairs: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).not.toContain('moved it to');
+        expect(existsSync(join(stale, 'settings.json'))).toBe(false);
+        writeFileSync(join(stale, 'settings.json'), '{}');
+      } finally {
+        if (existsSync(stale)) chmodSync(stale, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced() || !renamesForeignDir)(
+    'drains an aged quarantine on a later run and spares the rest',
+    () => {
+      // Production shape: a foreign 0555 home whose own mtime is old. The
+      // rung sets it aside without touching that mtime, so run one must
+      // leave the copy alone (the sweep runs before the rung), and a later
+      // run drains it only after a chmod — a hand-back restores the owner
+      // without the write bit.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stale = join(runnerTemp, 'qwen-home');
+      const keep = join(runnerTemp, 'triage-context');
+      const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      mkdirSync(stale);
+      writeFileSync(join(stale, 'settings.json'), '{"tools":{}}');
+      utimesSync(stale, fiveHoursAgo, fiveHoursAgo);
+      chmodSync(stale, 0o555);
+      try {
+        const first = runGuard(runnerTemp, { sudoBlocked: true, binDir });
+        expect(first.status, first.stderr).toBe(0);
+        const quarantine = readdirSync(runnerTemp).find((name) =>
+          name.startsWith('qwen-home.stale-'),
+        );
+        expect(quarantine).toBeTruthy();
+        expect(existsSync(join(runnerTemp, quarantine, 'settings.json'))).toBe(
+          true,
+        );
+
+        // An aged sibling the name filter must spare, and a quarantine a
+        // prior run made from a recently written home, which the age gate
+        // must spare.
+        const fresh = 'qwen-home.stale-20260101T000001Z-2';
+        mkdirSync(keep);
+        utimesSync(keep, fiveHoursAgo, fiveHoursAgo);
+        mkdirSync(join(runnerTemp, fresh));
+
+        const second = runGuard(runnerTemp);
+        expect(second.status, second.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, quarantine))).toBe(false);
+        expect(existsSync(keep)).toBe(true);
+        expect(existsSync(join(runnerTemp, fresh))).toBe(true);
+        // The live home survives both runs.
+        expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
+      } finally {
+        for (const name of readdirSync(runnerTemp)) {
+          try {
+            chmodSync(join(runnerTemp, name), 0o755);
+          } catch {
+            // A drained copy may already be gone.
+          }
+        }
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'does not follow a planted symlink while repairing mode bits',
+    () => {
+      // find matches a symlink by name and reports the link's own mtime, and
+      // chmod -R follows a symlink operand — so without -type d, anyone able
+      // to write RUNNER_TEMP could point this pre-checkout step at a tree
+      // outside it.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const victim = join(
+        mkdtempSync(join(tmpdir(), 'qwen-home-victim-')),
+        'd',
+      );
+      const lure = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-3');
+      try {
+        mkdirSync(victim);
+        writeFileSync(join(victim, 'file'), 'x');
+        chmodSync(victim, 0o500);
+        symlinkSync(victim, lure);
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        lutimesSync(lure, fiveHoursAgo, fiveHoursAgo);
+        const out = runGuard(runnerTemp);
+        expect(out.status, out.stderr).toBe(0);
+        expect(statSync(victim).mode & 0o200).toBe(0);
+      } finally {
+        chmodSync(victim, 0o755);
+        rmSync(victim, { recursive: true, force: true });
+        rmSync(runnerTemp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a quarantine the drain could not remove instead of claiming a clean sweep',
+    () => {
+      // Silence would make "drained" and "never drainable" identical in the
+      // log, while every later run re-walks the whole stranded tree.
+      const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+      const binDir = mkdtempSync(join(tmpdir(), 'qwen-home-guard-bin-'));
+      const stranded = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-4');
+      try {
+        mkdirSync(stranded);
+        writeFileSync(join(stranded, 'settings.json'), '{}');
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+        utimesSync(stranded, fiveHoursAgo, fiveHoursAgo);
+        chmodSync(stranded, 0o555);
+        const out = runGuard(runnerTemp, { chmodBlocked: true, binDir });
+        expect(out.status, out.stderr).toBe(0);
+        expect(out.stdout).toContain('survived the drain');
+        expect(out.stdout).toContain('qwen-home.stale-20260101T000000Z-4');
+        expect(existsSync(stranded)).toBe(true);
+      } finally {
+        if (existsSync(stranded)) chmodSync(stranded, 0o755);
+        rmSync(runnerTemp, { recursive: true, force: true });
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps the step header honest about the fail-fast contract', () => {
     const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");

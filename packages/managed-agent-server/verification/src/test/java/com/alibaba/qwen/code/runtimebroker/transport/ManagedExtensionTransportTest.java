@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.transport;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -16,6 +17,8 @@ import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -41,6 +44,65 @@ class ManagedExtensionTransportTest {
             ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST, "session");
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    @ParameterizedTest
+    @ValueSource(strings = {"source_changed", "skill_source_unavailable", "skill_source_busy",
+        "skill_snapshot_unavailable", "skill_snapshot_capacity", "skill_snapshot_pending",
+        "skill_snapshot_conflict", "skill_source_limit", "skill_candidate_limit"})
+    void preservesTheWorkersBoundedSkillRefusals(String code) throws Exception {
+        var failure = skillFailure(code, "valid");
+        assertEquals(409, failure.getStatusCode());
+        assertEquals(code, failure.getCode());
+        assertFalse(failure.isRetryable());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"unknown", "extra", "wrong-path", "wrong-status", "cacheable", "non-json", "encoded", "overflow"})
+    void doesNotTrustSkillCodesOutsideTheirProtocolBoundary(String mode) throws Exception {
+        var failure = skillFailure("source_changed", mode);
+        assertEquals("wrong-status".equals(mode) ? "managed_runtime_unavailable" : "managed_runtime_identity_conflict", failure.getCode());
+    }
+
+    private RuntimeBrokerException skillFailure(String code, String mode) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            assertEquals("Bearer token", exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.getRequestBody().readAllBytes();
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("code", "unknown".equals(mode) ? "unrecognized_skill_code" : code);
+            if ("extra".equals(mode)) {
+                fields.put("error", "private failure");
+            }
+            if ("overflow".equals(mode)) {
+                fields.put("padding", "x".repeat(ManagedExtensionProtocol.RESPONSE_LIMIT));
+            }
+            byte[] body = JsonCodec.encode(fields);
+            exchange.getResponseHeaders().set("Cache-Control", "cacheable".equals(mode) ? "max-age=60" : "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "non-json".equals(mode) ? "text/plain" : "application/json");
+            if ("encoded".equals(mode)) {
+                exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            }
+            exchange.sendResponseHeaders("wrong-status".equals(mode) ? 500 : 409, body.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(body);
+            }
+        });
+        server.start();
+        try {
+            var lease = new RuntimeLease("worker", URI.create("http://127.0.0.1:" + server.getAddress().getPort()), "token", "lease", 1);
+            var binding = new RuntimeBindingRecord("binding", new RuntimeProvisionRequest(SCOPE, "harness"), 1,
+                    RuntimeBindingRecord.State.READY, lease, false, null, null, 0, 0, Instant.now(), Instant.now());
+            var transport = new HttpRuntimeTransport();
+            var context = new ContextBinding("tenant", "workspace", 1, "storage", "nested/project", "context-config", 3);
+            var operation = "wrong-path".equals(mode) ? transport.extensionStop(lease, "retirement")
+                    : transport.extensionControl(binding, "harness", context, Map.of("kind", "extension-skill-candidates", "operationId", OPERATION));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> operation.toCompletableFuture().get(5, TimeUnit.SECONDS));
+            return (RuntimeBrokerException) failure.getCause();
+        } finally {
+            server.stop(0);
+        }
+    }
+
     @Test
     void extendedAttestationUsesTheActualLaunchConfigurationAndRejectsADifferentCache(@TempDir Path directory) throws Exception {
         var request = new RuntimeProvisionRequest(SCOPE, "harness", "local-process", "storage");
@@ -48,7 +110,7 @@ class ManagedExtensionTransportTest {
         var configuration = ManagedExtensionExecutionProfile.configuration(SCOPE.getCapabilityDigest(), directory.toString(), null);
         var boot = ManagedContextProtocol.boot(request, seed, configuration);
         AtomicReference<byte[]> captured = new AtomicReference<>();
-        AtomicReference<Map<String, Object>> response = new AtomicReference<>(ManagedContextProtocol.attestationResponse(boot));
+        AtomicReference<Map<String, Object>> response = new AtomicReference<>(ManagedContextProtocol.attestationResponse(boot.toWire()));
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/internal/managed-runtime/v3/attest", exchange -> {
             assertEquals("Bearer " + seed.getToken(), exchange.getRequestHeaders().getFirst("Authorization"));
@@ -67,8 +129,8 @@ class ManagedExtensionTransportTest {
             assertThrows(IllegalArgumentException.class, () -> new HttpRuntimeTransport().attest(lease, request, seed));
             var transport = new HttpRuntimeTransport().withManagedExtensionCacheDirectory(directory.toString(), null);
             assertEquals(SCOPE, transport.attest(lease, request, seed).toCompletableFuture().get(5, TimeUnit.SECONDS).getScope());
-            assertEquals(JSON.readTree(JsonCodec.encode(ManagedContextProtocol.attestationRequest(boot))), JSON.readTree(captured.get()));
-            var changed = new LinkedHashMap<>(ManagedContextProtocol.attestationResponse(boot));
+            assertEquals(JSON.readTree(JsonCodec.encode(ManagedContextProtocol.attestationRequest(boot.toWire()))), JSON.readTree(captured.get()));
+            var changed = new LinkedHashMap<>(ManagedContextProtocol.attestationResponse(boot.toWire()));
             changed.put("managedExtensions", ManagedExtensionExecutionProfile.configuration(SCOPE.getCapabilityDigest(), directory.resolve("other").toString(), null));
             response.set(changed);
             assertThrows(java.util.concurrent.ExecutionException.class,

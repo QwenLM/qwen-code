@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -11,13 +10,14 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -62,13 +62,13 @@ class WorkspaceSessionCloseTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
-    @Autowired ManagedSessionStore journal;
+    @Autowired JdbcManagedSessionStore journal;
     @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired CloseRuntime runtime;
 
     @Test
     void bothSurfacesReplayOneCloseAndWaitForDurableCleanupAfterRevocation() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         var close = runtime.results.computeIfAbsent(session, ignored -> new CompletableFuture<>());
         mvc.perform(get("/v1/agents/sessions/" + session).header(TenantContextFilter.HEADER, tenant)
@@ -80,8 +80,10 @@ class WorkspaceSessionCloseTest {
         String operation = mapper.readTree(admitted.getResponse().getContentAsString()).path("id").asText();
         await().untilAsserted(() -> assertThat(runtime.fenced).containsKey(session));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSING");
+        // D3: files closes on v2, so the claim gate names the fence
+        // (workspace_lifecycle_claim_fenced) ahead of the v1 admission-closed code.
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "a".repeat(43),
-                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
+                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced"));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close").header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner")).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"close\"}"))
@@ -103,7 +105,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void readerCannotCloseAndActiveOrPendingApprovalTurnsRemainGated() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         grant(tenant, "reader");
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
@@ -132,7 +134,7 @@ class WorkspaceSessionCloseTest {
     @Test
     void expiredOrUndecidableApprovalDoesNotPreventClose() throws Exception {
         for (String options : java.util.List.of("{\"expiresAt\":1}", "{}")) {
-            String tenant = "close-expired-" + UUID.randomUUID();
+            String tenant = UUID.randomUUID().toString();
             String session = create(tenant);
             seedAction(tenant, session, options);
             mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
@@ -146,8 +148,13 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void liveOriginalWriterPreventsCompletionUntilItSeals() throws Exception {
-        String tenant = "close-writer-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
+        // D3: the original writer seals itself without lifecycle authority,
+        // which is v1 single-phase behavior; external-files keeps protocol 1
+        // (ordinary files is v2 now, where a seal must carry the claim).
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES, tenant, session);
         String token = "a".repeat(43);
         var grant = journal.acquireWriter(tenant, session, token, new AcquireWriterRequest("ws", "original", 60_000L));
         var admitted = mvc.perform(post("/v1/agents/sessions/" + session + "/close")
@@ -164,7 +171,7 @@ class WorkspaceSessionCloseTest {
 
     @Test
     void uncertainStopIsObservableAndNeverCompletesUntilEvidenceArrives() throws Exception {
-        String tenant = "close-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = create(tenant);
         runtime.results.put(session, CompletableFuture.failedFuture(new RuntimeBrokerException(409,
                 "workspace_close_identity_unverified", "Original identity unavailable", false)));
@@ -185,11 +192,9 @@ class WorkspaceSessionCloseTest {
 
     private void seedAction(String tenant, String session, String options) {
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
+        jdbc.update("INSERT INTO ma_session_record (tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
-                        + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "ACTION", action),
+                        + " VALUES (?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
                 tenant, session, action, action, options);
     }
 
@@ -227,22 +232,28 @@ class WorkspaceSessionCloseTest {
         @Bean @Primary HarnessConnector uninitializedHarness() {
             return new UnavailableHarnessConnector() {
                 public boolean supportsLifecycle() { return true; }
+                // D3: the live-writer witness rides external-files (v1), whose
+                // saved lifecycle the default connector does not advertise.
+                public boolean supportsSavedLifecycle(String profile) {
+                    return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                            || super.supportsSavedLifecycle(profile);
+                }
                 public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {}
             };
         }
         @Bean @Primary CloseRuntime closeRuntime() { return new CloseRuntime(); }
         @Bean @Primary ManagedAgentStore closeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 ObjectMapper mapper,
-                com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry registry,
-                WorktreeFiles worktreeFiles, ManagedSessionSkills skills, ExtensionPackages extensions,
-                @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
-                @Nullable SessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
-                @Lazy @Nullable ManagedExtensionRecordStore records) {
+                JdbcManagedWorkspaceRegistry registry,
+                WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+                @Nullable JdbcSessionWorktreeStore worktrees,
+                @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry,
                     properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
-                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
+                    skills, extensions, lifecycle, definitions, worktrees, records);
         }
     }
 

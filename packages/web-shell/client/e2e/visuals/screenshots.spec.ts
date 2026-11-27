@@ -767,6 +767,42 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('sidebar continuation badge', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/continuation-badge';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            sessionId: 'cut-off',
+            displayName: 'Refactor the config loader',
+            needsContinuation: true,
+          },
+          {
+            sessionId: 'running',
+            displayName: 'Run the browser tests',
+            hasActivePrompt: true,
+          },
+          { sessionId: 'clean', displayName: 'Update session documentation' },
+        ].map((session) => ({
+          ...session,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      const badge = page
+        .locator(`[data-sidebar-workspace="${workspaceCwd}"]`)
+        .locator('[data-web-shell-session-continuation]');
+      await expect(badge).toBeVisible();
+      await expect(badge).toHaveText('Continue');
+      await captureScreenshot(page, `sidebar-continuation-badge-${theme}`);
+    });
+
     test('session overview bulk delete batches at the route limit', async ({
       page,
     }, testInfo) => {
@@ -1092,6 +1128,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).not.toContainText('Token budget reached');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('Token budget reached');
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
@@ -1118,6 +1158,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).not.toContainText('User authority is required');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('User authority is required');
       await expect(messageList).not.toContainText('Goal aborted');
       await captureScreenshot(page, `goal-blocked-${theme}`);

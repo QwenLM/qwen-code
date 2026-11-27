@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QwenSubscriptionSession } from './subscription-session.js';
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import {
-  readCachedSubscriptionModels,
+  readCachedSubscriptionCatalog,
   selectSubscriptionModel,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from './subscription-models.js';
@@ -171,16 +171,16 @@ it('loads every served model, persists the account cache and preserves it across
   const ids = ['qwen3.8-max', 'qwen3.7-flash', 'future-model'];
   modelFetch.mockResolvedValue(modelResponse(ids));
   expect(await session.getModels()).toEqual({ models: ids, cached: false });
-  expect(readCachedSubscriptionModels()).toEqual(ids);
+  expect(readCachedSubscriptionCatalog().models).toEqual(ids);
   expect(modelFetch).toHaveBeenCalledWith(
     expect.stringMatching(/\/models$/),
     expect.objectContaining({ maxRedirects: 0, timeoutMs: 5000 }),
   );
   await expire();
   await session.getAccessToken();
-  expect(readCachedSubscriptionModels()).toEqual(ids);
+  expect(readCachedSubscriptionCatalog().models).toEqual(ids);
   await session.signOut();
-  expect(readCachedSubscriptionModels()).toEqual([]);
+  expect(readCachedSubscriptionCatalog().models).toEqual([]);
 });
 
 it('retains credentials and the last catalog after network errors and empty responses', async () => {
@@ -201,19 +201,86 @@ it('retains credentials and the last catalog after network errors and empty resp
   expect(await session.getUserInfo()).toEqual(user);
 });
 
+it('validates optional metadata per field and replaces or reuses it with the model list', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  modelFetch.mockResolvedValue({
+    kind: 'response',
+    status: 200,
+    body: Buffer.from(
+      JSON.stringify({
+        data: [
+          {
+            id: ' qwen3.8-max ',
+            input_modalities: ['text'],
+            context_window_tokens: 262144,
+          },
+          { id: 'qwen3.8-max', input_modalities: ['text', 'video'] },
+          {
+            id: 'vision',
+            input_modalities: ['text', 'image', 'video', 'audio', 'pdf'],
+            context_window_tokens: '1000000',
+          },
+          {
+            id: 'window-only',
+            input_modalities: 'text',
+            context_window_tokens: 1000000,
+          },
+          { id: 'legacy' },
+        ],
+      }),
+    ),
+  });
+
+  const catalog = {
+    models: ['qwen3.8-max', 'vision', 'window-only', 'legacy'],
+    modelMetadata: [
+      { id: 'qwen3.8-max', modalities: {}, contextWindowSize: 262144 },
+      {
+        id: 'vision',
+        modalities: { image: true, video: true, audio: true, pdf: true },
+      },
+      { id: 'window-only', contextWindowSize: 1000000 },
+    ],
+  };
+  expect(await session.getModels()).toEqual({ ...catalog, cached: false });
+  expect(readCachedSubscriptionCatalog()).toEqual(catalog);
+
+  modelFetch.mockResolvedValue(modelResponse([], 503));
+  expect(await session.getModels()).toEqual({ ...catalog, cached: true });
+
+  modelFetch.mockResolvedValue(modelResponse(catalog.models));
+  expect(await session.getModels()).toEqual({
+    models: catalog.models,
+    cached: false,
+  });
+  expect(readCachedSubscriptionCatalog().modelMetadata).toBeUndefined();
+
+  await session.signOut();
+  expect(readCachedSubscriptionCatalog()).toEqual({ models: [] });
+});
+
 it('does not hide a repeated unauthorized response behind the cached catalog', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
   modelFetch.mockResolvedValue(modelResponse(['served']));
   await session.getModels();
   modelFetch.mockReset().mockResolvedValue(modelResponse([], 401));
-  await expect(session.getModels()).rejects.toMatchObject({
+  await expect(
+    session.getModels(undefined, '0.0.0-test'),
+  ).rejects.toMatchObject({
     code: 'invalid_token',
     status: 401,
   });
   expect(client.refreshToken).toHaveBeenCalledOnce();
-  expect(modelFetch).toHaveBeenCalledTimes(2);
-  expect(readCachedSubscriptionModels()).toEqual(['served']);
+  expect(modelFetch.mock.calls.map(([, options]) => options.headers)).toEqual(
+    [tokens.access_token, rotated.access_token].map((token) => ({
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': `QwenCode/0.0.0-test (${process.platform}; ${process.arch})`,
+    })),
+  );
+  expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
 });
 
 it.each([false, true])(
@@ -240,7 +307,9 @@ it.each([false, true])(
       status: 403,
       description: 'Your account cannot access this model catalog.',
     });
-    expect(readCachedSubscriptionModels()).toEqual(cached ? ['served'] : []);
+    expect(readCachedSubscriptionCatalog().models).toEqual(
+      cached ? ['served'] : [],
+    );
   },
 );
 
@@ -264,7 +333,7 @@ it('does not hide a refresh service failure behind the cached catalog', async ()
     stage: 'refresh',
     status: 503,
   });
-  expect(readCachedSubscriptionModels()).toEqual(['served']);
+  expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
 });
 
 it.each(['empty response', 'network failure'])(
@@ -279,7 +348,7 @@ it.each(['empty response', 'network failure'])(
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(SubscriptionOAuthError);
     expect(error).toMatchObject({ message: SUBSCRIPTION_MODELS_UNAVAILABLE });
-    expect(readCachedSubscriptionModels()).toEqual([]);
+    expect(readCachedSubscriptionCatalog().models).toEqual([]);
     expect(await session.getUserInfo()).toEqual(user);
   },
 );
@@ -304,7 +373,7 @@ it('does not commit a late catalog after logout or a new login', async () => {
   await session.signIn(() => {});
   resolve(modelResponse(['old-account-model']));
   expect(await outcome).toMatchObject({ code: 'session_changed' });
-  expect(readCachedSubscriptionModels()).toEqual([]);
+  expect(readCachedSubscriptionCatalog().models).toEqual([]);
 });
 
 it.each(['response', 'network failure'])(
@@ -349,7 +418,9 @@ it.each(['response', 'network failure'])(
     await vi.waitFor(() => expect(onDevice).toHaveBeenCalledOnce());
     expect(session.getIdentity()).toBe(identity);
     expect(await session.getAccessToken()).toBe(tokens.access_token);
-    expect(readCachedSubscriptionModels()).toEqual(['old-account-model']);
+    expect(readCachedSubscriptionCatalog().models).toEqual([
+      'old-account-model',
+    ]);
     expect(modelFetch).toHaveBeenCalledOnce();
     finishAuthorization(rotated);
     await authorization;
@@ -359,7 +430,7 @@ it.each(['response', 'network failure'])(
     else failCatalog(new TypeError('offline'));
     expect(await catalog).toMatchObject({ code: 'session_changed' });
     expect(await session.getAccessToken()).toBe(rotated.access_token);
-    expect(readCachedSubscriptionModels()).toEqual([]);
+    expect(readCachedSubscriptionCatalog().models).toEqual([]);
   },
 );
 
@@ -642,7 +713,7 @@ it.each(['cancel', 'device failure', 'access_denied', 'expired_token'])(
     );
     expect(session.getIdentity()).toBe(identity);
     expect(await session.getAccessToken()).toBe(tokens.access_token);
-    expect(readCachedSubscriptionModels()).toEqual(['served']);
+    expect(readCachedSubscriptionCatalog().models).toEqual(['served']);
     expect(client.revokeToken).not.toHaveBeenCalled();
   },
 );

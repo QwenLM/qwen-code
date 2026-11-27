@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarget;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
@@ -46,7 +46,7 @@ class ManagedMaterializationDeferTest {
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         store.deferMaterializationTarget("tenant", "session");
@@ -54,7 +54,7 @@ class ManagedMaterializationDeferTest {
         var row = jdbc.queryForMap("SELECT covered_sequence, gmt_modified FROM"
                         + " ma_event_stream WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
-                        + " stream_kind = ? AND stream_id = X''",
+                        + " stream_kind = ? AND stream_id = ''",
                 "tenant", "session", "SESSION");
         assertThat(row.get("gmt_modified")).isEqualTo(123456789L);
         assertThat(row.get("covered_sequence")).isEqualTo(9L);
@@ -96,7 +96,7 @@ class ManagedMaterializationDeferTest {
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         assertThat(store.findMaterializationTargets(2))

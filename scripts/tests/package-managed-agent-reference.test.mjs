@@ -58,8 +58,6 @@ async function fixture(root) {
     `,
     'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
       'server',
-    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
-      'recovery',
     'packages/managed-agent-server/server/src/main/resources/application.yml':
       "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
     'packages/managed-agent-server/distribution/config/application.example.yml':
@@ -89,12 +87,12 @@ async function fixture(root) {
       'select 1;',
     'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
       'class Latest {}',
-    'packages/cli/src/serve/capabilities.ts':
+    'packages/sdk-typescript/src/daemon/capabilities.ts':
       "export const SERVE_PROTOCOL_VERSION = 'v1' as const;\n",
     'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
-      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
+      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??\n  'hosted-workspace-files/1,hosted-workspace-shell/1'\n).split(',');\n",
     'docs/users/managed-agent-reference-deployment.md': 'deploy\n',
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
@@ -146,7 +144,7 @@ test('packages an independently verifiable reference distribution', async () => 
     });
     assert.deepEqual(
       result.manifest.components.map(({ name }) => name),
-      ['qwen-managed-agent-server', 'qwen-managed-agent-operator-recovery'],
+      ['qwen-managed-agent-server'],
     );
     assert.deepEqual(result.manifest.defaults, {
       publicShellEnabled: false,
@@ -289,10 +287,6 @@ test('launchers load the distribution config only when it exists', async () => {
     delete baseEnv.SPRING_CONFIG_ADDITIONAL_LOCATION;
     const env = { ...baseEnv, PATH: `${fakeBin}:${process.env.PATH}` };
     const launcherPath = path.join(bundle, 'bin/qwen-managed-agent-server');
-    const recoveryPath = path.join(
-      bundle,
-      'bin/qwen-managed-agent-operator-recovery',
-    );
     const run = (script, args, overrides = {}) =>
       execFileSync('sh', [script, ...args], {
         env: { ...env, ...overrides },
@@ -359,14 +353,6 @@ test('launchers load the distribution config only when it exists', async () => {
         error.status === 2 &&
         String(error.stderr).includes('unknown command: no-such-command'),
     );
-
-    const recovery = run(recoveryPath, ['inspect', 'binding-1', '7']);
-    assert.ok(recovery.includes(`ENV=file:${config}`));
-    assert.ok(recovery.includes('ARG=-jar'));
-    assert.ok(recovery.includes('ARG=inspect'));
-    assert.ok(recovery.includes('ARG=binding-1'));
-    assert.ok(recovery.includes('ARG=7'));
-    assert.ok(!recovery.includes('ARG=--spring.config.additional-location'));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -593,7 +579,7 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   );
   assert.match(
     harness,
-    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   const paths = {
     databasePassword: secrets.databasePassword,
@@ -1075,7 +1061,7 @@ test('ships the Harness credential keys the control plane reads', async () => {
   // The tool path's pair ships commented, for the operator to enable together.
   assert.match(
     template,
-    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   assert.match(
     template,
@@ -1121,9 +1107,9 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
       name: 'commented lifecycle v2 default',
       file: 'packages/cli/src/serve/hosted-harness-contract.ts',
       contents:
-        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-files/1,hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
       error:
-        /Hosted lifecycle v2 profiles must default to canonical Shell only/,
+        /Hosted lifecycle v2 profiles must default to canonical files and Shell/,
     },
     {
       name: 'duplicate public Shell default',

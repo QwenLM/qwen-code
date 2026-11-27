@@ -86,6 +86,19 @@ function boolSetting(): DaemonSettingDescriptor {
   };
 }
 
+function unsetBoolSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'experimental.unifiedAgentLoop',
+    type: 'boolean',
+    label: 'Unified Agent Loop',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: undefined,
+    unsetToggleValue: true,
+    values: { effective: undefined },
+  };
+}
+
 function integerSetting(): DaemonSettingDescriptor {
   return {
     key: 'tools.webSearch.maxPerSession',
@@ -621,6 +634,71 @@ describe('SettingsMessage UI language scope', () => {
 });
 
 describe('SettingsMessage user-scope editing', () => {
+  it('offers display translation only on the User tab', () => {
+    const displayLanguage: DaemonSettingDescriptor = {
+      key: 'general.displayLanguage',
+      type: 'enum',
+      label: 'Language: Display Translation',
+      category: 'General',
+      requiresRestart: true,
+      default: 'off',
+      options: [
+        { value: 'off', label: 'Off' },
+        { value: 'zh-CN', label: 'Simplified Chinese' },
+      ],
+      values: { effective: 'off', user: 'off', workspace: 'zh-CN' },
+    };
+    const container = renderPanel(
+      makeState([boolSetting(), displayLanguage], vi.fn()),
+    );
+    const trigger = () =>
+      container.querySelector(
+        'button[aria-label="Language: Display Translation"]',
+      );
+    expect(trigger()).toBeNull();
+
+    const userTab =
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1];
+    act(() => {
+      userTab?.focus();
+      userTab?.click();
+    });
+
+    expect(trigger()?.textContent).toContain('Off');
+    expect(container.textContent).not.toContain('Also modified in Workspace');
+  });
+
+  it('shows the timeout only on the User tab for a standalone session', () => {
+    const container = renderPanel(
+      makeState(
+        [
+          {
+            key: 'visionBridgeTimeoutMs',
+            type: 'integer',
+            label: 'Vision Bridge Timeout (ms)',
+            category: 'Model',
+            requiresRestart: true,
+            default: undefined,
+            values: { user: 45_000, effective: 45_000 },
+          },
+        ],
+        vi.fn(),
+      ),
+      { initialCategory: 'Model', workspaceSettingsWritable: false },
+    );
+    const setting = () =>
+      container.querySelector('input[name="visionBridgeTimeoutMs"]');
+    expect(setting()).not.toBeNull();
+
+    const workspaceTab =
+      container.querySelector<HTMLButtonElement>('[role="tab"]');
+    act(() => {
+      workspaceTab?.focus();
+      workspaceTab?.click();
+    });
+    expect(setting()).toBeNull();
+  });
+
   it('keeps a workspace theme change settings-owned', async () => {
     const setValue = vi.fn(() =>
       Promise.resolve({ requiresRestart: false } as DaemonSettingUpdateResult),
@@ -686,6 +764,64 @@ describe('SettingsMessage user-scope editing', () => {
 
     expect(setValue).toHaveBeenCalledWith('user', 'general.testFlag', true);
   });
+
+  it('describes an unset boolean switch with its visible badge', () => {
+    const container = renderPanel(makeState([unsetBoolSetting()], vi.fn()));
+    const control = switchButton(container);
+    const badge = container.querySelector('[data-slot="badge"]');
+
+    expect(badge?.textContent).toBe('Not set');
+    expect(badge?.id).toBeTruthy();
+    expect(control.getAttribute('aria-describedby')).toBe(badge?.id);
+    expect(control.getAttribute('data-state')).toBe('unchecked');
+  });
+
+  it('omits the unset description for an explicitly disabled boolean', () => {
+    const container = renderPanel(
+      makeState(
+        [
+          {
+            ...unsetBoolSetting(),
+            values: { effective: false, workspace: false },
+          },
+        ],
+        vi.fn(),
+      ),
+    );
+
+    expect(switchButton(container).hasAttribute('aria-describedby')).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ['experimental.unifiedAgentLoop', true, true],
+    ['experimental.unifiedAgentLoop', false, false],
+    ['tools.webSearch.enabled', undefined, true],
+    ['tools.shell.enableInteractiveShell', undefined, true],
+  ] as const)(
+    'toggles unset %s with schema value %s to %s',
+    async (key, unsetToggleValue, expected) => {
+      const setValue = vi.fn(
+        (scope: 'workspace' | 'user', key: string, value: unknown) =>
+          Promise.resolve({
+            key,
+            scope,
+            value,
+            requiresRestart: true,
+          } as DaemonSettingUpdateResult),
+      );
+      const container = renderPanel(
+        makeState([{ ...unsetBoolSetting(), key, unsetToggleValue }], setValue),
+      );
+
+      await act(async () => {
+        switchButton(container).click();
+      });
+
+      expect(setValue).toHaveBeenCalledWith('workspace', key, expected);
+    },
+  );
 
   it('edits an integer setting in a number input and commits a number', async () => {
     // A text input would commit the string "5", which the daemon's integer

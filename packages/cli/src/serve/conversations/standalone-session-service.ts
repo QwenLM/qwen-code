@@ -55,6 +55,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   AcpChildCapacityExceededError,
+  SystemOverloadedError,
   type AcpChildCapacity,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -265,6 +266,7 @@ export type StandaloneSessionLookup =
   | StandaloneSessionCreating;
 
 export interface ListStandaloneSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -300,6 +302,12 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
 
 export interface StandaloneSessionServiceOptions {
   daemonLog?: Pick<DaemonLogger, 'warn'>;
+  /**
+   * Channel label for standalone transcript exports, resolved once per
+   * daemon at boot (same value as the workspace-session export route) so
+   * both export surfaces bucket identically.
+   */
+  exportChannel?: string;
   ensureRuntime(): Promise<WorkspaceRuntime>;
   assertRuntimeCurrent(runtime: WorkspaceRuntime): void;
   quarantineRuntime(runtime: WorkspaceRuntime): Promise<void>;
@@ -720,6 +728,7 @@ export class StandaloneSessionService {
         runtime.workspaceCwd,
         {
           conversationKind: 'standalone-top-level',
+          ...(options.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(options.size !== undefined ? { size: options.size } : {}),
           ...(options.archiveState !== undefined
@@ -938,6 +947,7 @@ export class StandaloneSessionService {
           format,
           archiveState: durable.location,
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          config: { getChannel: () => this.options.exportChannel },
         });
       });
     });
@@ -2719,6 +2729,19 @@ export class StandaloneSessionService {
         this.recordCreationFailure(attempt, outcome);
         throw outcome;
       }
+      const loadRefusal =
+        error instanceof SystemOverloadedError
+          ? error
+          : error instanceof StandaloneSessionSpawnError &&
+              error.cause instanceof SystemOverloadedError
+            ? error.cause
+            : undefined;
+      if (loadRefusal) {
+        // Expected backpressure, not a creation defect: answer the retryable
+        // 503 without creation-failure diagnostics operators alert on.
+        attempt.cause ??= loadRefusal;
+        throw loadRefusal;
+      }
       attempt.cause ??= error;
       this.recordCreationFailure(attempt, error);
       throw error;
@@ -2873,6 +2896,11 @@ export class StandaloneSessionService {
           } catch {
             this.beginTerminalQuarantine(runtime);
           }
+        }
+        if (error.cause instanceof SystemOverloadedError) {
+          // Load backpressure is a retryable refusal, not a creation defect:
+          // keep the 503 system_overloaded contract instead of a 500 rollback.
+          throw error.cause;
         }
         const outcome = conflict
           ? serviceError('standalone_session_conflict', sessionId, false, error)

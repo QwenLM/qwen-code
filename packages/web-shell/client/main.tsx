@@ -34,7 +34,7 @@ import {
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
-import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import { loadLanguage, normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { inferStandaloneBasePath } from './utils/sessionPath';
@@ -437,11 +437,16 @@ export function StandaloneApp({
                         'title',
                         'environment',
                         'rightPanel',
+                        'scheduledTasks',
+                        'artifacts',
                         'tokenUsage',
                         'contextUsage',
                       ],
                     },
                     rightPanel: {
+                      // Every WebShellRightPanelItem, so a newly added entry
+                      // is not silently unreachable in the standalone shell
+                      // (main.test.tsx pins the completeness of this list).
                       items: [
                         'files',
                         'review',
@@ -449,6 +454,7 @@ export function StandaloneApp({
                         'terminal',
                         'webPreview',
                         'trajectory',
+                        'changeOverview',
                       ],
                     },
                     environmentPanel: {
@@ -457,6 +463,7 @@ export function StandaloneApp({
                         'sources',
                         'subagents',
                         'backgroundTasks',
+                        'scheduledTasks',
                         'attachments',
                         'artifacts',
                       ],
@@ -505,6 +512,9 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
+  const bootLanguage =
+    getInitialLanguage() ?? normalizeLanguage(navigator.language);
+  const localeReady = loadLanguage(bootLanguage);
   const pairing = MANAGED_APP
     ? undefined
     : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);
@@ -514,6 +524,7 @@ async function main() {
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
       : undefined);
+  if (localeReady) await localeReady;
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -532,7 +543,7 @@ async function main() {
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.
-        language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
+        language={bootLanguage}
         initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
@@ -540,12 +551,7 @@ async function main() {
       >
         {(token) =>
           MANAGED_APP ? (
-            <ManagedStandaloneApp
-              daemonToken={token}
-              language={
-                getInitialLanguage() ?? normalizeLanguage(navigator.language)
-              }
-            >
+            <ManagedStandaloneApp daemonToken={token} language={bootLanguage}>
               {(managedAgentProvider) => (
                 <StandaloneApp
                   daemonToken={token}

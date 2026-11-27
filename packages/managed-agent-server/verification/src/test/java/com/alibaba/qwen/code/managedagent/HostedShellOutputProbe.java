@@ -79,10 +79,9 @@ final class HostedShellOutputProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_id = o.physical_id WHERE s.tenant_id = ? AND s.storage_id = ?",
                 tenant, storage);
-        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_id"
                 + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
                 tenant, session.get("sessionId"));
         member.put("physicalOwner", physical);
@@ -164,8 +163,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         for (String key : List.of("binding_id", "runtime_generation", "runtime_session_id")) {
             assertThat(original.get(key)).isEqualTo(row.get(key));
         }
-        assertThat(original.get("execution_storage_key"))
-                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
+        assertThat(original.get("execution_storage_id"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("physical_id"));
         assertThat(jdbc.queryForList("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?",
                 String.class, id)).containsExactly("READY");
         return Map.of("state", row.get("execution_state"));
@@ -174,13 +173,13 @@ final class HostedShellOutputProbe implements AutoCloseable {
     // Led by the indexed session scope key, as in HostedGateTestSupport: the
     // raw tenant+session form scans the lane's accumulated ma_resource rows.
     private List<Map<String, Object>> resources(String id, String kind) {
-        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND kind = ? AND tenant_id = ? AND session_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, id), kind, tenant, id);
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND kind = ? AND tenant_id = ? AND session_id = ?",
+                tenant, id, kind, tenant, id);
     }
 
     private byte[] resource(String id, String resourceId, String digest, int length) throws Exception {
-        var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, id), resourceId, tenant, id);
+        var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                tenant, id, resourceId, tenant, id);
         byte[] bytes = (byte[]) row.get("inline_bytes");
         assertThat(bytes).hasSize(length);
         assertThat(((Number) row.get("byte_length")).intValue()).isEqualTo(length);
@@ -310,8 +309,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(previous);
-        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                byte[].class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, id), head.get("latest_checkpoint_resource_id"), tenant, id);
+        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                byte[].class, tenant, id, head.get("latest_checkpoint_resource_id"), tenant, id);
         assertThat(JSON.readTree(checkpoint).path("continuation").path("phase").asText()).isEqualTo("await_runtime");
         if (report == null) {
             return;

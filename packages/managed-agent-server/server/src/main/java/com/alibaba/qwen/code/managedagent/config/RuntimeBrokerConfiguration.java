@@ -1,11 +1,18 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
@@ -14,12 +21,16 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
+import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 
@@ -27,19 +38,6 @@ import java.util.concurrent.CompletableFuture;
 
 @Configuration
 public class RuntimeBrokerConfiguration {
-    @Bean
-    @ConditionalOnProperty(prefix = "qwen.managed-agent", name = {"session-store.enabled", "runtime-broker.enabled"}, havingValue = "true")
-    public com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore workspaceCsiApplicationStore(
-            @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") org.springframework.transaction.PlatformTransactionManager manager,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore nativeStore,
-            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions) {
-        if (!(bindings instanceof JdbcRuntimeBindingRepository jdbcBindings)
-                || !(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)) {
-            throw new IllegalStateException("Original JDBC repositories are required for CSI retirement");
-        }
-        return new com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, jdbcBindings, jdbcSessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
-    }
-
     @Bean
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
@@ -60,8 +58,17 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public RuntimeBindingRepository runtimeBindingRepository(
-            @Qualifier("managedAgentDataSource") DataSource dataSource, SecretProtector secretProtector) {
-        return new JdbcRuntimeBindingRepository(dataSource, secretProtector);
+            @Qualifier("managedAgentDataSource") DataSource dataSource, SecretProtector secretProtector,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            ObjectProvider<ToolPublicationObjectStore> objects,
+            ObjectProvider<ManagedAgentSettings> settings) {
+        // Same bundle construction as JdbcManagedSessionStore: without session-resource
+        // settings the bundle stays null and CSI admission keeps its fail-closed behavior.
+        var sessionResourceSettings = settings.getIfAvailable();
+        return new JdbcRuntimeBindingRepository(dataSource, secretProtector,
+                sessionResourceSettings == null ? null
+                        : new JdbcJournalPacks(
+                                jdbc, objects.getIfAvailable(), sessionResourceSettings));
     }
 
     @Bean
@@ -89,14 +96,14 @@ public class RuntimeBrokerConfiguration {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
-            WorkspaceExecutionStore workspaceExecutionStore,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationStore> publications,
-            org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData,
-            @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc,
-            @Qualifier("managedAgentTransactionManager") org.springframework.transaction.PlatformTransactionManager manager,
-            com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService ssh,
-            com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensions,
-            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier extensionCommands) {
+            JdbcWorkspaceExecutionStore workspaceExecutionStore,
+            ObjectProvider<ToolPublicationStore> publications,
+            ObjectProvider<ToolPublicationDataStore> publicationData,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
+            SshWorkspaceService ssh,
+            ManagedExtensionPackageService extensions,
+            ManagedExtensionCommandVerifier extensionCommands) {
         var broker = new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
@@ -113,9 +120,22 @@ public class RuntimeBrokerConfiguration {
     @Bean(destroyMethod = "")
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
-    public com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService runtimeBrokerService(
+    public RuntimeBrokerService runtimeBrokerService(
             EmbeddedRuntimeBroker broker) {
         return broker.service();
+    }
+
+    // The terminal capability hint must resolve placement through the same
+    // authority the Broker uses. Expose the resolver the Broker already built
+    // (null when there is no workspace execution store) so the ObjectProvider
+    // in ManagedAgentService finds it instead of always yielding null and
+    // pinning capabilities.terminal to false.
+    @Bean
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
+            name = "enabled", havingValue = "true")
+    public WorkspaceRuntimeResolver workspaceRuntimeResolver(
+            EmbeddedRuntimeBroker broker) {
+        return broker.workspaceRuntimeResolver();
     }
 
     @Bean

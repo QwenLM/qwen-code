@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,7 +21,7 @@ import java.util.Set;
 public final class ManagedExtensionAgentLaunch {
     private ManagedExtensionAgentLaunch() { }
 
-    public static void require(JdbcTemplate jdbc, ManagedExtensionRecordStore records,
+    public static void require(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore records,
             SessionRecord parent, JsonNode launch) {
         try {
             ManagedExtensionRecords.closed(launch, Set.of("version", "sourcePromptId", "approvalMode", "approvalRevision",
@@ -105,7 +107,7 @@ public final class ManagedExtensionAgentLaunch {
             throw refused();
         }
         var capabilities = jdbc.queryForList("SELECT b.capability_digest FROM ma_runtime_binding b"
-                + " JOIN ma_runtime_slot s ON s.request_key=b.request_key AND s.active_binding_id=b.binding_id"
+                + " JOIN ma_runtime_slot s ON s.request_id=b.request_id AND s.active_binding_id=b.binding_id"
                 + " AND s.last_generation=b.runtime_generation WHERE b.binding_id=? AND b.runtime_generation=?"
                 + " AND b.tenant_id=? AND b.workspace_id=? AND b.workspace_generation=? AND b.storage_id=?"
                 + " AND b.isolation_class='session' AND b.isolation_key=? AND b.binding_state='READY'"
@@ -118,15 +120,15 @@ public final class ManagedExtensionAgentLaunch {
         }
         String capability = capabilities.getFirst();
         String mode = owner.path("executionMode").asText();
-        if (!(com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(capability)
+        if (!(ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(capability)
                         && "linux-cgroup".equals(mode)
-                || com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(capability)
+                || ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(capability)
                         && "developer-process-group".equals(mode))) {
             throw refused();
         }
     }
 
-    public static JsonNode readContributions(ManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
+    public static JsonNode readContributions(JdbcManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
         JsonNode manifest = records.readRecordResource(tenant, session, ref);
         ManagedExtensionRecords.closed(manifest, Set.of("kind", "formatVersion", "byteLength", "digest", "parts"), "Contribution manifest");
         long length = ManagedExtensionRecords.count(manifest.get("byteLength"), 1, 2 * 1024 * 1024, "Contribution length");
@@ -150,7 +152,7 @@ public final class ManagedExtensionAgentLaunch {
         if (bytes.length != length || !DigestUtils.sha256Hex(bytes).equals(manifest.path("digest").asText())) {
             throw refused();
         }
-        JsonNode contributions = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+        JsonNode contributions = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
         if (contributions == null) {
             throw refused();
         }
@@ -184,7 +186,7 @@ public final class ManagedExtensionAgentLaunch {
         if (Set.of("write_file", "edit", "todo_write").contains(name)) {
             return true;
         }
-        if (WorkspaceToolProfiles.SHELL.equals(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
+        if (WorkspaceToolProfiles.isPublicShell(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
             return true;
         }
         return WorkspaceToolProfiles.isShellOrMcp(profile) && name.matches("mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+");

@@ -7,16 +7,41 @@
 import { describe, expect, it } from 'vitest';
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
+import { retryContext } from '../../../utils/retryContext.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.js';
 import { CerebrasOpenAICompatibleProvider } from './cerebras.js';
 import { MistralOpenAICompatibleProvider } from './mistral.js';
-import { stripReasoningContent } from './utils.js';
+import {
+  filterIsolatedModelOverrides,
+  stripReasoningContent,
+} from './utils.js';
 
 type Message = OpenAI.Chat.ChatCompletionMessageParam;
 type AssistantPayload = Partial<
   Omit<ExtendedChatCompletionAssistantMessageParam, 'role'>
 > & { provider_payload?: { opaque: string } };
+
+it('strips configured model fallback, hosted plugins, and background execution from isolated calls', () => {
+  const overrides = {
+    models: ['fallback-model'],
+    plugins: [{ id: 'web' }],
+    background: true,
+    temperature: 0.2,
+  };
+  const isolated = retryContext.run(
+    {
+      attempt: 1,
+      retryTotalDelayMs: 0,
+      requestSetupMs: 0,
+      singleAttempt: true,
+    },
+    () => filterIsolatedModelOverrides(overrides),
+  );
+
+  expect(isolated).toEqual({ temperature: 0.2 });
+  expect(filterIsolatedModelOverrides(overrides)).toBe(overrides);
+});
 
 describe('stripReasoningContent', () => {
   it.each([

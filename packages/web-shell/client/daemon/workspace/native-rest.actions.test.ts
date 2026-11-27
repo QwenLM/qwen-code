@@ -66,6 +66,30 @@ it('keeps a scheduled-task write scoped to its encoded non-primary workspace', a
   expect(acpFetch).not.toHaveBeenCalled();
 });
 
+it('keeps the scheduled-task owner guard on a prefixed native REST URL', async () => {
+  const { actions, restFetch, acpFetch } = setup('https://daemon/prefix/');
+  const capabilities = new Response(
+    JSON.stringify({
+      v: 1,
+      mode: 'native',
+      modelServices: [],
+      features: ['scheduled_task_owner_selection'],
+    }),
+  );
+  acpFetch.mockResolvedValue(capabilities.clone());
+  restFetch.mockImplementation(async (input) =>
+    new URL(input).pathname.endsWith('/capabilities')
+      ? capabilities.clone()
+      : new Response('{}'),
+  );
+  await actions.deleteScheduledTask('task/a', '/secondary b', 'session/a');
+  const url = new URL(restFetch.mock.calls[0][0]);
+  expect(url.pathname).toBe(
+    '/prefix/workspaces/%2Fsecondary%20b/scheduled-tasks/task%2Fa',
+  );
+  expect(url.searchParams.get('expectedSessionId')).toBe('session/a');
+});
+
 it('retains the existing server error for a native goal request on an empty base URL', async () => {
   const { actions, restFetch } = setup('');
   restFetch.mockResolvedValueOnce(
@@ -75,4 +99,28 @@ it('retains the existing server error for a native goal request on an empty base
   );
   await expect(actions.listGoals()).rejects.toThrow('Unavailable goal');
   expect(restFetch.mock.calls[0][0]).toBe('/goals');
+});
+
+it('sends the QR-login release as a keepalive DELETE scoped to its workspace', async () => {
+  // keepalive is the whole point: the release fires from pagehide, so the
+  // request has to outlive the document. Without it the abandonment path leaks.
+  const { actions, restFetch, acpFetch } = setup('https://daemon/prefix');
+  await actions.channelQrLogin.release('login/1', 'tab-a', '/secondary b');
+  const [url, init] = restFetch.mock.calls[0];
+  expect(url).toBe(
+    'https://daemon/prefix/workspaces/%2Fsecondary%20b/channel-qr-logins/login%2F1',
+  );
+  expect(init.method).toBe('DELETE');
+  expect(init.keepalive).toBe(true);
+  expect(new Headers(init.headers).get('x-qwen-client-id')).toBe('tab-a');
+  expect(new Headers(init.headers).get('authorization')).toBe('Bearer secret');
+  expect(acpFetch).not.toHaveBeenCalled();
+});
+
+it('omits the client id header when no tab identity is attached', async () => {
+  const { actions, restFetch } = setup('https://daemon/prefix');
+  await actions.channelQrLogin.release('login-1', undefined, '/secondary b');
+  const [, init] = restFetch.mock.calls[0];
+  expect(init.keepalive).toBe(true);
+  expect(new Headers(init.headers).get('x-qwen-client-id')).toBeNull();
 });

@@ -2,8 +2,10 @@ package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -88,6 +90,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        return call(delegate::supportsPersonalMemory);
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() {
         return call(delegate::supportsUserMessageQueue);
     }
@@ -134,6 +141,22 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsClientFiles() {
+        return call(delegate::supportsClientFiles);
+    }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        return call(() -> delegate.supportsClientFiles(session));
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return call(() -> delegate.clientFilesOperation(tenantId, sessionId, body));
+    }
+
+    @Override
     public boolean supportsMcpManagement() {
         return call(delegate::supportsMcpManagement);
     }
@@ -159,6 +182,42 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
+        return call(() -> delegate.preparePackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
+        return call(() -> delegate.inspectPackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
+        return call(() -> delegate.previewPackage(metadata, source));
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return call(() -> delegate.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillArchive(tenant, session, request));
+    }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }
@@ -181,6 +240,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         return call(() -> delegate.supportsLifecycle(profile));
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return call(() -> delegate.supportsSavedLifecycle(profile));
     }
 
     @Override
@@ -264,6 +328,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public RecoveryStatus inspectRecovery(String tenantId, String sessionId, String promptId) {
         return call(() -> delegate.inspectRecovery(tenantId, sessionId, promptId));
+    }
+
+    @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        return call(() -> delegate.inspectUnattachedRecovery(session, promptId));
     }
 
     @Override

@@ -1,16 +1,16 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpControllerTestFixture;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -21,32 +21,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class RuntimeRecoveryTest {
     @Test
-    void memoryRepositoryHonorsRecoveryContract() throws Exception {
-        RuntimeRecoveryContract.verify(new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(), "memory-recovery");
-    }
-
-    @Test
-    void memoryRepositoryHonorsBeginSessionReleaseContract() {
-        RuntimeRecoveryContract.verifyBeginSessionRelease(
-                new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "memory-release");
-    }
-
-    @Test
-    void memoryRepositoryHonorsUnprovenCaptureContract() {
-        RuntimeRecoveryContract.verifyUnprovenCapture(
-                new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "memory-capture");
-    }
-
-    @Test
     void persistedLossEndsExecutionBeforeAnUnavailableObserverResponds() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:slow-observer-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, "slow-observer");
         ToolExecutionRecord prepared = fixture.prepare("call");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -87,9 +69,13 @@ class RuntimeRecoveryTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void terminalHttpReadsUseSavedOwnershipAfterRestartAndRelease(boolean deferred) throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:http-recovery-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, "http-recovery");
         Map<String, Object> reference = Map.of("sessionId", fixture.session.getRuntimeSessionId(),
                 "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "0".repeat(64));
@@ -111,8 +97,8 @@ class RuntimeRecoveryTest {
                 id -> { throw new AssertionError("Current authorization/mapping must not rewrite old receipts"); },
                 new StaticRuntimeProvisioner(fixture.binding.getLease()), noTransport,
                 bindings, sessions, executions, "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10));
-                RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
-                        new InetSocketAddress("127.0.0.1", 0), "test-token", restarted);
+                RuntimeBrokerHttpControllerTestFixture server = new RuntimeBrokerHttpControllerTestFixture(
+                        "test-token", restarted);
                 HttpClient client = HttpClient.newHttpClient()) {
             server.start();
             for (boolean released : new boolean[] {false, true}) {
@@ -122,7 +108,7 @@ class RuntimeRecoveryTest {
                             java.time.Instant.now()));
                     bindings.recoverLost(sessions, executions, proof);
                 }
-                String path = RuntimeBrokerHttpServer.ROUTE_PREFIX + "/executions/" + prepared.getExecutionCallId();
+                String path = RuntimeBrokerHttpControllerTestFixture.ROUTE_PREFIX + "/executions/" + prepared.getExecutionCallId();
                 var response = client.send(HttpRequest.newBuilder(server.getBaseUri().resolve(path
                                 + "?requestId=read&harnessSessionId=" + prepared.getHarnessSessionId()
                                 + "&runtimeSessionId=" + prepared.getRuntimeSessionId()))

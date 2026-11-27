@@ -10,7 +10,9 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Placement;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
@@ -19,8 +21,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,6 +47,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     private final SSLContext tls;
     private final Map<Owner, Member> members = new ConcurrentHashMap<>();
     private final AtomicInteger next = new AtomicInteger();
+    private static final int REAPER_BATCH_SIZE = 32;
+    private static final Set<String> REAPER_DEFER_CODES = Set.of("harness_owner_still_live",
+            "harness_placement_changed", "harness_placement_not_admitted", "session_not_found");
     private final ScheduledExecutorService refreshes = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "managed-harness-pool");
         thread.setDaemon(true);
@@ -68,6 +75,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         private final QwenHostedHarnessConnector connector;
         private volatile boolean reachable;
         private volatile boolean quiescing;
+        private final AtomicInteger sideQueries = new AtomicInteger();
         Member(HarnessDiscovery.Endpoint endpoint, HostedHarnessClient client, QwenHostedHarnessConnector connector) {
             this.endpoint = endpoint;
             this.client = client;
@@ -106,8 +114,8 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (settings.getToken().isBlank() || !settings.getCapabilityDigest().matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalStateException("Harness pool requires a token and capability digest");
         }
-        if ("kubernetes".equals(settings.getPool().getDiscovery()) && tls == null) {
-            throw new IllegalStateException("Kubernetes Harness pool requires configured mTLS");
+        if (!"static".equals(settings.getPool().getDiscovery())) {
+            throw new IllegalStateException("Harness pool discovery must be static");
         }
         for (var endpoint : discovery.snapshot().endpoints()) {
             validateEndpoint(endpoint, tls);
@@ -219,18 +227,51 @@ public class HarnessPoolConnector implements HarnessConnector {
         }
         ready.sort(Comparator.comparing(member -> member.endpoint.instanceId()));
         accepting = List.copyOf(ready);
+        reapDepartedPlacements(snapshot);
         members.entrySet().removeIf(entry -> {
             if (ready.contains(entry.getValue())) {
                 return false;
             }
             Member member = entry.getValue();
             boolean owns = placements.hasUnreleasedOwnership(member.owner().instanceId(), member.owner().bootId());
-            if (!owns) {
+            if (!owns && member.sideQueries.get() == 0) {
                 member.connector.close();
                 return true;
             }
             return false;
         });
+    }
+
+    private void reapDepartedPlacements(HarnessDiscovery.Snapshot snapshot) {
+        List<Member> candidates = accepting.stream()
+                .filter(value -> value.reachable && !value.quiescing).toList();
+        if (candidates.isEmpty()) {
+            return;
+        }
+        // Unreachability alone never authorizes recovery; it only lets the
+        // Store consider the independent lease/seal proof. Unknown health is
+        // never enough, so instances without a negotiated member stay excluded.
+        Set<String> configured = Set.copyOf(snapshot.endpoints().stream()
+                .map(HarnessDiscovery.Endpoint::instanceId).toList());
+        Set<String> excluded = new HashSet<>(configured);
+        for (String instanceId : configured) {
+            List<Member> incarnations = members.values().stream()
+                    .filter(member -> member.endpoint.instanceId().equals(instanceId)).toList();
+            if (!incarnations.isEmpty() && incarnations.stream().noneMatch(member -> member.reachable)) {
+                excluded.remove(instanceId);
+            }
+        }
+        for (Placement candidate : placements.findExpiredSuspensions(excluded, REAPER_BATCH_SIZE)) {
+            Member successor = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+            try {
+                placements.takeover(candidate.tenantId(), candidate.sessionId(), candidate,
+                        successor.endpoint.instanceId(), successor.owner().bootId());
+            } catch (ManagedAgentException refusal) {
+                if (!REAPER_DEFER_CODES.contains(refusal.getCode())) {
+                    throw refusal;
+                }
+            }
+        }
     }
 
     private static boolean matches(Placement placement, Member member) {
@@ -304,6 +345,18 @@ public class HarnessPoolConnector implements HarnessConnector {
         return call(select(tenant, session, true), action);
     }
 
+    private <T> T admissionCall(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
+        try {
+            return call(tenant, session, action);
+        } catch (HarnessAttachmentLostFailure lost) {
+            Selected fresh = select(tenant, session, true);
+            var selectedCall = fresh.call();
+            var retry = new QwenHostedHarnessConnector.PoolCall(tenant, session, selectedCall.placement(),
+                    selectedCall.writerToken(), true);
+            return call(new Selected(fresh.placement(), fresh.member(), retry), action);
+        }
+    }
+
     private <T> T lifecycleCall(OperationRecord operation, Function<QwenHostedHarnessConnector, T> action) {
         return call(select(operation.tenantId(), operation.sessionId(), true, operation), action);
     }
@@ -328,71 +381,191 @@ public class HarnessPoolConnector implements HarnessConnector {
         return !closed;
     }
 
-    private boolean feature(String name) {
-        return contract != null && contract.features().contains(name);
+    private boolean feature(HarnessFeature feature) {
+        return contract != null && feature.in(contract.features());
     }
 
     @Override
     public boolean supportsApprovalSelection() {
-        return feature("approval-selection/1");
+        return feature(HarnessFeature.APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsLiveApprovalSelection() {
-        return feature("live-approval-selection/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.LIVE_APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsAutoApproval() {
-        return feature("auto-approval/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.AUTO_APPROVAL);
     }
 
     @Override
     public boolean supportsPermissionRules() {
-        return feature("permission-rules/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.PERMISSION_RULES);
     }
 
     @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
-        return feature("agent-definition-approval-selection/1") && supportsApprovalSelection();
+        return feature(HarnessFeature.AGENT_DEFINITION_APPROVAL_SELECTION);
     }
 
     @Override
     public boolean supportsModelSelection() {
-        return feature("model-selection/1");
+        return feature(HarnessFeature.MODEL_SELECTION);
     }
 
     @Override
     public boolean supportsModelConfiguration() {
-        return feature("session-model-config/1");
+        return feature(HarnessFeature.MODEL_CONFIGURATION);
     }
 
     @Override
-    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
+    public boolean supportsPersonalMemory() {
+        return feature(HarnessFeature.PERSONAL_MEMORY);
+    }
+
+    @Override
+    public boolean supportsUserMessageQueue() { return feature(HarnessFeature.USER_MESSAGE_QUEUE); }
+
+    @Override
+    public boolean supportsSideQueries() {
+        return feature(HarnessFeature.SIDE_QUERY) && !accepting.isEmpty();
+    }
+
+    @Override
+    public synchronized SideQueryTarget prepareSideQuery() {
+        if (closed || !supportsSideQueries()) {
+            throw new ManagedAgentException(503, "harness_unavailable", "No side-query Harness is available.");
+        }
+        var candidates = accepting;
+        var member = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+        var selected = member.connector.prepareSideQuery();
+        member.sideQueries.incrementAndGet();
+        return new SideQueryTarget() {
+            private boolean released;
+            @Override public String instanceId() { return member.owner().instanceId(); }
+            @Override public String bootId() { return member.owner().bootId(); }
+            @Override public Map<String, Object> submit(Map<String, Object> body) { return selected.submit(body); }
+            @Override public Map<String, Object> status(String id, Map<String, Object> claim) { return selected.status(id, claim); }
+            @Override public void cancel(String id, Map<String, Object> claim) { selected.cancel(id, claim); }
+            @Override public synchronized void close() {
+                if (!released) {
+                    released = true;
+                    selected.close();
+                    member.sideQueries.decrementAndGet();
+                }
+            }
+        };
+    }
 
     @Override
     public boolean supportsContextCompression() {
-        return feature("context-compression/1");
+        return feature(HarnessFeature.CONTEXT_COMPRESSION);
     }
 
     @Override
     public boolean supportsPlanMode() {
-        return feature("plan-mode/1");
+        return feature(HarnessFeature.PLAN_MODE);
     }
 
     @Override
     public boolean supportsInputAttachments() {
-        return feature("input-attachments/1");
+        return feature(HarnessFeature.INPUT_ATTACHMENTS);
     }
 
     @Override
     public boolean supportsSessionSkills() {
-        return feature("session-skills/2");
+        return feature(HarnessFeature.SESSION_SKILLS);
     }
 
     @Override
     public boolean supportsSessionExtensions() {
-        return feature("session-extension-packages/1");
+        return feature(HarnessFeature.SESSION_EXTENSIONS);
+    }
+
+    @Override
+    public boolean supportsPackagePreparation() { return feature(HarnessFeature.PACKAGE_PREPARATION); }
+
+    private Member packagePreparationMember() {
+        List<Member> candidates = accepting;
+        if (closed || !supportsPackagePreparation() || candidates.isEmpty()) {
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Package preparation is unavailable.");
+        }
+        Member member = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+        if (!member.reachable || member.quiescing) {
+            throw new ManagedAgentException(503, "package_preparation_unavailable", "Package preparation is unavailable.");
+        }
+        return member;
+    }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
+        return packagePreparationMember().connector.preparePackage(metadata, source);
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
+        return packagePreparationMember().connector.inspectPackage(metadata, source);
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
+        return packagePreparationMember().connector.previewPackage(metadata, source);
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() { return feature(HarnessFeature.RUNTIME_SKILL_IMPORT); }
+
+    @Override
+    public boolean supportsClientFiles() { return feature(HarnessFeature.CLIENT_FILES); }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        if (!feature(HarnessFeature.CLIENT_FILES)) {
+            return false;
+        }
+        // All pool members share the same deployment/session dispatch policy;
+        // ask any ready member so the capability matches the register refusal.
+        for (Member member : accepting) {
+            if (member.reachable) {
+                return member.connector.supportsClientFiles(session);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        Selected selected = select(tenantId, sessionId, false);
+        if (selected == null) {
+            throw new ManagedAgentException(503, "client_files_relay_unavailable",
+                    "No Hosted Harness accepts the Session.");
+        }
+        return call(selected, connector -> connector.clientFilesOperation(tenantId, sessionId, body));
+    }
+
+    private <T> T existingRuntimeSkillOwner(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
+        Selected selected = select(tenant, session, false);
+        if (selected == null) {
+            throw new ManagedAgentException(409, "managed_extension_owner_unavailable", "The original Runtime owner is unavailable.");
+        }
+        return call(selected, action);
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return existingRuntimeSkillOwner(tenant, session, leaf -> leaf.runtimeSkillArchive(tenant, session, request));
     }
 
     @Override
@@ -422,9 +595,34 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle(String profile) {
-        return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
-                ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
-                : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
+        }
+        // D3: ordinary files joins the negotiated v2 profiles, keeping its
+        // availability gate; external-files stays on the saved v1 path above.
+        if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        return contract != null
+                && WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                && contract.profiles().contains(profile);
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
+                : supportsLifecycle(profile);
+    }
+
+    @Override
+    public boolean supportsPublicChildAgents() {
+        // D5′: the negotiated pool contract gates children — the same feature
+        // token and lifecycle v2 Shell the single connector reads.
+        Contract negotiated = contract;
+        return negotiated != null
+                && HarnessFeature.PUBLIC_CHILD_AGENTS.in(negotiated.features())
+                && supportsLifecycle(WorkspaceToolProfiles.SHELL);
     }
 
     @Override
@@ -539,7 +737,7 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public void resolveAction(String tenant, String session, String action, JsonNode response) {
-        call(tenant, session, leaf -> {
+        admissionCall(tenant, session, leaf -> {
             leaf.resolveAction(tenant, session, action, response);
             return null;
         });
@@ -563,25 +761,36 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public Map<String, Object> runAutomationOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body));
+        return "cancel_run".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body));
     }
 
     @Override
     public void runChildOperation(String tenant, String session, Map<String, Object> body) {
-        call(tenant, session, leaf -> {
+        Function<QwenHostedHarnessConnector, Void> action = leaf -> {
             leaf.runChildOperation(tenant, session, body);
             return null;
-        });
+        };
+        if ("cancel".equals(body.get("kind")) || "close_scope".equals(body.get("kind"))) {
+            call(tenant, session, action);
+        } else {
+            admissionCall(tenant, session, action);
+        }
     }
 
     @Override
     public Map<String, Object> runMessageOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body));
+        return "stop".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body));
     }
 
     @Override
     public Map<String, Object> runChannelOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body));
+        return "cancel_delivery".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body));
     }
 
     @Override
@@ -694,6 +903,23 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public RecoveryStatus inspectRecovery(String tenant, String session, String prompt) {
         return observe(tenant, session, null, leaf -> leaf.inspectRecovery(tenant, session, prompt));
+    }
+
+    @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        Selected selected = select(session.tenantId(), session.sessionId(), false);
+        if (selected == null || !"ACTIVE".equals(selected.placement().state())) {
+            return null;
+        }
+        if (!selected.member().reachable) {
+            throw unavailable();
+        }
+        var leaf = selected.member().connector;
+        var status = leaf.withPlacement(selected.call(), () -> leaf.inspectUnattachedRecovery(session, promptId));
+        if (!selected.placement().equals(placements.get(session.tenantId(), session.sessionId()))) {
+            throw unavailable();
+        }
+        return status;
     }
 
     @Override

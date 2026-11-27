@@ -34,7 +34,10 @@ import {
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
@@ -78,9 +81,14 @@ const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockMemoryHandler = vi.hoisted(() => vi.fn());
 vi.mock('../commands/memory.js', () => ({
   memoryCommand: {
-    command: 'memory <subcommand> <source>',
-    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
-    handler: mockMemoryHandler,
+    command: 'memory',
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({
+        command: 'import <source>',
+        builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+        handler: mockMemoryHandler,
+      }),
+    handler: () => {},
   },
 }));
 const mockSessionServiceInstance = vi.hoisted(() => ({
@@ -116,11 +124,11 @@ vi.mock('../commands/update.js', () => ({
 // any machine with OPENAI_API_KEY + model + base URL set.
 vi.mock('../commands/batch.js', () => ({
   batchCommand: {
-    // Positionals must be declared: parseArguments runs yargs in strict mode,
-    // so a bare `batch` would reject `status batch_x` before the handler runs.
-    command: 'batch <subcommand> [id]',
+    command: 'batch',
     describe: 'mock batch command',
-    handler: mockBatchHandler,
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({ command: 'status [id]', handler: mockBatchHandler }),
+    handler: () => {},
   },
 }));
 
@@ -160,6 +168,7 @@ const createNativeLspServiceInstance = () => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  getTrustFileDecisionBelowIdeRoot: vi.fn(() => undefined),
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -1379,6 +1388,35 @@ describe('parseArguments', () => {
     }
   });
 
+  it('should accept managed as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'managed'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('managed');
+  });
+
+  it('reports the managed channel for Hosted Harness ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('managed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the managed marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'SDK'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('SDK');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -1571,6 +1609,27 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['unifiedAgentLoop', 'isUnifiedAgentLoopEnabled'],
+    ['eventBusAgentLoop', 'isEventBusAgentLoopEnabled'],
+  ] as const)(
+    'derives %s from settings with the override variable unset',
+    async (setting, getter) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      // The Hosted Harness is off by default for both switches.
+      const defaults = await loadCliConfig({}, argv);
+      expect(defaults[getter]('hosted')).toBe(false);
+      const enabled = await loadCliConfig(
+        { experimental: { [setting]: true } },
+        argv,
+      );
+      expect(enabled[getter]('hosted')).toBe(true);
+    },
+  );
+
   it('derives folderTrust from settings and defaults it to false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1584,6 +1643,48 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
       true,
     );
+  });
+
+  it('resolves the launcher-marker channel for synthesized ACP argv', async () => {
+    // The Hosted Harness per-turn configs never pass through parseArguments.
+    const argv = {
+      acp: true,
+      sessionId: 'channel-fallback-test',
+      sessionIdGenerated: true,
+    } as CliArgs;
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'daemon',
+    );
+    await loadCliConfig({}, { ...argv, channel: 'SDK' });
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe('SDK');
+  });
+
+  it('resolves the launcher-marker channel for the deprecated experimentalAcp alias', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {
+      experimentalAcp: true,
+      sessionId: 'channel-fallback-alias-test',
+      sessionIdGenerated: true,
+    } as CliArgs);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+  });
+
+  it('leaves the channel unset for non-ACP argv even under a marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {} as CliArgs);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0].channel,
+    ).toBeUndefined();
   });
 
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
@@ -3296,6 +3397,115 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionWorkflowEnabled: true,
+      }),
+    );
+  });
+
+  it('leaves the event-bus agent loop setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: undefined,
+      }),
+    );
+  });
+
+  it('propagates the event-bus agent loop opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
+  it('propagates an explicit event-bus agent loop opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: false } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('leaves the unified agent loop setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: undefined,
+      }),
+    );
+  });
+
+  it('propagates the unified agent loop opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: true,
+      }),
+    );
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: false } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
       }),
     );
   });
@@ -5942,6 +6152,7 @@ describe('loadCliConfig folderTrust', () => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    ServerConfig.ideContextStore.clear();
   });
 
   it('should be false when folderTrust is false', async () => {
@@ -5978,6 +6189,131 @@ describe('loadCliConfig folderTrust', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
+  });
+
+  it.each([undefined, false])(
+    'uses the ACP session workspace trust when launch-directory IDE trust is %s',
+    async (ideTrust) => {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      const sessionCwd = path.join(process.cwd(), 'other-workspace');
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: workspacePath === sessionCwd,
+          source: 'file',
+        }),
+      );
+      vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: ideTrust },
+      });
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        sessionCwd,
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(true);
+      expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    },
+  );
+
+  it('does not turn implicit trust into explicit trust for a foreign ACP workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      process.cwd(),
+    ]);
+
+    const config = await loadCliConfig(
+      { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    expect(config.isProjectHooksPendingApproval()).toBe(true);
+  });
+
+  it('honors IDE trust for an ACP session at the connected workspace root', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--approval-mode',
+      'auto-edit',
+    ];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    const { isWorkspaceTrusted: actualIsWorkspaceTrusted } =
+      await vi.importActual<typeof import('./trustedFolders.js')>(
+        './trustedFolders.js',
+      );
+    vi.mocked(isWorkspaceTrusted).mockImplementation(actualIsWorkspaceTrusted);
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      sessionCwd,
+    ]);
+
+    const config = await loadCliConfig(
+      { security: { folderTrust: { enabled: true } } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: false } }, [
+      sessionCwd,
+    ]);
+    expect(config.isTrustedFolder()).toBe(false);
+  });
+
+  it.each([
+    ['an ACP session', ['--acp']],
+    ['an interactive session', []],
+  ])(
+    'lets a trust rule below the IDE root decide the runtime trust of %s',
+    async (_label, flags) => {
+      process.argv = ['node', 'script.js', ...flags];
+      const argv = await parseArguments();
+      const ideRoot = path.dirname(process.cwd());
+      vi.mocked(getTrustFileDecisionBelowIdeRoot).mockImplementation(
+        (_settings, location, root) =>
+          location === process.cwd() && root === ideRoot ? false : undefined,
+      );
+      ServerConfig.ideContextStore.set(
+        { workspaceState: { isTrusted: true } },
+        [ideRoot],
+      );
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        process.cwd(),
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(false);
+      expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    },
+  );
+
+  it('honors live IDE trust for an ACP session in the process workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, process.cwd(), []);
+    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+      workspaceState: { isTrusted: false },
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
   });
 });
 
@@ -6121,6 +6457,22 @@ describe('loadCliConfig with includeDirectories', () => {
       }),
     );
     expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
+  it('keeps the retention limit out of the static worktree config', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-config-'));
+    try {
+      const argv = await parseArguments();
+      await loadCliConfig(
+        { worktree: { maxRetained: 0 } } as Settings,
+        argv,
+        cwd,
+      );
+      const forwarded = mockConfigConstructorParams.mock.lastCall?.[0];
+      expect(forwarded.worktree).not.toHaveProperty('maxRetained');
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   describe('project hooks approval gate', () => {
@@ -7076,47 +7428,25 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
-  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+  it('leaves the per-turn tool-call cap off unless maxToolCallsPerTurn is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const load = (loopProtection?: unknown) =>
-      loadCliConfig(
-        { model: { loopProtection } } as Settings,
-        argv,
-        undefined,
-        [],
-      );
-    expect((await load('stop')).getLoopProtection()).toBe('stop');
-    expect((await load('off')).getLoopProtection()).toBe('off');
-    expect((await load()).getLoopProtection()).toBe('warn');
-    expect((await load('never')).getLoopProtection()).toBe('warn');
-  });
-
-  it('warns once about an invalid model.loopProtection value', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      for (let i = 0; i < 2; i++) {
-        const config = await loadCliConfig(
-          { model: { loopProtection: 'Stop' } } as unknown as Settings,
-          argv,
-          undefined,
-          [],
-        );
-        expect(config.getLoopProtection()).toBe('warn');
-      }
-      const warnings = errorSpy.mock.calls.filter(([message]) =>
-        String(message).includes('model.loopProtection'),
-      );
-      expect(warnings).toEqual([
-        [
-          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
-        ],
-      ]);
-    } finally {
-      errorSpy.mockRestore();
-    }
+    const load = (model: Settings['model']) =>
+      loadCliConfig({ model } as Settings, argv, undefined, []);
+    expect((await load({})).getMaxToolCallsPerTurn()).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+    expect(
+      (await load({ maxToolCallsPerTurn: 100 })).getMaxToolCallsPerTurn(),
+    ).toBe(100);
+    expect(
+      (
+        await load({
+          loopProtection: 'stop',
+          skipLoopDetection: false,
+        } as unknown as Settings['model'])
+      ).getMaxToolCallsPerTurn(),
+    ).toBe(Number.POSITIVE_INFINITY);
   });
 
   it('should have undefined chatCompression if not in settings', async () => {

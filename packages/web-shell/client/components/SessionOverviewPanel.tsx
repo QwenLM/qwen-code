@@ -28,6 +28,7 @@ import {
   type DaemonSessionSummary,
   type DaemonStandaloneSessionSummary,
   type DaemonStatusReportSession,
+  type DaemonSessionClient,
   type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -35,6 +36,7 @@ import {
   ArrowUpDownIcon,
   CircleIcon,
   CircleHelpIcon,
+  GitPullRequestIcon,
   InfoIcon,
   ShieldQuestionIcon,
   DownloadIcon,
@@ -64,6 +66,7 @@ import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-session-live-state';
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import { hasLiveWork } from '../session-catalog/session-live-work';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_ARCHIVE_BATCH_SIZE,
@@ -72,6 +75,10 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from './dialogs/BindSessionPrDialog';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
 import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
@@ -153,6 +160,7 @@ export interface SessionCard {
   workspaceCwd: string;
   /** Catalog the session came from; 'standalone' has no workspace of its own. */
   sourceType?: string;
+  worktree?: DaemonSessionSummary['worktree'];
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -268,9 +276,13 @@ export function deriveSessionCards(
         currentContextKind,
       ),
       prs: session.prs,
-      gitBranch: session.worktree?.branch ?? session.branch?.name,
+      gitBranch:
+        session.worktree?.branch ||
+        session.worktree?.slug ||
+        session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
+      ...(session.worktree ? { worktree: session.worktree } : {}),
     };
   });
   cards.sort((a, b) => {
@@ -320,6 +332,7 @@ function SessionOverviewPanelInner({
     sessionId: string,
     workspaceCwd?: string,
     sessionContext?: DaemonProductSessionContext,
+    restoredSession?: DaemonSessionClient,
   ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
@@ -335,6 +348,13 @@ function SessionOverviewPanelInner({
   const connection = useConnection();
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const workspace = useWorkspace();
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
@@ -363,6 +383,10 @@ function SessionOverviewPanelInner({
   const canExportWorkspaceSessions =
     connection.capabilities?.features?.includes('workspace_session_export') ??
     false;
+  const restoreWorktreeEnabled =
+    connection.capabilities?.features?.includes(
+      'session_worktree_restore_v1',
+    ) ?? false;
   const registeredWorkspaces =
     connection.capabilities?.workspaces ?? workspace.capabilities?.workspaces;
   const workspaceCatalogAdvertised =
@@ -618,11 +642,16 @@ function SessionOverviewPanelInner({
   const detailsOpenRef = useRef(detailsOpen);
   detailsOpenRef.current = detailsOpen;
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
+  const [restoringIds, setRestoringIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<SessionCard[] | null>(
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<SessionCard[] | null>(null);
+  const [bindPrTarget, setBindPrTarget] = useState<SessionCard | null>(null);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [batchBusy, setBatchBusy] = useState(false);
   const [footerSticky, setFooterSticky] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -781,22 +810,40 @@ function SessionOverviewPanelInner({
       isRegisteredTrustedCard(card),
     [currentWorkspaceCwd, isRegisteredTrustedCard],
   );
+  // The card's grade drives its sort and displayed status, so it stays as it
+  // is; the two destructive actions read the shared predicate as well, because
+  // a background-only session grades idle here and closing it kills that work.
+  // An unresolved session falls back to the grade alone rather than blocking.
+  const cardHasLiveWork = useCallback(
+    (card: SessionCard) => {
+      const session = sessionByIdentity.get(getSessionIdentity(card));
+      return session ? hasLiveWork(session) : false;
+    },
+    [sessionByIdentity],
+  );
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
+    [
+      canUseSessionMutation,
+      cardHasLiveWork,
+      sessionArchiveEnabled,
+      sessionByIdentity,
+    ],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionByIdentity],
+    [canUseSessionMutation, cardHasLiveWork, sessionByIdentity],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>
@@ -849,15 +896,16 @@ function SessionOverviewPanelInner({
   }, []);
 
   const reloadData = useCallback(
-    () =>
-      Promise.all([
-        reload().catch(() => undefined),
-        reloadOther().catch(() => undefined),
-        liveStateActive
-          ? Promise.resolve()
-          : statusReload().catch(() => undefined),
-        reloadStandalone().catch(() => undefined),
-      ]),
+    (options?: { failOnError?: boolean }) => {
+      const settle = <T,>(request: Promise<T>) =>
+        options?.failOnError ? request : request.catch(() => undefined);
+      return Promise.all([
+        settle(reload()),
+        settle(reloadOther()),
+        liveStateActive ? Promise.resolve() : settle(statusReload()),
+        settle(reloadStandalone()),
+      ]);
+    },
     [liveStateActive, reload, reloadOther, reloadStandalone, statusReload],
   );
   const refresh = useCallback(() => {
@@ -972,6 +1020,19 @@ function SessionOverviewPanelInner({
         const ids = batch.map((card) => card.sessionId);
         try {
           if (mutation === 'archive') {
+            const selectedSessionId = connectionRef.current.sessionId;
+            const selectedClientId = connectionRef.current.clientId;
+            // Standalone archives require no active prompt or attached client.
+            if (
+              selectedSessionId &&
+              selectedClientId &&
+              batch.some((card) => card.sessionId === selectedSessionId)
+            ) {
+              await workspace.client.detachSession(
+                selectedSessionId,
+                selectedClientId,
+              );
+            }
             const result =
               await workspace.client.archiveStandaloneSessions(ids);
             for (const id of [
@@ -1042,6 +1103,97 @@ function SessionOverviewPanelInner({
       }
     },
     [],
+  );
+
+  const restoreWorktree = useCallback(
+    (card: SessionCard) => {
+      if (
+        !restoreWorktreeEnabled ||
+        card.worktree?.worktreeRemoved === undefined ||
+        card.worktree.canRestore !== true
+      ) {
+        return;
+      }
+      const identity = getSessionIdentity(card);
+      const busy = busyIds.has(identity) || restoringIds.has(identity);
+      if (busy || batchBusy) return;
+      setActionError(null);
+      setRestoringIds((prev) => new Set(prev).add(identity));
+      void runBusy(card, async () => {
+        let restoredSession: DaemonSessionClient | undefined;
+        let handedOff = false;
+        try {
+          const restored = await actions.restoreWorktreeSession(
+            card.sessionId,
+            {
+              workspaceCwd: card.workspaceCwd,
+            },
+          );
+          restoredSession = restored;
+          if (!mountedRef.current) return;
+          await reloadData({ failOnError: true });
+          if (!mountedRef.current) return;
+          onOpenSession(
+            card.sessionId,
+            card.workspaceCwd,
+            openSessionContext(card),
+            restored,
+          );
+          handedOff = true;
+        } catch (error) {
+          setActionError(
+            `${t('sessionsOverview.restoreWorktreeFailed')}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        } finally {
+          if (restoredSession && !handedOff) {
+            await restoredSession.detach().catch((error: unknown) => {
+              console.warn(
+                '[web-shell] worktree restore detach failed:',
+                error,
+              );
+            });
+          }
+        }
+      }).finally(() => {
+        setRestoringIds((prev) => {
+          const next = new Set(prev);
+          next.delete(identity);
+          return next;
+        });
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      busyIds,
+      onOpenSession,
+      reloadData,
+      restoreWorktreeEnabled,
+      restoringIds,
+      runBusy,
+      t,
+    ],
+  );
+
+  const openSession = useCallback(
+    (card: SessionCard) => {
+      if (card.worktree?.worktreeRemoved === undefined) {
+        onOpenSession(
+          card.sessionId,
+          card.workspaceCwd,
+          openSessionContext(card),
+        );
+        return;
+      }
+      if (!restoreWorktreeEnabled || card.worktree.canRestore !== true) {
+        setActionError(t('sessionsOverview.restoreWorktreeUnavailable'));
+        return;
+      }
+      restoreWorktree(card);
+    },
+    [onOpenSession, restoreWorktree, restoreWorktreeEnabled, t],
   );
 
   const startRename = useCallback((card: SessionCard) => {
@@ -1142,6 +1294,81 @@ function SessionOverviewPanelInner({
     t,
     workspace.client,
   ]);
+
+  const startBindPr = useCallback((card: SessionCard) => {
+    setActionError(null);
+    setBindPrError(undefined);
+    setBindPrTarget(card);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less cards → the global route). Standalone
+  // cards are excluded by the button gate (openSessionContext), not by
+  // canRenameCard — which is true for them — since their metadata route only
+  // accepts displayName.
+  const bindPrTargetRef = useRef(bindPrTarget);
+  bindPrTargetRef.current = bindPrTarget;
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const card = bindPrTarget;
+      if (!card || batchBusy) return;
+      const ownerCwd = card.workspaceCwd || primaryCwd;
+      void runBusy(card, async () => {
+        setBindPrError(undefined);
+        try {
+          if (isCurrentCard(card)) {
+            await actions.bindSessionPr(pr);
+          } else if (card.workspaceCwd) {
+            await workspace.client
+              .workspaceByCwd(card.workspaceCwd)
+              .updateSessionMetadata(card.sessionId, { pr });
+          } else {
+            await workspace.client.updateSessionMetadata(card.sessionId, {
+              pr,
+            });
+          }
+          // A late completion must not close a dialog the user has since
+          // opened for another card.
+          if (bindPrTargetRef.current === card) {
+            setBindPrTarget(null);
+          }
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          await reloadData();
+        } catch (err) {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          const message =
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed');
+          // Surface the failure on the still-open dialog, or on the panel's
+          // error row if the user already dismissed it.
+          if (bindPrTargetRef.current === card) {
+            setBindPrError(message);
+          } else {
+            setActionError(message);
+          }
+        }
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      bindPrTarget,
+      isCurrentCard,
+      primaryCwd,
+      reloadData,
+      runBusy,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const editingNameRef = useRef(editingName);
   const saveRenameRef = useRef(saveRename);
   editingNameRef.current = editingName;
@@ -1441,11 +1668,7 @@ function SessionOverviewPanelInner({
                             window.getSelection()?.isCollapsed === false
                           )
                             return;
-                          onOpenSession(
-                            card.sessionId,
-                            card.workspaceCwd,
-                            openSessionContext(card),
-                          );
+                          openSession(card);
                         }}
                       >
                         {card.label}
@@ -1493,6 +1716,45 @@ function SessionOverviewPanelInner({
                       {card.gitBranch}
                     </span>
                   </>
+                )}
+                {card.worktree?.worktreeRemoved && (
+                  <span
+                    className="inline-flex shrink-0 items-center"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      className="shrink-0"
+                      data-web-shell-session-restore-worktree
+                      title={
+                        card.worktree.canRestore === true
+                          ? t('sessionsOverview.restoreWorktree')
+                          : t('sessionsOverview.restoreWorktreeUnavailable')
+                      }
+                      aria-label={
+                        card.worktree.canRestore === true
+                          ? t('sessionsOverview.restoreWorktree')
+                          : t('sessionsOverview.restoreWorktreeUnavailable')
+                      }
+                      aria-busy={
+                        restoringIds.has(getSessionIdentity(card)) || undefined
+                      }
+                      disabled={
+                        batchBusy ||
+                        busyIds.has(getSessionIdentity(card)) ||
+                        restoringIds.has(getSessionIdentity(card)) ||
+                        !restoreWorktreeEnabled ||
+                        card.worktree.canRestore !== true
+                      }
+                      onClick={() => restoreWorktree(card)}
+                    >
+                      {restoringIds.has(getSessionIdentity(card))
+                        ? t('sessionsOverview.restoringWorktree')
+                        : t('sessionsOverview.restoreWorktree')}
+                    </Button>
+                  </span>
                 )}
                 <SessionPrBadge prs={card.prs ?? []} />
               </div>
@@ -1629,6 +1891,25 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) &&
+                !openSessionContext(card) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    disabled={batchBusy || busy || !canRename}
+                    onClick={() => startBindPr(card)}
+                    aria-label={t('sessionsOverview.bindPr')}
+                    title={
+                      canRename
+                        ? t('sessionsOverview.bindPr')
+                        : t('sessionsOverview.actionUnavailable')
+                    }
+                  >
+                    <GitPullRequestIcon className="size-4" />
+                  </Button>
+                )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -1685,7 +1966,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 156,
+          width: 180,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1705,10 +1986,14 @@ function SessionOverviewPanelInner({
       editingIdentity,
       handleExport,
       isCurrentCard,
-      onOpenSession,
+      openSession,
       registeredWorkspaces,
+      restoreWorktree,
+      restoreWorktreeEnabled,
+      restoringIds,
       sessionMetadataEnabled,
       sessionDetailsProps,
+      startBindPr,
       startRename,
       t,
     ],
@@ -2012,12 +2297,7 @@ function SessionOverviewPanelInner({
           onRowClick={(row) => {
             if (editingCard || window.getSelection()?.isCollapsed === false)
               return;
-            const card = row.original;
-            onOpenSession(
-              card.sessionId,
-              card.workspaceCwd,
-              openSessionContext(card),
-            );
+            openSession(row.original);
           }}
           data-web-shell-session-table-viewport
         />
@@ -2196,6 +2476,16 @@ function SessionOverviewPanelInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {bindPrTarget && (
+        <BindSessionPrDialog
+          workspaceCwd={bindPrTarget.workspaceCwd ?? ''}
+          busy={busyIds.has(getSessionIdentity(bindPrTarget))}
+          error={bindPrError}
+          onSubmit={submitBindPr}
+          onClose={() => setBindPrTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2217,6 +2507,7 @@ export function SessionOverviewPanel({
     sessionId: string,
     workspaceCwd?: string,
     sessionContext?: DaemonProductSessionContext,
+    restoredSession?: DaemonSessionClient,
   ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (

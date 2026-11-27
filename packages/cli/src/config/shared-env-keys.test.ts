@@ -9,7 +9,6 @@ import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/ex
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
-  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   isHardcodedProjectEnvExclusion,
@@ -59,11 +58,6 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
     );
   });
-  it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
-    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
-      ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
-    );
-  });
 
   // The extraction-cadence experiment (#13004) is default-off, and its gate
   // reads process.env on every call: a repo-shipped .env that set it would
@@ -93,6 +87,9 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes attribution markers so a project .env cannot spoof channel', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_SERVE');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_MANAGED_RUNTIME',
+    );
   });
 
   // Language servers run with the user's permissions, so a cloned repository
@@ -100,6 +97,18 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes the LSP opt-in pair so project files cannot start servers', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_ENABLE_LSP');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DISABLE_LSP');
+  });
+
+  // The loop-rollout switches are an operator opt-in: a repository's checked-in
+  // .env / settings.env must not force the shared loop or the event-bus kernel
+  // on, nor force the operator's loop off, ahead of the explicit setting.
+  it('excludes the agent-loop rollout pair so project files cannot force a loop', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    );
   });
 
   // QWEN_CLI_ENTRY is the spawned session-process entrypoint; a project file

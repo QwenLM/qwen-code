@@ -5,6 +5,14 @@
  */
 
 import {
+  mergeHookExecution,
+  parseHookLifecycle,
+  summarizeHookExecutions,
+  type HookExecutionEntry,
+  type HookTurnPage,
+} from '../telemetry/hook-lifecycle-contract.js';
+
+import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
@@ -14,8 +22,10 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
@@ -23,7 +33,10 @@ import {
   localManagedSessionKey,
   readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
-import { readManagedSessionRecordsAndTitle } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  ManagedSessionProjectionLimitError,
+  readManagedSessionRecordsAndTitle,
+} from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_HEADER_SUBTYPE,
   ManagedSessionRecordError,
@@ -84,6 +97,7 @@ import {
 } from './session-artifact-persistence.js';
 import {
   aggregateTranscriptRecordFragments,
+  isLifecycleUiTelemetryEvent,
   isUserPromptSubmitContextPartText,
   isTranscriptConversationRecord,
   projectUserTranscriptForDisplay,
@@ -97,11 +111,17 @@ import {
   type BranchPointRecord,
 } from './branch-points.js';
 
+// `limit` counts active ChatRecords (replay uuids), not replay events: one
+// record can produce several events, and a backward page may expand past
+// `limit` to keep turn and tool-call/result boundaries intact.
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
-export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 256 * 1024 * 1024;
+const SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES = 256 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -137,16 +157,43 @@ export class SessionTranscriptSnapshotUnavailableError extends Error {
 
 class EmptySessionTranscriptError extends SessionTranscriptSnapshotUnavailableError {}
 
+export type SessionTranscriptLimitDimension =
+  | 'snapshot'
+  | 'line'
+  | 'index'
+  | 'replay'
+  | 'artifact_library';
+
 export class SessionTranscriptTooLargeError extends Error {
+  readonly dimension: SessionTranscriptLimitDimension;
+  readonly measuredBytes?: number;
+  readonly retryable?: boolean;
+
   constructor(
     readonly sessionId: string,
     readonly snapshotSize: number,
     readonly maxBytes: number,
+    details?: {
+      dimension?: SessionTranscriptLimitDimension;
+      measuredBytes?: number;
+      retryable?: boolean;
+    },
   ) {
-    super(
-      `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`,
-    );
+    const dimension = details?.dimension ?? 'snapshot';
+    const measuredBytes = details?.measuredBytes;
+    const message =
+      dimension === 'snapshot'
+        ? `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`
+        : `Transcript ${dimension} for session ${sessionId} exceeds limit (${measuredBytes ?? snapshotSize} bytes, max ${maxBytes} bytes; file size ${snapshotSize} bytes)`;
+    super(message);
     this.name = 'SessionTranscriptTooLargeError';
+    this.dimension = dimension;
+    if (measuredBytes !== undefined) {
+      this.measuredBytes = measuredBytes;
+    }
+    if (details?.retryable !== undefined) {
+      this.retryable = details.retryable;
+    }
   }
 }
 
@@ -198,6 +245,7 @@ export interface SessionTranscriptNavigationTurn {
   turnId: string;
   kind: SessionTranscriptNavigationTurnKind;
   promptId?: string;
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -279,6 +327,8 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
+  /** Original conversation clock, retained after the outer projection is consumed. */
+  conversationStartTime?: string;
   attributionSnapshot?: AttributionSnapshot;
   historyGaps?: HistoryGap[];
   recording: {
@@ -299,6 +349,15 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /** Damage warnings from the artifact rebuild, present even when no
+   * readable record produced a snapshot (an all-refused journal). The
+   * first-open seed gates on these like the load funnel does. */
+  artifactJournalWarnings?: readonly string[];
+  /** Whether the transcript read completed (no torn tail). The first-open
+   * projection seed gates on this exactly like the load seed's
+   * sourceReadComplete; sourcesUnavailable is broader (it also flags a
+   * damaged sources snapshot, which does not narrow artifact delivery). */
+  sourceReadComplete?: boolean;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
   initialTurn: number;
@@ -372,11 +431,7 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (
-        uiEvent &&
-        uiEvent['event.name'] !== 'request_lifecycle' &&
-        uiEvent['event.name'] !== 'tool_lifecycle'
-      ) {
+      if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
     }
@@ -409,6 +464,10 @@ function buildManagedSessionRestoreProjection(
   const restoredFileHistory = fileHistory.finish();
   const runtime: SessionRuntimeResumeState = {
     apiHistory: apiHistory.finish(),
+    // The managed projection rebuilds from the committed journal in full,
+    // so the first-open seed's read-completeness gate holds by construction
+    // (keeps the seed's managed behavior identical to the load funnel's).
+    sourceReadComplete: true,
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -473,6 +532,18 @@ interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
 }
 
+interface LastUserPromptReadOptions {
+  preferCache?: boolean;
+  validateFirstRecord?: (
+    record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
+  ) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptSnapshot {
+  lastUserPromptAt?: string;
+  firstRecordOwner?: Pick<ChatRecord, 'sessionId' | 'cwd'>;
+}
+
 interface SessionTranscriptFileIdentity {
   dev: number;
   ino: number;
@@ -507,6 +578,7 @@ interface AggregatedRecordReadContext {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  lastUserPromptAt?: string;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
@@ -515,6 +587,7 @@ interface UuidIndexEntry {
   apiHistoryCompressionCandidate: boolean;
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
+  uiTelemetryCandidate: boolean;
   goalRecoveryCandidate: boolean;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
@@ -566,10 +639,32 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  hookTurns?: Map<
+    string,
+    Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
+  >;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
 const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+// Refusing indexes above the shared budget outright made every page of a
+// large session reparse the whole JSONL (#17889): the one session that most
+// needs the cache could never enter it. Oversized indexes get their own
+// bounded budget instead, so the shared byte budget keeps capping
+// small-session retention exactly as before while a large session's index
+// survives across requests. Worst-case byte retention is the sum of both
+// budgets. Still O(snapshot) per page: an index estimated above this cap
+// (dense short records reach it well below the file-size cap), and a session
+// refused while the class is full — refusal keeps the resident indexes
+// instead of thrashing between them. The 32-entry count cap stays global, so
+// an oversized entry can take a slot a warm small index held (at most three
+// oversized entries fit the class budget).
+const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
+// Hard refusal ceiling for dense-record index builds, decoupled from the
+// 256 MiB cache-admission budget so terse 60-120 MiB transcripts continue to
+// serve uncached (as on base) while extreme multi-million-record dense files
+// still fail closed before exhausting a 1 GiB heap.
+export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES = 512 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -654,6 +749,43 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+interface LastUserPromptCacheEntry {
+  fileIdentity: SessionTranscriptFileIdentity;
+  size: number;
+  lastUpdated: string;
+  snapshot: Promise<LastUserPromptSnapshot>;
+}
+
+const lastUserPromptScopes = new Map<
+  string,
+  Map<string, LastUserPromptCacheEntry>
+>();
+const lastUserPromptUpdates = new Map<string, object>();
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 100_000;
+
+function promptTimeScope(filePath: string, workspaceCwd: string) {
+  const key = JSON.stringify([path.dirname(filePath), workspaceCwd]);
+  let entries = lastUserPromptScopes.get(key);
+  if (!entries) entries = new Map();
+  lastUserPromptScopes.delete(key);
+  lastUserPromptScopes.set(key, entries);
+  while (lastUserPromptScopes.size > 64) {
+    lastUserPromptScopes.delete(lastUserPromptScopes.keys().next().value!);
+  }
+  return entries;
+}
+
+function trimPromptTimeScopes(): void {
+  let count = [...lastUserPromptScopes.values()].reduce(
+    (sum, entries) => sum + entries.size,
+    0,
+  );
+  while (count > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+    const oldest = lastUserPromptScopes.keys().next().value!;
+    count -= lastUserPromptScopes.get(oldest)!.size;
+    lastUserPromptScopes.delete(oldest);
+  }
+}
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -662,12 +794,17 @@ const indexCache = new Map<string, CacheEntry>();
 // who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
+let indexCacheOversizedMaxBytesForTest: number | undefined;
+let maxIndexEstimateBytesForTest: number | undefined;
+let availableHeapBudgetForTest: number | undefined;
+let maxLineBytesForTest: number | undefined;
+let maxAllReplayBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
 let cooperativeYieldHookForTest: (() => void) | undefined;
 let selectedLineReadHookForTest:
-  | ((offset: number, length: number) => void)
+  | ((offset: number, length: number) => void | Promise<void>)
   | undefined;
 let indexBuildCompleteHookForTest:
   | ((filePath: string) => void | Promise<void>)
@@ -810,6 +947,15 @@ function isAttributionSnapshotCandidate(record: ChatRecord): boolean {
     isObjectRecord(record.systemPayload) &&
     'snapshot' in record.systemPayload
   );
+}
+
+function isRestoreUiTelemetryCandidate(record: ChatRecord): boolean {
+  if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+    return false;
+  }
+  const uiEvent = (record.systemPayload as UiTelemetryRecordPayload | undefined)
+    ?.uiEvent;
+  return isObjectRecord(uiEvent) && !isLifecycleUiTelemetryEvent(uiEvent);
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
@@ -1757,8 +1903,64 @@ function getIndexCacheMaxBytes(): number {
   return indexCacheMaxBytesForTest ?? INDEX_CACHE_MAX_BYTES;
 }
 
+function getIndexCacheOversizedMaxBytes(): number {
+  return indexCacheOversizedMaxBytesForTest ?? INDEX_CACHE_OVERSIZED_MAX_BYTES;
+}
+
+function getMaxIndexEstimateBytes(): number {
+  return (
+    maxIndexEstimateBytesForTest ?? SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES
+  );
+}
+
+export function getSessionTranscriptMaxLineBytes(): number {
+  return maxLineBytesForTest ?? SESSION_TRANSCRIPT_MAX_LINE_BYTES;
+}
+
+function getMaxAllReplayBytes(): number {
+  return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
+}
+
+function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
+  return (
+    INDEX_HINT_BASE_BYTES +
+    estimateStringBytes(record.uuid) +
+    estimateStringBytes(record.parentUuid) +
+    estimateStringBytes(record.type) +
+    estimateStringBytes(record.subtype)
+  );
+}
+
+function estimateUuidIndexEntryBytes(
+  uuid: string,
+  entry: UuidIndexEntry,
+): number {
+  return (
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_HINT_BASE_BYTES * 2 +
+    INDEX_MAP_ENTRY_BYTES +
+    INDEX_CONTAINER_BASE_BYTES +
+    entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
+    estimateStringBytes(uuid) +
+    estimateStringBytes(entry.parentUuid) +
+    estimateStringBytes(entry.lastUserPromptAt) +
+    estimateStringBytes(entry.type) +
+    estimateStringBytes(entry.subtype) +
+    estimateStringBytes(entry.navigationKind) +
+    estimateStringBytes(entry.turnResultPromptId) +
+    estimateStringBytes(entry.daemonPromptId) +
+    estimateStringBytes(entry.turnHint.turnParentUuid) +
+    estimateStringBytes(entry.turnHint.turnPromptId) +
+    estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
+    estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
+    entry.segments.length * INDEX_SEGMENT_BYTES
+  );
 }
 
 function estimateIndexCacheBytes(index: TranscriptIndex): number {
@@ -1780,12 +1982,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     estimateStringBytes(index.lastUpdated);
 
   for (const record of index.physicalRecords) {
-    total +=
-      INDEX_HINT_BASE_BYTES +
-      estimateStringBytes(record.uuid) +
-      estimateStringBytes(record.parentUuid) +
-      estimateStringBytes(record.type) +
-      estimateStringBytes(record.subtype);
+    total += estimatePhysicalRecordHintBytes(record);
   }
 
   for (const uuid of index.runtimeUuids) {
@@ -1802,24 +1999,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(gap.missingParentUuid);
   }
   for (const [uuid, entry] of index.byUuid) {
-    total +=
-      INDEX_ENTRY_BASE_BYTES +
-      INDEX_HINT_BASE_BYTES * 2 +
-      INDEX_MAP_ENTRY_BYTES +
-      INDEX_CONTAINER_BASE_BYTES +
-      entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
-      estimateStringBytes(uuid) +
-      estimateStringBytes(entry.parentUuid) +
-      estimateStringBytes(entry.type) +
-      estimateStringBytes(entry.subtype) +
-      estimateStringBytes(entry.navigationKind) +
-      estimateStringBytes(entry.turnResultPromptId) +
-      estimateStringBytes(entry.daemonPromptId) +
-      estimateStringBytes(entry.turnHint.turnParentUuid) +
-      estimateStringBytes(entry.turnHint.turnPromptId) +
-      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
-      estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      entry.segments.length * INDEX_SEGMENT_BYTES;
+    total += estimateUuidIndexEntryBytes(uuid, entry);
   }
   for (const turn of index.navigationTurns) {
     total +=
@@ -1851,6 +2031,80 @@ function getIndexCacheBytes(): number {
   return total;
 }
 
+// An entry's class follows the current shared budget, not the budget it was
+// admitted under, so lowering the budget reclassifies and prunes consistently.
+function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let shared = 0;
+  let oversized = 0;
+  for (const entry of indexCache.values()) {
+    if (!entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget) oversized += entry.byteSize;
+    else shared += entry.byteSize;
+  }
+  return { shared, oversized };
+}
+
+// Whether growing a cached entry by extraBytes fits the budget class the
+// entry belongs to AFTER the addition — the same class rule
+// getIndexCacheBytesByClass and pruneCacheByteBudget apply to live entries.
+// A shared entry whose projection or hook aggregate pushes it past the
+// shared budget moves into the oversized class instead of being refused
+// against a budget it no longer belongs to. When superseded snapshots of
+// the same file block the target class (an old prefix whose retained
+// projection holds it), they are reclaimed only if the addition fits after
+// the reclaim — the same fit-before-evict judgment the admission doors use.
+// current describes the file state the reclaim may trust: verified doors
+// (the offer) pass the just-verified snapshot length, frozen-prefix growth
+// (hook aggregates, projections decoded under a frozen cursor) passes a
+// fresh stat of the live file, and a failed stat passes undefined so
+// reclaim is skipped (only additions that already fit without reclaim are
+// retained) rather than reclaiming blind. The entry being grown
+// is excluded from the reclaim scan — under a frozen snapshot it can itself
+// be shorter than the live file.
+function cacheAdditionFitsClassBudget(
+  entry: CacheEntry,
+  extraBytes: number,
+  current: ReclaimContext | undefined,
+): boolean {
+  const sharedBudget = getIndexCacheMaxBytes();
+  const currentBytes = entry.byteSize ?? 0;
+  const totalBytes = currentBytes + extraBytes;
+  const oversized = totalBytes > sharedBudget;
+  const classBudget = oversized
+    ? getIndexCacheOversizedMaxBytes()
+    : sharedBudget;
+  const classBytes = getIndexCacheBytesByClass();
+  const classTotal = oversized ? classBytes.oversized : classBytes.shared;
+  // The entry's current bytes already count toward its current class; when
+  // the addition crosses the class boundary they move with it.
+  const staysInClass = currentBytes > sharedBudget === oversized;
+  const added = staysInClass ? extraBytes : totalBytes;
+  if (classTotal + added <= classBudget) return true;
+  const value = entry.value;
+  if (!value) return false;
+  const reclaimable = supersededSnapshotBytes(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    current,
+    oversized,
+    entry,
+  );
+  if (classTotal - reclaimable + added > classBudget) return false;
+  evictSupersededSnapshots(
+    value.filePath,
+    value.snapshotSize,
+    value.lastUpdated,
+    value.fileIdentity,
+    current,
+    oversized,
+    entry,
+  );
+  return true;
+}
+
 function pruneCache(now = Date.now()): void {
   for (const [key, entry] of indexCache) {
     if (entry.expiresAt <= now) {
@@ -1859,15 +2113,46 @@ function pruneCache(now = Date.now()): void {
     }
   }
   while (indexCache.size > INDEX_CACHE_MAX_ENTRIES) {
-    const oldest = indexCache.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    indexCache.delete(oldest);
-    debugLogger.debug(`index cache evicted LRU ${oldest}`);
+    // In-flight build placeholders hold no bytes and are bounded by their
+    // own TTL; evicting one discards a completed index when its build
+    // finishes (the stale-completion path returns it uncached). The count
+    // cap stays authoritative over completed entries: skip placeholders
+    // while their build is still awaited.
+    let oldestValue: string | undefined;
+    for (const [key, entry] of indexCache) {
+      if (entry.value) {
+        oldestValue = key;
+        break;
+      }
+    }
+    if (oldestValue === undefined) break;
+    indexCache.delete(oldestValue);
+    debugLogger.debug(`index cache evicted LRU ${oldestValue}`);
   }
-  while (getIndexCacheBytes() > getIndexCacheMaxBytes()) {
+  pruneCacheByteBudget(false);
+  pruneCacheByteBudget(true);
+}
+
+// Evicts least-recently-used entries of one class until that class fits its
+// own budget. The classes never evict each other by byte budget: an oversized
+// index must not push warm small-session indexes out of the shared budget
+// (#17889). The 32-entry count cap in pruneCache remains global.
+function pruneCacheByteBudget(oversizedClass: boolean): void {
+  const sharedBudget = getIndexCacheMaxBytes();
+  const budget = oversizedClass
+    ? getIndexCacheOversizedMaxBytes()
+    : sharedBudget;
+  const inClass = (byteSize: number) =>
+    byteSize > sharedBudget === oversizedClass;
+  let total = 0;
+  for (const entry of indexCache.values()) {
+    if (entry.byteSize && inClass(entry.byteSize)) total += entry.byteSize;
+  }
+  while (total > budget) {
     let evicted = false;
     for (const [key, entry] of indexCache) {
-      if (!entry.byteSize) continue;
+      if (!entry.byteSize || !inClass(entry.byteSize)) continue;
+      total -= entry.byteSize;
       indexCache.delete(key);
       debugLogger.debug(`index cache evicted by byte budget ${key}`);
       evicted = true;
@@ -1877,9 +2162,150 @@ function pruneCache(now = Date.now()): void {
   }
 }
 
+// The file state a reclaim decision may trust. verified means the incoming
+// snapshot was just checked against the file (admission re-verification,
+// offer assertion), so the unreachable clauses apply; a frozen-prefix
+// growth caller only knows a fresh stat of the live file (verified false),
+// and a failed stat leaves the context undefined.
+type ReclaimContext = { size: number; verified: boolean };
+
+// A snapshot of the same file that the incoming one supersedes, or that
+// the current file state has left unreachable. The unreachable clauses
+// need a verified current file state: a changed identity (the identity
+// guard rejects their cursors, even when a backup restored an older
+// mtime), a length beyond the current file (the size guard rejects them,
+// even when a same-millisecond truncation kept the mtime), or an equal
+// size at a different mtime (the mtime guard rejects them). Supersession
+// itself is decided by length, never by mtime order: an in-place sync can
+// append and then restore an older source timestamp, so a newer mtime
+// does not make a shorter prefix live, and an older mtime does not make a
+// longer index dead. Under the append-only read model a same-identity
+// strictly shorter prefix is contained in the incoming snapshot and
+// reclaimable fit-before-evict; a longer same-identity index still serves
+// the frozen offsets and is protected. Frozen-prefix growth compares
+// against the LIVE file length instead of the frozen snapshot: an
+// in-place truncation during the frozen read can leave the current full
+// index shorter than the frozen snapshot at the same identity, and that
+// entry is the live index, not a historical prefix — only entries
+// strictly shorter than the live file are reclaimable. Without a current
+// state (failed stat) nothing is reclaimed and retention is refused.
+function isSupersededSnapshot(
+  value: TranscriptIndex,
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+): boolean {
+  if (value.filePath !== filePath) return false;
+  const sameIdentity =
+    value.fileIdentity.dev === fileIdentity.dev &&
+    value.fileIdentity.ino === fileIdentity.ino;
+  if (current?.verified) {
+    if (!sameIdentity) return true;
+    if (value.snapshotSize > current.size) return true;
+    if (
+      value.snapshotSize === snapshotSize &&
+      value.lastUpdated !== lastUpdated
+    ) {
+      return true;
+    }
+    return value.snapshotSize < snapshotSize;
+  }
+  if (current) {
+    // The live index always equals the current file length, so strictly
+    // shorter entries are historical prefixes (or unreachable orphans of
+    // a replaced file) regardless of identity; entries at or beyond the
+    // current length may be the live index and are protected.
+    return value.snapshotSize < current.size;
+  }
+  return false;
+}
+
+// The bytes evictSupersededSnapshots would free, so admission can check the
+// new snapshot fits after the reclaim before evicting anything.
+function supersededSnapshotBytes(
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+  oversizedClass: boolean,
+  exclude?: CacheEntry,
+): number {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let bytes = 0;
+  for (const entry of indexCache.values()) {
+    if (entry === exclude) continue;
+    const value = entry.value;
+    if (!value || !entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget !== oversizedClass) continue;
+    if (
+      isSupersededSnapshot(
+        value,
+        filePath,
+        snapshotSize,
+        lastUpdated,
+        fileIdentity,
+        current,
+      )
+    ) {
+      bytes += entry.byteSize;
+    }
+  }
+  return bytes;
+}
+
+// Evicts superseded snapshots of the same transcript when a newer one cannot
+// be admitted: a superseded frozen prefix would otherwise hold the class
+// budget and force every page of the live snapshot to reparse the whole
+// JSONL. Frozen cursors to an evicted prefix rebuild on demand; eviction
+// itself costs latency only, since page bodies are read from the live file
+// at the frozen offsets whether or not the index is cached. That read model
+// assumes append-only writes: an in-place rewrite followed by an append
+// serves rewritten prefix bytes under a frozen cursor (see the design doc's
+// Compatibility and limits section). Cross-class eviction is deliberately absent: freeing
+// shared bytes does not admit an oversized index, and the class-full refusal
+// keeps resident indexes instead of thrashing between them.
+function evictSupersededSnapshots(
+  filePath: string,
+  snapshotSize: number,
+  lastUpdated: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  current: ReclaimContext | undefined,
+  oversizedClass: boolean,
+  exclude?: CacheEntry,
+): boolean {
+  const sharedBudget = getIndexCacheMaxBytes();
+  let evicted = false;
+  for (const [key, entry] of indexCache) {
+    if (entry === exclude) continue;
+    const value = entry.value;
+    if (!value || !entry.byteSize) continue;
+    if (entry.byteSize > sharedBudget !== oversizedClass) continue;
+    if (
+      !isSupersededSnapshot(
+        value,
+        filePath,
+        snapshotSize,
+        lastUpdated,
+        fileIdentity,
+        current,
+      )
+    ) {
+      continue;
+    }
+    indexCache.delete(key);
+    debugLogger.debug(`index cache evicted superseded snapshot ${key}`);
+    evicted = true;
+  }
+  return evicted;
+}
+
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
+  sessionId: string,
   onLine: (
     line: Buffer,
     offset: number,
@@ -1887,6 +2313,7 @@ async function forEachLineInSnapshot(
   ) => void | Promise<void>,
 ): Promise<void> {
   if (snapshotSize === 0) return;
+  const maxLineBytes = getSessionTranscriptMaxLineBytes();
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
@@ -1901,52 +2328,69 @@ async function forEachLineInSnapshot(
   const makePendingLine = (): Buffer =>
     pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
 
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    let lineStart = 0;
-    while (lineStart < buffer.length) {
-      const lineEnd = buffer.indexOf(0x0a, lineStart);
-      if (lineEnd === -1) break;
-      const lineOffset =
-        pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
-      const currentLine = buffer.subarray(lineStart, lineEnd);
-      const rawLine =
-        pendingLength > 0
-          ? Buffer.concat(
-              [...pending, currentLine],
-              pendingLength + currentLine.length,
-            )
-          : currentLine;
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let lineStart = 0;
+      while (lineStart < buffer.length) {
+        const lineEnd = buffer.indexOf(0x0a, lineStart);
+        if (lineEnd === -1) break;
+        const lineOffset =
+          pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
+        const currentLine = buffer.subarray(lineStart, lineEnd);
+        const totalLineLength = pendingLength + currentLine.length;
+        if (totalLineLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            totalLineLength,
+            maxLineBytes,
+          );
+        }
+        const rawLine =
+          pendingLength > 0
+            ? Buffer.concat([...pending, currentLine], totalLineLength)
+            : currentLine;
+        const line =
+          rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+            ? rawLine.subarray(0, rawLine.length - 1)
+            : rawLine;
+        await onLine(line, lineOffset, line.length);
+        await scheduler.afterUnit(line.length);
+        pending = [];
+        pendingLength = 0;
+        lineStart = lineEnd + 1;
+      }
+
+      if (lineStart < buffer.length) {
+        if (pendingLength === 0) {
+          pendingOffset = streamOffset + lineStart;
+        }
+        const tail = buffer.subarray(lineStart);
+        const nextPendingLength = pendingLength + tail.length;
+        if (nextPendingLength > maxLineBytes) {
+          throw new SessionTranscriptPageTooLargeError(
+            sessionId,
+            nextPendingLength,
+            maxLineBytes,
+          );
+        }
+        pending.push(tail);
+        pendingLength = nextPendingLength;
+      }
+      streamOffset += buffer.length;
+    }
+
+    if (pendingLength > 0) {
+      const rawLine = makePendingLine();
       const line =
-        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+        rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, lineOffset, line.length);
+      await onLine(line, pendingOffset, line.length);
       await scheduler.afterUnit(line.length);
-      pending = [];
-      pendingLength = 0;
-      lineStart = lineEnd + 1;
     }
-
-    if (lineStart < buffer.length) {
-      if (pendingLength === 0) {
-        pendingOffset = streamOffset + lineStart;
-      }
-      const tail = buffer.subarray(lineStart);
-      pending.push(tail);
-      pendingLength += tail.length;
-    }
-    streamOffset += buffer.length;
-  }
-
-  if (pendingLength > 0) {
-    const rawLine = makePendingLine();
-    const line =
-      rawLine[rawLine.length - 1] === 0x0d
-        ? rawLine.subarray(0, rawLine.length - 1)
-        : rawLine;
-    await onLine(line, pendingOffset, line.length);
-    await scheduler.afterUnit(line.length);
+  } finally {
+    stream.destroy();
   }
 }
 
@@ -1965,7 +2409,7 @@ async function readSegmentRecords(
   ) {
     records = lineCache.value.records;
   } else {
-    selectedLineReadHookForTest?.(segment.offset, segment.length);
+    await selectedLineReadHookForTest?.(segment.offset, segment.length);
     const buffer = Buffer.alloc(segment.length);
     await handle.read(buffer, 0, segment.length, segment.offset);
     const line = buffer.toString('utf8').trim();
@@ -2116,6 +2560,16 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
+function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
+  for (let position = index.replayUuids.length - 1; position >= 0; position--) {
+    const timestamp = index.byUuid.get(
+      index.replayUuids[position]!,
+    )?.lastUserPromptAt;
+    if (timestamp !== undefined) return timestamp;
+  }
+  return undefined;
+}
+
 /**
  * The index entry for one record's first fragment.
  *
@@ -2132,6 +2586,7 @@ function newIndexEntry(
   const navigationKind = navigationKindForRecord(record);
   return {
     parentUuid: record.parentUuid,
+    lastUserPromptAt: userPromptTimestamp(record),
     sessionIdMatchesFile: record.sessionId === sessionId,
     type: record.type,
     ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
@@ -2144,6 +2599,7 @@ function newIndexEntry(
     apiHistoryCompressionCandidate: isApiHistoryCompressionCandidate(record),
     resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
     attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
+    uiTelemetryCandidate: isRestoreUiTelemetryCandidate(record),
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
     turnHint: getSessionTurnRecordHint(record, sessionId),
     ...(navigationKind ? { navigationKind } : {}),
@@ -2196,11 +2652,55 @@ async function buildIndex(params: {
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
+  const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+  const buildHeapUsedStart = process.memoryUsage().heapUsed;
+  const heapSizeLimit = getHeapStatistics().heap_size_limit;
+  const availableHeapBytes = Math.max(0, heapSizeLimit - buildHeapUsedStart);
+  const remainingHeapBudget =
+    availableHeapBudgetForTest ??
+    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2));
+  // V8's heap_size_limit exceeds --max-old-space-size by a platform-dependent
+  // margin (~96 MiB on x86_64 Node 26; larger on aarch64/Node 24, where a
+  // 192 MiB old space can report roughly 2x that in heap_size_limit). Deducting
+  // 96 MiB keeps 256+ MiB heaps below Mark-Compact OOM while giving ~512+ MiB
+  // heaps 5/8 headroom above GC noise; smaller heaps on such platforms remain
+  // subject to V8's pre-existing OOM limitation, matching base.
+  const estimatedOldSpaceAvailableBytes = Math.max(
+    0,
+    availableHeapBytes - 96 * 1024 * 1024,
+  );
+  const maxHeapGrowthBytes =
+    availableHeapBudgetForTest ??
+    Math.max(
+      64 * 1024,
+      Math.min(
+        Math.floor((availableHeapBytes * 5) / 8),
+        Math.floor((estimatedOldSpaceAvailableBytes * 3) / 4),
+      ),
+    );
+  const maxIndexBuildBytes = Math.min(
+    maxIndexEstimateBytes,
+    remainingHeapBudget,
+  );
+  // Only mark a heap-limited estimate rejection retryable when live heap
+  // occupancy is elevated (or a test injects a constrained headroom). An idle
+  // process with a small fixed --max-old-space-size will reject the same file
+  // on every retry.
+  const transientHeapPressure =
+    availableHeapBudgetForTest !== undefined
+      ? remainingHeapBudget < maxIndexEstimateBytes
+      : remainingHeapBudget < maxIndexEstimateBytes &&
+        buildHeapUsedStart >= Math.floor(heapSizeLimit / 4);
+  let estimatedIndexBytes =
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_CONTAINER_BASE_BYTES * 7 +
+    estimateStringBytes(filePath);
 
   try {
     await forEachLineInSnapshot(
       filePath,
       snapshotSize,
+      sessionId,
       (line, offset, length) => {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
@@ -2223,14 +2723,18 @@ async function buildIndex(params: {
             leafUuid = record.uuid;
           }
           const existing = byUuid.get(record.uuid);
-          physicalRecords.push({
+          const physicalHint: PhysicalRecordHint = {
             uuid: record.uuid,
             parentUuid: record.parentUuid,
             type: record.type,
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
-          });
+          };
+          physicalRecords.push(physicalHint);
+          estimatedIndexBytes +=
+            INDEX_CONTAINER_SLOT_BYTES +
+            estimatePhysicalRecordHintBytes(physicalHint);
           const segment = {
             offset,
             length,
@@ -2248,10 +2752,17 @@ async function buildIndex(params: {
                 : undefined,
             } as ChatRecord;
             existing.segments.push(segment);
+            estimatedIndexBytes +=
+              INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
               isAssistantPreviewCandidate(fragmentRecord);
+            existing.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
+              ...(record as unknown as ChatRecord),
+              type: existing.type,
+              subtype: existing.subtype,
+            } as ChatRecord);
             if (existing.type === 'assistant' && record.usageMetadata) {
               existing.resumeTokenCountsCandidate =
                 isResumeTokenCountsCandidate({
@@ -2268,6 +2779,47 @@ async function buildIndex(params: {
             const chatRecord = record as unknown as ChatRecord;
             const entry = newIndexEntry(chatRecord, sessionId, [segment]);
             byUuid.set(record.uuid, entry);
+            estimatedIndexBytes += estimateUuidIndexEntryBytes(
+              record.uuid,
+              entry,
+            );
+          }
+          if (estimatedIndexBytes > maxIndexBuildBytes) {
+            const retryable =
+              transientHeapPressure &&
+              estimatedIndexBytes <= maxIndexEstimateBytes;
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              snapshotSize,
+              maxIndexBuildBytes,
+              {
+                dimension: 'index',
+                measuredBytes: estimatedIndexBytes,
+                ...(retryable ? { retryable: true } : {}),
+              },
+            );
+          }
+          // The cache estimate intentionally stays unchanged. For the hard
+          // build ceiling, periodically sample real heap growth as well —
+          // short-record retention can cost materially more than the estimate
+          // on some runtimes, and estimation alone must not free a 1 GiB heap.
+          // Always sample the first record so a depleted process cannot admit
+          // a build even if there are fewer than 1024 records.
+          if ((sequence & 1023) === 1) {
+            const heapGrowth =
+              process.memoryUsage().heapUsed - buildHeapUsedStart;
+            if (heapGrowth > maxHeapGrowthBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                snapshotSize,
+                maxHeapGrowthBytes,
+                {
+                  dimension: 'index',
+                  measuredBytes: heapGrowth,
+                  retryable: true,
+                },
+              );
+            }
           }
         }
       },
@@ -2384,9 +2936,7 @@ async function buildIndex(params: {
       `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
-  await indexBuildCompleteHookForTest?.(filePath);
-
-  return {
+  const builtIndex: TranscriptIndex = {
     executionEngine: executionEngine.finish({
       filePath,
       ...fileIdentity,
@@ -2411,6 +2961,38 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
+  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
+  if (finalEstimatedBytes > maxIndexBuildBytes) {
+    const retryable =
+      transientHeapPressure && finalEstimatedBytes <= maxIndexEstimateBytes;
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxIndexBuildBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalEstimatedBytes,
+        ...(retryable ? { retryable: true } : {}),
+      },
+    );
+  }
+  const finalHeapGrowth = process.memoryUsage().heapUsed - buildHeapUsedStart;
+  if (finalHeapGrowth > maxHeapGrowthBytes) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      snapshotSize,
+      maxHeapGrowthBytes,
+      {
+        dimension: 'index',
+        measuredBytes: finalHeapGrowth,
+        retryable: true,
+      },
+    );
+  }
+
+  await indexBuildCompleteHookForTest?.(filePath);
+
+  return builtIndex;
 }
 
 async function getCachedIndex(params: {
@@ -2444,15 +3026,71 @@ async function getCachedIndex(params: {
 
   debugLogger.debug(`index cache miss ${key}`);
   params.onCacheState?.('miss');
-  const pending = buildIndex(params);
-  indexCache.set(key, {
-    pending,
-    expiresAt: now + INDEX_CACHE_TTL_MS,
-  });
-  try {
-    const value = await pending;
+  // Waiters share the verified completion, not the raw build: a snapshot
+  // rewritten under the build must fail every sharer closed, not only the
+  // initiator's cache admission. The wrapper compares its own promise
+  // against the cache entry; a const self-reference trips TS2454, so the
+  // binding is a let assigned exactly once.
+  let pending: Promise<TranscriptIndex> | undefined;
+  // eslint-disable-next-line prefer-const -- assigned once, see above
+  pending = (async () => {
+    const value = await buildIndex(params);
+    // A build can complete after the file was rewritten or replaced under it
+    // (equal-size mtime move, identity change, truncation). Re-verify the
+    // frozen snapshot before ANY early return or admission: cache-entry
+    // ownership only governs cache writes and deletes, never whether the
+    // built index is safe to serve, so every sharer of the build fails
+    // closed together. allowAppend keeps a prefix frozen across a concurrent
+    // append valid.
+    let verifiedSize: number | undefined;
+    try {
+      verifiedSize = await verifiedSnapshotSize(
+        params.filePath,
+        params.fileIdentity,
+        params.snapshotSize,
+        params.lastUpdated,
+        true,
+      );
+    } catch (error) {
+      // A transient stat error (EMFILE/EIO/EACCES) leaves the file state
+      // unknown: serve the built snapshot uncached rather than fail a page
+      // that was ready. ENOENT maps to undefined inside verifiedSnapshotSize.
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(
+        `index cache skipped verify after stat error ${key}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return value;
+    }
+    if (verifiedSize === undefined) {
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(`index cache skipped changed snapshot ${key}`);
+      throw new SessionTranscriptSnapshotUnavailableError(
+        path.basename(params.filePath, '.jsonl'),
+      );
+    }
+    // The signature check yielded; the pending entry may have been replaced
+    // (TTL expiry or the 32-entry LRU). The verified value is still safe to
+    // serve, but this completion no longer owns the cache slot. Everything
+    // from here to the cache write is synchronous: the ownership check, the
+    // class budget math and the reclaim all see one consistent cache state,
+    // and the reclaim uses the length the signature was verified against
+    // instead of a second stat that could fail or observe a newer file.
+    if (indexCache.get(key)?.pending !== pending) {
+      debugLogger.debug(`index cache skipped stale completion ${key}`);
+      return value;
+    }
     const byteSize = estimateIndexCacheBytes(value);
-    if (byteSize > getIndexCacheMaxBytes()) {
+    const oversized = byteSize > getIndexCacheMaxBytes();
+    const classBudget = oversized
+      ? getIndexCacheOversizedMaxBytes()
+      : getIndexCacheMaxBytes();
+    if (byteSize > classBudget) {
       if (indexCache.get(key)?.pending === pending) {
         indexCache.delete(key);
       }
@@ -2461,17 +3099,51 @@ async function getCachedIndex(params: {
       );
       return value;
     }
-    if (indexCache.get(key)?.pending !== pending) {
-      debugLogger.debug(`index cache skipped stale completion ${key}`);
-      return value;
-    }
-    if (getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes()) {
-      indexCache.delete(key);
-      debugLogger.debug(
-        `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+    const classBytes = getIndexCacheBytesByClass();
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget
+    ) {
+      // Evict superseded prefixes only when the new snapshot fits after the
+      // reclaim; otherwise the eviction would force their still-readable
+      // frozen cursors to rebuild for an admission that is refused anyway.
+      // The verified current file length decides whether a longer cached
+      // prefix is unreachable (a same-millisecond truncation keeps the
+      // mtime).
+      const reclaimable = supersededSnapshotBytes(
+        params.filePath,
+        params.snapshotSize,
+        params.lastUpdated,
+        params.fileIdentity,
+        { size: verifiedSize, verified: true },
+        oversized,
       );
-      return value;
+      if (
+        (oversized ? classBytes.oversized : classBytes.shared) -
+          reclaimable +
+          byteSize >
+        classBudget
+      ) {
+        indexCache.delete(key);
+        debugLogger.debug(
+          `index cache skipped byte-budget admission ${key} byteSize=${byteSize}`,
+        );
+        return value;
+      }
+      evictSupersededSnapshots(
+        params.filePath,
+        params.snapshotSize,
+        params.lastUpdated,
+        params.fileIdentity,
+        { size: verifiedSize, verified: true },
+        oversized,
+      );
     }
+    // Map.set updates an existing key in place; the placeholder has held
+    // its insertion position through the build while the count-cap prune
+    // skipped it. Delete first so the completion lands at the MRU tail
+    // instead of being the prune's first eviction candidate.
+    indexCache.delete(key);
     indexCache.set(key, {
       value,
       byteSize,
@@ -2479,12 +3151,19 @@ async function getCachedIndex(params: {
     });
     pruneCache();
     return value;
+  })();
+  indexCache.set(key, {
+    pending,
+    expiresAt: now + INDEX_CACHE_TTL_MS,
+  });
+  try {
+    return await pending;
   } catch (error) {
     if (indexCache.get(key)?.pending === pending) {
       indexCache.delete(key);
     }
     debugLogger.debug(
-      `index cache build failed ${key}: ${
+      `index cache completion rejected ${key}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -2527,6 +3206,23 @@ function selectRestoreReplayUuids(
   if (replay.kind === 'none') return undefined;
   const replayIndex = makeReplayIndex(index, replay.hideInheritedHistory);
   if (replay.kind === 'all') {
+    const maxAllReplayBytes = getMaxAllReplayBytes();
+    let totalReplayBytes = 0;
+    for (const uuid of replayIndex.replayUuids) {
+      const entry = replayIndex.byUuid.get(uuid);
+      if (!entry) continue;
+      for (const segment of entry.segments) {
+        totalReplayBytes += segment.length;
+      }
+      if (totalReplayBytes > maxAllReplayBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          index.snapshotSize,
+          maxAllReplayBytes,
+          { dimension: 'replay', measuredBytes: totalReplayBytes },
+        );
+      }
+    }
     return {
       index: replayIndex,
       uuids: replayIndex.replayUuids,
@@ -2572,23 +3268,51 @@ async function assertIndexSnapshotUnchanged(
   }
 }
 
+// The verified current file length, or undefined when the file no longer
+// matches the snapshot signature. ENOENT maps to undefined; a transient
+// stat error throws so the caller can choose its degradation. Admission
+// reuses the returned length instead of stat-ing again, keeping the
+// ownership check, budget math and cache writes synchronous with the
+// verification — no second syscall can fail uncaught or observe a file
+// state newer than the one the signature was verified against.
+async function verifiedSnapshotSize(
+  filePath: string,
+  fileIdentity: SessionTranscriptFileIdentity,
+  snapshotSize: number,
+  lastUpdated: string,
+  allowAppend = false,
+): Promise<number | undefined> {
+  let stats: fs.Stats;
+  try {
+    stats = await fsp.stat(filePath);
+  } catch (error) {
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  }
+  const matches =
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
+    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated);
+  return matches ? stats.size : undefined;
+}
+
 async function hasSnapshotSignature(
   filePath: string,
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
   lastUpdated: string,
+  allowAppend = false,
 ): Promise<boolean> {
-  let stats: fs.Stats;
-  try {
-    stats = await fsp.stat(filePath);
-  } catch (error) {
-    if (isFileMissingError(error)) return false;
-    throw error;
-  }
   return (
-    stats.size === snapshotSize &&
-    sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    new Date(stats.mtimeMs).toISOString() === lastUpdated
+    (await verifiedSnapshotSize(
+      filePath,
+      fileIdentity,
+      snapshotSize,
+      lastUpdated,
+      allowAppend,
+    )) !== undefined
   );
 }
 
@@ -2622,7 +3346,7 @@ export async function readSessionTranscriptSnapshot(
   const owner = new SessionExecutionEngineAccumulator(sessionId);
   const records: ChatRecord[] = [];
   let firstRecord: ChatRecord | undefined;
-  await forEachLineInSnapshot(filePath, stats.size, (line) => {
+  await forEachLineInSnapshot(filePath, stats.size, sessionId, (line) => {
     for (const { value } of owner.parseLine(
       line.toString('utf8').trim(),
       filePath,
@@ -2658,7 +3382,8 @@ export async function readSessionTranscriptSnapshot(
 function offerFreshIndexToCache(index: TranscriptIndex): void {
   // Projected indexes are only built for a page request and their byte
   // estimate ignores `projectedRecords`. Caching one would both inflate the
-  // 64MB budget and serve wrapper-free pages from the physical-index cache.
+  // cache's byte budget and serve wrapper-free pages from the physical-index
+  // cache.
   if (index.projectedRecords !== undefined) return;
   pruneCache();
   const key = makeCacheKey(
@@ -2669,21 +3394,109 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   );
   if (indexCache.has(key)) return;
   const byteSize = estimateIndexCacheBytes(index);
-  if (
-    byteSize > getIndexCacheMaxBytes() ||
-    getIndexCacheBytes() + byteSize > getIndexCacheMaxBytes() ||
-    indexCache.size >= INDEX_CACHE_MAX_ENTRIES
-  ) {
+  const oversized = byteSize > getIndexCacheMaxBytes();
+  const classBudget = oversized
+    ? getIndexCacheOversizedMaxBytes()
+    : getIndexCacheMaxBytes();
+  if (byteSize > classBudget) {
     debugLogger.debug(
       `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
     );
     return;
   }
-  indexCache.set(key, {
+  const classBytes = getIndexCacheBytesByClass();
+  const countFull = indexCache.size >= INDEX_CACHE_MAX_ENTRIES;
+  if (
+    (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
+      classBudget ||
+    countFull
+  ) {
+    // Same fit-before-evict judgment as getCachedIndex, extended to the
+    // 32-entry count cap: a refused offer must not evict the superseded
+    // prefix it cannot replace. The byte arm stays class-scoped, but count
+    // slots are class-agnostic — a superseded same-file entry in the other
+    // class frees a slot too.
+    // Every offer caller verifies the snapshot unchanged immediately
+    // before offering, so the snapshot length is the current file length.
+    const current: ReclaimContext = {
+      size: index.snapshotSize,
+      verified: true,
+    };
+    const reclaimable = supersededSnapshotBytes(
+      index.filePath,
+      index.snapshotSize,
+      index.lastUpdated,
+      index.fileIdentity,
+      current,
+      oversized,
+    );
+    const reclaimableOtherClass = countFull
+      ? supersededSnapshotBytes(
+          index.filePath,
+          index.snapshotSize,
+          index.lastUpdated,
+          index.fileIdentity,
+          current,
+          !oversized,
+        )
+      : 0;
+    if (
+      (oversized ? classBytes.oversized : classBytes.shared) -
+        reclaimable +
+        byteSize >
+        classBudget ||
+      (countFull && reclaimable + reclaimableOtherClass === 0)
+    ) {
+      debugLogger.debug(
+        `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
+      );
+      return;
+    }
+    evictSupersededSnapshots(
+      index.filePath,
+      index.snapshotSize,
+      index.lastUpdated,
+      index.fileIdentity,
+      current,
+      oversized,
+    );
+    if (countFull && reclaimable === 0) {
+      evictSupersededSnapshots(
+        index.filePath,
+        index.snapshotSize,
+        index.lastUpdated,
+        index.fileIdentity,
+        current,
+        !oversized,
+      );
+    }
+  }
+  const entry: CacheEntry = {
     value: index,
     byteSize,
     expiresAt: Date.now() + INDEX_CACHE_TTL_MS,
+  };
+  indexCache.set(key, entry);
+  accountManagedProjection(index, entry, {
+    size: index.snapshotSize,
+    verified: true,
   });
+}
+
+// A fresh read of the live file length for frozen-prefix growth reclaim.
+// The frozen snapshot is NOT re-verified here — the page already passed
+// its snapshot guards, and a truncation or replacement under the read is
+// exactly what the reclaim must see. Any stat failure leaves the context
+// undefined: reclaim is skipped rather than reclaiming blind.
+async function frozenReclaimContext(
+  filePath: string,
+): Promise<ReclaimContext | undefined> {
+  try {
+    const stats = await fsp.stat(filePath);
+    return { size: stats.size, verified: false };
+  } catch {
+    return undefined;
+  }
 }
 
 function lastUuidMatching(
@@ -2729,6 +3542,28 @@ function indexHasManagedHeader(index: TranscriptIndex): boolean {
   return index.physicalRecords.some(
     (record) => record.subtype === MANAGED_SESSION_HEADER_SUBTYPE,
   );
+}
+
+function assertManagedAllReplayBudget(
+  records: readonly ChatRecord[],
+  sessionId: string,
+  snapshotSize: number,
+  replay: SessionRestoreReplaySelection,
+): void {
+  if (replay.kind !== 'all') return;
+  const maxBytes = getMaxAllReplayBytes();
+  let total = 0;
+  for (const record of records) {
+    total += Buffer.byteLength(JSON.stringify(record), 'utf8');
+    if (total > maxBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        snapshotSize,
+        maxBytes,
+        { dimension: 'replay', measuredBytes: total },
+      );
+    }
+  }
 }
 
 /**
@@ -2822,6 +3657,55 @@ const managedProjections = new WeakMap<
     readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
   }
 >();
+// Session title metadata is a few bytes and is never what the class byte
+// budget is sizing; keep it in a separate WeakMap so refusing to retain the
+// decoded bodies does not drop customTitle/titleSource from the restore
+// payload (while still deleting the bodies from managedProjections so a
+// follow-up read re-decodes instead of seeing an empty record list).
+const managedProjectionTitles = new WeakMap<
+  TranscriptIndex,
+  { title?: string; source?: 'auto' | 'manual' }
+>();
+
+function estimateManagedProjectionBytes(projection: {
+  readonly records: ChatRecord[];
+  readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
+}): number {
+  // Fold per record rather than stringifying the whole history at once: a
+  // single giant JSON string would transiently allocate hundreds of MiB on
+  // the event loop for a large managed session. Same UTF-16 caliber as the
+  // index and hook estimates; the omitted array brackets/commas are
+  // negligible against the bodies.
+  let bytes =
+    INDEX_CONTAINER_BASE_BYTES +
+    estimateStringBytes(JSON.stringify(projection.titleInfo));
+  for (const record of projection.records) {
+    bytes += estimateStringBytes(JSON.stringify(record));
+  }
+  return bytes;
+}
+
+// A restore projection can be decoded while its index is not yet cached and
+// then offered to the cache; account the retained bodies at admission, or
+// drop them when they do not fit the entry's budget class.
+// current follows cacheAdditionFitsClassBudget: the offer door passes the
+// just-verified snapshot length, a frozen-prefix decode passes a fresh
+// stat of the live file (or undefined when the stat failed) so retention
+// never reclaims the live index.
+function accountManagedProjection(
+  index: TranscriptIndex,
+  entry: CacheEntry,
+  current: ReclaimContext | undefined,
+) {
+  const projection = managedProjections.get(index);
+  if (!projection) return;
+  const projectionBytes = estimateManagedProjectionBytes(projection);
+  if (cacheAdditionFitsClassBudget(entry, projectionBytes, current)) {
+    entry.byteSize = (entry.byteSize ?? 0) + projectionBytes;
+  } else {
+    managedProjections.delete(index);
+  }
+}
 
 /**
  * An index over projected records, shaped like the physical one.
@@ -2912,7 +3796,10 @@ export class SessionTranscriptReader {
     this.storage = new Storage(workspaceCwd, runtimeBaseDir);
   }
 
-  getSessionFilePath(sessionId: string): string {
+  getSessionFilePath(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
       debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
@@ -2920,8 +3807,201 @@ export class SessionTranscriptReader {
     return path.join(
       this.storage.getProjectDir(),
       'chats',
+      ...(archiveState === 'archived' ? ['archive'] : []),
       `${sessionId}.jsonl`,
     );
+  }
+
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+    readOptions: LastUserPromptReadOptions = {},
+  ): Promise<string | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    const warm = readOptions.preferCache
+      ? lastUserPromptCache.get(key)
+      : undefined;
+    if (warm) {
+      let snapshot = await warm.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== warm) snapshot = await current.snapshot;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    const stats = await fsp.stat(filePath);
+    lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const fileIdentity = fileIdentityFromStats(stats);
+    const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const cached = lastUserPromptCache.get(key);
+    if (
+      cached &&
+      fileIdentity.ino === 0 &&
+      cached.fileIdentity.ino === 0 &&
+      (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
+    )
+      return undefined;
+    if (
+      cached &&
+      sameFileIdentity(cached.fileIdentity, fileIdentity) &&
+      stats.size >= cached.size &&
+      (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
+    ) {
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, cached);
+      let snapshot = await cached.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== cached) snapshot = await current.snapshot;
+      cached.size = stats.size;
+      cached.lastUpdated = lastUpdated;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    // Preserve the base O(1) behavior of session-list enrichment on very
+    // large transcripts. Restore/paging reads use the expanded limit below;
+    // prompt timestamps are optional metadata, not worth an entire index scan.
+    if (stats.size > SESSION_TRANSCRIPT_MAX_PROMPT_TIME_BYTES) return undefined;
+    const pending = (async (): Promise<LastUserPromptSnapshot> => {
+      let index: TranscriptIndex;
+      try {
+        index = await getCachedIndex({
+          filePath,
+          fileIdentity,
+          snapshotSize: stats.size,
+          lastUpdated,
+        });
+      } catch (error) {
+        if (
+          error instanceof SessionTranscriptTooLargeError &&
+          error.retryable === true
+        ) {
+          // Memory available to this process may change. Do not retain a
+          // missing prompt timestamp until the session file is rewritten.
+          throw error;
+        }
+        if (
+          (error instanceof EmptySessionTranscriptError ||
+            error instanceof SessionTranscriptTooLargeError ||
+            error instanceof SessionTranscriptPageTooLargeError) &&
+          (await hasSnapshotSignature(
+            filePath,
+            fileIdentity,
+            stats.size,
+            lastUpdated,
+            true,
+          ))
+        )
+          return {};
+        throw error;
+      }
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      if (!firstRecord)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      const effective = indexHasManagedHeader(index)
+        ? managedPageIndex(
+            index,
+            await this.readManagedRecords(sessionId, index, {}),
+          )
+        : index;
+      const timestamp = lastUserPromptFromIndex(effective);
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          stats.size,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      return {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner: {
+          sessionId: firstRecord.sessionId,
+          cwd: firstRecord.cwd,
+        },
+      };
+    })();
+    const entry = {
+      fileIdentity,
+      size: stats.size,
+      lastUpdated,
+      snapshot: pending,
+    };
+    lastUserPromptCache.set(key, entry);
+    trimPromptTimeScopes();
+    let snapshot: LastUserPromptSnapshot;
+    try {
+      snapshot = await pending;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== entry) snapshot = await current.snapshot;
+    } catch (error) {
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === entry) currentScope.delete(key);
+      throw error;
+    }
+    return readOptions.validateFirstRecord &&
+      (!snapshot.firstRecordOwner ||
+        !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+      ? undefined
+      : snapshot.lastUserPromptAt;
+  }
+
+  invalidateLastUserPromptAt(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      const key = JSON.stringify([filePath, this.workspaceCwd]);
+      lastUserPromptUpdates.delete(key);
+      promptTimeScope(filePath, this.workspaceCwd).delete(key);
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    const filePath = this.getSessionFilePath(sessionId);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    if (timestamp === undefined) {
+      this.invalidateLastUserPromptAt(sessionId);
+      return;
+    }
+    const update = {};
+    lastUserPromptUpdates.set(key, update);
+    try {
+      const stats = await fsp.stat(filePath);
+      if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, {
+        fileIdentity: fileIdentityFromStats(stats),
+        size: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        snapshot: Promise.resolve({
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
+        }),
+      });
+      trimPromptTimeScopes();
+    } catch (error) {
+      if (lastUserPromptUpdates.get(key) === update)
+        promptTimeScope(filePath, this.workspaceCwd).delete(key);
+      throw error;
+    } finally {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptUpdates.delete(key);
+    }
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -2938,24 +4018,14 @@ export class SessionTranscriptReader {
     );
   }
 
-  async readTurnIndexPage(
+  private async readTurnIndexSnapshot(
     sessionId: string,
-    options: SessionTranscriptReadTurnIndexOptions = {},
-  ): Promise<SessionTranscriptTurnIndexPage> {
-    const limit = normalizeLimit(options.limit);
-    if (options.start !== undefined && options.snapshot === undefined) {
-      throw new InvalidSessionTranscriptCursorError();
-    }
-    if (
-      options.start !== undefined &&
-      !isFiniteNonNegativeInteger(options.start)
-    ) {
-      throw new RangeError('Transcript turn index start must be non-negative');
-    }
+    encodedSnapshot?: string,
+  ) {
     const snapshot =
-      options.snapshot === undefined
+      encodedSnapshot === undefined
         ? undefined
-        : this.decodeSnapshot(options.snapshot);
+        : this.decodeSnapshot(encodedSnapshot);
     if (snapshot && snapshot.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -2967,7 +4037,10 @@ export class SessionTranscriptReader {
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      !sameFileIdentity(currentIdentity, fileIdentity) ||
+      (snapshot &&
+        stats.size === snapshotSize &&
+        new Date(stats.mtimeMs).toISOString() !== snapshot.lastUpdated)
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -3000,6 +4073,28 @@ export class SessionTranscriptReader {
       startTime,
       lastUpdated,
     };
+    return { index, snapshotState };
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
         ? await this.readManagedRecords(sessionId, index, {})
@@ -3055,6 +4150,9 @@ export class SessionTranscriptReader {
     }
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
+      const historyPromptId = projected
+        ? undefined
+        : index?.byUuid.get(turn.turnId)?.turnHint.turnPromptId;
       const detail = turn.finalAssistantRecordId
         ? details.get(turn.finalAssistantRecordId)
         : undefined;
@@ -3063,6 +4161,7 @@ export class SessionTranscriptReader {
         turnId: turn.turnId,
         kind: turn.kind,
         ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(historyPromptId ? { historyPromptId } : {}),
         ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
         label: preview
           ? preview.label
@@ -3084,6 +4183,152 @@ export class SessionTranscriptReader {
       turns,
       startTime,
       lastUpdated,
+    };
+  }
+
+  async readTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<HookTurnPage | undefined> {
+    const limit = normalizeLimit(options.limit ?? 50);
+    const start = options.start ?? 0;
+    if (
+      (options.start !== undefined && options.snapshot === undefined) ||
+      !isFiniteNonNegativeInteger(start)
+    )
+      throw new InvalidSessionTranscriptCursorError();
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    if (!index) return undefined;
+    const base = {
+      sessionId,
+      promptId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      start,
+    };
+    if (indexHasManagedHeader(index)) {
+      return {
+        ...base,
+        totalExecutions: 0,
+        executions: [],
+        summary: null,
+        coverage: 'unsupported',
+      };
+    }
+    const cacheKey = makeCacheKey(
+      index.filePath,
+      index.fileIdentity,
+      index.snapshotSize,
+      index.lastUpdated,
+    );
+    const cached = indexCache.get(cacheKey);
+    let turn =
+      cached?.value === index ? cached.hookTurns?.get(promptId) : undefined;
+    if (!turn) {
+      const executionsById = new Map<string, HookExecutionEntry>();
+      let partial = !index.sourceReadComplete || index.gaps.length > 0;
+      await forEachAggregatedRecord(
+        index,
+        index.replayUuids.filter(
+          (uuid) =>
+            index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
+        ),
+        (record) => {
+          const value = (
+            record.systemPayload as UiTelemetryRecordPayload | undefined
+          )?.uiEvent;
+          if (value?.['event.name'] !== 'hook_lifecycle') return;
+          const event = parseHookLifecycle(value);
+          if (!event) {
+            partial = true;
+            return;
+          }
+          if (event.sessionId !== sessionId || event.promptId !== promptId) {
+            partial = true;
+            return;
+          }
+          executionsById.set(
+            event.executionId,
+            mergeHookExecution(
+              executionsById.get(event.executionId),
+              event,
+              'replay',
+            ),
+          );
+        },
+      );
+      if (
+        executionsById.size === 0 &&
+        !index.replayUuids.some(
+          (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+        )
+      )
+        return undefined;
+      const entries = [...executionsById.values()].sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+      partial ||= entries.some(
+        (entry) => entry.conflicted || entry.status === 'unknown',
+      );
+      turn = {
+        executions: entries,
+        summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+        coverage: partial
+          ? 'partial'
+          : entries.length > 0
+            ? 'recorded'
+            : 'unrecorded',
+      };
+      if (
+        cached?.value === index &&
+        indexCache.get(cacheKey) === cached &&
+        !cached.hookTurns?.has(promptId)
+      ) {
+        const byteSize =
+          INDEX_CONTAINER_BASE_BYTES +
+          INDEX_MAP_ENTRY_BYTES +
+          entries.length *
+            (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
+          estimateStringBytes(promptId) +
+          estimateStringBytes(JSON.stringify(turn));
+        // Account against the entry's post-add budget class: an oversized
+        // index cached elsewhere must not block hook retention on shared
+        // entries, and an aggregate that pushes a shared entry past the
+        // shared budget moves it into the oversized class. The snapshot is
+        // frozen: reclaim compares candidates against a fresh stat of the
+        // live file, so an in-place truncation under the read cannot make
+        // the current full index look like a historical prefix.
+        const current = await frozenReclaimContext(index.filePath);
+        // The stat yielded; re-check slot ownership and concurrent
+        // retention before the synchronous fit/reclaim/write tail.
+        if (
+          indexCache.get(cacheKey) === cached &&
+          cached.value === index &&
+          !cached.hookTurns?.has(promptId) &&
+          cacheAdditionFitsClassBudget(cached, byteSize, current)
+        ) {
+          cached.hookTurns ??= new Map();
+          cached.hookTurns.set(promptId, turn);
+          cached.byteSize = (cached.byteSize ?? 0) + byteSize;
+        }
+      }
+    }
+    const entries = turn.executions;
+    if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
+    const executions = entries.slice(start, start + limit);
+    return {
+      ...base,
+      totalExecutions: entries.length,
+      ...structuredClone({ executions, summary: turn.summary }),
+      ...(start + executions.length < entries.length
+        ? { nextStart: start + executions.length }
+        : {}),
+      coverage: turn.coverage,
     };
   }
 
@@ -3175,6 +4420,7 @@ export class SessionTranscriptReader {
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
           entry?.subtype === 'memory_catalog_snapshot' ||
+          entry?.subtype === 'permission_context_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
@@ -3236,10 +4482,9 @@ export class SessionTranscriptReader {
       (entry) => entry.type === 'assistant',
     );
     const uiTelemetrySet = new Set(
-      index.runtimeUuids.filter((uuid) => {
-        const entry = index.byUuid.get(uuid);
-        return entry?.type === 'system' && entry.subtype === 'ui_telemetry';
-      }),
+      index.runtimeUuids.filter(
+        (uuid) => index.byUuid.get(uuid)?.uiTelemetryCandidate === true,
+      ),
     );
     const fileHistorySet = new Set(
       index.runtimeUuids.filter((uuid) => {
@@ -3312,11 +4557,7 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (
-          uiEvent &&
-          uiEvent['event.name'] !== 'request_lifecycle' &&
-          uiEvent['event.name'] !== 'tool_lifecycle'
-        ) {
+        if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
       }
@@ -3588,6 +4829,10 @@ export class SessionTranscriptReader {
         ? restoreSessionSources(sourceRecords, sessionId)
         : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      ...(artifacts.warningList().length > 0
+        ? { artifactJournalWarnings: artifacts.warningList() }
+        : {}),
+      sourceReadComplete: index.sourceReadComplete,
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
         ? {
@@ -3635,11 +4880,23 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
     );
     // Read from the whole log: a session whose title the session list no
     // longer finds in its windows must not restore, and then re-anchor, an
-    // older one.
-    const persistedTitle = managedProjections.get(index)?.titleInfo ?? {};
+    // older one. Read from managedProjectionTitles first so a budget refusal
+    // that deleted the decoded bodies from managedProjections still preserves
+    // customTitle/titleSource.
+    const persistedTitle =
+      managedProjectionTitles.get(index) ??
+      managedProjections.get(index)?.titleInfo ??
+      {};
     const projection = buildManagedSessionRestoreProjection({
       sessionId,
       records,
@@ -3672,6 +4929,13 @@ export class SessionTranscriptReader {
       sessionId,
       index,
       readOptions,
+      options.replay.kind === 'all' ? getMaxAllReplayBytes() : undefined,
+    );
+    assertManagedAllReplayBudget(
+      records,
+      sessionId,
+      index.snapshotSize,
+      options.replay,
     );
     const replay = managedReplayPage(records, options.replay);
     await assertIndexSnapshotUnchanged(index, sessionId);
@@ -3688,6 +4952,7 @@ export class SessionTranscriptReader {
     sessionId: string,
     index: TranscriptIndex,
     readOptions: RestoreProjectionReadOptions,
+    maxBodyBytes?: number,
   ): Promise<ChatRecord[]> {
     // Timed as the same stage the index-based path uses for its record reads:
     // for a Managed log the projection is that read, and leaving it untimed
@@ -3731,8 +4996,20 @@ export class SessionTranscriptReader {
             // The index froze a byte length, so the projection answers from
             // the same prefix rather than from records appended since.
             maxBytes: index.snapshotSize,
+            ...(maxBodyBytes !== undefined ? { maxBodyBytes } : {}),
           });
         } catch (error) {
+          if (error instanceof ManagedSessionProjectionLimitError) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              index.snapshotSize,
+              error.maxBytes,
+              {
+                dimension: 'replay',
+                measuredBytes: error.measuredBytes,
+              },
+            );
+          }
           // A missing or corrupt body is the same class of failure as a
           // snapshot that can no longer be served: the page contract maps
           // that to 409, not an untyped 500 from JSON.parse(null).
@@ -3741,7 +5018,50 @@ export class SessionTranscriptReader {
           }
           throw error;
         }
-        managedProjections.set(index, projection);
+        managedProjectionTitles.set(index, projection.titleInfo);
+        // The projection holds every decoded message body, while the cache
+        // accounts only the physical hints. Retain it only while the index is
+        // cache-resident and the bodies fit the entry's budget class; else
+        // the bodies would outlive the request off-budget. A non-resident
+        // index dies with the request, so retaining against it is
+        // request-scoped and safe.
+        const projectionCacheKey = makeCacheKey(
+          index.filePath,
+          index.fileIdentity,
+          index.snapshotSize,
+          index.lastUpdated,
+        );
+        const cachedEntry = indexCache.get(projectionCacheKey);
+        if (cachedEntry?.value !== index) {
+          managedProjections.set(index, projection);
+        } else if (!managedProjections.has(index)) {
+          // A concurrent page may have decoded and retained the projection
+          // while this read was decoding; it is already accounted then.
+          // The index may be a frozen prefix of a changed file: reclaim
+          // compares candidates against a fresh stat of the live file, so
+          // an in-place truncation under the decode cannot make the
+          // current full index look like a historical prefix.
+          const current = await frozenReclaimContext(index.filePath);
+          // The stat yielded; re-check slot ownership and concurrent
+          // retention before accounting. Set first, then let the shared
+          // admission helper account or drop (it deletes from the WeakMap
+          // when the bodies do not fit); the has() re-check keeps the
+          // helper's unconditional byte add from double-counting an
+          // already-accounted projection.
+          if (!managedProjections.has(index)) {
+            if (
+              indexCache.get(projectionCacheKey) === cachedEntry &&
+              cachedEntry.value === index
+            ) {
+              managedProjections.set(index, projection);
+              accountManagedProjection(index, cachedEntry, current);
+            } else {
+              // The slot was re-owned under the stat: keep the projection
+              // request-scoped, off the cache budget.
+              managedProjections.set(index, projection);
+            }
+          }
+        }
       }
       return [...projection.records];
     } finally {
@@ -4013,6 +5333,31 @@ export class SessionTranscriptReader {
       );
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
+    // A cached index is keyed by the frozen mtime, so an equal-size in-place
+    // rewrite would otherwise serve new bytes under the old snapshot; the
+    // segment uuid check only catches rewrites of the selected records.
+    // Same invariant as readTurnIndexSnapshot and hasSnapshotSignature
+    // (allowAppend); kept inline to reuse the stats already taken, keep the
+    // graded warn, and let a missing file propagate ENOENT rather than fold
+    // into a rewrite error (hasSnapshotSignature returns false on ENOENT).
+    // Pure appends (size grew) stay readable. A rewrite before the append is
+    // not detected: page bodies are read from the live file at the frozen
+    // offsets, so rewritten prefix bytes are served under the frozen cursor
+    // even with a warm index (frozen-prefix digest validation is deferred;
+    // see the design doc's Compatibility and limits section).
+    const frozenLastUpdated = cursor?.lastUpdated ?? snapshot?.lastUpdated;
+    if (
+      frozenLastUpdated !== undefined &&
+      stats.size === snapshotSize &&
+      new Date(stats.mtimeMs).toISOString() !== frozenLastUpdated
+    ) {
+      debugLogger.warn(
+        `snapshot unavailable: equal-size rewrite session=${sessionId} ` +
+          `frozenUpdated=${frozenLastUpdated} ` +
+          `currentUpdated=${new Date(stats.mtimeMs).toISOString()}`,
+      );
+      throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+    }
 
     const physicalIndex = await getCachedIndex({
       filePath,
@@ -4165,9 +5510,16 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
+  lastUserPromptScopes.clear();
+  lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
+  indexCacheOversizedMaxBytesForTest = undefined;
+  maxIndexEstimateBytesForTest = undefined;
+  availableHeapBudgetForTest = undefined;
+  maxLineBytesForTest = undefined;
+  maxAllReplayBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -4197,7 +5549,7 @@ export function setSessionTranscriptIndexBuildCompleteHookForTest(
 }
 
 export function setSessionTranscriptSelectedLineReadHookForTest(
-  hook: (offset: number, length: number) => void,
+  hook: (offset: number, length: number) => void | Promise<void>,
 ): void {
   selectedLineReadHookForTest = hook;
 }
@@ -4207,6 +5559,37 @@ export function setSessionTranscriptIndexCacheMaxBytesForTest(
 ): void {
   indexCacheMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+  maxBytes: number,
+): void {
+  indexCacheOversizedMaxBytesForTest = maxBytes;
+  pruneCache();
+}
+
+export function setSessionTranscriptAvailableHeapBudgetForTest(
+  maxBytes: number | undefined,
+): void {
+  availableHeapBudgetForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxIndexEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxIndexEstimateBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxLineBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxLineBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxAllReplayBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxAllReplayBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

@@ -10,10 +10,17 @@ import {
   escapeXml,
   escapeXmlElementText,
   escapeXmlWithinBudget,
+  TASK_NOTIFICATION_OPEN,
+  TASK_NOTIFICATION_CLOSE,
 } from './xml.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('xml utils', () => {
+  it('preserves the task notification wire tags consumed by existing readers', () => {
+    expect(TASK_NOTIFICATION_OPEN).toBe('<task-notification>');
+    expect(TASK_NOTIFICATION_CLOSE).toBe('</task-notification>');
+  });
+
   it.each([
     ['&', 5, '&amp;', false],
     ['&', 4, '', true],

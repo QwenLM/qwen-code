@@ -11,6 +11,7 @@ import {
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
+import { getMemoryBaseDir } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   AuthType,
   type ChatRecord,
@@ -26,12 +27,10 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   resolveUsageStatisticsEnabled,
-  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -90,6 +89,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { persistRunUsageOnExit } from './utils/usage-persistence.js';
 import { AppEvent, appEvents } from './utils/events.js';
 import { readStdin } from './utils/readStdin.js';
 import {
@@ -220,6 +220,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 }
 
 import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { modsWanted } from './services/display-translation-mod.js';
 import {
   handleUncaughtException,
   isExpectedPtyRaceError,
@@ -436,6 +437,8 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 }
 
+export { persistRunUsageOnExit };
+
 export async function main() {
   profileCheckpoint('main_entry');
   // First thing, before any child can be spawned: an inherited messaging
@@ -505,6 +508,14 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  // The daemon checked this launch environment for collisions before spawning.
+  // Child settings and provider reloads can independently reload workspace .env.
+  const daemonProjectMemoryBase =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    process.env[QWEN_CODE_SERVE_ENV] === '1'
+      ? getMemoryBaseDir()
+      : undefined;
   const conversationsRuntimeProvenance =
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
@@ -699,10 +710,6 @@ export async function main() {
     const npmBunHandoff = selectNpmBunHandoff({
       interactive:
         isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
-      screenReader:
-        argv.screenReader ??
-        settings.merged.ui?.accessibility?.screenReader ??
-        false,
       protocolMode: Boolean(
         isAcpMode ||
           argv.inputFormat === InputFormat.STREAM_JSON ||
@@ -1008,6 +1015,17 @@ export async function main() {
   // cwd, and the startup-level chdir would not propagate. Reject the
   // combination with a clear error rather than silently dropping --worktree.
   let startupWorktreeContext: StartupWorktreeContext | null = null;
+  const startupWorktreeMemoryOwner =
+    argv.worktree === undefined
+      ? undefined
+      : {
+          cwd: process.cwd(),
+          memoryBaseDir: Storage.runWithRuntimeBaseDir(
+            settings.merged.advanced?.runtimeOutputDir,
+            process.cwd(),
+            () => getMemoryBaseDir(),
+          ),
+        };
   if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
     writeStderrLine(
       '--worktree cannot be combined with --acp / --experimental-acp. ' +
@@ -1116,6 +1134,9 @@ export async function main() {
       undefined,
       privateAcpParentCapability === undefined
         ? {
+            ...(!isAcpMode && !isBareMode(argv.bare)
+              ? { modelPreferences: settings.merged.model?.preferences ?? {} }
+              : {}),
             workflowAncestorTrustProvider:
               createLocalWorkflowAncestorTrustProvider(
                 getOperatorTrustSettings(settings),
@@ -1129,6 +1150,15 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+    if (daemonProjectMemoryBase !== undefined) {
+      config.bindProjectMemoryToWorkspace(daemonProjectMemoryBase);
+    }
+    if (startupWorktreeContext && startupWorktreeMemoryOwner) {
+      config.bindProjectMemoryToWorktree(
+        process.cwd(),
+        startupWorktreeMemoryOwner,
+      );
+    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,
@@ -1183,6 +1213,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
+      isAcpMode ||
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
       config.getShellExecutionSandbox?.()
@@ -1252,27 +1283,13 @@ export async function main() {
     }
 
     // Persist session usage for cross-session reports (must run before
-    // config.shutdown() which clears telemetry state).
-    // sessionStartTime is read from uiTelemetryService so it stays correct
-    // after /clear resets the session (reset() updates the internal timestamp).
-    registerCleanup(() => {
-      try {
-        const metrics = uiTelemetryService.getMetrics();
-        const hasActivity = Object.values(metrics.models).some(
-          (m) => m.api.totalRequests > 0,
-        );
-        if (!hasActivity) return;
-        persistSessionUsage({
-          sessionId: config.getSessionId(),
-          startTime: uiTelemetryService.getSessionStartTime(),
-          endTime: new Date(),
-          project: config.getProjectRoot(),
-          metrics,
-        });
-      } catch {
-        // Best-effort — don't block shutdown
-      }
-    });
+    // config.shutdown() which clears telemetry state). In ACP mode each hosted
+    // session persists its own live delta on teardown in QwenAgent; running
+    // the process-wide exit writer here would append a duplicate record under
+    // the bootstrap config's session id.
+    if (!isAcpMode) {
+      registerCleanup(() => persistRunUsageOnExit(config));
+    }
 
     registerCleanup(() => config.shutdownExecutionEnvironments(), {
       first: true,
@@ -1358,9 +1375,16 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    const allowSubscriptionStartupFallback =
+      !config.getExperimentalZedIntegration() &&
+      argv.model === undefined &&
+      argv.authType === undefined;
     markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
+      allowSubscriptionStartupFallback,
+      allowUnlistedSubscriptionModel:
+        deferIdeConnection && allowSubscriptionStartupFallback,
     });
     markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
@@ -1480,7 +1504,7 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
-      if (settings.merged.experimental?.mods) {
+      if (modsWanted(settings)) {
         const { createInteractiveModSession } = await import(
           './services/interactive-mod-session.js'
         );
@@ -1496,11 +1520,9 @@ export async function main() {
       const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
         './ui/opentui/renderer-selection.js'
       );
-      const selection = selectTuiRenderer(
-        undefined,
-        undefined,
-        process.env,
-        config.getScreenReader(),
+      const selection = selectTuiRenderer(undefined, undefined, process.env);
+      const { setTuiRendererOfRecord } = await import(
+        './ui/tui-renderer-of-record.js'
       );
       if (selection.renderer === 'opentui') {
         try {
@@ -1519,6 +1541,7 @@ export async function main() {
             },
           );
           if (started) {
+            setTuiRendererOfRecord('opentui');
             clearCorruptionEnvVars();
             return;
           }
@@ -1542,6 +1565,9 @@ export async function main() {
       } else {
         debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
+      // Reached for the default ink renderer and for every non-strict OpenTUI
+      // boot fallback, so the diagnostic records the renderer actually serving.
+      setTuiRendererOfRecord('ink');
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,

@@ -38,6 +38,7 @@ const catalogController = vi.hoisted(() => ({
 let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
+let blocksState: any[] = [];
 let sessionHasActivePromptValue: boolean;
 let queuedPromptDispatchError:
   | ((text: string) => string | undefined)
@@ -58,7 +59,10 @@ type ToolApprovalTestProps = Parameters<
   typeof import('./messages/ToolApproval').ToolApproval
 >[0];
 let latestToolApprovalProps: ToolApprovalTestProps | undefined;
+let latestAskUserQuestionProps: any;
 let renderRealChatEditor: boolean;
+let renderRealAskUserQuestion: boolean;
+const transcriptScrollToBottom = vi.fn();
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
   | ((tool: {
@@ -81,6 +85,7 @@ const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
 const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const addArtifact = vi.fn(async () => ({}) as any);
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
@@ -101,6 +106,7 @@ const daemonActions = {
   setReasoningEffort,
   setWorkflowMode,
   loadArtifacts,
+  addArtifact,
   getTasks,
   getWorkflowTasks,
   getGoal,
@@ -151,7 +157,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     };
   },
   useStreamingState: () => streamingStateValue,
-  useTranscriptBlocks: () => [],
+  useTranscriptBlocks: () => blocksState,
   useTranscriptHistory: () => ({
     hasMore: false,
     loading: false,
@@ -163,11 +169,13 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
     appendLocalUserMessage,
+    getSnapshot: () => ({ blocks: blocksState }),
   }),
   usePromptStatus: () => 'idle',
   useOptionalWorkspace: () => undefined,
   useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
+    baseUrl: 'https://pane.example/daemon/proxy',
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
     status: connectionState.status,
@@ -210,8 +218,17 @@ vi.mock('../hooks/useMessages', () => ({
   useMessagesFromBlocks: () => messagesState,
 }));
 
+let transcriptBlocksMock: any[] = [];
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
+  // Fresh array per call, like the previous inline literal: consumers memo
+  // on `blocks` identity, and the mocked extractPendingPermission reads a
+  // mutable test variable that must be re-read on every render.
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: (transcriptBlocksMock.length > 0
+      ? transcriptBlocksMock
+      : blocksState
+    ).slice(),
+  }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -232,63 +249,83 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-      data-file-changes={JSON.stringify(
-        [...(props.turnFileChanges?.values() ?? [])].flat(),
-      )}
-    >
-      {props.messages.length}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-review"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'review',
-            kind: 'review',
-            title: 'Turn review',
-            turnId: 'turn-1',
-            changes: [
-              {
-                path: '/w/source.ts',
-                status: 'modified',
-                toolCallId: 'write-0',
-                isArtifact: false,
-                diffs: [],
-              },
-            ],
-          })
-        }
-      />
-    </div>
-  ),
+  TranscriptViewport: forwardRef(function MockTranscriptViewport(
+    props: any,
+    ref: any,
+  ) {
+    useImperativeHandle(ref, () => ({
+      scrollToBottom: transcriptScrollToBottom,
+    }));
+    return (
+      <div
+        data-testid="pane-messages"
+        data-approval={props.pendingApproval ? 'yes' : 'no'}
+        data-responding={String(Boolean(props.isResponding))}
+        data-session-viewport={String(Boolean(props.sessionViewportEnabled))}
+        data-file-changes={JSON.stringify(
+          [...(props.turnFileChanges?.values() ?? [])].flat(),
+        )}
+      >
+        {props.messages.length}
+        {props.failedPromptMessageId ? (
+          <button
+            data-testid="pane-failed-prompt-retry"
+            data-failed-status={props.failedPromptStatus}
+            type="button"
+            onClick={props.onRetryFailedPrompt}
+          >
+            {props.failedPromptMessageId}
+          </button>
+        ) : null}
+        <button
+          data-testid="pane-open-turn-output"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'artifact:turn-artifact',
+              kind: 'artifact',
+              title: 'Turn artifact',
+              turnId: 'turn-1',
+              artifactId: 'turn-artifact',
+              artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+              workspaceCwd: '/w',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-attachment"
+          type="button"
+          onClick={() =>
+            props.onAttachmentPreview?.({
+              name: 'data.json',
+              attachmentId: 'attachment-1',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-review"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'review',
+              kind: 'review',
+              title: 'Turn review',
+              turnId: 'turn-1',
+              changes: [
+                {
+                  path: '/w/source.ts',
+                  status: 'modified',
+                  toolCallId: 'write-0',
+                  isArtifact: false,
+                  diffs: [],
+                },
+              ],
+            })
+          }
+        />
+      </div>
+    );
+  }),
 }));
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
@@ -447,20 +484,31 @@ vi.mock('./messages/ToolApproval', () => ({
   },
 }));
 vi.mock('./messages/AskUserQuestion', () => ({
-  AskUserQuestion: (props: any) => (
-    <button
-      data-testid="ask-approval"
-      data-keyboard-active={String(props.keyboardActive)}
-      onClick={() => props.onConfirm(props.request.id, 'opt')}
-    >
-      ask
-    </button>
-  ),
+  AskUserQuestion: (props: any) => {
+    latestAskUserQuestionProps = props;
+    if (renderRealAskUserQuestion) {
+      return <RealAskUserQuestion {...props} />;
+    }
+    return (
+      <button
+        data-testid="ask-approval"
+        data-keyboard-active={String(props.keyboardActive)}
+        onClick={() => props.onConfirm(props.request.id, 'opt')}
+      >
+        ask
+      </button>
+    );
+  },
 }));
 
 const RealChatEditor = (
   await vi.importActual<typeof import('./ChatEditor')>('./ChatEditor')
 ).ChatEditor;
+const RealAskUserQuestion = (
+  await vi.importActual<typeof import('./messages/AskUserQuestion')>(
+    './messages/AskUserQuestion',
+  )
+).AskUserQuestion;
 const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
@@ -493,11 +541,15 @@ beforeEach(() => {
   };
   streamingStateValue = 'idle';
   pendingPermission = null;
+  blocksState = [];
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   latestToolApprovalProps = undefined;
+  latestAskUserQuestionProps = undefined;
   renderRealChatEditor = false;
+  renderRealAskUserQuestion = false;
+  transcriptScrollToBottom.mockClear();
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
   queuedPromptSessionHasActivePrompt = undefined;
@@ -511,6 +563,9 @@ beforeEach(() => {
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  addArtifact.mockReset();
+  addArtifact.mockResolvedValue({} as any);
+  transcriptBlocksMock = [];
   getTasks.mockReset();
   getWorkflowTasks.mockReset();
   getGoal.mockReset();
@@ -828,7 +883,9 @@ describe('ChatPane', () => {
     act(() => {
       pending = registerContextUsageControls.mock.calls.at(-1)![0].compress();
     });
-    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress');
+    expect(sendPrompt).toHaveBeenCalledExactlyOnceWith('/compress', {
+      suppressInputHistory: true,
+    });
     expect(clearFollowup).toHaveBeenCalledOnce();
     expect(onBeforeContextCompress).toHaveBeenCalledExactlyOnceWith(
       connectionState.sessionId,
@@ -1269,6 +1326,63 @@ describe('ChatPane', () => {
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
 
+  it('renders the Goals-page affordance in the pane strip when wired', () => {
+    // Split-view panes reach the Goals page through this forward; deleting
+    // the `onOpenGoals={onOpenGoals}` line must turn this case red.
+    const onOpenGoals = vi.fn();
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render({ onOpenGoals });
+
+    const openGoals = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] [data-testid="goal-open-goals"]',
+    );
+    if (!openGoals) throw new Error('goals-page affordance was not rendered');
+    act(() => openGoals.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Goals-page affordance in a pane without the Goals surface', () => {
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    expect(
+      container!.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+    // The strip itself still renders — only the navigation affordance is
+    // absent, so the pane keeps its controls.
+    expect(
+      container!.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+  });
+
   it('builds the control request from the freshly fetched Goal', async () => {
     // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
     // not from the possibly-stale snapshot in connection state, or every
@@ -1646,6 +1760,30 @@ describe('ChatPane', () => {
     );
   });
 
+  it('read-only allows tool approvals and hides queue mutations', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    queuedPromptsMock = [
+      {
+        id: 1,
+        text: 'queued next',
+        midTurnState: 'queued',
+        midTurnMessageId: '1',
+      },
+    ];
+    render({ readOnly: true });
+    expect(latestChatEditorProps).toBeUndefined();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-queue')).toBeNull();
+  });
+
+  it('read-only keeps the stopped status without offering resume', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    const stopped = testid('workspace-runtime-stopped');
+    expect(stopped).not.toBeNull();
+    expect(stopped?.querySelector('button')).toBeNull();
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],
@@ -1890,6 +2028,33 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
       mountUnavailableModelTooltip,
     );
+  });
+
+  it('scopes model picker content to its own pane and connected daemon', () => {
+    connectionState.currentModel = 'pane-model';
+    render({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'sess-1',
+      workspaceCwd: '/pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
+    expect(latestChatEditorProps.currentModel).toBe('pane-model');
+
+    const initialScope = latestChatEditorProps.modelPickerScope;
+    messagesState = [
+      ...messagesState,
+      { id: 'm2', role: 'assistant', content: 'Streaming delta' },
+    ];
+    rerender({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toBe(initialScope);
+
+    connectionState.sessionId = 'other-pane-session';
+    rerender({ workspaceCwd: '/other-pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'other-pane-session',
+      workspaceCwd: '/other-pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -2200,6 +2365,7 @@ describe('ChatPane', () => {
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
       submittedPrompt: 'hello there',
+      idempotencyKey: expect.any(String),
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2356,6 +2522,7 @@ describe('ChatPane', () => {
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
       submittedPrompt: '/deploy staging',
+      idempotencyKey: expect.any(String),
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2414,6 +2581,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
       submittedPrompt: '/deploy staging',
+      idempotencyKey: expect.any(String),
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2430,6 +2598,7 @@ describe('ChatPane', () => {
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
       submittedPrompt: '/usr/local/bin/tool',
+      idempotencyKey: expect.any(String),
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
@@ -2496,6 +2665,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
       submittedPrompt: 'with image',
+      idempotencyKey: expect.any(String),
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2512,6 +2682,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('', {
       submittedPrompt: '',
+      idempotencyKey: expect.any(String),
       images,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2545,6 +2716,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
       submittedPrompt: 'check @.husky/',
+      idempotencyKey: expect.any(String),
       inputAnnotations,
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
@@ -2755,12 +2927,13 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('locks the pane when idle prompt admission outcome is unknown', async () => {
+  it('marks an uncertain idle prompt for message-level resend without locking the pane', async () => {
     const onError = vi.fn();
     const onImageIngestionNotice = vi.fn();
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const confirm = vi.spyOn(window, 'confirm');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     sendPrompt.mockImplementationOnce(async (_text, options) => {
+      blocksState = [{ id: 'u-uncertain', kind: 'user', text: 'hi' }];
       options?.onAdmissionStarted?.();
       throw new Error('disconnected');
     });
@@ -2779,54 +2952,57 @@ describe('ChatPane', () => {
       latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
-    expect(commit).not.toHaveBeenCalled();
-    expect(clearFollowup).not.toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledOnce();
+    expect(clearFollowup).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
     expect(onImageIngestionNotice).toHaveBeenCalledWith(
       'warning',
-      expect.stringContaining('uncertain'),
+      expect.stringContaining('Message may not have sent'),
     );
-    const notice = testid('pane-prompt-admission-unknown');
-    expect(notice).not.toBeNull();
-    expect(latestChatEditorProps.disabled).toBe(true);
-    expect(registerContextUsageControls).toHaveBeenLastCalledWith(
-      expect.objectContaining({ canCompress: false }),
-    );
-    await act(async () => {
-      await registerContextUsageControls.mock.calls.at(-1)![0].compress();
-    });
-    expect(sendPrompt).toHaveBeenCalledTimes(1);
-    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
-      '/w',
-    );
-    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
-    act(() => latestOnSubmit!('do not retry'));
-    expect(sendPrompt).toHaveBeenCalledTimes(1);
-
-    act(() => {
-      notice?.querySelectorAll('button').item(0).click();
-    });
-    expect(confirm).toHaveBeenCalledOnce();
-    expect(latestChatEditorProps.disabled).toBe(true);
-
-    confirm.mockReturnValue(true);
-    act(() => {
-      notice?.querySelectorAll('button').item(0).click();
-    });
-    expect(commit).not.toHaveBeenCalled();
+    expect(testid('pane-prompt-admission-unknown')).toBeNull();
     expect(latestChatEditorProps.disabled).toBe(false);
     expect(registerContextUsageControls).toHaveBeenLastCalledWith(
       expect.objectContaining({ canCompress: true }),
     );
-    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
-    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+
+    const retry = testid('pane-failed-prompt-retry');
+    expect(retry).not.toBeNull();
+    expect(retry?.textContent).toBe('u-uncertain');
+    expect(retry?.getAttribute('data-failed-status')).toBe('uncertain');
+    const firstKey = sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+    expect(typeof firstKey).toBe('string');
+
+    await act(async () => {
+      retry?.click();
+      sendPromptAdmit?.();
+      await Promise.resolve();
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(2);
+    expect(sendPrompt).toHaveBeenLastCalledWith(
+      'hi',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        bindBlockId: 'u-uncertain',
+        idempotencyKey: firstKey,
+      }),
+    );
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
     confirm.mockRestore();
     warn.mockRestore();
   });
 
-  it('keeps an unknown admission locked across an unrelated stream', async () => {
+  it('hides the resend indicator during streaming and auto-clears on reply or promptId', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     sendPrompt.mockImplementationOnce(async (_text, options) => {
+      blocksState = [{ id: 'u-stream', kind: 'user', text: 'hi' }];
       options?.onAdmissionStarted?.();
       throw new Error('response lost');
     });
@@ -2836,13 +3012,53 @@ describe('ChatPane', () => {
       latestOnSubmit!('hi');
       await Promise.resolve();
     });
-    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(testid('pane-failed-prompt-retry')).not.toBeNull();
+
+    // Background notification must not clear the indicator.
+    blocksState = [
+      { id: 'u-stream', kind: 'user', text: 'hi' },
+      {
+        id: 'bg-1',
+        kind: 'assistant',
+        text: 'Background notice',
+        meta: { source: 'background_notification' },
+      },
+    ];
+    rerender();
+    expect(testid('pane-failed-prompt-retry')).not.toBeNull();
 
     streamingStateValue = 'responding';
     rerender();
+    expect(testid('pane-failed-prompt-retry')).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
 
-    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
-    expect(latestChatEditorProps.disabled).toBe(true);
+    streamingStateValue = 'idle';
+    rerender();
+    expect(testid('pane-failed-prompt-retry')).not.toBeNull();
+
+    blocksState = [
+      { id: 'u-stream', kind: 'user', text: 'hi', promptId: 'daemon-1' },
+    ];
+    rerender();
+    expect(testid('pane-failed-prompt-retry')).toBeNull();
+
+    // Also auto-clears when an assistant reply lands.
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      blocksState = [{ id: 'u-reply', kind: 'user', text: 'hi again' }];
+      options?.onAdmissionStarted?.();
+      throw new Error('response lost');
+    });
+    await act(async () => {
+      latestOnSubmit!('hi again');
+      await Promise.resolve();
+    });
+    expect(testid('pane-failed-prompt-retry')).not.toBeNull();
+    blocksState = [
+      { id: 'u-reply', kind: 'user', text: 'hi again' },
+      { id: 'a-reply', kind: 'assistant', text: 'ok' },
+    ];
+    rerender();
+    expect(testid('pane-failed-prompt-retry')).toBeNull();
     warn.mockRestore();
   });
 
@@ -2869,7 +3085,7 @@ describe('ChatPane', () => {
     });
 
     expect(commit).toHaveBeenCalledOnce();
-    expect(testid('pane-prompt-admission-unknown')).toBeNull();
+    expect(testid('pane-failed-prompt-retry')).toBeNull();
     expect(latestChatEditorProps.disabled).toBe(false);
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'turn failed' }),
@@ -2877,45 +3093,46 @@ describe('ChatPane', () => {
     );
   });
 
-  it('discards an unknown local payload without hiding its marker', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sendPrompt.mockImplementationOnce(async (_text, options) => {
-      options?.onAdmissionStarted?.();
-      throw new Error('disconnected');
+  it('keeps the pane editable after a definite 413 rejection', async () => {
+    const onError = vi.fn();
+    sendPrompt.mockImplementationOnce(async () => {
+      blocksState = [{ id: 'u-413', kind: 'user', text: 'hi' }];
+      throw new DaemonHttpError(413, undefined, 'Too large');
     });
-    render();
+    render({ onError });
     const commit = vi.fn();
+
     await act(async () => {
       latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
 
-    act(() => {
-      testid('pane-prompt-admission-unknown')
-        ?.querySelectorAll('button')
-        .item(1)
-        .click();
-    });
-
     expect(commit).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(DaemonHttpError),
+      'Failed to send prompt',
+    );
     expect(latestChatEditorProps.disabled).toBe(false);
-    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
-    expect(sendPrompt).toHaveBeenCalledTimes(1);
-    warn.mockRestore();
+    const retry = testid('pane-failed-prompt-retry');
+    expect(retry).not.toBeNull();
+    expect(retry?.getAttribute('data-failed-status')).toBe('failed');
   });
 
-  it('keeps the pane editable after a definite 413 rejection', async () => {
+  it('keeps the draft in the composer when rejection occurs without an appended block', async () => {
     const onError = vi.fn();
     sendPrompt.mockRejectedValueOnce(
       new DaemonHttpError(413, undefined, 'Too large'),
     );
     render({ onError });
+    const commit = vi.fn();
 
     await act(async () => {
-      latestOnSubmit!('hi');
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
 
+    expect(commit).not.toHaveBeenCalled();
+    expect(testid('pane-failed-prompt-retry')).toBeNull();
     expect(onError).toHaveBeenCalledWith(
       expect.any(DaemonHttpError),
       'Failed to send prompt',
@@ -3056,11 +3273,7 @@ describe('ChatPane', () => {
         new MouseEvent('click', { bubbles: true }),
       ),
     );
-    expect(submitPermission).toHaveBeenCalledWith(
-      'perm-1',
-      'proceed',
-      undefined,
-    );
+    expect(submitPermission).toHaveBeenCalledWith('perm-1', 'proceed');
   });
 
   it('routes an AskUserQuestion permission to the AskUserQuestion overlay', () => {
@@ -3620,7 +3833,7 @@ describe('ChatPane', () => {
       latestChatEditorProps.onSelectMode('yolo');
       await expect(
         latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
-      ).rejects.toThrow('still pending');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(submitPermission).not.toHaveBeenCalled();
     expect(latestToolApprovalProps!.disabled).toBe(true);
@@ -3697,7 +3910,7 @@ describe('ChatPane', () => {
     await act(async () => {
       await expect(
         latestToolApprovalProps!.onConfirm('plan-approval', 'restore_previous'),
-      ).rejects.toThrow('permission failed');
+      ).rejects.toThrow('Approval was not accepted');
     });
     expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
     await act(async () =>
@@ -3853,9 +4066,12 @@ describe('ChatPane', () => {
     );
   });
 
-  it('locks uncertain /plan prompt admission instead of permitting a duplicate', async () => {
+  it('recovers an uncertain /plan prompt admission onto the message resend indicator without locking', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     sendPrompt.mockImplementationOnce(async (_text, options) => {
+      blocksState = [
+        { id: 'u-plan', kind: 'user', text: 'explain the migration' },
+      ];
       options?.onAdmissionStarted?.();
       throw new Error('disconnected');
     });
@@ -3863,14 +4079,28 @@ describe('ChatPane', () => {
     await act(async () => {
       latestOnSubmit!('/plan explain the migration');
     });
-    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
-    expect(latestChatEditorProps.disabled).toBe(true);
-    act(() => {
-      latestOnSubmit!('/plan duplicate');
-    });
-    expect(sendPrompt).toHaveBeenCalledOnce();
+    expect(testid('pane-prompt-admission-unknown')).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
     expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
       '/w',
+    );
+    const retry = testid('pane-failed-prompt-retry');
+    expect(retry?.textContent).toBe('u-plan');
+    expect(retry?.getAttribute('data-failed-status')).toBe('uncertain');
+    const planKey = sendPrompt.mock.calls[0]?.[1]?.idempotencyKey;
+
+    await act(async () => {
+      retry?.click();
+      await Promise.resolve();
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(2);
+    expect(sendPrompt).toHaveBeenLastCalledWith(
+      'explain the migration',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        bindBlockId: 'u-plan',
+        idempotencyKey: planKey,
+      }),
     );
     warn.mockRestore();
   });
@@ -3985,6 +4215,24 @@ describe('ChatPane', () => {
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-sub-session',
+      toolName: 'create_sub_session',
+      toolKind: 'other',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: { workspace: '/repos/b' },
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
   it('resolves host at mention providers through a pane ChatEditor', () => {
     renderRealChatEditor = true;
     const atProviders = [
@@ -4061,6 +4309,7 @@ describe('ChatPane continuation errors', () => {
       // Actual action + actual ChatPane/Banner; only SDK request and hook state
       // delivery are simulated. No SSE frames or provider replay are invented.
       const actions = createDaemonSessionActions({
+        getPromptStatus: () => 'idle',
         store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
         sessionRef,
         activePromptsRef: { current: new Map() },
@@ -4157,6 +4406,27 @@ it('requires an explicit resume for a stopped pane', async () => {
   expect(loadSession).toHaveBeenCalledWith('stopped', {
     sessionContext: { kind: 'workspace', cwd: '/workspace' },
   });
+});
+
+it('keeps the pane editor available while deferring sends until history loads', async () => {
+  connectionState.loadingTranscript = true;
+  render();
+
+  expect(latestChatEditorProps?.disabled).toBe(false);
+  expect(latestChatEditorProps?.submitDisabled).toBe(true);
+  expect(latestOnSubmit!('pane draft')).toBe(false);
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connectionState.loadingTranscript = false;
+  rerender();
+  expect(latestChatEditorProps?.submitDisabled).toBe(false);
+  await act(async () => {
+    latestOnSubmit!('pane draft');
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    'pane draft',
+    expect.objectContaining({ submittedPrompt: 'pane draft' }),
+  );
 });
 
 it('fences pane submits while the runtime is stopped and says why', async () => {
@@ -4414,5 +4684,287 @@ describe('pane approval mode allowlist', () => {
     expect(workspaceByCwd).toHaveBeenCalledOnce();
     // A failed scoped read fails closed rather than offering every mode.
     expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});
+
+describe('pane reported-artifact registration (R6-1)', () => {
+  it('registers reported artifacts for the pane session under its own provider', async () => {
+    // Split panes and side tasks render ChatPane under their own
+    // DaemonSessionProvider, so App's single registration mount (main
+    // session only) must not be the only registration site.
+    connectionState.sessionId = 'sess-pane';
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    transcriptBlocksMock = [
+      {
+        kind: 'assistant',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              title: 'report',
+              workspacePath: 'report.html',
+              kind: 'html',
+              storage: 'workspace',
+            },
+          ],
+        },
+      },
+    ];
+    render();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(addArtifact).toHaveBeenCalledTimes(1);
+    expect(addArtifact).toHaveBeenCalledWith({
+      title: 'report',
+      workspacePath: 'report.html',
+      kind: 'html',
+      storage: 'workspace',
+    });
+  });
+});
+
+describe('ChatPane ChatSurface convergence (slice 4)', () => {
+  it('renders through ChatSurface, routes AskUserQuestion submit and dismiss, forwards isResponding, and scrolls transcript on submit', async () => {
+    streamingStateValue = 'responding';
+    pendingPermission = {
+      id: 'ask-1',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick one', options: [{ label: 'Alpha' }] }],
+      },
+    };
+    render();
+    const surface = testid('chat-surface');
+    expect(surface).not.toBeNull();
+    expect(surface?.className).toContain('surface');
+    expect(testid('pane-messages')?.parentElement?.className).toContain('body');
+    expect(testid('pane-messages')?.getAttribute('data-responding')).toBe(
+      'true',
+    );
+    expect(testid('pane-messages')?.getAttribute('data-session-viewport')).toBe(
+      'true',
+    );
+    expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('no');
+    expect(latestChatEditorProps.workspaceFeaturesEnabled).toBe(true);
+
+    // Submit answers through ChatSurface -> controller.respondQuestion.
+    await act(async () => {
+      const ok = await latestAskUserQuestionProps.onConfirm(
+        'ask-1',
+        'allow-once',
+        { '0': 'Alpha' },
+      );
+      expect(ok).toBe(true);
+    });
+    expect(submitPermission).toHaveBeenCalledWith('ask-1', 'allow-once', {
+      '0': 'Alpha',
+    });
+
+    // Dismissing a fresh question routes through controller.respondApproval.
+    pendingPermission = {
+      id: 'ask-2',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick two', options: [{ label: 'Beta' }] }],
+      },
+    };
+    rerender();
+    await act(async () => {
+      const ok = await latestAskUserQuestionProps.onConfirm(
+        'ask-2',
+        'reject-once',
+      );
+      expect(ok).toBe(true);
+    });
+    expect(submitPermission).toHaveBeenCalledWith('ask-2', 'reject-once');
+
+    // Submitting a prompt calls scrollToBottom through ChatSurface.transcriptRef.
+    pendingPermission = null;
+    streamingStateValue = 'idle';
+    rerender();
+    await act(async () => {
+      latestOnSubmit?.('hello pane');
+    });
+    expect(transcriptScrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps composer status chrome mounted and approval-hidden while hiding the editor in readOnly mode', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    expect(testid('chat-surface')).not.toBeNull();
+    expect(container!.querySelector('[data-web-shell-composer]')).toBeNull();
+    expect(testid('pane-streaming')).not.toBeNull();
+    expect(testid('workspace-runtime-stopped')).not.toBeNull();
+    expect(testid('pane-streaming')?.parentElement?.className).not.toContain(
+      'composerHidden',
+    );
+
+    pendingPermission = {
+      id: 'perm-ro',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
+    rerender({ readOnly: true });
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-streaming')?.parentElement?.className).toContain(
+      'composerHidden',
+    );
+  });
+
+  it('releases ExitPlanMode handoff lock when respondToPermission returns false', async () => {
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-unapplied',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    respondToPermission.mockResolvedValueOnce(false);
+    render();
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm(
+          'plan-unapplied',
+          'restore_previous',
+        ),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(latestChatEditorProps.modeControlsDisabled).toBe(false);
+  });
+
+  it('preserves original permission failure and mode-lock causes in onError without double reporting', async () => {
+    const onError = vi.fn();
+    connectionState.currentMode = 'plan';
+    connectionState.planExecutionMode = 'yolo';
+    pendingPermission = {
+      id: 'plan-diag',
+      toolName: 'exit_plan_mode',
+      toolKind: 'switch_mode',
+      options: [{ id: 'restore_previous', kind: 'allow_once' }],
+      content: [],
+    };
+    const modeDeferred = deferred<void>();
+    setApprovalMode.mockReturnValueOnce(modeDeferred.promise);
+    render({ onError });
+
+    // Same-tick mode lock surfaces the localized mode.changePending error once.
+    await act(async () => {
+      latestChatEditorProps.onSelectMode('yolo');
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-diag', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]?.[0] as Error)?.message).toContain(
+      'A mode change or plan confirmation is pending',
+    );
+    expect(onError.mock.calls[0]?.[1]).toBe(
+      'Failed to submit permission choice',
+    );
+
+    await act(async () => {
+      modeDeferred.resolve(undefined);
+      await Promise.resolve();
+    });
+    onError.mockClear();
+
+    // Transport failure surfaces the original daemon error once.
+    const transportErr = new Error('daemon says: plan mode changed');
+    respondToPermission.mockRejectedValueOnce(transportErr);
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('plan-diag', 'restore_previous'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      transportErr,
+      'Failed to submit permission choice',
+    );
+
+    // Mount the real AskUserQuestion card: a failed dismissal must report the
+    // original cause exactly once (no double report from card + pane) and leave
+    // no stale record for a subsequent tool-approval refusal.
+    onError.mockClear();
+    renderRealAskUserQuestion = true;
+    pendingPermission = {
+      id: 'ask-diag',
+      options: [
+        { id: 'allow-once', label: 'Submit', kind: 'allow_once' },
+        { id: 'reject-once', label: 'Ignore', kind: 'reject_once' },
+      ],
+      rawInput: {
+        questions: [{ question: 'Pick', options: [{ label: 'One' }] }],
+      },
+    };
+    rerender({ onError });
+    const dismissErr = new Error('dismiss failed');
+    submitPermission.mockRejectedValueOnce(dismissErr);
+    const ignoreBtn = [...container!.querySelectorAll('button')].find((btn) =>
+      /ignore/i.test(btn.textContent ?? ''),
+    );
+    expect(ignoreBtn).toBeDefined();
+    await act(async () => {
+      ignoreBtn!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      dismissErr,
+      'Failed to submit permission choice',
+    );
+
+    // Next tool-approval refusal (returning false with no thrown cause) must
+    // surface the generic approval-rejection fallback, not the stale dismissErr.
+    onError.mockClear();
+    renderRealAskUserQuestion = false;
+    pendingPermission = {
+      id: 'perm-after-dismiss',
+      toolName: 'write_file',
+      rawInput: {},
+      options: [{ id: 'proceed', kind: 'allow_once' }],
+    };
+    rerender({ onError });
+    submitPermission.mockResolvedValueOnce(false);
+    await act(async () => {
+      await expect(
+        latestToolApprovalProps!.onConfirm('perm-after-dismiss', 'proceed'),
+      ).rejects.toThrow('Approval was not accepted');
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Approval was not accepted',
+    );
+  });
+
+  it('wires onComposerCancel so a failed cancel reports the pane handler error instead of the surface fallback', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    const cancelErr = new Error('daemon cancel boom');
+    cancel.mockRejectedValueOnce(cancelErr);
+    render({ onError });
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(cancelErr, 'Failed to cancel request');
   });
 });

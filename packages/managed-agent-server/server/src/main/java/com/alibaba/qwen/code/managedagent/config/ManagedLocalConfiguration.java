@@ -36,8 +36,7 @@ public class ManagedLocalConfiguration {
             throw new IllegalStateException("Managed local does not expose an H2 Web console");
         }
         if (server.getAddress() == null || !server.getAddress().isLoopbackAddress()
-                || !BrokerSecurity.isLoopback(properties.getInternalServer().getAddress())
-                || !BrokerSecurity.isLoopback(properties.getRuntimeBroker().getHost())) {
+                || !BrokerSecurity.isLoopback(properties.getInternalServer().getAddress())) {
             throw new IllegalStateException("Managed local listeners must use loopback addresses");
         }
         requireLoopbackUrl(properties.getHarness().getBaseUrl());
@@ -47,7 +46,7 @@ public class ManagedLocalConfiguration {
                 || !"local-process".equals(broker.getProvisioner())
                 || !broker.isDurableLocalProcess() || !broker.isVerifiedWorkspaceRecoveryEnabled()
                 || broker.getSsh().isEnabled() || !broker.getSsh().getNodes().isEmpty()
-                || !broker.getWorkspaceMounts().isEmpty() || !broker.getResidentWorkspaces().isEmpty()
+                || !broker.getWorkspaceMounts().isEmpty()
                 || !directory.resolve("runtime").toString().equals(broker.getStateDirectory())
                 || !directory.resolve("legacy").toString().equals(broker.getWorkspaceCwd())
                 || !directory.resolve("workspaces").toString().equals(broker.getWorkspaceCreationRoot())) {

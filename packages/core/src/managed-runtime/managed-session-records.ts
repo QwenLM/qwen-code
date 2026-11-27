@@ -29,14 +29,7 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
-// Sessions stay readable by every deployed reader: every domain the log
-// may hold, `monitor_run` included, parses in readers since #12837
-// (v0.24.7). A `managed-session/2` stamp on each new Session would make a
-// rollback or a mixed-version rollout lose access to every Session
-// created in between (H3 round-5 verification matrix), so the stamp
-// rises only when a change genuinely breaks an older reader mid-scan.
-export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
-export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/2';
+export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -54,6 +47,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'tool.intent',
   'action.changed',
   'tool.receipt',
+  'tool.measured',
   'checkpoint.committed',
   'context.compacted',
   'cancel.requested',
@@ -263,6 +257,9 @@ export function assertManagedSessionChildContinuationEnabled(): void {
  */
 export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
   'email',
+  'dingtalk',
+  'github',
+  'wecom',
 ] as const);
 
 /**
@@ -395,7 +392,7 @@ export interface ManagedSessionEvent {
 
 export interface ManagedSessionHeader {
   readonly formatVersion: number;
-  readonly minimumReader: string;
+  readonly minimumReader?: string;
   readonly sessionKey: ManagedSessionKey;
   readonly engine: 'managed';
   readonly definitionRef: ManagedSessionDurableRef;
@@ -732,6 +729,20 @@ export function managedSessionKeysEqual(
   );
 }
 
+/** Whether two references name the same resource with the same identity. */
+export function managedSessionDurableRefsEqual(
+  left: ManagedSessionDurableRef,
+  right: ManagedSessionDurableRef,
+): boolean {
+  return (
+    left.resourceId === right.resourceId &&
+    left.kind === right.kind &&
+    left.schemaVersion === right.schemaVersion &&
+    left.byteLength === right.byteLength &&
+    left.digest === right.digest
+  );
+}
+
 export function assertManagedSessionDurableRef(
   value: ManagedSessionJsonValue | undefined,
   label: string,
@@ -905,7 +916,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         deadline: 'timeOrNull',
         admissionRef: 'ref',
+        notBefore: 'timeOrNull',
       },
+      optional: ['notBefore'],
     },
     'wake.requested': {
       fields: {
@@ -949,8 +962,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         modelAttemptId: 'idOrNull',
         parentMessageId: 'idOrNull',
+        diagnosticsRef: 'ref',
       },
-      optional: ['modelAttemptId'],
+      optional: ['modelAttemptId', 'diagnosticsRef'],
     },
     'tool.intent': {
       fields: {
@@ -960,7 +974,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         toolDefinitionRef: 'ref',
         argsRef: 'ref',
         outcomeSource: 'text',
+        diagnosticsRef: 'ref',
       },
+      optional: ['diagnosticsRef'],
     },
     'message.delta': {
       fields: {
@@ -999,6 +1015,13 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         optionsRef: 'refOrNull',
         state: 'text',
         decisionRef: 'refOrNull',
+      },
+    },
+    'tool.measured': {
+      fields: {
+        executionCallId: 'id',
+        toolOutcomeRef: 'ref',
+        measurementsRef: 'ref',
       },
     },
     'tool.receipt': {
@@ -1101,6 +1124,7 @@ const EVENT_ACTORS: Readonly<
   'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
+  'tool.measured': ['harness'],
   'checkpoint.committed': ['harness'],
   'context.compacted': ['harness'],
   'cancel.requested': ['trusted_entry'],
@@ -1126,6 +1150,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
+  'tool.measured': true,
   'checkpoint.committed': true,
   'context.compacted': true,
   'cancel.requested': false,
@@ -1468,6 +1493,7 @@ function assertPayloadRules(
     case 'tool.intent':
     case 'message.delta':
     case 'tool.receipt':
+    case 'tool.measured':
     case 'cancel.requested':
     case 'turn.settled':
       return;
@@ -1778,16 +1804,18 @@ export function parseManagedSessionHeader(
     fail('header.formatVersion is not supported by this reader.');
   }
   const minimumReader = record['minimumReader'];
-  const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
-  const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_READER_CAPABILITY,
-  );
-  if (
-    requiredReaderVersion === null ||
-    currentReaderVersion === null ||
-    requiredReaderVersion > currentReaderVersion
-  ) {
-    fail('header.minimumReader is not supported by this reader.');
+  if (minimumReader !== undefined) {
+    const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
+    const currentReaderVersion = managedSessionReaderVersion(
+      MANAGED_SESSION_READER_CAPABILITY,
+    );
+    if (
+      requiredReaderVersion === null ||
+      currentReaderVersion === null ||
+      requiredReaderVersion > currentReaderVersion
+    ) {
+      fail('header.minimumReader is not supported by this reader.');
+    }
   }
   if (record['engine'] !== 'managed') {
     fail('header.engine must be managed.');
@@ -1795,7 +1823,9 @@ export function parseManagedSessionHeader(
   const proof = record['baseTranscriptProof'];
   return {
     formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-    minimumReader: minimumReader as string,
+    ...(minimumReader === undefined
+      ? {}
+      : { minimumReader: minimumReader as string }),
     sessionKey: assertManagedSessionKey(
       record['sessionKey'],
       'header.sessionKey',

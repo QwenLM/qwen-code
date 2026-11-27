@@ -69,6 +69,22 @@ describe('localizeBuiltinDescriptions (commands)', () => {
     );
   });
 
+  it('re-localizes /pr so the slash menu matches the UI language', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'pr',
+        description: 'Bind a GitHub pull request to this session',
+        source: 'builtin-command',
+      },
+    ];
+    expect(localizeBuiltinDescriptions(commands, zh)[0].description).toBe(
+      '将 GitHub 拉取请求绑定到本会话',
+    );
+    expect(localizeBuiltinDescriptions(commands, en)[0].description).toBe(
+      'Bind a GitHub pull request to this session',
+    );
+  });
+
   it('leaves a custom command that shadows a built-in name untouched', () => {
     const commands: CommandInfo[] = [
       { name: 'export', description: 'my project exporter', source: 'custom' },

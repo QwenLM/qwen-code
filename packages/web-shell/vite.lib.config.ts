@@ -1,22 +1,95 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import postcss from 'postcss';
+import postcss, { type AtRule, type ChildNode, type Root } from 'postcss';
 import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
 import { WEB_SHELL_BUILD_TARGET } from './vite.config';
 
-const COMPONENT_SCOPE =
-  ':where([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn], [data-web-shell-root][data-web-shell-shadcn] *, [data-web-shell-portal-root][data-web-shell-shadcn] *)';
-const COMPONENT_ROOT_SCOPE =
-  ':is([data-web-shell-root]:where([data-web-shell-shadcn]), [data-web-shell-portal-root]:where([data-web-shell-shadcn]))';
+const COMPONENT_SCOPE_PRELUDE =
+  '([data-web-shell-root][data-web-shell-shadcn], [data-web-shell-portal-root][data-web-shell-shadcn])';
+const COMPONENT_ROOT_SCOPE_RE =
+  /:is\(\s*\[data-web-shell-root\]:where\(\[data-web-shell-shadcn\]\)\s*,\s*\[data-web-shell-portal-root\]:where\(\[data-web-shell-shadcn\]\)\s*\)/g;
 
-function scopeComponentCss(css: string): string {
-  const root = postcss.parse(css);
-  const scopeNode = selectorParser().astSync(COMPONENT_SCOPE).first.first;
-  if (!scopeNode) throw new Error('Invalid WebShell component CSS scope');
+function scopeRuleSelector(
+  selectorText: string,
+  scopeWhereTemplate: selectorParser.Node,
+): string {
+  return selectorParser((selectors) => {
+    const originals = selectors.nodes.slice();
+    selectors.removeAll();
+    for (const selector of originals) {
+      const first = selector.first;
+      if (first?.type === 'pseudo' && first.value === ':scope') {
+        selectors.append(selector);
+        continue;
+      }
+      // Inside @scope, an unprefixed selector implicitly prepends
+      // `:where(:scope) ` (descendant-only), so it would miss classes placed
+      // directly on `[data-web-shell-root]` (e.g. `.app`, `.themeDark`,
+      // `.appChatEmpty .content`). Emit a zero-specificity `:where(:scope)`
+      // compound branch alongside the descendant selector so both the scope
+      // root itself and its descendants match without universal `*` rules.
+      const rootSelector = selector.clone();
+      const rootFirst = rootSelector.first;
+      const scopeWhere = scopeWhereTemplate.clone();
+      if (rootFirst?.type === 'universal') {
+        rootFirst.replaceWith(scopeWhere);
+      } else if (rootFirst?.type === 'tag') {
+        rootSelector.insertAfter(rootFirst, scopeWhere);
+      } else {
+        rootSelector.prepend(scopeWhere);
+      }
+      selectors.append(rootSelector);
+      selectors.append(selector);
+    }
+  }).processSync(selectorText);
+}
+
+function isInsideKeyframes(node: ChildNode): boolean {
+  let parent = node.parent;
+  while (parent) {
+    if (
+      parent.type === 'atrule' &&
+      parent.name.toLowerCase().endsWith('keyframes')
+    ) {
+      return true;
+    }
+    parent = parent.parent;
+  }
+  return false;
+}
+
+function hoistNestedKeyframes(container: AtRule): AtRule[] {
+  const hoisted: AtRule[] = [];
+  container.walkAtRules((atRule) => {
+    if (!atRule.name.toLowerCase().endsWith('keyframes')) return;
+    const wrappers: Array<{ name: string; params: string }> = [];
+    let current = atRule.parent;
+    while (current && current.type === 'atrule') {
+      wrappers.push({ name: current.name, params: current.params });
+      if (current === container) break;
+      current = current.parent;
+    }
+    atRule.remove();
+    let wrapped: AtRule = atRule;
+    for (const wrapper of wrappers) {
+      const outer = postcss.atRule({
+        name: wrapper.name,
+        params: wrapper.params,
+      });
+      outer.append(wrapped);
+      wrapped = outer;
+    }
+    hoisted.push(wrapped);
+  });
+  return hoisted;
+}
+
+function scopeComponentCss(root: Root): void {
   const keyframeNames = new Map<string, string>();
   const propertyNames = new Map<string, string>();
 
@@ -51,37 +124,92 @@ function scopeComponentCss(css: string): string {
       );
     }
   });
+  const scopeWhereTemplate =
+    selectorParser().astSync(':where(:scope)').first.first;
+  if (!scopeWhereTemplate) throw new Error('Invalid WebShell :scope selector');
+
   root.walkRules((rule) => {
-    let parent = rule.parent;
-    while (parent) {
-      if (
-        parent.type === 'atrule' &&
-        parent.name.toLowerCase().endsWith('keyframes')
-      ) {
-        return;
-      }
-      parent = parent.parent;
-    }
+    if (isInsideKeyframes(rule)) return;
     if (
       rule.selectors.every(
         (selector) => selector === ':root' || selector === ':host',
       )
     ) {
-      rule.selector = COMPONENT_ROOT_SCOPE;
+      rule.selector = ':scope';
       return;
     }
-    rule.selector = selectorParser((selectors) => {
-      selectors.each((selector) => {
-        const first = selector.first;
-        if (first?.type === 'tag' || first?.type === 'universal') {
-          selector.insertAfter(first, scopeNode.clone());
-        } else {
-          selector.prepend(scopeNode.clone());
-        }
-      });
-    }).processSync(rule.selector);
+    const simplified = rule.selector.replace(COMPONENT_ROOT_SCOPE_RE, ':scope');
+    rule.selector = scopeRuleSelector(simplified, scopeWhereTemplate);
   });
-  return root.toString();
+
+  // Global declarative at-rules (@charset, @import, @font-face, @property,
+  // @keyframes) cannot live inside @scope, so hoist them to the top level
+  // while keeping all style rules in their original cascade order.
+  const preludeNodes: ChildNode[] = [];
+  const hoistedGlobals: ChildNode[] = [];
+  const scopedNodes: ChildNode[] = [];
+
+  root.each((node) => {
+    node.remove();
+    if (node.type === 'atrule') {
+      const name = node.name.toLowerCase();
+      if (name === 'charset' || name === 'import') {
+        preludeNodes.push(node);
+        return;
+      }
+      if (
+        name === 'font-face' ||
+        name === 'property' ||
+        name.endsWith('keyframes')
+      ) {
+        hoistedGlobals.push(node);
+        return;
+      }
+      if (name === 'media' || name === 'supports') {
+        hoistedGlobals.push(...hoistNestedKeyframes(node));
+        if (!node.nodes || node.nodes.length === 0) return;
+      }
+    }
+    scopedNodes.push(node);
+  });
+
+  for (const node of preludeNodes) root.append(node);
+  for (const node of hoistedGlobals) root.append(node);
+
+  let currentScope: AtRule | null = null;
+  const flushScope = () => {
+    if (currentScope) {
+      root.append(currentScope);
+      currentScope = null;
+    }
+  };
+
+  for (const node of scopedNodes) {
+    if (node.type === 'atrule' && node.name.toLowerCase() === 'layer') {
+      flushScope();
+      if (node.nodes && node.nodes.length > 0) {
+        const innerScope = postcss.atRule({
+          name: 'scope',
+          params: COMPONENT_SCOPE_PRELUDE,
+        });
+        node.each((child) => {
+          child.remove();
+          innerScope.append(child);
+        });
+        node.append(innerScope);
+      }
+      root.append(node);
+      continue;
+    }
+    if (!currentScope) {
+      currentScope = postcss.atRule({
+        name: 'scope',
+        params: COMPONENT_SCOPE_PRELUDE,
+      });
+    }
+    currentScope.append(node);
+  }
+  flushScope();
 }
 
 function escapeRegExp(value: string): string {
@@ -103,7 +231,9 @@ function injectCssModules(): Plugin {
             typeof item.source === 'string'
               ? item.source
               : Buffer.from(item.source).toString('utf8');
-          return scopeComponentCss(source);
+          const root = postcss.parse(source);
+          scopeComponentCss(root);
+          return root.toString();
         })
         .join('\n');
       if (!css) return;
@@ -165,6 +295,22 @@ function injectCssModules(): Plugin {
 // Windows build would blow the budget this exists to protect.
 const TRANSCRIPT_STUBS = new Map(
   [
+    [
+      './client/components/messages/AssistantMessageRow.tsx',
+      './client/components/messages/AssistantMessageRow.transcript-stub.tsx',
+    ],
+    [
+      './client/components/messages/ThinkingBody.tsx',
+      './client/components/messages/ThinkingBody.transcript-stub.tsx',
+    ],
+    [
+      './client/components/streaming-tail.ts',
+      './client/components/streaming-tail.transcript-stub.ts',
+    ],
+    [
+      './client/components/messages/HookStatistics.tsx',
+      './client/components/messages/HookStatistics.transcript-stub.tsx',
+    ],
     [
       './client/components/message-deletion-messages.ts',
       './client/components/message-deletion-messages.transcript-stub.ts',
@@ -238,6 +384,30 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-mcp-messages.ts',
       './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
+    [
+      './client/components/managed/managed-artifact-library-messages.ts',
+      './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/workspace-artifact-library-messages.ts',
+      './client/components/artifacts/workspace-artifact-library-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/sidebar/archived-sessions-messages.ts',
+      './client/components/sidebar/archived-sessions-messages.transcript-stub.ts',
+    ],
+    ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
+    ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],
+    ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
+    ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
+    ['./client/i18n-ru-part3.ts', './client/i18n-ru-part3.transcript-stub.ts'],
+    ['./client/i18n-ru-part4.ts', './client/i18n-ru-part4.transcript-stub.ts'],
+    ['./client/i18n-ru-part5.ts', './client/i18n-ru-part5.transcript-stub.ts'],
+    ['./client/i18n-ru-part6.ts', './client/i18n-ru-part6.transcript-stub.ts'],
+    [
+      './client/i18n-ru-remainder.ts',
+      './client/i18n-ru-remainder.transcript-stub.ts',
+    ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
     normalizePath(resolve(__dirname, stub)),
@@ -263,11 +433,33 @@ function stubTranscriptModules(): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
+  css: {
+    postcss: {
+      plugins: [
+        {
+          postcssPlugin: 'scope-web-shell-terminal-css',
+          Once(root) {
+            const file = normalizePath(root.source?.input.file ?? '').replace(
+              /\?.*$/,
+              '',
+            );
+            if (file.endsWith('/@xterm/xterm/css/xterm.css')) {
+              scopeComponentCss(root);
+            }
+          },
+        },
+      ],
+    },
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -285,8 +477,12 @@ export default defineConfig(({ mode }) => ({
     jsxDev: false,
   },
   build: {
-    emptyOutDir: false,
-    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
+    // Only the managed-host pass owns its outDir, so it can safely empty it;
+    // the other passes share `dist/` with the app build.
+    emptyOutDir: mode === 'managed-host',
+    // Outside `dist/`: the app build empties that directory, which would
+    // silently delete a host bundle a maintainer had just produced.
+    outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -336,9 +532,7 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
-          'remark-math',
-          'rehype-katex',
-          'mermaid',
+          'hast-util-from-html-isomorphic',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',

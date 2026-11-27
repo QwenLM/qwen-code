@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 
@@ -48,11 +50,29 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsModelSelection() { return false; }
 
+    public default boolean supportsPersonalMemory() { return false; }
+
     public default boolean supportsModelConfiguration() { return false; }
 
     public default boolean supportsUserMessageQueue() { return false; }
 
     public default boolean supportsContextCompression() { return false; }
+
+    public default boolean supportsSideQueries() { return false; }
+
+    /** Selects an instance without acquiring or changing Session placement. */
+    public default SideQueryTarget prepareSideQuery() {
+        throw new UnsupportedOperationException("Side queries are unavailable");
+    }
+
+    public interface SideQueryTarget extends AutoCloseable {
+        public String instanceId();
+        public String bootId();
+        public Map<String, Object> submit(Map<String, Object> body);
+        public Map<String, Object> status(String queryId, Map<String, Object> claim);
+        public void cancel(String queryId, Map<String, Object> claim);
+        @Override public void close();
+    }
 
     @FunctionalInterface
     public interface ContextCompressionSubmission {
@@ -94,7 +114,56 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
 
+    public default boolean supportsClientFiles() { return false; }
+
+    /**
+     * Session-aware client-files admission: must answer the same question the
+     * register route answers, so the capability is never advertised for a
+     * Session whose registration the Harness would refuse (foregroundOnly or
+     * no tool profile). Defaults to the parameterless capability.
+     */
+    public default boolean supportsClientFiles(StoreModels.SessionRecord session) {
+        return supportsClientFiles();
+    }
+
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public default Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException("Client files registration is unavailable");
+    }
+
     public default boolean supportsSessionExtensions() { return false; }
+
+    public default boolean supportsPackagePreparation() { return false; }
+
+    public record PreparedPackage(Map<String, Object> descriptor, InputStream archive) implements AutoCloseable {
+        @Override public void close() throws IOException { archive.close(); }
+    }
+
+    public default PreparedPackage preparePackage(Map<String, Object> metadata, InputStream source) {
+        throw new UnsupportedOperationException("Managed package preparation is unavailable");
+    }
+
+    public default Map<String, Object> inspectPackage(Map<String, Object> metadata, InputStream source) {
+        throw new UnsupportedOperationException("Managed package inspection is unavailable");
+    }
+
+    public default Map<String, Object> previewPackage(Map<String, Object> metadata, InputStream source) {
+        throw new UnsupportedOperationException("Managed package preview is unavailable");
+    }
+
+    public default boolean supportsRuntimeSkillImport() { return false; }
+
+    public default Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
 
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         throw new UnsupportedOperationException("Extension management is unavailable");
@@ -112,6 +181,10 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsLifecycle(String profile) {
         return WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+    }
+
+    default boolean supportsSavedLifecycle(String profile) {
+        return supportsLifecycle(profile);
     }
 
     public default void prepareLifecycleResources(StoreModels.OperationRecord operation) {
@@ -198,6 +271,14 @@ public interface HarnessConnector extends AutoCloseable {
 
     /** Inspects an existing attachment without loading or acquiring anything. */
     public default RecoveryStatus inspectRecovery(String tenantId, String sessionId, String promptId) {
+        return null;
+    }
+
+    /**
+     * Reads resident evidence for a Session view without supplying replay identity.
+     * Returns null when the connector has no resident evidence. A failed read throws.
+     */
+    public default RecoveryStatus inspectUnattachedRecovery(StoreModels.SessionRecord session, String promptId) {
         return null;
     }
 
@@ -340,8 +421,15 @@ public interface HarnessConnector extends AutoCloseable {
      * Loads a Session whose committed wake nobody holds, so its wake pump runs
      * the waiting input (EventTransport wake consumer, phase MQ2c). A wake
      * drives new work, so this takes the new-work admission the relay verbs
-     * take. Returns false, loading nothing, when this node already holds an
-     * attachment for the Session.
+     * take. The caller must have observed no live writer under the SQL wake
+     * fence: under that fence a cached attachment is stale (a suspended
+     * Session's sealed writer leaves one behind), so this removes exactly the
+     * observed reference and its recovery marker before the recovery load.
+     * The MCP management cache holds its own references (a management-only
+     * load never publishes into the attachment map), so its observed
+     * reference is evicted under the same per-key identity rule.
+     * A concurrent load that published a newer attachment keeps it, and this
+     * returns false, loading nothing, when the Session is already held.
      */
     public default boolean activateForWake(String tenantId, String sessionId) {
         throw new UnsupportedOperationException(

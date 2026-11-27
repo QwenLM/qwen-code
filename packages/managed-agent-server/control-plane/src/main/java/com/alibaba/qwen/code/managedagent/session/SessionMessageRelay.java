@@ -174,6 +174,18 @@ public class SessionMessageRelay {
                 }
             }
         } catch (RuntimeException error) {
+            if (error instanceof HarnessHttpFailure http
+                    && ("hosted_session_closing".equals(http.getErrorCode())
+                            || "hosted_session_open_busy"
+                                    .equals(http.getErrorCode()))) {
+                // A Session a step must load is tearing down or out of
+                // cold-open slots: a wait on either side, as for a command,
+                // never an attempt. A suspended or Action-parked child meets
+                // it on every step that reloads it.
+                store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                        now + LEASE_MS, now);
+                return;
+            }
             defer(row, pending.domain(), error, now);
         }
     }
@@ -592,11 +604,15 @@ public class SessionMessageRelay {
                     || "hosted_turn_recovery_required"
                             .equals(error.getErrorCode())
                     || "hosted_session_closing".equals(error.getErrorCode())
+                    || "hosted_session_open_busy".equals(error.getErrorCode())
                     || "session_command_blocked".equals(error.getErrorCode())) {
                 // A blocked or closing lead is a wait, not a failure — the
                 // attempt budget is for real faults. A sender whose run
                 // has not attached yet waits the same way: the control
-                // plane's attach commit may trail this execute.
+                // plane's attach commit may trail this execute. The wait
+                // is bounded by the Harness itself: a teardown that cannot
+                // finish escalates to hosted_session_teardown_blocked,
+                // which is a real fault here and spends the attempt budget.
                 store.scheduleRetry(row, owner, now + HEARTBEAT_MS,
                         now + LEASE_MS, now);
                 return;

@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -31,21 +31,21 @@ class ManagedOperationSchemaUpgradeTest {
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("t", "s");
+        String operationRef = ManagedIdentityRefs.operationRef("CLOSE", "t", "SESSION", "s", "s", "op-1");
         jdbc.update(
                 "INSERT INTO ma_operation"
-                    + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,session_id,"
-                    + "target_kind,target_key,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,gmt_create,gmt_modified)"
-                    + " VALUES (?,?,?,'CLOSE',?,?,'SESSION',?,'digest','{}',"
+                    + " (operation_ref,scope_kind,scope_id,operation_id,operation_kind,tenant_id,session_id,"
+                    + "target_kind,target_id,request_digest,request_json,state,phase,admission_stage,delivery_state,session_status_before,gmt_create,gmt_modified)"
+                    + " VALUES (?,'SESSION',?,?,'CLOSE',?,?,'SESSION',?,'digest','{}',"
                     + "'PENDING','PENDING','JAVA_DURABLE','PENDING','ACTIVE',0,0)",
-                ManagedSchemaKeys.key("operation"),
-                scope,
+                operationRef,
+                "s",
                 "op-1",
                 "t",
                 "s",
-                ManagedSchemaKeys.key("s"));
+                "s");
         assertThat(store.findOperation("t", "s", "op-1"))
                 .hasValueSatisfying(
                         operation -> {
@@ -57,9 +57,9 @@ class ManagedOperationSchemaUpgradeTest {
         jdbc.update(
                 "UPDATE ma_operation SET"
                     + " lifecycle_protocol_version=1,target_cwd_relative=?,expected_context_revision=2,result_context_revision=3"
-                    + " WHERE operation_key=?",
+                    + " WHERE operation_ref=?",
                 ".",
-                ManagedSchemaKeys.key("operation"));
+                operationRef);
         assertThat(store.findOperation("t", "s", "op-1"))
                 .hasValueSatisfying(
                         operation -> {

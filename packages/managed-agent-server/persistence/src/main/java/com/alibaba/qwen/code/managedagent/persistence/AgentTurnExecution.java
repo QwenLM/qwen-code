@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -23,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 final class AgentTurnExecution {
     private final AgentEventJournal eventJournal;
@@ -32,6 +32,7 @@ final class AgentTurnExecution {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final JdbcJournalPacks packs;
 
     AgentTurnExecution(AgentEventJournal eventJournal,
             AgentMessageProjection messageProjection,
@@ -39,7 +40,8 @@ final class AgentTurnExecution {
             AgentStoreRows storeRows,
             JdbcTemplate jdbc,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            JdbcJournalPacks packs) {
         this.eventJournal = eventJournal;
         this.messageProjection = messageProjection;
         this.sessionCommands = sessionCommands;
@@ -47,6 +49,7 @@ final class AgentTurnExecution {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.packs = packs;
     }
 
     List<DispatchTarget> findDispatchable(long now, int limit) {
@@ -54,7 +57,7 @@ final class AgentTurnExecution {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -68,19 +71,18 @@ final class AgentTurnExecution {
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
                         + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
-                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
+                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
                         result.getString("turn_id")), now, now, limit);
     }
 
-    Optional<TurnRecord> claimTurn(String tenantId, String sessionId,
-            String turnId, String owner, Duration leaseDuration) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    Optional<TurnRecord> claimTurn(String tenantId, String sessionId, String turnId, String owner, Duration leaseDuration) {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " dispatch_owner = ?, dispatch_lease_until = ?,"
+                        + " error_code = CASE WHEN error_code = ? THEN NULL ELSE error_code END,"
                         + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ? AND turn_id = ?"
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
@@ -89,24 +91,20 @@ final class AgentTurnExecution {
                         + " NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR NOT EXISTS"
                         + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
                         + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
-                owner, now + leaseDuration.toMillis(), now, tenantId,
-                sessionId, turnId, now, now);
+                owner, now + leaseDuration.toMillis(), AgentStateStore.HARNESS_ACTION_PARKED,
+                now, tenantId, sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
                 : storeRows.findTurn(tenantId, sessionId, turnId);
     }
 
-    boolean renewTurn(String tenantId, String sessionId,
-            String turnId, String owner, Duration leaseDuration) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    boolean renewTurn(String tenantId, String sessionId, String turnId, String owner, Duration leaseDuration) {
         long now = clock.millis();
         return jdbc.update("UPDATE ma_turn SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", dispatch_lease_until = ?, version = version + 1 WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND dispatch_owner = ? AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND dispatch_lease_until >= ?",
                 now + leaseDuration.toMillis(), tenantId, sessionId, turnId,
                 owner, now) == 1;
     }
 
-    void releaseTurnLease(String tenantId, String sessionId,
-            String turnId, String owner) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    void releaseTurnLease(String tenantId, String sessionId, String turnId, String owner) {
         jdbc.update("UPDATE ma_turn SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, version = version +"
                         + " 1 WHERE tenant_id = ? AND session_id = ? AND"
@@ -115,10 +113,8 @@ final class AgentTurnExecution {
                 tenantId, sessionId, turnId, owner);
     }
 
-    boolean markTurnRecoveryBlocked(String tenantId,
-            String sessionId, String turnId, String owner,
-            String errorCode, String errorMessage) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
+            String turnId, String owner, String errorCode, String errorMessage) {
         long now = clock.millis();
         Long retryAfter = AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(errorCode)
                 ? now + 15_000L : null;
@@ -136,9 +132,8 @@ final class AgentTurnExecution {
                 owner, now, errorCode, AgentStateStore.HARNESS_RECOVERY_BLOCKED) == 1;
     }
 
-    boolean markTurnFailureRecovery(String tenantId, String sessionId,
-            String turnId, String owner, String message) {
-        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+    boolean markTurnFailureRecovery(String tenantId, String sessionId, String turnId, String owner, String message) {
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
         TurnRecord turn = locked.turn();
         long now = clock.millis();
         String diagnostic = AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
@@ -152,9 +147,8 @@ final class AgentTurnExecution {
                 tenantId, sessionId, turnId, owner, now) == 1;
     }
 
-    boolean requestRecoveryRecheck(String tenantId, String sessionId,
-            String turnId) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+    boolean requestRecoveryRecheck(String tenantId, String sessionId, String turnId) {
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         long now = clock.millis();
         return jdbc.update("UPDATE ma_turn SET retry_after = ?, gmt_modified = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND session_id = ?"
@@ -173,7 +167,6 @@ final class AgentTurnExecution {
     boolean parkTurnForRuntimeRecovery(String tenantId,
             String sessionId, String turnId, String owner, String message,
             long retryAfter) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         long now = clock.millis();
         // D7-2: the park keeps the Turn active so its input stays unsettled.
         // Only a proven cancel may settle it; the recheck drives that cancel.
@@ -188,8 +181,7 @@ final class AgentTurnExecution {
                 now, tenantId, sessionId, turnId, owner, now) == 1;
     }
 
-    void deferTurnRetry(String tenantId, String sessionId,
-            String turnId, String owner, long retryAfter) {
+    void deferTurnRetry(String tenantId, String sessionId, String turnId, String owner, long retryAfter) {
         scheduleTurnRetry(tenantId, sessionId, turnId, owner, retryAfter,
                 false);
     }
@@ -197,7 +189,6 @@ final class AgentTurnExecution {
     void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter,
             boolean budgetExempt) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE ma_turn SET retry_count = retry_count"
                         + " + 1, consecutive_failures = consecutive_failures"
                         + " + 1, budget_exempt_failures ="
@@ -211,9 +202,8 @@ final class AgentTurnExecution {
                 sessionId, turnId, owner);
     }
 
-    boolean bindHarness(String tenantId, String sessionId,
-            String turnId, String owner, String harnessBootId) {
-        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+    boolean bindHarness(String tenantId, String sessionId, String turnId, String owner, String harnessBootId) {
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
         SessionRecord session = locked.session();
         TurnRecord turn = locked.turn();
         long now = clock.millis();
@@ -241,7 +231,7 @@ final class AgentTurnExecution {
     boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId) {
-        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
         SessionRecord session = locked.session();
         TurnRecord turn = locked.turn();
         long now = clock.millis();
@@ -269,9 +259,7 @@ final class AgentTurnExecution {
         return updated == 1;
     }
 
-    void markSubmissionAttempted(String tenantId, String sessionId,
-            String turnId, String owner) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    void markSubmissionAttempted(String tenantId, String sessionId, String turnId, String owner) {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " is_submission_attempted = TRUE, gmt_modified = ?,"
@@ -293,9 +281,7 @@ final class AgentTurnExecution {
      * duplicate-admission 409 — the caller adopts the attach's epoch and streams instead of
      * withdrawing again (R10-4). Refuses under the same lease guards as the mark.
      */
-    boolean withdrawSubmissionAttempted(String tenantId,
-            String sessionId, String turnId, String owner) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId, String turnId, String owner) {
         long now = clock.millis();
         int updated = jdbc.update("UPDATE ma_turn SET"
                         + " is_submission_attempted = FALSE, gmt_modified = ?,"
@@ -315,7 +301,7 @@ final class AgentTurnExecution {
         // Lock the session row before the turn row: every writer must take
         // the two in this order or InnoDB deadlocks against the
         // session-first paths (e.g. insertCancelCommand).
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         long now = clock.millis();
         // The admission proves coordination made progress, so the retry
         // budget restarts: it counts consecutive failures without progress.
@@ -356,7 +342,7 @@ final class AgentTurnExecution {
             String turnId, String owner, String expectedTurnEventEpoch,
             String expectedSessionEventEpoch, String eventEpoch,
             long lastEventId) {
-        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
         SessionRecord session = locked.session();
         TurnRecord turn = locked.turn();
         long now = clock.millis();
@@ -416,7 +402,7 @@ final class AgentTurnExecution {
     void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch) {
-        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
         TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
@@ -436,13 +422,13 @@ final class AgentTurnExecution {
         }
         jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " ma_event_stream WHERE tenant_id"
-                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " FOR UPDATE",
                 Long.class, tenantId, sessionId);
         List<EventRecord> deltas =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
                             + " event_type IN ('item.output_text.delta', 'item.reasoning.delta')"
                             + " ORDER BY sequence_id ASC",
                         eventJournal.eventMapper,
@@ -459,7 +445,7 @@ final class AgentTurnExecution {
             data.put("text", "");
             jdbc.update(
                     "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND session_id ="
-                        + " ? AND stream_kind = 'SESSION' AND stream_id = X'' AND sequence_id = ?",
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = '' AND sequence_id = ?",
                     storeRows.writeJson(data),
                     tenantId,
                     sessionId,
@@ -486,7 +472,6 @@ final class AgentTurnExecution {
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId, String sourceBootId,
             String sourceEventEpoch, Long throughSourceId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         boolean bounded = throughSourceId != null;
         if (bounded && (sourceBootId == null || sourceEventEpoch == null
                 || fromSourceId < 1 || throughSourceId < fromSourceId || throughSourceId >= retractionSourceId)) {
@@ -512,7 +497,7 @@ final class AgentTurnExecution {
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
             jdbc.queryForObject(
                     "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                         + " UPDATE",
                     Long.class,
                     tenantId,
@@ -520,7 +505,7 @@ final class AgentTurnExecution {
             List<EventRecord> deltas =
                     jdbc.query(
                             "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                                + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                                 + " turn_id = ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                             eventJournal.eventMapper,
@@ -539,7 +524,7 @@ final class AgentTurnExecution {
                 data.put("text", "");
                 jdbc.update(
                         "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' AND"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' AND"
                             + " sequence_id = ?",
                         storeRows.writeJson(data),
                         tenantId,
@@ -583,7 +568,6 @@ final class AgentTurnExecution {
     void recordHarnessEvents(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             List<HarnessEvent> events) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         if (events.isEmpty()) {
             return;
         }
@@ -682,9 +666,8 @@ final class AgentTurnExecution {
                 tenantId, sessionId, turnId, owner, now);
     }
 
-    boolean cancelUnadmittedTurn(String tenantId, String sessionId,
-            String turnId, String owner) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+    boolean cancelUnadmittedTurn(String tenantId, String sessionId, String turnId, String owner) {
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = storeRows.requireTurn(tenantId, sessionId, turnId);
         if (!"CANCELLING".equals(turn.status())
                 || !owner.equals(turn.dispatchOwner())
@@ -694,10 +677,9 @@ final class AgentTurnExecution {
         }
         var heads = WorkspaceOperations.rows(jdbc,
                 "SELECT tenant_id, session_id, state, writer_lease_until FROM"
-                        + " ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                        + " ma_session_head WHERE tenant_id = ? AND harness_session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId));
+                tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         if (heads.size() != 1 || !tenantId.equals(heads.getFirst().get("tenant_id"))
                 || !sessionId.equals(heads.getFirst().get("session_id"))
@@ -709,12 +691,13 @@ final class AgentTurnExecution {
         }
         // The locked, fenced writer cannot admit a late HTTP request. Even an
         // idle journal may contain this prompt's completed admission: replay
-        // its real result instead of replacing it with cancellation.
-        java.util.Set<String> accepted;
+        // its real result instead of replacing it with cancellation. Owed
+        // cleanup stays protected and does not prevent cancelling an unadmitted turn.
+        Set<String> accepted;
         try {
-            accepted = WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
-                    tenantId, sessionId, false,
-                    WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2);
+            accepted = JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper,
+                    tenantId, sessionId, true,
+                    WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) == 2, packs);
         } catch (ManagedAgentException unverified) {
             return false;
         }
@@ -725,10 +708,9 @@ final class AgentTurnExecution {
         return "CANCELLED".equals(storeRows.requireTurn(tenantId, sessionId, turnId).status());
     }
 
-    void cancelBeforeAdmission(String tenantId, String sessionId,
-            String turnId, String owner) {
+    void cancelBeforeAdmission(String tenantId, String sessionId, String turnId, String owner) {
         // Session-row lock first; see recordAdmission.
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = storeRows.requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || turn.harnessEventEpoch() != null
@@ -754,13 +736,12 @@ final class AgentTurnExecution {
         sessionCommands.settleTurnCommands(tenantId, sessionId, turnId, now);
     }
 
-    void failTurn(String tenantId, String sessionId, String turnId,
-            String owner, String code, String message) {
+    void failTurn(String tenantId, String sessionId, String turnId, String owner, String code, String message) {
         settleFailedTurn(tenantId, sessionId, turnId, owner, code, message, true);
     }
 
     void failWorktreeInitialTurns(String tenantId, String sessionId, String code) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?"
                 + " AND state IN ('FAILED', 'BLOCKED') FOR UPDATE", Integer.class, tenantId, sessionId).isEmpty()) {
             return;
@@ -779,16 +760,14 @@ final class AgentTurnExecution {
         }
     }
 
-    boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
-            String turnId, String owner, String message) {
+    boolean failRecoveryBlockedTurn(String tenantId, String sessionId, String turnId, String owner, String message) {
         return settleFailedTurn(tenantId, sessionId, turnId, owner,
                 "managed_runtime_recovery_blocked", message, false);
     }
 
-    boolean settleFailedTurn(String tenantId, String sessionId, String turnId,
-            String owner, String code, String message, boolean allowCancelling) {
+    boolean settleFailedTurn(String tenantId, String sessionId, String turnId, String owner, String code, String message, boolean allowCancelling) {
         // Session-row lock first; see recordAdmission.
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        storeRows.requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = storeRows.requireTurn(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || !AgentStoreRows.ACTIVE_TURN_STATES.contains(turn.status())

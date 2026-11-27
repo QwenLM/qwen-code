@@ -3,13 +3,14 @@ package com.alibaba.qwen.code.managedagent.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.Row;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.LeaseRenewalRunner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -19,6 +20,7 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -26,11 +28,9 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -87,15 +87,11 @@ public class ChildWorkspaceService {
     private final WorkspaceExecutionStore leases;
     private final RuntimeWarmer warmer;
     private final Supplier<Long> clock;
+    private final LeaseRenewalRunner runner;
     private final String owner;
     private final long renewMillis;
-    private final ScheduledExecutorService renewals = Executors.newSingleThreadScheduledExecutor(task -> {
-        Thread thread = new Thread(task, "child-workspace-renewal");
-        thread.setDaemon(true);
-        return thread;
-    });
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ChildWorkspaceService(SessionQueryStore sessions, ChildWorkspaceStore store,
             WorkspaceExecutionStore leases, RuntimeWarmer warmer) {
         this(sessions, store, leases, warmer, System::currentTimeMillis,
@@ -110,13 +106,14 @@ public class ChildWorkspaceService {
         this.leases = leases;
         this.warmer = warmer;
         this.clock = clock;
-        this.owner = owner;
+        this.runner = new LeaseRenewalRunner(owner, "child-workspace-renewal");
+        this.owner = this.runner.owner();
         this.renewMillis = renewMillis;
     }
 
     @PreDestroy
     void stopRenewals() {
-        renewals.shutdownNow();
+        runner.close();
     }
 
     /**
@@ -307,13 +304,13 @@ public class ChildWorkspaceService {
     }
 
     private void prepareStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             String base = claimed.baseCommit();
             String childCwd = claimed.childCwdRelative();
-            ChildWorktreeGit.Repository repository;
+            ChildWorktreeOperations.Repository repository;
             if (base == null) {
-                ChildWorktreeGit.Layout layout = git.layout(root, claimed.parentCwdRelative());
+                ChildWorktreeOperations.Layout layout = git.layout(root, claimed.parentCwdRelative());
                 childCwd = childCwd(claimed.childWorkspaceId(), layout.offset());
                 repository = git.open(root, layout.repositoryRelative());
                 base = git.base(root, repository, claimed.childWorkspaceId());
@@ -342,7 +339,7 @@ public class ChildWorkspaceService {
      * directory past its 1024 code points, and that is a layout refusal.
      */
     static String childCwd(String childWorkspaceId, String offset) {
-        String cwd = ChildWorktreeGit.childCwd(childWorkspaceId, offset);
+        String cwd = ChildWorktreeOperations.childCwd(childWorkspaceId, offset);
         try {
             if (!WorkspaceRelativePath.normalize(cwd).equals(cwd)) {
                 throw new ChildWorkspaceException(ChildWorkspaceException.LAYOUT, false,
@@ -356,16 +353,16 @@ public class ChildWorkspaceService {
     }
 
     private void mergeStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         String id = claimed.childWorkspaceId();
         held(provider, claimed, root -> {
-            ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+            ChildWorktreeOperations.Repository repository = git.open(root, claimed.repositoryRelative());
             String result = claimed.resultCommit();
             if (result == null) {
                 result = pinResult(git, root, repository, claimed);
                 advance(claimed, MERGING, columns("result_commit", result));
             }
-            ChildWorktreeGit.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
+            ChildWorktreeOperations.Merge merge = git.merge(root, repository, claimed.baseCommit(), result);
             if (merge.clean()) {
                 advance(claimed, APPLYING, columns("parent_tree", merge.parentTree(),
                         "merged_tree", merge.mergedTree()));
@@ -377,8 +374,8 @@ public class ChildWorkspaceService {
             }
             // The child's result stays pinned: a conflict never loses work.
             git.discard(root, claimed.repositoryRelative(), id, true);
-            List<String> conflicts = merge.conflicts().size() > ChildWorktreeGit.MAX_CONFLICT_PATHS
-                    ? merge.conflicts().subList(0, ChildWorktreeGit.MAX_CONFLICT_PATHS) : merge.conflicts();
+            List<String> conflicts = merge.conflicts().size() > ChildWorktreeOperations.MAX_CONFLICT_PATHS
+                    ? merge.conflicts().subList(0, ChildWorktreeOperations.MAX_CONFLICT_PATHS) : merge.conflicts();
             advance(claimed, CONFLICTED, columns("parent_tree", merge.parentTree(),
                     "outcome_code", "conflicted", "conflict_paths", conflicts));
             return null;
@@ -386,7 +383,7 @@ public class ChildWorkspaceService {
     }
 
     private void applyStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             land(git, root, git.open(root, claimed.repositoryRelative()), claimed);
             return null;
@@ -400,7 +397,7 @@ public class ChildWorkspaceService {
      * pins remain to remove.
      */
     private void appliedStep(ChildWorkspaceProvider provider, Row claimed) {
-        ChildWorktreeGit git = provider.git();
+        ChildWorktreeOperations git = provider.git();
         held(provider, claimed, root -> {
             settle(git, root, claimed);
             return null;
@@ -412,13 +409,13 @@ public class ChildWorkspaceService {
      * the same hold, that it landed, then removes the worktree and both
      * pins.
      */
-    private void land(ChildWorktreeGit git, Path root, ChildWorktreeGit.Repository repository, Row applying) {
+    private void land(ChildWorktreeOperations git, Path root, ChildWorktreeOperations.Repository repository, Row applying) {
         git.apply(root, repository, applying.parentTree(), applying.mergedTree());
         advance(applying, APPLIED, columns());
         settle(git, root, find(applying));
     }
 
-    private void settle(ChildWorktreeGit git, Path root, Row applied) {
+    private void settle(ChildWorktreeOperations git, Path root, Row applied) {
         git.discard(root, applied.repositoryRelative(), applied.childWorkspaceId(), false);
         advance(applied, MERGED, columns("outcome_code", "merged"));
     }
@@ -429,8 +426,8 @@ public class ChildWorkspaceService {
      * refs/qwen/child-workspaces/&lt;id&gt;/result both name. The caller
      * keeps the repository it opened: a merge goes on to use it.
      */
-    private static String pinResult(ChildWorktreeGit git, Path root,
-            ChildWorktreeGit.Repository repository, Row claimed) {
+    private static String pinResult(ChildWorktreeOperations git, Path root,
+            ChildWorktreeOperations.Repository repository, Row claimed) {
         String result = git.result(root, repository, claimed.childWorkspaceId(),
                 claimed.baseCommit());
         git.pin(root, repository, claimed.childWorkspaceId(), "result", result);
@@ -443,7 +440,7 @@ public class ChildWorkspaceService {
         boolean merged = "merged".equals(claimed.outcomeCode());
         AtomicReference<String> pinFailure = new AtomicReference<>();
         held(provider, claimed, root -> {
-            ChildWorktreeGit git = provider.git();
+            ChildWorktreeOperations git = provider.git();
             String result = claimed.resultCommit();
             if (result == null && !merged && DISCARD_PINNED.equals(claimed.finishRequest())) {
                 // The discard replaced the merge of a child that completed:
@@ -454,7 +451,7 @@ public class ChildWorkspaceService {
                 // a failure that outlasts the retries) leaves an ordinary
                 // discard, which is what the discard was before the pin.
                 try {
-                    ChildWorktreeGit.Repository repository = git.open(root, claimed.repositoryRelative());
+                    ChildWorktreeOperations.Repository repository = git.open(root, claimed.repositoryRelative());
                     result = pinResult(git, root, repository, claimed);
                 } catch (ChildWorkspaceException error) {
                     if (error.retryable() && claimed.attempts() + 1 < MAX_ATTEMPTS) {
@@ -475,7 +472,7 @@ public class ChildWorkspaceService {
                     result != null && !merged);
             return null;
         });
-        java.util.Map<String, Object> discarded = columns("outcome_code",
+        Map<String, Object> discarded = columns("outcome_code",
                 claimed.outcomeCode() == null ? "discarded" : claimed.outcomeCode());
         if (pinFailure.get() != null) {
             // The row itself records that a pin was owed and could not be
@@ -498,7 +495,7 @@ public class ChildWorkspaceService {
     private <T> T held(ChildWorkspaceProvider provider, Row claimed, Function<Path, T> work) {
         AtomicBoolean live = new AtomicBoolean(true);
         AtomicLong renewed = new AtomicLong(clock.get());
-        ScheduledFuture<?> renewal = renewals.scheduleWithFixedDelay(() -> {
+        ScheduledFuture<?> renewal = runner.scheduleWithFixedDelay(() -> {
             try {
                 if (store.renew(claimed, owner, clock.get() + LEASE_MS, clock.get())) {
                     renewed.set(clock.get());
@@ -513,7 +510,7 @@ public class ChildWorkspaceService {
                 }
                 LOG.warn("child workspace claim renewal failed run={}", claimed.childRunId(), error);
             }
-        }, renewMillis, renewMillis, TimeUnit.MILLISECONDS);
+        }, renewMillis);
         try {
             ContextBinding storage = new ContextBinding(claimed.tenantId(), claimed.workspaceId(),
                     claimed.workspaceGeneration(), claimed.storageId(), ".",
@@ -536,7 +533,7 @@ public class ChildWorkspaceService {
         }
     }
 
-    private void advance(Row claimed, String toState, java.util.Map<String, Object> columns) {
+    private void advance(Row claimed, String toState, Map<String, Object> columns) {
         if (!store.transition(claimed, owner, toState, columns, clock.get())) {
             throw new ManagedAgentException(409, "child_workspace_claim_lost",
                     "The child Workspace moved on under another claim.");
@@ -588,7 +585,7 @@ public class ChildWorkspaceService {
     private void end(Row latest, String state, String code, String message) {
         boolean landed = APPLIED.equals(latest.state()) || "merged".equals(latest.outcomeCode());
         String outcome = landed ? "merged" : latest.outcomeCode() != null ? latest.outcomeCode() : code;
-        java.util.Map<String, Object> columns = columns("outcome_code", outcome,
+        Map<String, Object> columns = columns("outcome_code", outcome,
                 "last_error", StringUtils.truncate(message, 1024));
         if (DISCARDING.equals(latest.state())) {
             columns.put("finish_request", null);

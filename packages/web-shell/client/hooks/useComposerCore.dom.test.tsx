@@ -8,6 +8,7 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  addInlineTagEffect,
   clearComposerDraftIfMatches,
   captureComposerDraftGuard,
   getInlineComposerTags,
@@ -31,11 +32,14 @@ let latest: UseComposerCoreReturn | null = null;
 function Harness({
   composerInput,
   onSubmit,
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
   parseUserMessageContent,
   followupState,
+  onAcceptFollowup,
   sessionId,
   atWorkspaceCwd,
   composerScopeKey,
@@ -55,6 +59,8 @@ function Harness({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -64,6 +70,7 @@ function Harness({
     shownAt: number;
     suggestion: string | null;
   };
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
   sessionId?: string;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
@@ -83,6 +90,8 @@ function Harness({
 }) {
   const composer = useComposerCore({
     onSubmit,
+    prepareSubmit,
+    submitDisabled,
     commands: commands ?? [],
     allowEmptySlashMenu,
     cycleModeOnTab,
@@ -94,6 +103,7 @@ function Harness({
     onFileTagClick,
     parseUserMessageContent,
     followupState,
+    onAcceptFollowup,
     sessionId,
     atWorkspaceCwd,
     composerScopeKey,
@@ -121,11 +131,14 @@ function Harness({
 async function mount({
   composerInput,
   onSubmit = vi.fn(),
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
   parseUserMessageContent,
   followupState,
+  onAcceptFollowup,
   sessionId,
   atWorkspaceCwd,
   composerScopeKey,
@@ -145,6 +158,8 @@ async function mount({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -154,6 +169,7 @@ async function mount({
     shownAt: number;
     suggestion: string | null;
   };
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
   sessionId?: string;
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
@@ -189,11 +205,14 @@ async function mount({
           <Harness
             composerInput={composerInput}
             onSubmit={onSubmit}
+            prepareSubmit={prepareSubmit}
+            submitDisabled={submitDisabled}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             onFileTagClick={onFileTagClick}
             parseUserMessageContent={parseUserMessageContent}
             followupState={followupState}
+            onAcceptFollowup={onAcceptFollowup}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
             composerScopeKey={currentComposerScopeKey}
@@ -279,7 +298,7 @@ afterEach(() => {
   for (let index = localStorage.length - 1; index >= 0; index--) {
     const key = localStorage.key(index);
     if (
-      key === 'qwen-web-shell-command-history' ||
+      key?.startsWith('qwen-web-shell-command-history') ||
       key?.startsWith('qwen-web-shell-history') ||
       key?.startsWith('qwen-web-shell-session-draft:') ||
       key?.startsWith('qwen-web-shell-pending-task-draft:')
@@ -339,6 +358,228 @@ describe('useComposerCore tooltip portal', () => {
     ).not.toBeNull();
     host.remove();
   });
+});
+
+describe('custom inline draft tags', () => {
+  const tag = {
+    id: 'orders',
+    value: 'Orders',
+    kind: 'custom-reference',
+    serialized: '<ref:orders>',
+  };
+  const parseUserMessageContent: UserMessageContentParser = (content) =>
+    content
+      .split(/(<ref:orders>)/)
+      .map((text) =>
+        text === tag.serialized ? { type: 'tag', tag } : { type: 'text', text },
+      );
+
+  it('restores only the inserted occurrence after saving, and preserves a literal-only draft', async () => {
+    const options = { sessionId: 'custom-inline', parseUserMessageContent };
+    await mount(options);
+    act(() => {
+      latest!.setText(`literal ${tag.serialized} and `);
+      latest!.addTags([{ ...tag, metadata: { unavailable: BigInt(1) } }], {
+        placement: 'inline',
+      });
+      latest!.insertText(' afterward');
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const original = latest!.getText();
+    const storageKey = getSessionDraftKey(options.sessionId);
+    expect(localStorage.getItem(storageKey)).toContain(original);
+
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(original);
+    const editor = container!.querySelector('.cm-content')!;
+    expect(editor.textContent).toContain(
+      `literal ${tag.serialized} and Orders`,
+    );
+    const remove = editor.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove Orders"]',
+    )!;
+    act(() => {
+      remove.click();
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    const remaining = latest!.getText();
+    expect(remaining.split(tag.serialized)).toHaveLength(2);
+    act(() => root!.unmount());
+    container!.remove();
+    await mount(options);
+    expect(latest!.getText()).toBe(remaining);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+
+  it('hydrates legacy drafts on mount and session switch without covering a saved file tag', async () => {
+    const before = `look at ${tag.serialized}`;
+    const after = `${tag.serialized} and ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey('custom-legacy'), before);
+    localStorage.setItem(
+      getSessionDraftKey('mixed-legacy'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: after,
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          tags: [],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'custom-legacy',
+      parseUserMessageContent,
+      persistFileReferences: true,
+    });
+    expect(latest!.getText()).toBe(before);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+    mounted.switchSession('mixed-legacy', undefined);
+    expect(latest!.getText()).toBe(after);
+    expect(
+      getInlineComposerTags(latest!.viewRef.current!).map((item) => item.kind),
+    ).toEqual(['file', tag.kind]);
+  });
+
+  it('keeps a legacy draft editable when the parser changes the source', async () => {
+    const sessionId = 'custom-lossy-parser';
+    const text = `keep this ${tag.serialized}`;
+    localStorage.setItem(getSessionDraftKey(sessionId), text);
+    await mount({
+      sessionId,
+      parseUserMessageContent: () => [{ type: 'tag', tag }],
+    });
+    expect(latest!.getText()).toBe(text);
+    expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+  });
+
+  it('restores large drafts after the first frame and decorates each reference once', async () => {
+    vi.useFakeTimers({
+      toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+    });
+    const parser = vi.fn(parseUserMessageContent);
+    const text = `${tag.serialized} ${tag.serialized}\n${'draft\n'.repeat(12_000)}`;
+    localStorage.setItem(
+      getSessionDraftKey('large'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text,
+          tags: [],
+          inlineTags: [
+            {
+              start: 0,
+              end: tag.serialized.length,
+              tag: { ...tag, kind: 'file' },
+            },
+          ],
+          customInlineRanges: [
+            {
+              start: tag.serialized.length + 1,
+              end: tag.serialized.length * 2 + 1,
+            },
+          ],
+        }),
+    );
+    const mounted = await mount({
+      sessionId: 'small',
+      parseUserMessageContent: parser,
+      persistFileReferences: true,
+    });
+    const view = latest!.viewRef.current!;
+    const update = vi.spyOn(view, 'update');
+    const addedKinds = () =>
+      update.mock.calls.flatMap(([transactions]) =>
+        transactions.flatMap((transaction) =>
+          transaction.effects.flatMap((effect) =>
+            effect.is(addInlineTagEffect) ? [effect.value.tag.kind] : [],
+          ),
+        ),
+      );
+
+    mounted.switchSession('large', undefined);
+    expect(latest!.getText()).toBe(text);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(addedKinds()).toEqual(['file']);
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersToNextFrame();
+    });
+    expect(parser).toHaveBeenCalledExactlyOnceWith(text);
+    expect(addedKinds()).toEqual(['file', tag.kind]);
+    expect(view.state.selection.main.anchor).toBe(text.length);
+    expect(latest!.getText()).toBe(text);
+    update.mockRestore();
+  });
+
+  it.each(['switch', 'unmount'])(
+    'preserves a pending chip range when editing immediately before %s',
+    async (action) => {
+      vi.useFakeTimers({
+        toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
+      });
+      const parser = vi.fn(parseUserMessageContent);
+      const sessionId = 'pending';
+      const text = `${tag.serialized} \n${'draft\n'.repeat(12_000)}`;
+      localStorage.setItem(
+        getSessionDraftKey(sessionId),
+        '\0qwen-file-draft:1:' +
+          JSON.stringify({
+            text,
+            tags: [],
+            inlineTags: [],
+            customInlineRanges: [{ start: 0, end: tag.serialized.length }],
+          }),
+      );
+      const mounted = await mount({
+        sessionId,
+        parseUserMessageContent: parser,
+      });
+      act(() => {
+        latest!.viewRef.current!.dispatch({
+          changes: { from: 0, insert: `literal ${tag.serialized} and ` },
+          userEvent: 'input.type',
+        });
+      });
+      const edited = latest!.getText();
+      if (action === 'switch') {
+        mounted.switchSession('other', undefined);
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([]);
+      } else {
+        act(() => root!.unmount());
+        container!.remove();
+      }
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).not.toHaveBeenCalled();
+
+      if (action === 'switch') {
+        mounted.switchSession(sessionId, undefined);
+      } else {
+        await mount({ sessionId, parseUserMessageContent: parser });
+      }
+      expect(latest!.getText()).toBe(edited);
+      act(() => {
+        vi.advanceTimersToNextFrame();
+        vi.advanceTimersToNextFrame();
+      });
+      expect(parser).toHaveBeenCalledExactlyOnceWith(edited);
+      expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      expect(container!.querySelector('.cm-content')!.textContent).toContain(
+        `literal ${tag.serialized} and Orders`,
+      );
+    },
+  );
 });
 
 describe('useComposerCore history and drafts', () => {
@@ -1855,6 +2096,112 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).toBe('!');
   });
 
+  it('captures type-anywhere keystrokes when focus parks on a marked focus region', async () => {
+    await mount();
+    // The managed page wrapper is a non-interactive tabindex=-1 parking spot
+    // for discard/task-panel focus, and it wraps the composer; typing there
+    // must still reach the editor.
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    document.body.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(region);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      region.remove();
+    }
+  });
+
+  it('captures type-anywhere keystrokes when a shadow mount parks focus on a focus region', async () => {
+    await mount();
+    // A shadow-root mount retargets document.activeElement and event.target to
+    // the host, so the parked wrapper has to be read from the container root.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    shadow.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(host);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes to the shell that owns the parked focus region', async () => {
+    await mount();
+    // Two managed shells can share one shadow root and park focus on sibling
+    // wrappers; only the shell whose wrapper contains this composer may take
+    // the keystroke, otherwise it lands in the wrong conversation.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const ownRegion = document.createElement('div');
+    ownRegion.tabIndex = -1;
+    ownRegion.setAttribute('data-web-shell-focus-region', '');
+    ownRegion.appendChild(container!);
+    const foreignRegion = document.createElement('div');
+    foreignRegion.tabIndex = -1;
+    foreignRegion.setAttribute('data-web-shell-focus-region', '');
+    shadow.appendChild(foreignRegion);
+    shadow.appendChild(ownRegion);
+    try {
+      act(() => foreignRegion.focus());
+      expect(shadow.activeElement).toBe(foreignRegion);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => foreignRegion.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes alone when focus parks on an unmarked focusable element', async () => {
+    await mount();
+    const outside = document.createElement('div');
+    outside.tabIndex = -1;
+    document.body.appendChild(outside);
+    try {
+      act(() => outside.focus());
+      expect(document.activeElement).toBe(outside);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => outside.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      outside.remove();
+    }
+  });
+
   it('leaves a long paste inline in shell mode', async () => {
     await mount();
     act(() => latest!.toggleShellMode());
@@ -2615,6 +2962,83 @@ describe('useComposerCore paste', () => {
     expect(latest!.pendingImageBatchCount).toBe(0);
     expect(latest!.pastedImages).toEqual([]);
     expect(onImageIngestionNotice).not.toHaveBeenCalled();
+  });
+
+  it('stops queued image reads once the batch is cancelled', async () => {
+    class PendingFileReader {
+      static calls = 0;
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      readAsDataURL() {
+        PendingFileReader.calls += 1;
+      }
+    }
+    vi.stubGlobal('FileReader', PendingFileReader);
+    await mount();
+    const files = Array.from(
+      { length: 10 },
+      (_, index) =>
+        new File(['png'], `photo-${index}.png`, { type: 'image/png' }),
+    );
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    });
+    await act(async () => Promise.resolve());
+    expect(latest!.pendingImageBatchCount).toBe(1);
+    expect(PendingFileReader.calls).toBe(4);
+
+    act(() => latest!.handle.clear());
+    await act(async () => Promise.resolve());
+
+    expect(PendingFileReader.calls).toBe(4);
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toEqual([]);
+  });
+
+  it('still reads the whole batch when it is not cancelled', async () => {
+    class CompletingFileReader {
+      static calls = 0;
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      readAsDataURL() {
+        CompletingFileReader.calls += 1;
+        setTimeout(() => {
+          this.result = 'data:image/png;base64,AAAA';
+          this.onload?.({} as ProgressEvent<FileReader>);
+        }, 0);
+      }
+    }
+    vi.stubGlobal('FileReader', CompletingFileReader);
+    await mount();
+    const files = Array.from(
+      { length: 10 },
+      (_, index) =>
+        new File(['png'], `photo-${index}.png`, { type: 'image/png' }),
+    );
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(CompletingFileReader.calls).toBe(10);
+    expect(latest!.pastedImages).toHaveLength(10);
+    expect(latest!.pendingImageBatchCount).toBe(0);
   });
 });
 
@@ -4790,5 +5214,371 @@ describe('composer draft attachment races', () => {
       images: [image],
       files: [],
     });
+  });
+});
+
+function pressEnter() {
+  container!.querySelector('.cm-content')!.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+describe('useComposerCore follow-up submission', () => {
+  const followupState = {
+    isVisible: true,
+    shownAt: 0,
+    suggestion: 'inspect the orders table',
+  };
+
+  it.each([
+    { name: 'photo.png', type: 'image/png', text: '', method: 'Enter' },
+    { name: 'notes.txt', type: 'text/plain', text: '', method: 'Enter' },
+    { name: 'photo.png', type: 'image/png', text: 'inspect', method: 'button' },
+  ])(
+    'submits $name via $method with only the draft text',
+    async ({ name, type, text, method }) => {
+      const onAcceptFollowup = vi.fn();
+      const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+      act(() => {
+        latest!.setText(text);
+        latest!.ingestFiles([new File(['contents'], name, { type })]);
+      });
+      await waitForImageIngestion();
+      const { pastedImages, pastedFiles } = latest!;
+      expect(pastedImages.length + pastedFiles.length).toBe(1);
+
+      act(() => {
+        if (method === 'Enter') pressEnter();
+        else latest!.submitText();
+      });
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0]!.slice(0, 3)).toEqual([
+        text,
+        pastedImages.length ? pastedImages : undefined,
+        pastedFiles.length ? pastedFiles : undefined,
+      ]);
+      expect(onAcceptFollowup).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the suggestion unaccepted if Enter is pressed during attachment ingestion', async () => {
+    const onAcceptFollowup = vi.fn();
+    const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+
+    act(() => {
+      latest!.ingestFiles([
+        new File(['contents'], 'notes.txt', { type: 'text/plain' }),
+      ]);
+      pressEnter();
+    });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onAcceptFollowup).not.toHaveBeenCalled();
+    await waitForImageIngestion();
+  });
+
+  it('accepts and submits a visible suggestion with Enter in an empty draft', async () => {
+    const onAcceptFollowup = vi.fn();
+    const { onSubmit } = await mount({ followupState, onAcceptFollowup });
+
+    act(() => pressEnter());
+
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0]![0]).toBe(followupState.suggestion);
+    expect(onAcceptFollowup).toHaveBeenCalledExactlyOnceWith('enter', {
+      skipOnAccept: true,
+    });
+  });
+});
+
+describe('useComposerCore prepareSubmit gate', () => {
+  function deferredPrepare() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepareSubmit = vi.fn(() => gate);
+    return { prepareSubmit, release };
+  }
+
+  it('submitText waits for prepareSubmit and sends text inserted during it', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('');
+  });
+
+  it('Enter waits for prepareSubmit before submitting', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+  });
+
+  it('drops reentrant submits while preparation is in flight', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('once'));
+
+    act(() => latest!.submitText());
+    act(() => latest!.submitText());
+    act(() => pressEnter());
+    await act(async () => {
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('once');
+  });
+
+  it('cancels the submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // The incoming draft must have content: an empty one would be rejected
+    // by the submit itself, letting a missing identity guard pass unnoticed.
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels the submit when the composer unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    act(() => latest!.submitText());
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('keeps a desktop slash followup on the normal submit path', async () => {
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: '/clear',
+      },
+    });
+
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+  });
+
+  it('recomputes the follow-up completion after preparation inserts text', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { onSubmit } = await mount({
+      prepareSubmit: async () => {
+        await gate;
+        latest!.insertText('dictated');
+      },
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: 'suggested prompt',
+      },
+    });
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('dictated');
+  });
+
+  it('cancels the submit when the workspace switches without a session', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // Both drafts are session-less: only the workspace-derived identity
+    // fields change, so a sessionId-only guard would let this submit through.
+    localStorage.setItem(getPendingTaskDraftKey('/workspace/b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession(undefined, '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels an Enter submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => pressEnter());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not submit or throw when an Enter submit unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    // After unmount the view ref is null: without the Enter-path guards the
+    // continuation throws on the dead view instead of submitting, so the
+    // witness is "no unhandled rejection", not just "no submit".
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      act(() => pressEnter());
+      act(() => root?.unmount());
+      root = null;
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('keeps submits synchronous and never preparing without a finalizer', async () => {
+    const { onSubmit } = await mount();
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed');
+    expect(latest!.submitPreparing).toBe(false);
+  });
+
+  it('refuses a guarded Enter submit before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('refuses a guarded submitText before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('drops a programmatic submit landing inside the finalization window', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['earlier prompt']),
+    );
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(latest!.submitPreparing).toBe(true);
+    // History-search Enter submits programmatically while the flush is in
+    // flight; it must be dropped, not race the flush continuation.
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.submitSearchMatch('earlier prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the submit without an unhandled rejection when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn(async () => {
+      throw new Error('prepare failed');
+    });
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await act(async () => {
+        latest!.submitText();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(latest!.submitPreparing).toBe(false);
+      expect(latest!.getText()).toBe('typed');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

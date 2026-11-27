@@ -18,7 +18,7 @@ Issue #14163 跟踪 FG8 为 `monitor_run` 与 `child_run` 的 `shell` kind 剩�
 
 1. **FG8c 等 #13986 落地再写。** 它压的正是 #13986 在改写的冷加载/重铸平面，现在写等于写两遍。IT 类注释将改记为 a-d 分两片落地（本片 a+b+d，c 后续）。
 
-2. **门禁断言物理真相，不分支逻辑。** triage 在 #14163 上唯一一处实质性更正仍然成立：`HostedMonitorRemoteExecutor.stop` 的 `proven=false` 收敛、routine/drain 两臂的选择、`settleStopRequested` 投影，今天都被 vitest 钉着（`hosted-monitor-remote-executor.test.ts`、`hosted-harness-session.test.ts`、`hosted-child-run-session.test.ts`）。这些单测结构上钉不住的——恰好一个物理进程、零 OS 副作用、真实丢应答后恰好一条 journal 行、真实事务回滚——恰恰是本片每个 case 通过 JDBC、捕获日志与 case 目录证据断言的东西。只会复述 vitest 断言的期望措辞从门禁里剔除；一个 case 的自然结局存在两种诚实变体时（例如启动前取消结算成 `cancelled` 还是 `start_failed`/`not_started_proven`），门禁断言行级不变量并记录实测到的结算形态，不赌措辞。
+2. **门禁断言物理真相，不分支逻辑。** triage 在 #14163 上唯一一处实质性更正仍然成立：`HostedMonitorRemoteExecutor.stop` 的 `proven=false` 收敛、routine/drain 两臂的选择、`settleStopRequested` 投影，今天都被 vitest 钉着（`hosted-monitor-remote-executor.test.ts`、`hosted-harness-session.runtime-cleanup.test.ts`、`hosted-child-run-session.test.ts`）。这些单测结构上钉不住的——恰好一个物理进程、零 OS 副作用、真实丢应答后恰好一条 journal 行、真实事务回滚——恰恰是本片每个 case 通过 JDBC、捕获日志与 case 目录证据断言的东西。只会复述 vitest 断言的期望措辞从门禁里剔除；一个 case 的自然结局存在两种诚实变体时（例如启动前取消结算成 `cancelled` 还是 `start_failed`/`not_started_proven`），门禁断言行级不变量并记录实测到的结算形态，不赌措辞。
 
 3. **broker 代理长出真注入。** FG8a 的 dispatch/monitor-stop 臂与 FG8d 的 `cancel-reply-lost` 是 broker 前置代理的第一批故障原语：一个 lose-once 臂——转发请求、消费已提交的上游响应、然后毁掉客户端 socket（Harness 无法把这次丢失误读成 HTTP 拒绝）。判别按路径后缀操作名（`:start`、`:cancel`），或针对 monitor-stop 按解析后的 POST body（`operation.kind === 'monitor-stop'`），因为所有 control 调用共享同一条路径。`#13896` 的 control 家族在本夹具里只有 monitor 一个 kind，body 判别无歧义。
 

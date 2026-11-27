@@ -65,6 +65,7 @@ import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { switchPrimaryModel } from '../models/primary-model-switch.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
@@ -628,7 +629,7 @@ export async function applyModelSelection(
 
   let after: ContentGeneratorConfig | undefined;
   try {
-    await config.switchModel(selectedAuthType, modelId, {
+    await switchPrimaryModel(config, settings, selectedAuthType, modelId, {
       ...(selectedAuthType !== authType &&
       selectedAuthType === AuthType.QWEN_OAUTH
         ? { requireCachedCredentials: true }

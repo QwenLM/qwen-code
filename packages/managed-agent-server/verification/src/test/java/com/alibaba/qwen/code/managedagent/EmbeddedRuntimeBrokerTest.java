@@ -1,31 +1,36 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -50,9 +55,7 @@ class EmbeddedRuntimeBrokerTest {
             "550e8400-e29b-41d4-a716-446655440000";
 
     @Test
-    void usesFetchCompatibleDefaultBrokerPort() {
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
-                .isEqualTo(4182);
+    void usesDurableLocalProvisioningByDefault() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isTrue();
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isTrue();
     }
@@ -100,8 +103,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void startsPrivateListenerAndResolvesTenantFromTheSessionStore()
-            throws Exception {
+    void resolvesTenantFromTheSessionStore() throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         when(store.findSessionById(SESSION_ID)).thenReturn(
                 Optional.of(new SessionRecord("tenant-a", SESSION_ID,
@@ -112,16 +114,6 @@ class EmbeddedRuntimeBrokerTest {
         try (EmbeddedRuntimeBroker broker = broker(store, properties)) {
             broker.warm(SESSION_ID).toCompletableFuture().join();
             verify(store).findSessionById(SESSION_ID);
-
-            URI endpoint = broker.getBaseUri().resolve(
-                    "/internal/runtime-broker/v1/tool-sessions:acquire");
-            HttpURLConnection connection = (HttpURLConnection) endpoint
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization", "Bearer wrong");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write("{}".getBytes());
-            assertThat(connection.getResponseCode()).isEqualTo(401);
         }
     }
 
@@ -143,34 +135,6 @@ class EmbeddedRuntimeBrokerTest {
                             ((RuntimeBrokerException) error.getCause())
                                     .getCode())
                             .isEqualTo("workspace_unavailable"));
-        }
-    }
-
-    @Test
-    void rejectsUnsupportedOrMalformedBrokerRoutesBeforeAnySideEffects()
-            throws Exception {
-        ManagedAgentStore store = mock(ManagedAgentStore.class);
-        try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
-            for (String route : java.util.List.of("executions:prepare",
-                    "executions/execution-1:start",
-                    "executions/execution-1:resolve")) {
-                HttpURLConnection connection = (HttpURLConnection) broker
-                        .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                                + route).toURL().openConnection();
-                connection.setRequestMethod("POST");
-                connection.setRequestProperty("Authorization",
-                        "Bearer broker-token");
-                connection.setDoOutput(true);
-                connection.getOutputStream().write("{}".getBytes());
-                boolean unsupported = route.endsWith(":resolve");
-                assertThat(connection.getResponseCode()).isEqualTo(unsupported ? 501 : 409);
-                assertThat(new String(connection.getErrorStream()
-                        .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                        .contains(unsupported ? "runtime_broker_operation_unsupported"
-                                : "runtime_broker_protocol_conflict");
-                connection.disconnect();
-            }
-            org.mockito.Mockito.verifyNoInteractions(store);
         }
     }
 
@@ -199,7 +163,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void closingTheListenerAlsoClosesTheBrokerService() throws Exception {
+    void closingTheBrokerClosesTheBrokerService() throws Exception {
         EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class),
                 properties());
 
@@ -317,35 +281,22 @@ class EmbeddedRuntimeBrokerTest {
                         "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
                         1, null, 0)));
         ManagedAgentProperties properties = properties();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-release-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        JdbcRuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
+        JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
         seedReleasedSession(sessions, bindings, properties);
         try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
                 properties, bindings, sessions,
-                new InMemoryToolExecutionRepository())) {
+                new JdbcToolExecutionRepository(source))) {
             // The admission fence refuses new work on a closed Session, but
-            // release is a teardown route: it must still resolve the
-            // Session's scope so an already-released Runtime Session
-            // answers idempotently.
-            HttpURLConnection connection = (HttpURLConnection) broker
-                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                            + "tool-sessions/" + RUNTIME_ID + ":release")
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization",
-                    "Bearer broker-token");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write(("{\"protocolVersion\":1,"
-                    + "\"requestId\":\"req-release\","
-                    + "\"harnessSessionId\":\"" + SESSION_ID + "\"}")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            assertThat(connection.getResponseCode()).isEqualTo(200);
-            assertThat(new String(connection.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8))
-                    .contains("\"released\":true");
-            connection.disconnect();
+            // release is teardown: it must still resolve the Session's scope
+            // so an already-released Runtime Session answers idempotently.
+            assertThat(broker.service().release(SESSION_ID, RUNTIME_ID)
+                    .toCompletableFuture().join()).isTrue();
         }
     }
 
@@ -362,25 +313,13 @@ class EmbeddedRuntimeBrokerTest {
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             // A Runtime Session this process does not hold would provision a
             // Runtime, which is new work on a closed Session.
-            HttpURLConnection connection = (HttpURLConnection) broker
-                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
-                            + "tool-sessions:acquire")
-                    .toURL().openConnection();
-            connection.setRequestMethod("POST");
-            connection.setRequestProperty("Authorization",
-                    "Bearer broker-token");
-            connection.setDoOutput(true);
-            connection.getOutputStream().write(("{\"protocolVersion\":1,"
-                    + "\"requestId\":\"req-acquire\","
-                    + "\"harnessSessionId\":\"" + SESSION_ID + "\","
-                    + "\"runtimeSessionId\":\"" + RUNTIME_ID + "\","
-                    + "\"turnKind\":\"bootstrap\"}")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            assertThat(connection.getResponseCode()).isEqualTo(409);
-            assertThat(new String(connection.getErrorStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8))
-                    .contains("runtime_broker_session_closed");
-            connection.disconnect();
+            assertThatThrownBy(() -> broker.service().acquire(SESSION_ID,
+                    RUNTIME_ID, "bootstrap").toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
         }
     }
 
@@ -393,13 +332,15 @@ class EmbeddedRuntimeBrokerTest {
                         "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
                         1, null, 0)));
         ManagedAgentProperties properties = properties();
-        InMemoryRuntimeSessionRepository sessions =
-                new InMemoryRuntimeSessionRepository();
-        InMemoryRuntimeBindingRepository bindings =
-                new InMemoryRuntimeBindingRepository();
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-reconcile-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        JdbcRuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
+        JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
         seedReleasedSession(sessions, bindings, properties);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository();
+        JdbcToolExecutionRepository executions = new JdbcToolExecutionRepository(source);
         String digest = "sha256:" + "b".repeat(64);
         ToolExecutionRecord prepared = ToolExecutionRecord.prepared("call-1",
                 "idem-1", "binding-1", 1, SESSION_ID, RUNTIME_ID, "turn-1",
@@ -431,48 +372,6 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void namesTheSupportedProvisionersInTheKubernetesRejection()
-            throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setProvisioner("kubernetes");
-        properties.getRuntimeBroker().setWorkspaceCwd("/workspace");
-        // Blank derives the canonical workspace ID for the k8s/local path.
-        properties.getRuntimeBroker().setWorkspaceId("");
-
-        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
-                properties))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not supported")
-                .hasMessageContaining("static").hasMessageContaining("local-process");
-    }
-
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"/", "/workspace", "/workspace/project with spaces"})
-    void keepsKubernetesPathsIndependentOfTheServerFilesystem(String cwd) throws Exception {
-        var config = properties().getRuntimeBroker();
-        config.setProvisioner("kubernetes-workspace");
-        config.setWorkspaceId("resident-workspace");
-        config.setWorkspaceCwd(cwd);
-
-        assertThat(EmbeddedRuntimeBroker.workspaceId(config)).isEqualTo("resident-workspace");
-    }
-
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.NullAndEmptySource
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"workspace", ".", "C:\\workspace", "\\\\server\\workspace",
-            "//workspace", "/workspace/", "/workspace//project", "/workspace/.", "/workspace/../project", "/workspace/\0project"})
-    void rejectsNonNormalizedKubernetesWorkspacePathsBeforeAssembly(String cwd) throws Exception {
-        var config = properties().getRuntimeBroker();
-        config.setProvisioner("kubernetes-workspace");
-        config.setWorkspaceId("resident-workspace");
-        config.setWorkspaceCwd(cwd);
-
-        assertThatThrownBy(() -> EmbeddedRuntimeBroker.workspaceId(config))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("workspace cwd must be an absolute normalized path");
-    }
-
-    @Test
     void constructsAnExternalScratchProvisionerForAValidConfiguration()
             throws Exception {
         ManagedAgentProperties properties = properties();
@@ -489,6 +388,40 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void externalCloseCapabilityContainsRegistrationDriftAndReadFailure() throws Exception {
+        var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:external-capability-" + java.util.UUID.randomUUID()
+                        + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(source);
+        var registrations = new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore(jdbc, manager);
+        registrations.registerExternalStorage("tenant", "register",
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/remote/workspace")));
+        new com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore(jdbc, manager)
+                .materialize("tenant", "workspace", "Name", "actor", "materialize");
+        var properties = properties();
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setExternalProviderUrl("http://127.0.0.1:9");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        var context = new ContextBinding("tenant", "workspace", 1, "workspace", ".", "config", 1);
+        try (var broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), null, null, null, jdbc, manager)) {
+            assertThat(broker.supportsWorkspaceClose(context)).isTrue();
+            jdbc.update("UPDATE ma_storage SET registration_revision = 2");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
+            jdbc.execute("DROP TABLE ma_storage");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
+        }
+    }
+
+    @Test
     void refusesAnExternalScratchConfigurationWithoutAProviderUrl()
             throws Exception {
         ManagedAgentProperties properties = properties();
@@ -499,20 +432,6 @@ class EmbeddedRuntimeBrokerTest {
                 properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("External Runtime provider URL");
-    }
-
-    @Test
-    void refusesANonLoopbackListenAddressWithoutTheOptIn() throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setHost("0.0.0.0");
-
-        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
-                properties))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("could not start")
-                .cause()
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("non-loopback");
     }
 
     @Test
@@ -534,26 +453,12 @@ class EmbeddedRuntimeBrokerTest {
         }
     }
 
-    @Test
-    void allowNonLoopbackLetsTheBrokerBindAWildcardAddress()
-            throws Exception {
-        ManagedAgentProperties properties = properties();
-        properties.getRuntimeBroker().setHost("0.0.0.0");
-        properties.getRuntimeBroker().setAllowNonLoopback(true);
-
-        try (EmbeddedRuntimeBroker broker = broker(
-                mock(ManagedAgentStore.class), properties)) {
-            assertThat(broker.getBaseUri()).isNotNull();
-            assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
-        }
-    }
-
     private static final String RUNTIME_ID =
             "550e8400-e29b-41d4-a716-446655440001";
 
     private static void seedReleasedSession(
-            InMemoryRuntimeSessionRepository sessions,
-            InMemoryRuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions,
+            RuntimeBindingRepository bindings,
             ManagedAgentProperties properties) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
@@ -616,7 +521,7 @@ class EmbeddedRuntimeBrokerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("need Git");
         properties.getRuntimeBroker().setChildWorkspaceGit("git");
-        var probe = new com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit("git",
+        var probe = new ChildWorktreeGit("git",
                 java.time.Duration.ofSeconds(30));
         try {
             probe.requireSupportedVersion();
@@ -660,11 +565,15 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     private static EmbeddedRuntimeBroker mountedBroker(ManagedAgentProperties properties) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-mounted-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
-                new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(),
-                mock(com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.class));
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source),
+                mock(JdbcWorkspaceExecutionStore.class));
     }
 
     private static ManagedAgentProperties properties() throws Exception {
@@ -674,8 +583,6 @@ class EmbeddedRuntimeBrokerTest {
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
-        broker.setHost("127.0.0.1");
-        broker.setPort(0);
         broker.setToken("broker-token");
         broker.setProvisioner("static");
         broker.setTrustedLocalRebootRecovery(false);
@@ -690,9 +597,13 @@ class EmbeddedRuntimeBrokerTest {
 
     private static EmbeddedRuntimeBroker broker(ManagedAgentStore store,
             ManagedAgentProperties properties) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:embedded-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return new EmbeddedRuntimeBroker(store, properties,
-                new InMemoryRuntimeBindingRepository(),
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository());
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source));
     }
 }

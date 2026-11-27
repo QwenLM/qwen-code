@@ -77,7 +77,7 @@ class Issue13180HardenedVerificationTest {
     /** Gap 1: header-asserted tenant/actor identity must be rejected. */
     @Test
     void gap1HeaderAssertedIdentityIsRejected() throws Exception {
-        String tenant = "tenant-g1-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         // Original attack: tenant header only.
         HttpResponse<String> create = raw(publicPort, "POST",
                 "/v1/agents/sessions", tenant, null,
@@ -117,7 +117,7 @@ class Issue13180HardenedVerificationTest {
     /** Gap 2: self-minted writer token takeover during a free lease window. */
     @Test
     void gap2WriterTakeoverWithSelfMintedTokenFails() throws Exception {
-        String tenant = "tenant-g2-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = createSession(tenant, "victim");
         String token = credentials.issue(tenant, WORKSPACE, session);
 
@@ -175,7 +175,7 @@ class Issue13180HardenedVerificationTest {
     /** Gap 3: the internal surface must not answer on the public port. */
     @Test
     void gap3InternalSurfaceIsOffThePublicPort() throws Exception {
-        String tenant = "tenant-g3-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = createSession(tenant, "owner");
         String token = credentials.issue(tenant, WORKSPACE, session);
 
@@ -203,25 +203,24 @@ class Issue13180HardenedVerificationTest {
     /** Gap 4: a hosted approval answers its recorded creator only. */
     @Test
     void gap4HostedApprovalOwnershipIsEnforced() throws Exception {
-        String tenant = "tenant-g4-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String session = createSession(tenant, "owner");
 
         // The durable creator record must exist (V40 creator_actor_key).
-        byte[] creator = jdbc.queryForObject(
+        String creator = jdbc.queryForObject(
                 "SELECT creator_actor_key FROM ma_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                byte[].class, tenant, session);
+                String.class, tenant, session);
         assertThat(creator).as("creator_actor_key recorded").isNotNull();
 
         String actionId = "tool_approval_"
                 + UUID.randomUUID().toString().replace("-", "");
         long nowMillis = System.currentTimeMillis();
         jdbc.update(
-                "INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, session_id,"
+                "INSERT INTO ma_session_record (record_kind, tenant_id, session_id,"
                         + " action_id, record_id, action_version, domain, revision, state, options_json, gmt_create)"
-                        + " VALUES ('ACTION', ?, ?, ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, actionId), tenant, session, actionId, actionId,
+                        + " VALUES ('ACTION', ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
+                tenant, session, actionId, actionId,
                 "{\"v\":1,\"requestId\":\"" + actionId + "\","
                         + "\"turnId\":\"turn-verify\","
                         + "\"functionCallId\":\"call-verify\","
