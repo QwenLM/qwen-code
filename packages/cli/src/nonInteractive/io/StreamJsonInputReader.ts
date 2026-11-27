@@ -24,6 +24,7 @@ export class StreamJsonParseError extends Error {}
 
 export class StreamJsonInputReader {
   private readonly input: Readable;
+  private closeLineReader: (() => void) | undefined;
 
   constructor(input: Readable = process.stdin) {
     this.input = input;
@@ -35,6 +36,7 @@ export class StreamJsonInputReader {
       crlfDelay: Number.POSITIVE_INFINITY,
       terminal: false,
     });
+    this.closeLineReader = () => rl.close();
 
     try {
       for await (const rawLine of rl) {
@@ -47,7 +49,12 @@ export class StreamJsonInputReader {
       }
     } finally {
       rl.close();
+      this.closeLineReader = undefined;
     }
+  }
+
+  close(): void {
+    this.closeLineReader?.();
   }
 
   private parse(line: string): StreamJsonInputMessage {

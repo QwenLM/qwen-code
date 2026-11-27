@@ -76,6 +76,7 @@ import {
   canonicalToolName,
   Kind,
   parsePositiveIntegerEnv,
+  MAX_SESSION_TURNS_EXIT_CODE,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
@@ -117,6 +118,7 @@ import {
   handleToolError,
   handleCancellationError,
   handleMaxTurnsExceededError,
+  getMaxTurnsExceededMessage,
   handleBudgetExceededError,
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
@@ -133,6 +135,13 @@ export class TurnInterruptedError extends Error {
   constructor() {
     super('Operation cancelled.');
     this.name = 'TurnInterruptedError';
+  }
+}
+
+class MaxSessionTurnsReachedError extends Error {
+  constructor() {
+    super('Maximum session turn count reached.');
+    this.name = 'MaxSessionTurnsReachedError';
   }
 }
 
@@ -681,8 +690,7 @@ export async function runNonInteractive(
     };
 
     const emitMaxSessionTurnsResult = async (): Promise<number> => {
-      const message =
-        'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+      const message = getMaxTurnsExceededMessage(config);
       if (outputFormat !== OutputFormat.STREAM_JSON) {
         // Preserve the established exit-code/stderr contract for text and
         // batch JSON output. Stream JSON is the only format that carries the
@@ -690,6 +698,22 @@ export async function runNonInteractive(
         await settleBeforeTerminalOutput();
         await handleMaxTurnsExceededError(config);
       }
+      endActiveInteraction('error', {
+        errorMessage: message,
+        errorType: 'max_session_turns',
+      });
+      await failClosedActiveGoalTurn(
+        'Headless Goal stopped after the session turn limit',
+      );
+      config.getBackgroundTaskRegistry().abortAll();
+      flushQueuedNotificationsToSdk(localQueue);
+      finalizeOneShotMonitors();
+      try {
+        adapter.finalizeAssistantMessage();
+      } catch {
+        // No active assistant message, or the loop already finalized it.
+      }
+      process.stderr.write(`${message}\n`);
       const metrics = uiTelemetryService.getMetrics();
       await emitResult({
         isError: true,
@@ -699,12 +723,9 @@ export async function runNonInteractive(
         apiDurationMs: totalApiDurationMs,
         numTurns: turnCount,
         usage: computeUsageFromMetrics(metrics),
-        stats:
-          outputFormat === OutputFormat.JSON
-            ? uiTelemetryService.getMetrics()
-            : undefined,
+        stats: undefined,
       });
-      return 1;
+      return MAX_SESSION_TURNS_EXIT_CODE;
     };
 
     // Get readonly values once at the start
@@ -787,9 +808,9 @@ export async function runNonInteractive(
       limitedTurnCount++;
       const maxSessionTurns = config.getMaxSessionTurns();
       if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
-        await failClosedActiveGoalTurn(
-          'Headless Goal stopped after the session turn limit',
-        );
+        if (outputFormat === OutputFormat.STREAM_JSON) {
+          throw new MaxSessionTurnsReachedError();
+        }
         await settleBeforeTerminalOutput();
         await handleMaxTurnsExceededError(config);
       }
@@ -3258,9 +3279,6 @@ export async function runNonInteractive(
               return await routeAbort();
             case 'max_session_turns':
               // The client counts turns across the whole session (#15325).
-              await failClosedActiveGoalTurn(
-                'Headless Goal stopped after the session turn limit',
-              );
               return await emitMaxSessionTurnsResult();
             case 'next_round':
               currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
@@ -3732,11 +3750,7 @@ export async function runNonInteractive(
               } else if (result.reason === 'cancelled') {
                 await routeAbort();
               } else if (result.reason === 'max_session_turns') {
-                await failClosedActiveGoalTurn(
-                  'Headless Goal stopped after the session turn limit',
-                );
-                await settleBeforeTerminalOutput();
-                await handleMaxTurnsExceededError(config);
+                throw new MaxSessionTurnsReachedError();
               }
               // A duplicate provider call raises no LoopDetected event, so the
               // turn ends as an error here, as it does on the legacy loop.
@@ -3903,9 +3917,10 @@ export async function runNonInteractive(
               }
             })();
             drainPromise = p;
-            void p.finally(() => {
+            const clearDrainPromise = () => {
               if (drainPromise === p) drainPromise = null;
-            });
+            };
+            void p.then(clearDrainPromise, clearDrainPromise);
             return p;
           };
 
@@ -4135,6 +4150,9 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      if (error instanceof MaxSessionTurnsReachedError) {
+        return await emitMaxSessionTurnsResult();
+      }
       const budgetExceeded = budgetEnforcer.getExceeded();
       const failureMessage =
         error instanceof Error ? error.message : String(error);

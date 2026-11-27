@@ -14,6 +14,7 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { MAX_SESSION_TURNS_EXIT_CODE } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
@@ -97,6 +98,7 @@ class Session {
   private initialPrompt: CLIUserMessage | null = null;
   private processingPromise: Promise<void> | null = null;
   private isShuttingDown: boolean = false;
+  private exitCode = 0;
   private configInitialized: boolean = false;
   private monitorNotificationsRegistered: boolean = false;
   private monitorRegistrationsRegistered: boolean = false;
@@ -561,19 +563,31 @@ class Session {
     const turnAbortController = this.startTurn();
 
     try {
-      await runNonInteractive(this.config, this.settings, input, promptId, {
-        ...(humanInput ? { humanInput } : {}),
-        ...(promptParts ? { promptParts } : {}),
-        ...(isToolMessage(userMessage) ? { fromTool: true } : {}),
-        modSession: this.modSession,
-        abortController: turnAbortController,
-        memoryWaitStopSignal: this.memoryWaitStopController.signal,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-        captureMonitorNotifications: false,
-        captureMonitorRegistrations: false,
-        recoverableCancellation: true,
-      });
+      const exitCode = await runNonInteractive(
+        this.config,
+        this.settings,
+        input,
+        promptId,
+        {
+          ...(humanInput ? { humanInput } : {}),
+          ...(promptParts ? { promptParts } : {}),
+          ...(isToolMessage(userMessage) ? { fromTool: true } : {}),
+          modSession: this.modSession,
+          abortController: turnAbortController,
+          memoryWaitStopSignal: this.memoryWaitStopController.signal,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+          captureMonitorNotifications: false,
+          captureMonitorRegistrations: false,
+          recoverableCancellation: true,
+        },
+      );
+      if (exitCode === MAX_SESSION_TURNS_EXIT_CODE) {
+        this.exitCode = exitCode;
+        this.isShuttingDown = true;
+        this.abortSession();
+        this.inputReader.close();
+      }
     } catch (error) {
       debugLogger.error('[Session] Query execution error:', error);
     } finally {
@@ -1070,7 +1084,7 @@ class Session {
    * 4. control_cancel - synchronous
    * 5. user_message - enqueued for processing
    */
-  async run(): Promise<void> {
+  async run(): Promise<number> {
     try {
       debugLogger.info('[Session] Starting session', this.sessionId);
 
@@ -1142,6 +1156,7 @@ class Session {
       }
 
       await this.drainAndShutdown();
+      return this.exitCode;
     } catch (error) {
       debugLogger.error('[Session] Error:', error);
       await this.shutdown();
@@ -1222,7 +1237,7 @@ export async function runNonInteractiveStreamJson(
   config: Config,
   input: string,
   settings: LoadedSettings = createMinimalSettings(),
-): Promise<void> {
+): Promise<number> {
   let initialPrompt: CLIUserMessage | undefined = undefined;
   if (input && input.trim().length > 0) {
     const sessionId = config.getSessionId();
@@ -1239,7 +1254,7 @@ export async function runNonInteractiveStreamJson(
 
   const manager = new Session(config, initialPrompt, settings);
   try {
-    await manager.run();
+    return await manager.run();
   } finally {
     await settleChatRecording(config, { finalize: true });
     await manager.dispose();

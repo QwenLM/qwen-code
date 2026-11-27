@@ -2925,7 +2925,7 @@ describe('llm.tsx main function', () => {
       .mockResolvedValue(validatedConfig);
     const runStreamJsonSpy = vi
       .spyOn(streamJsonModule, 'runNonInteractiveStreamJson')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(0);
 
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],

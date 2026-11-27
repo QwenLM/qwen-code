@@ -382,9 +382,10 @@ export class FatalConfigError extends FatalError {
     super(message, 52);
   }
 }
+export const MAX_SESSION_TURNS_EXIT_CODE = 53;
 export class FatalTurnLimitedError extends FatalError {
   constructor(message: string) {
-    super(message, 53);
+    super(message, MAX_SESSION_TURNS_EXIT_CODE);
   }
 }
 export class FatalToolExecutionError extends FatalError {

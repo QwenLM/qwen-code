@@ -302,12 +302,7 @@ export async function handleCancellationError(
 export async function handleMaxTurnsExceededError(
   config: Config,
 ): Promise<never> {
-  const baseMessage =
-    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
-  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
-  const message = jsonSchemaActive
-    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
-    : baseMessage;
+  const message = getMaxTurnsExceededMessage(config);
   const maxTurnsError = new FatalTurnLimitedError(message);
 
   if (config.getOutputFormat() === OutputFormat.JSON) {
@@ -322,6 +317,15 @@ export async function handleMaxTurnsExceededError(
     writeStderrLine(maxTurnsError.message);
   }
   return exitAfterCleanup(maxTurnsError.exitCode);
+}
+
+export function getMaxTurnsExceededMessage(config: Config): string {
+  const baseMessage =
+    'Reached max session turns for this session. Increase the number of turns by specifying maxSessionTurns in settings.json.';
+  const jsonSchemaActive = config.getJsonSchema?.() !== undefined;
+  return jsonSchemaActive
+    ? `${baseMessage}\nNote: --json-schema is active. If the model never called structured_output, verify it isn't denied by permissions.deny / --exclude-tools and that the schema is satisfiable.`
+    : baseMessage;
 }
 
 /**

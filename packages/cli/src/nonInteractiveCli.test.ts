@@ -10425,7 +10425,7 @@ describe('runNonInteractive', () => {
         'Second question',
         'prompt-client-turn-cap-stream-json',
       ),
-    ).resolves.toBe(1);
+    ).resolves.toBe(53);
 
     const messages = processStdoutSpy.mock.calls
       .map((call) => String(call[0]))
