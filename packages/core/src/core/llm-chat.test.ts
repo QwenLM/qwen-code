@@ -8485,6 +8485,8 @@ describe('LlmChat', async () => {
       },
     );
 
+    const mongolianLine = 'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n';
+
     it.each([
       { name: 'an equal window', window: 65_536 },
       { name: 'a smaller window', window: 52_000, output: 4_000 },
@@ -8508,6 +8510,18 @@ describe('LlmChat', async () => {
         rawMessages: [{ role: 'user', content: 'Use this fixed prompt.' }],
         output: 4_000,
       },
+      {
+        name: 'new Mongolian text',
+        window: 65_536,
+        followUp: mongolianLine.repeat(240),
+        measuredInput: 48_380,
+      },
+      {
+        name: 'new Mongolian text near the window',
+        window: 65_536,
+        followUp: mongolianLine.repeat(310),
+        measuredInput: 56_640,
+      },
       { name: 'a different system prompt', window: 36_000, otherSystem: true },
       {
         name: 'a raw message override',
@@ -8523,6 +8537,8 @@ describe('LlmChat', async () => {
         output,
         otherSystem,
         rawMessages,
+        followUp,
+        measuredInput,
       }) => {
         const fallbackModel = 'compatible-minimax';
         const fallback = vi.fn().mockResolvedValue(textStream('completed'));
@@ -8549,10 +8565,18 @@ describe('LlmChat', async () => {
               },
             }),
           ),
-          { ...narrowPrimary, contextWindowSize: primaryWindow },
+          {
+            ...narrowPrimary,
+            contextWindowSize: primaryWindow,
+            ...(followUp && { extra_body: { max_tokens: 8_000 } }),
+          },
         );
         mockCompress(noop());
-        const promptTokenCount = primaryWindow === 33_000 ? 27_038 : 41_038;
+        const promptTokenCount = followUp
+          ? 20_038
+          : primaryWindow === 33_000
+            ? 27_038
+            : 41_038;
         streamMock().mockResolvedValueOnce(
           textStream('acknowledged', {
             promptTokenCount,
@@ -8576,7 +8600,10 @@ describe('LlmChat', async () => {
           await chat.sendMessageStream(
             digitalOceanModel,
             {
-              message: 'What happened next?',
+              message: followUp
+                ? 'Use the preceding conversation to answer this follow-up. ' +
+                  followUp
+                : 'What happened next?',
               config: { maxOutputTokens: callerLimit },
             },
             'warm-compatible-second',
@@ -8588,7 +8615,12 @@ describe('LlmChat', async () => {
         if (otherSystem) {
           expect(fallbackRequest.config.systemInstruction).toBe(fallbackSystem);
         }
-        if (differentPrompt && output === undefined) {
+        if (measuredInput !== undefined) {
+          const outputTokens = fallbackRequest.config.maxOutputTokens;
+          expect(primaryRequest.config?.maxOutputTokens).toBe(8_000);
+          expect(outputTokens + measuredInput).toBeLessThanOrEqual(window);
+          expect(outputTokens).toBeGreaterThanOrEqual(4_000);
+        } else if (differentPrompt && output === undefined) {
           expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(5_000);
         } else {
           expect(fallbackRequest.config.maxOutputTokens).toBe(
@@ -8609,7 +8641,7 @@ describe('LlmChat', async () => {
       },
       {
         name: 'fixed Mongolian messages',
-        rawText: 'ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ᠂ ᠪᠢᠴᠢᠭ᠌ ᠪᠠᠷᠢᠮᠲᠠ ᠤᠩᠰᠢᠵᠤ ᠪᠠᠢᠨ᠎ᠠ᠃\n'.repeat(240),
+        rawText: mongolianLine.repeat(240),
         measuredInput: 28_358,
       },
       { name: 'a discarded tool default' },

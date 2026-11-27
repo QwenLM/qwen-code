@@ -1061,6 +1061,16 @@ function estimateHuggingFaceFallbackTextTokens(text: string): number {
   );
 }
 
+function estimateHuggingFaceUnpaddedTextTokens(text: string): number {
+  // Raw messages and the new part of a warm prompt lack the cold-prompt pad.
+  const khmer = text.match(/\p{Script=Khmer}/gu)?.length ?? 0;
+  const mongolian = text.match(/\p{Script=Mongolian}/gu)?.length ?? 0;
+  return (
+    estimateHuggingFaceFallbackTextTokens(text) +
+    Math.ceil(khmer * 0.9 + mongolian * 1.5)
+  );
+}
+
 function estimateRawChatMessagesTokens(
   messages: unknown[],
   imageTokenEstimate: number,
@@ -1078,15 +1088,7 @@ function estimateRawChatMessagesTokens(
     }
     return value;
   });
-  // Raw overrides bypass the standard prompt's padding. Leave room for
-  // extra subword pieces in scripts that are denser than the base estimate.
-  const khmerAndMongolian =
-    text.match(/[\p{Script=Khmer}\p{Script=Mongolian}]/gu)?.length ?? 0;
-  return (
-    estimateHuggingFaceFallbackTextTokens(text) +
-    Math.ceil(khmerAndMongolian * 0.9) +
-    imageTokens
-  );
+  return estimateHuggingFaceUnpaddedTextTokens(text) + imageTokens;
 }
 
 /**
@@ -4692,7 +4694,7 @@ export class LlmChat {
               const densePendingTokens = estimateContentTokens(
                 pendingContents,
                 imageTokenEstimate,
-                estimateHuggingFaceFallbackTextTokens,
+                estimateHuggingFaceUnpaddedTextTokens,
               );
               usageTokens =
                 promptTokensForClamp +
