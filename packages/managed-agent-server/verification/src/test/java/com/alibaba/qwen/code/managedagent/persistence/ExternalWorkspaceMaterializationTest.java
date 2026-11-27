@@ -31,9 +31,14 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -533,6 +538,43 @@ class ExternalWorkspaceMaterializationTest {
         context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
         context.refresh();
         store.materialize("tenant", "workspace", "Name", "owner", "key");
+    }
+
+    @Test
+    void sharedExternalFilesUseOnePlacementAndKeepEachSessionsDirectory() {
+        try (var context = new AnnotationConfigApplicationContext()) {
+            configureExternalFiles(context);
+            var alias = new ExternalStorageRegistration.StorageAlias("shared", "/aliases/shared", "/worker/shared", "workspace");
+            registrations.registerExternalStorage("tenant", "shared-storage", new ExternalStorageRegistration(
+                    new ExternalStorageRegistration.ExternalStorageIdentity("provider", "shared-volume", 1), alias));
+            store.materialize("tenant", "shared", "Shared", "owner", "shared-workspace");
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            var resolver = new WorkspaceRuntimeResolver(sessions, new JdbcWorkspaceExecutionStore(jdbc, manager),
+                    properties, null, registrations);
+            var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]));
+            var placements = new java.util.ArrayList<RuntimeBindingRecord>();
+            for (var directory : List.of("conversations/alpha", "conversations/bravo")) {
+                var admission = new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
+                        SessionCreationCommand.builder().tenantId("tenant").actorId("owner")
+                                .idempotencyKey("create-" + placements.size()).requestDigest("digest-" + placements.size())
+                                .agentId("qwen-code").input(List.of()).selection(new WorkspaceSelection("shared", directory)).build()));
+                var saved = resolver.resolve(admission.sessionId());
+                assertThat(saved.binding().getCwdRelative()).isEqualTo(directory);
+                assertThat(saved.scope().getCanonicalCwd()).isEqualTo(alias.mountRoot());
+                assertThat(saved.scope().getIsolationClass()).isEqualTo("workspace");
+                placements.add(bindings.findOrCreate(new RuntimeProvisionRequest(saved.scope(), null, "external-workspace", "shared")));
+            }
+            var first = placements.getFirst();
+            var second = placements.getLast();
+            assertThat(second.getBindingId()).isEqualTo(first.getBindingId());
+            assertThat(second.getGeneration()).isEqualTo(first.getGeneration());
+            assertThat(second.getRequest().requestKey()).isEqualTo(first.getRequest().requestKey());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding", Integer.class)).isOne();
+            assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> registry.resolveForCreation(
+                    "tenant", "owner", new WorkspaceSelection("workspace", "conversations/alpha"))))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        }
     }
 
     @Test

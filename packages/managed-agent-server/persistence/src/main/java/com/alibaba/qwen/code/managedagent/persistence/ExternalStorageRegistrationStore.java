@@ -320,7 +320,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 continue;
             }
             result.put(storage, new RegistrationState(true, registered.providerId(),
-                    registered.tenantWorkspaceId()));
+                    registered.tenantWorkspaceId(), registered.isolationClass()));
         }
         return result;
     }
@@ -329,7 +329,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             Number registrationRevision, String physicalKey, String mountRoot, String storageKind) {
     }
 
-    record RegistrationState(boolean current, String providerId, String tenantWorkspaceId) {
+    record RegistrationState(boolean current, String providerId, String tenantWorkspaceId, String isolationClass) {
     }
 
     private static String text(Object value) {

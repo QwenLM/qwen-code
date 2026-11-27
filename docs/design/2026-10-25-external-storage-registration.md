@@ -45,6 +45,25 @@ sets HTTP correlation, not idempotency. Identical retries return the original
 registration ID and epoch-millisecond timestamp after restart; changed data with
 the same key returns `idempotency_conflict`. New requests cannot change an owner.
 
+### Runtime placement for registered storage
+
+An external storage alias can include the optional `isolationClass` value
+`session` or `workspace`. The operator registers it with the alias, and the
+registration receipt covers it for idempotency. Omitted values follow the
+Broker's configured isolation. It is excluded from physical storage identity
+and the worker's boot storage descriptor.
+
+With an explicit `workspace` placement, an authorized external Files Session
+can select an existing directory below the mount. The Session stores its
+normalized relative cwd. The Broker keys its binding on the canonical mount
+root and the Workspace's generation and capability digest. Sessions selecting
+different directories can therefore hold the same Worker. The Worker validates
+the directory on the live mount when installing the Session context. Closing
+one Session releases its own hold. A shared Worker can remain ready for the
+other Sessions. Foreground Shell retains its Session-only placement contract.
+The provider still has to confirm the identity of the original mounted storage
+on acquisition.
+
 ## Persistence and compatibility
 
 Use existing `ma_storage`, `ma_storage_owner` and `ma_request_receipt` rows in one

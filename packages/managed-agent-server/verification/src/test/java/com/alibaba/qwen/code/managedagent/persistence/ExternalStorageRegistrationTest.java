@@ -106,6 +106,8 @@ public class ExternalStorageRegistrationTest {
                 registration("provider", "other-volume", "workspace", "/aliases/one"),
                 registration("other-provider", "volume", "workspace", "/aliases/one"),
                 new ExternalStorageRegistration(new ExternalStorageIdentity("provider", "volume", 2), original.alias()),
+                new ExternalStorageRegistration(original.identity(), new StorageAlias(
+                        original.alias().tenantWorkspaceId(), original.alias().aliasPath(), original.alias().mountRoot(), "workspace")),
                 registration("provider", "volume", "other-workspace", "/aliases/two"))) {
             assertConflict(() -> store.registerExternalStorage("tenant", "key", changed), "idempotency_conflict");
             assertConflict(() -> store.registerExternalStorage("tenant", "other-key", changed), "alias_conflict");
@@ -250,11 +252,11 @@ public class ExternalStorageRegistrationTest {
         assertThat(trace.events()).isEmpty();
         assertThat(reader.states("tenant", List.of("one", "one", "missing")))
                 .containsOnlyKeys("one").containsEntry("one",
-                        new ExternalStorageRegistrationStore.RegistrationState(true, "provider", "one"));
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "provider", "one", null));
         assertThat(reader.states("tenant", List.of("two"))).containsOnlyKeys("two");
         assertThat(reader.states("other-tenant", List.of("one", "two")))
                 .containsOnlyKeys("one").containsEntry("one",
-                        new ExternalStorageRegistrationStore.RegistrationState(true, "other-provider", "one"));
+                        new ExternalStorageRegistrationStore.RegistrationState(true, "other-provider", "one", null));
         assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
                 .map(StoreLockTrace.Event::sql)).hasSize(3).allSatisfy(sql -> assertThat(sql)
                         .contains("s.tenant_id = ?", "s.storage_id in ("));

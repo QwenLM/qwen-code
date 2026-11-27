@@ -39,6 +39,17 @@ registration。可选的可见 ASCII `requestId`（1–128 字符）只设置 HT
 幂等身份。同内容重试在重启后仍返回原 registration ID 与毫秒时间戳；同 key 改内容
 返回 `idempotency_conflict`。新请求也不能修改已有 owner。
 
+### 注册存储的 Runtime 放置范围
+
+管理员可随外部存储别名登记可选的 `isolationClass`，取值为 `session` 或 `workspace`。
+注册回执将该值计入幂等输入。省略时沿用当前 Broker 的放置配置。物理存储身份和
+Worker boot 的 storage 描述仍使用原有字段。
+
+显式登记为 `workspace` 的外部 Files 会话可选择挂载根下已存在的目录。会话保存规范化的相对工作目录。
+Broker 以挂载根、Workspace 代次与能力摘要识别运行绑定，因此不同目录下的会话可以共用一台 Worker。
+Worker 在安装会话上下文时从实际挂载验证目录。关闭会话仅释放自身的运行引用，其他会话可继续使用该 Worker。
+前台 Shell 使用会话级放置。每次获取运行绑定仍由供应方确认原挂载的实际存储身份。
+
 ## 持久化与兼容性
 
 在一个事务中写入现有 `ma_storage`、`ma_storage_owner` 与 `ma_request_receipt`。

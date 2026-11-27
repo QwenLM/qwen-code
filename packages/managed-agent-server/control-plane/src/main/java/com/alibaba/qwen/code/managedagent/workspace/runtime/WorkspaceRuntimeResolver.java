@@ -141,7 +141,7 @@ public final class WorkspaceRuntimeResolver {
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
                     externalDigest(session.toolProfile()),
-                    boundSessionIsolationClass)
+                    registered.isolationClass() == null ? boundSessionIsolationClass : registered.isolationClass())
                     .withLifecycleAuthority(lifecycle));
         }
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
