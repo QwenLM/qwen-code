@@ -73,6 +73,8 @@ headless、Ink、OpenTUI、子代理以及共享循环上的 ACP 通过 `CoreToo
 解除转义，从而将被清除结果对应文件的缓存置为失效。压缩后恢复文件时，先规范化桥接
 工具名，再查别名。会话导出按写入或编辑结果中的实际路径计数。旧记录可回退到所保存的
 `file_path` 和文件名，因此不同目录中的同名文件会分别计数。
+AUTO 模式的历史操作投影、恢复会话时的工具描述，以及导出的工具元数据，也会根据解析
+出的工具对参数副本应用别名。聊天记录和导出的原始参数继续保留模型使用的名字。
 
 ### 在 schema 错误中点出未知参数
 
@@ -89,8 +91,10 @@ params must have required property 'pattern'. Unrecognized parameters: query. Ac
 `dependentSchemas`、`dependencies`、`unevaluatedProperties`）的 schema 会跳过
 这条说明。省略 `additionalProperties` 且 `required` 中有键未列在 `properties` 时，
 也会跳过说明。封闭 schema 可在 Ajv 的 `must NOT have additional properties`
-错误之后点明多出的键。说明只在 schema 校验报错时追加。自行校验参数的工具（如
-`agent`）继续返回自己的参数校验错误。
+错误之后点明多出的键。说明只在 schema 校验报错时追加。无参数的封闭工具只列出未知键。
+调度器按原始 schema 错误计数，因此换一个未知参数名
+也会累计同一个错误的重试次数。自行校验参数的工具（如 `agent`）继续返回自己的参数
+校验错误。
 
 说明放在工具层而不是 `SchemaValidator` 里，因为后者的错误文本还有其他调用方共用。
 
@@ -105,8 +109,9 @@ params must have required property 'pattern'. Unrecognized parameters: query. Ac
 ## 验证
 
 单元测试覆盖调度器和旧 ACP 在 hook 前处理别名、保留原始历史参数、直接调用和桥接
-调用的缓存失效与恢复、会话导出，以及封闭、组合和只在 `required` 中声明参数时的
-schema 提示行为。桥接历史样例对应可由 `tools.eager` 设为延迟加载的文件工具。
+调用的缓存失效与恢复、历史工具元数据、AUTO 投影和导出计数。Schema 测试覆盖封闭、
+组合和只在 `required` 中声明参数时的提示行为，以及改变未知参数名时的重试阈值。桥接
+历史样例对应可由 `tools.eager` 设为延迟加载的文件工具。
 
 [E2E 报告](https://github.com/QwenLM/qwen-code/pull/18500#issuecomment-7211299701)
 记录了模型模拟环境和最初的 CLI、ACP 及子代理测试结果。验收用例包括：

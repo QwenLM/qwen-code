@@ -174,11 +174,36 @@ describe('BaseDeclarativeTool.validateToolParams', () => {
     );
   });
 
+  it('names unexpected keys when a closed schema accepts no parameters', () => {
+    const noParams = tool({
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    });
+    expect(noParams.validateToolParams({ reason: 'checking status' })).toBe(
+      'params must NOT have additional properties. Unrecognized parameters: reason.',
+    );
+  });
+
+  const querySchema = { properties: { query: { type: 'string' } } };
+  const draft2020 = 'https://json-schema.org/draft/2020-12/schema';
   it.each([
     ['additionalProperties', { additionalProperties: { type: 'string' } }],
     ['patternProperties', { patternProperties: { '^x': {} } }],
-    ['anyOf', { anyOf: [{ properties: { query: { type: 'string' } } }] }],
+    ['allOf', { allOf: [querySchema] }],
+    ['anyOf', { anyOf: [querySchema] }],
+    ['oneOf', { oneOf: [querySchema] }],
     ['$ref', { $ref: '#/definitions/x', definitions: { x: {} } }],
+    ['if', { if: { required: ['query'] }, then: querySchema }],
+    [
+      'dependentSchemas',
+      { $schema: draft2020, dependentSchemas: { query: querySchema } },
+    ],
+    ['dependencies', { dependencies: { query: querySchema } }],
+    [
+      'unevaluatedProperties',
+      { $schema: draft2020, unevaluatedProperties: true },
+    ],
   ])('adds nothing for a schema with %s', (_name, extra) => {
     expect(
       tool({ ...schema, ...extra }).validateToolParams({ query: 'x' }),

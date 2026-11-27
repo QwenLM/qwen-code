@@ -89,7 +89,11 @@ import {
   finalizeToolResponses,
   toolResponseTextLength,
 } from '../tools/tool-response-finalizer.js';
-import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
+import {
+  getToolValidationRetryKey,
+  ToolConfirmationOutcome,
+  Kind,
+} from '../tools/tools.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
@@ -198,7 +202,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
-import { DiscoveredTool } from '../tools/tool-registry.js';
+import { applyRegisteredToolArgAliases } from '../tools/tool-registry.js';
 import { IdeClient } from '../ide/ide-client.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
@@ -259,7 +263,6 @@ import {
   runWithInvocationContext,
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
-import { applyToolArgAliases } from '../tools/tool-arg-aliases.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
 import {
   codeModeToolResultStamp,
@@ -3463,7 +3466,9 @@ export class CoreToolScheduler {
         toolName: string,
         errorMessage: string,
       ): number => {
-        const key = `${toolName}:${errorMessage}`;
+        // Count the underlying error independently of the per-call hint.
+        const retryMessage = getToolValidationRetryKey(errorMessage);
+        const key = `${toolName}:${retryMessage}`;
         const existingCount = retryErrorsRecordedInBatch.get(key);
         if (existingCount !== undefined) {
           for (const trackedKey of this.validationRetryCounts.keys()) {
@@ -3474,7 +3479,7 @@ export class CoreToolScheduler {
           this.validationRetryCounts.set(key, existingCount);
           return existingCount;
         }
-        const count = this.recordRetryableToolError(toolName, errorMessage);
+        const count = this.recordRetryableToolError(toolName, retryMessage);
         retryErrorsRecordedInBatch.set(key, count);
         return count;
       };
@@ -3711,13 +3716,7 @@ export class CoreToolScheduler {
             continue;
           }
 
-          // Discovered tools can share a built-in name with a different schema.
-          if (
-            !(toolInstance instanceof DiscoveredTool) &&
-            !(toolInstance instanceof DiscoveredMCPTool)
-          ) {
-            applyToolArgAliases(toolInstance.name, reqInfo.args);
-          }
+          applyRegisteredToolArgAliases(toolInstance, reqInfo.args);
 
           // Reject file-modifying calls whose arguments arrived incomplete, to
           // prevent writing partial content even when repair made the params
@@ -3899,9 +3898,6 @@ export class CoreToolScheduler {
                 ? new Error(targetMessage)
                 : invocationOrError;
 
-            // Track validation retry for loop detection. Counts accumulate per
-            // (tool, error message) pair so a different validation mistake on
-            // the same tool starts fresh rather than tripping the threshold.
             const count = recordBatchRetryableToolError(
               reqInfo.name,
               invocationOrError.message,

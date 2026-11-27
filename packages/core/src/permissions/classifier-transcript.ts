@@ -32,7 +32,10 @@
 
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 import type { Content, Part } from '@google/genai';
-import type { ToolRegistry } from '../tools/tool-registry.js';
+import {
+  applyRegisteredToolArgAliases,
+  type ToolRegistry,
+} from '../tools/tool-registry.js';
 import {
   canonicalToolName,
   resolveBuiltinToolName,
@@ -335,9 +338,9 @@ function formatPendingActionPrompt(
 }
 
 /**
- * Look up the tool in the registry and project the args through
- * `toAutoClassifierInput`. Falls back to the raw args when the tool is unknown
- * or declares no projection. Returns `{}` when the projection returns the
+ * Look up the tool in the registry, apply aliases to an argument copy, and
+ * project it through `toAutoClassifierInput`. Falls back to the raw args when
+ * the tool is unknown or declares no projection. Returns `{}` for the
  * empty-string sentinel (tool encoded as "no security relevance"), and for an
  * `mcp__*` name the registry cannot resolve — see below. A bridged call whose
  * `tool_call` wrapper is unavailable is projected through its target instead
@@ -348,14 +351,19 @@ function projectFunctionArgs(
   args: unknown,
   toolRegistry: ToolRegistry,
 ): Record<string, unknown> {
-  const tool = toolRegistry.getTool(name);
+  const canonicalName = canonicalToolName(name);
+  const tool =
+    toolRegistry.getTool(name) ??
+    (canonicalName === name ? undefined : toolRegistry.getTool(canonicalName));
   const rawArgs =
     args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
 
   let projected: Record<string, unknown> | string | undefined;
   if (tool) {
     try {
-      projected = tool.toAutoClassifierInput(rawArgs as never);
+      const projectionArgs = structuredClone(rawArgs);
+      applyRegisteredToolArgAliases(tool, projectionArgs);
+      projected = tool.toAutoClassifierInput(projectionArgs as never);
     } catch {
       projected = undefined;
     }
@@ -392,8 +400,10 @@ function projectFunctionArgs(
         ? (rawArgs['arguments'] as Record<string, unknown>)
         : {};
     try {
+      const projectionArgs = structuredClone(targetArgs);
+      applyRegisteredToolArgAliases(target, projectionArgs);
       const targetProjection = target.toAutoClassifierInput(
-        structuredClone(targetArgs) as never,
+        projectionArgs as never,
       );
       if (targetProjection === '') return { name: target.name };
       return targetProjection === undefined

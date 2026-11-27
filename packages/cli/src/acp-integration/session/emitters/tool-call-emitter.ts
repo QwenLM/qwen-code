@@ -5,6 +5,7 @@
  */
 
 import type { ToolLifecycleEvent } from '@qwen-code/qwen-code-core';
+import { applyRegisteredToolArgAliases } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 
 import { BaseEmitter } from './base-emitter.js';
 import { PlanEmitter } from './PlanEmitter.js';
@@ -473,7 +474,9 @@ export class ToolCallEmitter extends BaseEmitter {
 
     if (tool && args) {
       try {
-        const invocation = tool.build(args);
+        const invocationArgs = structuredClone(args);
+        applyRegisteredToolArgAliases(tool, invocationArgs);
+        const invocation = tool.build(invocationArgs);
         title = `${title}: ${invocation.getDescription()}`;
         // Map locations to ensure line is null instead of undefined (for ACP consistency)
         locations = invocation.toolLocations().map((loc) => ({

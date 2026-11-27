@@ -564,6 +564,13 @@ const OPEN_SCHEMA_KEYWORDS = [
   'unevaluatedProperties',
 ];
 
+const UNRECOGNIZED_PARAMS_PREFIX = '. Unrecognized parameters: ';
+
+export function getToolValidationRetryKey(errorMessage: string): string {
+  const hintStart = errorMessage.indexOf(UNRECOGNIZED_PARAMS_PREFIX);
+  return hintStart === -1 ? errorMessage : errorMessage.slice(0, hintStart);
+}
+
 /**
  * Names the top-level arguments a schema does not declare, and the ones it
  * does: a model that used another harness's name for an argument otherwise
@@ -593,7 +600,10 @@ function describeUnrecognizedParams(schema: unknown, params: unknown): string {
     (key) => !Object.hasOwn(properties, key),
   );
   if (unrecognized.length === 0) return '';
-  return `. Unrecognized parameters: ${unrecognized.join(', ')}. Accepted parameters: ${accepted.join(', ')}.`;
+  const hint = `${UNRECOGNIZED_PARAMS_PREFIX}${unrecognized.join(', ')}.`;
+  return accepted.length > 0
+    ? `${hint} Accepted parameters: ${accepted.join(', ')}.`
+    : hint;
 }
 
 /**

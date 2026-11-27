@@ -23,6 +23,7 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
+import { applyToolArgAliases } from './tool-arg-aliases.js';
 import {
   MANAGED_RUNTIME_TOOL_NAMES,
   type ExecutionEnvironment,
@@ -229,6 +230,21 @@ Signal: Signal number or \`(none)\` if no signal was received.
   ): ToolInvocation<ToolParams, ToolResult> {
     return new DiscoveredToolInvocation(this.config, this.name, params);
   }
+}
+
+export function applyRegisteredToolArgAliases(
+  tool: { readonly name?: string },
+  args: ToolParams,
+): void {
+  // Discovery can supply a different schema under a built-in tool name.
+  if (
+    !tool.name ||
+    tool instanceof DiscoveredTool ||
+    tool instanceof DiscoveredMCPTool
+  ) {
+    return;
+  }
+  applyToolArgAliases(tool.name, args);
 }
 
 export class ToolRegistry {

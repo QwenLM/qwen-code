@@ -88,6 +88,9 @@ Post-compaction restoration normalizes bridged tool names before looking up
 aliases. Session export counts writes and edits by the tool result's resolved
 path, with the recorded `file_path` and the basename as fallbacks for older
 records. This keeps same-named files in different directories distinct.
+AUTO mode's prior-action projection, resumed tool descriptions and exported
+tool metadata also apply aliases to a copy for the resolved tool. Transcripts
+and exported raw arguments retain the original names.
 
 ### Unknown arguments in schema errors
 
@@ -108,8 +111,11 @@ accept other keys
 With `additionalProperties` omitted, a key in `required` outside `properties`
 also suppresses the note. For a closed schema, the note can name the extra
 keys behind Ajv's `must NOT have additional properties` error. The note is
-added only when schema validation reports an error. Tools such as `agent`
-continue to produce their own parameter validation errors.
+added only when schema validation reports an error. For a closed tool with
+no declared parameters, it lists the unexpected keys alone. The scheduler
+keeps retry counts on the original schema diagnosis, so changing an
+unrecognized name does not reset the count. Tools such as `agent` continue to
+produce their own parameter validation errors.
 
 The note lives in the tool layer rather than in `SchemaValidator`, whose error
 text other callers share.
@@ -127,9 +133,10 @@ text other callers share.
 
 Unit tests cover alias normalization before hooks in the scheduler and legacy
 ACP, raw history arguments, cache eviction and restoration for direct and
-bridged calls, session export, and schema hints for closed, composed and
-required-only keys. The bridged history fixtures represent file tools that
-`tools.eager` can defer.
+bridged calls, historical tool metadata and AUTO projections, and export
+counts. Schema tests cover closed, composed and required-only keys and the
+retry threshold when unknown names change. The bridged history fixtures
+represent file tools that `tools.eager` can defer.
 
 The [E2E report](https://github.com/QwenLM/qwen-code/pull/18500#issuecomment-7211299701)
 records the mock model setup and the initial CLI, ACP and subagent results.

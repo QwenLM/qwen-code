@@ -116,6 +116,7 @@ import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  ToolCallTool,
 } from '../tools/tool-call.js';
 import {
   getChannelWorkflowOrigin,
@@ -16586,6 +16587,7 @@ describe('CoreToolScheduler validation retry loop detection', () => {
           getApprovalMode: () => ApprovalMode.YOLO,
           getTruncateToolOutputThreshold: () => 100,
           getTruncateToolOutputLines: () => 10,
+          getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
           setApprovalMode: vi.fn(),
         },
       ),
@@ -16655,6 +16657,47 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(await send(invalid('c2'))).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
     // Turn 3: same bad params — should trigger directive
     expect(await send(invalid('c3'))).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts the same validation error even as the unrecognized parameter changes', async () => {
+    const tool = createStrictTool(
+      ToolNames.SHELL,
+      'Shell',
+      'A tool that requires a command.',
+      'command',
+    );
+    const send = createRetryScheduler([tool]);
+
+    for (const [index, key] of ['cmd', 'shell', 'exec'].entries()) {
+      const message = await send(
+        makeRequest(`missing-command-${index}`, tool.name, {
+          [key]: 'echo ok',
+        }),
+      );
+      expect(message).toContain("params must have required property 'command'");
+      expect(message).toContain(
+        `Unrecognized parameters: ${key}. Accepted parameters: command.`,
+      );
+      expect(message?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(index === 2);
+    }
+  });
+
+  it('counts malformed tool_call envelopes with different unrecognized parameters', async () => {
+    const tool = new ToolCallTool();
+    const send = createRetryScheduler([tool]);
+
+    for (const [index, key] of ['tool', 'target', 'function'].entries()) {
+      const message = await send(
+        makeRequest(`missing-target-${index}`, tool.name, {
+          [key]: 'deferred_tool',
+          arguments: {},
+        }),
+      );
+      expect(message).toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(message).toContain("params must have required property 'name'");
+      expect(message).toContain(`Unrecognized parameters: ${key}.`);
+      expect(message?.includes(RETRY_LOOP_STOP_DIRECTIVE)).toBe(index === 2);
+    }
   });
 
   it.each([

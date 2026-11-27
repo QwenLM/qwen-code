@@ -18,6 +18,7 @@ import {
   ToolNames,
 } from './tool-names.js';
 import {
+  applyRegisteredToolArgAliases,
   deferredDeclarationFingerprint,
   type ToolRegistry,
 } from './tool-registry.js';
@@ -373,9 +374,9 @@ export class ToolCallTool extends BaseDeclarativeTool<
     }
 
     try {
-      const projected = target.toAutoClassifierInput(
-        structuredClone(params.arguments) as never,
-      );
+      const projectionArgs = structuredClone(params.arguments);
+      applyRegisteredToolArgAliases(target, projectionArgs);
+      const projected = target.toAutoClassifierInput(projectionArgs as never);
       if (projected === '') {
         return { name: target.name };
       }

@@ -20,6 +20,7 @@ import type {
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { applyRegisteredToolArgAliases } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
 import { isGoalCheckpointBookkeepingRecord } from '@qwen-code/qwen-code-core/goals/goal-card.js';
 import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
 import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
@@ -125,9 +126,9 @@ function formatToolDescription(
   args: Record<string, unknown>,
 ): string {
   try {
-    // Create tool invocation instance and get description
-    const invocation = tool.build(args);
-    return invocation.getDescription();
+    const invocationArgs = structuredClone(args);
+    applyRegisteredToolArgAliases(tool, invocationArgs);
+    return tool.build(invocationArgs).getDescription();
   } catch {
     // Fallback: use the description arg directly if available
     if (typeof args['description'] === 'string') {

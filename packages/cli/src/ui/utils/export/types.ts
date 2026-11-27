@@ -18,6 +18,7 @@ export interface ExportToolInvocation {
 }
 
 export interface ExportToolDefinition {
+  name?: string;
   displayName?: string;
   kind?: unknown;
   build?: (args: Record<string, unknown>) => ExportToolInvocation;
