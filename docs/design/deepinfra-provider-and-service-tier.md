@@ -34,7 +34,7 @@ DeepInfra is registered as an OpenAI-compatible provider:
 - **Protocol**: `AuthType.USE_OPENAI`
 - **Base URL**: `https://api.deepinfra.com/v1/openai`
 - **Env Key**: `DEEPINFRA_API_KEY`
-- **Models**: Curated starter models (`deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1`, `meta-llama/Llama-3.3-70B-Instruct`, `Qwen/Qwen2.5-Coder-32B-Instruct`) with `modelsEditable: true`.
+- **Models**: Curated starter models (`deepseek-ai/DeepSeek-V3`, `deepseek-ai/DeepSeek-R1-0528`, `meta-llama/Llama-3.3-70B-Instruct-Turbo`, `Qwen/Qwen2.5-72B-Instruct`) with `modelsEditable: true`.
 - **Ownership Gate**: Dual-gate requiring `model.envKey === DEEPINFRA_ENV_KEY` and host ending in `.deepinfra.com` or equal to `api.deepinfra.com`.
 - **Attribution Headers**: `HTTP-Referer` and `X-Title` set for request attribution.
 - **UI Group**: `third-party`.
