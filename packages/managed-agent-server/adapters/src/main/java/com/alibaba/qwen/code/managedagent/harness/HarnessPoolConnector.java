@@ -24,6 +24,7 @@ import javax.net.ssl.SSLContext;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,6 +47,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     private final SSLContext tls;
     private final Map<Owner, Member> members = new ConcurrentHashMap<>();
     private final AtomicInteger next = new AtomicInteger();
+    private static final int REAPER_BATCH_SIZE = 32;
+    private static final Set<String> REAPER_DEFER_CODES = Set.of("harness_owner_still_live",
+            "harness_placement_changed", "harness_placement_not_admitted", "session_not_found");
     private final ScheduledExecutorService refreshes = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "managed-harness-pool");
         thread.setDaemon(true);
@@ -223,6 +227,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         }
         ready.sort(Comparator.comparing(member -> member.endpoint.instanceId()));
         accepting = List.copyOf(ready);
+        reapDepartedPlacements(snapshot);
         members.entrySet().removeIf(entry -> {
             if (ready.contains(entry.getValue())) {
                 return false;
@@ -235,6 +240,38 @@ public class HarnessPoolConnector implements HarnessConnector {
             }
             return false;
         });
+    }
+
+    private void reapDepartedPlacements(HarnessDiscovery.Snapshot snapshot) {
+        List<Member> candidates = accepting.stream()
+                .filter(value -> value.reachable && !value.quiescing).toList();
+        if (candidates.isEmpty()) {
+            return;
+        }
+        // Unreachability alone never authorizes recovery; it only lets the
+        // Store consider the independent lease/seal proof. Unknown health is
+        // never enough, so instances without a negotiated member stay excluded.
+        Set<String> configured = Set.copyOf(snapshot.endpoints().stream()
+                .map(HarnessDiscovery.Endpoint::instanceId).toList());
+        Set<String> excluded = new HashSet<>(configured);
+        for (String instanceId : configured) {
+            List<Member> incarnations = members.values().stream()
+                    .filter(member -> member.endpoint.instanceId().equals(instanceId)).toList();
+            if (!incarnations.isEmpty() && incarnations.stream().noneMatch(member -> member.reachable)) {
+                excluded.remove(instanceId);
+            }
+        }
+        for (Placement candidate : placements.findExpiredSuspensions(excluded, REAPER_BATCH_SIZE)) {
+            Member successor = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+            try {
+                placements.takeover(candidate.tenantId(), candidate.sessionId(), candidate,
+                        successor.endpoint.instanceId(), successor.owner().bootId());
+            } catch (ManagedAgentException refusal) {
+                if (!REAPER_DEFER_CODES.contains(refusal.getCode())) {
+                    throw refusal;
+                }
+            }
+        }
     }
 
     private static boolean matches(Placement placement, Member member) {
@@ -866,6 +903,23 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public RecoveryStatus inspectRecovery(String tenant, String session, String prompt) {
         return observe(tenant, session, null, leaf -> leaf.inspectRecovery(tenant, session, prompt));
+    }
+
+    @Override
+    public RecoveryStatus inspectUnattachedRecovery(SessionRecord session, String promptId) {
+        Selected selected = select(session.tenantId(), session.sessionId(), false);
+        if (selected == null || !"ACTIVE".equals(selected.placement().state())) {
+            return null;
+        }
+        if (!selected.member().reachable) {
+            throw unavailable();
+        }
+        var leaf = selected.member().connector;
+        var status = leaf.withPlacement(selected.call(), () -> leaf.inspectUnattachedRecovery(session, promptId));
+        if (!selected.placement().equals(placements.get(session.tenantId(), session.sessionId()))) {
+            throw unavailable();
+        }
+        return status;
     }
 
     @Override

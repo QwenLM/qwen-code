@@ -459,6 +459,7 @@ export interface ChatRecord {
   subtype?:
     | 'chat_compression'
     | 'memory_catalog_snapshot'
+    | 'permission_context_snapshot'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -4065,6 +4066,19 @@ export class ChatRecordingService {
       });
     } catch (error) {
       debugLogger.error('Error saving memory catalog snapshot:', error);
+    }
+  }
+
+  recordPermissionContextSnapshot(snapshot: Part): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'permission_context_snapshot',
+        message: { role: 'user', parts: [snapshot] },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving permission context snapshot:', error);
     }
   }
 

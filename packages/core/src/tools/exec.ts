@@ -57,7 +57,12 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       );
     const media: Part[] = [];
     let retainedOmniMedia = false;
-    const metadata: Pick<ToolResult, 'modelOverride' | 'terminateTurn'> = {};
+    const metadata: Pick<
+      ToolResult,
+      'modelOverride' | 'terminateTurn' | 'hookStopReason'
+    > = {};
+    const turnEnded = () =>
+      metadata.terminateTurn === true || metadata.hookStopReason !== undefined;
     let skillAttempted = false;
     const skillOutputs: string[] = [];
     const sessionId = this.config.getSessionId();
@@ -87,15 +92,22 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
             : goalBarrier;
         const task = (async () => {
           await predecessors;
-          if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
+          if (turnEnded()) throw new CodeModeTurnTerminated();
           if (nestedSignal.aborted) throw nestedSignal.reason;
           if (isSkill) skillAttempted = true;
-          const result = await runtime.dispatch(
+          const pending = runtime.dispatch(
             name,
             args,
             nestedSignal,
             (response) => {
               onResult?.(response);
+              // A hook stop ends the turn whatever the call's outcome.
+              if (
+                response.hookStopReason !== undefined &&
+                metadata.hookStopReason === undefined
+              ) {
+                metadata.hookStopReason = response.hookStopReason;
+              }
               if (
                 isSkill &&
                 !signal.aborted &&
@@ -137,13 +149,19 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               }
             },
           );
-          if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
-          if (isSkill) skillOutputs.push(result.output);
-          if (name === 'capture_screen_context') {
-            const { content: _content, ...textResult } = result;
-            return textResult;
-          }
-          return result;
+          return pending
+            .then((result) => {
+              if (isSkill) skillOutputs.push(result.output);
+              if (name === 'capture_screen_context') {
+                const { content: _content, ...textResult } = result;
+                return textResult;
+              }
+              return result;
+            })
+            .finally(() => {
+              // A rejected tool call can carry the same stop signal.
+              if (turnEnded()) throw new CodeModeTurnTerminated();
+            });
         })();
         active.add(task);
         const release = () => active.delete(task);

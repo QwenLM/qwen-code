@@ -543,6 +543,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_USER_PROMPT_META_KEY,
+  DAEMON_PROMPT_SOURCE_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -4643,15 +4644,22 @@ class QwenAgent implements Agent {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
       const sessions = this.getActiveSessions();
+      const sessionConfigs = new Set(
+        sessions.map((session) => session.getConfig()),
+      );
       const liveConfigs = new Set([
         this.config,
-        ...sessions.map((session) => session.getConfig()),
+        ...sessionConfigs,
         ...(discoveryConfig ? [discoveryConfig] : []),
       ]);
       const syncErrors: unknown[] = [];
       for (const config of liveConfigs) {
         try {
-          const cwd = config.getTargetDir();
+          // MCP settings and approvals belong to the workspace that admitted
+          // the session. A session/cd only moves its working directory.
+          const workspaceRoot = sessionConfigs.has(config)
+            ? this.sessionWorkspaceRoot(config)
+            : config.getTargetDir();
           // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts)
           // — each live Config in this Set may independently be bare/safe or
           // not, so the check is per-config, not hoisted outside the loop.
@@ -4668,7 +4676,7 @@ class QwenAgent implements Agent {
             ? { ...config.getTopTierMcpServers() }
             : assembleMcpServers(
                 settings.merged.mcpServers,
-                cwd,
+                workspaceRoot,
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
@@ -4677,7 +4685,7 @@ class QwenAgent implements Agent {
             : recomputeMcpGating(
                 settings,
                 mcpServers,
-                cwd,
+                workspaceRoot,
                 bootAllowed,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
@@ -7532,6 +7540,7 @@ class QwenAgent implements Agent {
         ? meta[DAEMON_SUBMITTED_PROMPT_META_KEY]
         : meta[SUBMITTED_PROMPT_META_KEY];
     const userPrompt = meta[DAEMON_USER_PROMPT_META_KEY];
+    const promptSource = meta[DAEMON_PROMPT_SOURCE_META_KEY];
     const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
     const suppliedChannelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
     const suppliedChannelWorkflowOrigin =
@@ -7547,8 +7556,12 @@ class QwenAgent implements Agent {
     delete meta[SUBMITTED_PROMPT_META_KEY];
     delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
     delete meta[DAEMON_USER_PROMPT_META_KEY];
+    delete meta[DAEMON_PROMPT_SOURCE_META_KEY];
     if (this.privateParentState === 'trusted' && userPrompt === false) {
       meta[DAEMON_USER_PROMPT_META_KEY] = false;
+    }
+    if (this.privateParentState === 'trusted' && promptSource !== undefined) {
+      meta[DAEMON_PROMPT_SOURCE_META_KEY] = promptSource;
     }
     if (typeof submittedPrompt === 'string' && suppliedChannelPrompt !== true) {
       meta[DAEMON_SUBMITTED_PROMPT_META_KEY] = submittedPrompt;
@@ -8309,7 +8322,9 @@ class QwenAgent implements Agent {
             };
             if (isGatedMcpScope(server.scope)) {
               const approvalState = approvals.getState(
-                config.getWorkingDir(),
+                scope === 'session'
+                  ? this.sessionWorkspaceRoot(config)
+                  : config.getWorkingDir(),
                 name,
                 server,
               );

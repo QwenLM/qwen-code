@@ -72,6 +72,7 @@ import {
   type ToolBatchResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
 import {
   runUserPromptSubmit,
   type UserPromptSubmitDecision,
@@ -1639,6 +1640,8 @@ export async function* livePromptEvents(
     // a replay in place, and finalizes, counts and records the results.
     let scheduled: Promise<unknown>;
     let batch: Promise<ToolBatchResult> | undefined;
+    const scheduleTools = (calls: ToolCallRequestInfo[], signal: AbortSignal) =>
+      promptIdContext.run(promptId, () => scheduler.schedule(calls, signal));
     // The results the batch answered without running a call.
     const answered = sharedRound?.answered ?? [];
     if (sharedRound) {
@@ -1677,7 +1680,7 @@ export async function* livePromptEvents(
                   }),
                 ),
               );
-            void scheduler.schedule(launched as never, signal).catch(reject);
+            void scheduleTools(launched, signal).catch(reject);
           }).catch((error: unknown) => {
             onScheduleFailed(error);
             throw error;
@@ -1759,7 +1762,7 @@ export async function* livePromptEvents(
       publishToolHistory(
         pending.map((request) => ({ status: 'scheduled', request })),
       );
-      scheduled = scheduler.schedule(pending as never, abort);
+      scheduled = scheduleTools(pending, abort);
       void scheduled.catch(onScheduleFailed);
     }
     for (;;) {
@@ -2088,11 +2091,22 @@ export async function* livePromptEvents(
       for (const { request, response } of answeredOnly)
         dualOutput?.emitToolResult(request, response);
     }
-    if (cancelled || shared?.stop === 'tool_ended_turn') {
+    const hookStopReason =
+      shared?.stop === 'hook_stopped' ? shared.hookStopReason : undefined;
+    if (
+      cancelled ||
+      shared?.stop === 'tool_ended_turn' ||
+      hookStopReason !== undefined
+    ) {
+      // A Goal turn that a tool or a tool hook ended finishes its Goal turn.
       const permit =
         shared &&
-        completed.find((call) => call.response.terminateTurn)?.request
-          .goalContext;
+        completed.find(
+          (call) =>
+            call.response.terminateTurn ||
+            (hookStopReason !== undefined &&
+              call.response.hookStopReason !== undefined),
+        )?.request.goalContext;
       let events: ServerLlmStreamEvent[] = [];
       try {
         if (responseParts.length > 0) {
@@ -2122,6 +2136,14 @@ export async function* livePromptEvents(
         throw error;
       }
       endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      if (!cancelled && hookStopReason !== undefined && isCurrentSession()) {
+        yield {
+          type: 'info',
+          text: t('A hook stopped the turn: {{reason}}', {
+            reason: hookStopReason,
+          }),
+        };
+      }
       for (const event of events) {
         if (!isCurrentSession()) return;
         dualOutput?.processEvent(event);

@@ -10,6 +10,7 @@ import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerExecutionUnresolved,
   HostedWorkspaceBrokerRejection,
+  HostedWorkspaceBrokerTransportError,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
 import {
@@ -726,6 +727,37 @@ it('waits for original terminal evidence after a cancellation request', async ()
   });
   expect(starts).toBe(1);
 });
+
+it.each(['v2', 'v3'] as const)(
+  'marks a dropped execution poll in Tool %s',
+  async (protocol) => {
+    const paths: string[] = [];
+    const broker = await fixture((path) => {
+      paths.push(path);
+      return path.endsWith(':start')
+        ? {
+            body: {
+              ...identity,
+              executionCallId: 'execution',
+              status: { state: 'executing' },
+            },
+          }
+        : { drop: true };
+    });
+    const signal = new AbortController().signal;
+    const result =
+      protocol === 'v2'
+        ? broker.execute('execution', '{}', signal)
+        : broker.executeV3('execution', '{}', 'publication', 'token', signal);
+    await expect(result).rejects.toBeInstanceOf(
+      HostedWorkspaceBrokerTransportError,
+    );
+    expect(paths).toEqual([
+      '/internal/runtime-broker/v1/executions/execution:start',
+      '/internal/runtime-broker/v1/executions/execution',
+    ]);
+  },
+);
 
 it('retries a lost prepare reply with the original reservation', async () => {
   const requests: Array<Record<string, unknown>> = [];

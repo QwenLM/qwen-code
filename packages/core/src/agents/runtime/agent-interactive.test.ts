@@ -408,7 +408,7 @@ describe('AgentInteractive', () => {
         text: '',
         terminateMode: AgentTerminateMode.LOOP_DETECTED,
         turnsUsed: 3,
-        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        loopType: LoopType.TURN_TOOL_CALL_CAP,
       },
     });
     // Built inline: an extra async hop before the waitFor shifts its timing.
@@ -431,7 +431,7 @@ describe('AgentInteractive', () => {
       .filter((m) => m.role === 'info')
       .map((m) => String(m.content));
     expect(stopMessages).toContain(
-      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
+      'Agent stopped: loop detected (turn_tool_call_cap).',
     );
 
     await agent.shutdown();
@@ -451,7 +451,7 @@ describe('AgentInteractive', () => {
     [AgentTerminateMode.ERROR, 'Agent stopped due to an error.', 'error'],
     [
       AgentTerminateMode.LOOP_DETECTED,
-      'Agent stopped: duplicate tool-call loop detected.',
+      'Agent stopped: loop detected.',
       'error',
     ],
   ] as const)(
@@ -484,6 +484,35 @@ describe('AgentInteractive', () => {
       await agent.shutdown();
     },
   );
+
+  it('shows the hook stop reason in the warning and the Arena error', async () => {
+    const { core } = createMockCore({
+      loopResult: {
+        text: 'A hook stopped the agent: \x1b[31mbudget\nspent\x1b[0m',
+        terminateMode: AgentTerminateMode.HOOK_STOPPED,
+        turnsUsed: 1,
+      },
+    });
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+    await agent.start(context);
+    await waitForStatus(agent, AgentStatus.FAILED);
+
+    const reason = 'A hook stopped the agent: budget spent';
+    expect(agent.getLastRoundError()).toBe(
+      `Terminated: HOOK_STOPPED (${reason})`,
+    );
+    expect(agent.getMessages()).toContainEqual(
+      expect.objectContaining({
+        role: 'info',
+        content: reason,
+        metadata: { level: 'warning' },
+      }),
+    );
+    await agent.shutdown();
+  });
 
   it('should set status to failed when chat creation fails', async () => {
     const agent = await startAgent(createMockCore({ nullChat: true }).core);
