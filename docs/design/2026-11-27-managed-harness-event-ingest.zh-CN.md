@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `43dc924882` 核实。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
+状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `43dc924882` 核实。§10 的第一步在同一变更中实现。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
 
 ## 1. 问题与现状
 
@@ -77,7 +77,6 @@
   "workspaceId": "...",
   "writerId": "...",
   "writerGeneration": 7,
-  "bootId": "...",
   "eventEpoch": "...",
   "turnId": "...",
   "promptId": "...",
@@ -96,6 +95,8 @@
 }
 ```
 
+writer ID 就是 Harness 的 boot ID：Harness 会拒绝 writer 不是自身 boot 的 Store 描述，所以请求里不再单独携带 boot ID。
+
 `events` 包含 Session journal 在 `(afterSequence, throughSequence]` 内投影出的全部 envelope，包括其他 prompt 的，与 `GET /session/:id/events` 会推送的内容相同。每个请求最多 64 个 envelope。心跳时 `events` 可以为空。`end` 可选。
 
 Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到的值与拉流时相同：
@@ -112,33 +113,34 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
    - 带 `end: "parked"` 的请求也可以出示一次干净 seal 后的已 seal 实例，校验与干净 seal 释放分支相同：writer ID、generation、token 哈希和 placement。
 2. **定位 Turn。** 按 `turnId` 读取 Turn，并要求其 `prompt_id` 与 `promptId` 一致。
    - Turn 仍活跃但 `harness_event_epoch` 与 `eventEpoch` 不同，说明准入还没记录：返回 `managed_event_ingest_not_ready`。
-   - `dispatch_owner` 不是 `harness:` + `bootId`，或租约已过期：返回 `managed_event_ingest_not_owner`。
+   - `dispatch_owner` 不是 `harness:` + `writerId`，或租约已过期：返回 `managed_event_ingest_not_owner`。
 3. **检查游标。**
    - `afterSequence` 大于 `harness_last_event_id` 时，返回 `managed_event_ingest_cursor_mismatch` 和已提交游标。
    - `throughSequence` 不大于游标时，直接确认，不写入。
 4. **写入。** 按 `consumeStream` 的规则依次处理 envelope：
    - 跳过其他 prompt 的 envelope 和没有 ID 的 envelope。
    - 增量最多 64 条或 64 KiB 一组。
-   - 其他每个投影事件、每次撤回和每个终态事件各自调用一次现有的 `recordHarnessEvents` 或 `retractHarnessTurnOutput`。owner 用 `harness:` + `bootId`，来源键用 `bootId:eventEpoch:sourceId`。
+   - 其他每个投影事件、每次撤回和每个终态事件各自调用一次现有的 `recordHarnessEvents` 或 `retractHarnessTurnOutput`。owner 用 `harness:` + `writerId`，来源键用 `writerId:eventEpoch:sourceId`。
    - 每次调用保持现有的事务、加锁顺序和校验。中途失败时，已提交的前缀保留。Harness 原样重发该请求，已在游标及以下的 envelope 会被忽略。
    - 由于一个请求本身就是一批，事务边界可能与拉流时不同，但写入的事件相同。
 5. **推进并续租。** Turn 未终结时，把游标推进到 `throughSequence`（末尾的 envelope 已被过滤），并以 Harness owner 调用 `renewTurn` 续租。
 6. **结束。**
    - `parked` 要求游标等于 head 的已提交序号，然后以 Harness owner 调用 `parkTurnForAction`。
    - `recovery_blocked` 要求同样的游标条件，然后以 `HARNESS_RECOVERY_BLOCKED` 调用 `markTurnRecoveryBlocked`。
-   - 两个方法都按现有条件清空 `dispatch_owner`。条件不满足时，回复中说明；该 Turn 之后会在租约过期时恢复。
+   - 两个方法都按现有条件清空 `dispatch_owner`。游标未到或条件不满足时，返回 `managed_event_ingest_end_refused`；该 Turn 之后会在租约过期时恢复。
 
 ### 回复
 
 回复为 `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`。
 
-| 回复                                                          | Harness 的处理               |
-| ------------------------------------------------------------- | ---------------------------- |
-| 成功                                                          | 从 `cursor` 继续             |
-| `managed_event_ingest_cursor_mismatch`                        | 从返回的游标重新读 journal   |
-| `managed_event_ingest_not_ready`                              | 退避重试，最长不超过租约时长 |
-| `managed_event_ingest_not_owner`、writer 校验被拒、终态已确认 | 停止为这次准入上报           |
-| 传输失败                                                      | 原样重发同一请求             |
+| 回复                                                          | Harness 的处理                                               |
+| ------------------------------------------------------------- | ------------------------------------------------------------ |
+| 成功                                                          | 从 `cursor` 继续                                             |
+| `managed_event_ingest_cursor_mismatch`                        | 从返回的游标重新读 journal                                   |
+| `managed_event_ingest_not_ready`                              | 退避重试，最长不超过租约时长                                 |
+| `managed_event_ingest_not_owner`、writer 校验被拒、终态已确认 | 停止为这次准入上报                                           |
+| `managed_event_ingest_end_refused`                            | 若是游标未到，补发到已提交序号后重试；否则停止为这次准入上报 |
+| 传输失败                                                      | 原样重发同一请求                                             |
 
 ## 5. 派发者的改动
 

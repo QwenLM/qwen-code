@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
+Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first slice in §10 is implemented in the same change. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
 
 ## 1. Problem and current state
 
@@ -77,7 +77,6 @@ Consequences:
   "workspaceId": "...",
   "writerId": "...",
   "writerGeneration": 7,
-  "bootId": "...",
   "eventEpoch": "...",
   "turnId": "...",
   "promptId": "...",
@@ -96,6 +95,8 @@ Consequences:
 }
 ```
 
+The writer ID is the Harness boot ID: a Harness refuses a Store descriptor whose writer is not its own boot, so the request carries no separate boot ID.
+
 `events` holds every envelope the Session journal projects in `(afterSequence, throughSequence]`, including other prompts' envelopes, as `GET /session/:id/events` would stream them. A request carries at most 64 envelopes. `events` may be empty for a heartbeat. `end` is optional.
 
 Java decodes each envelope with the rules of the SDK stream decoder, so the projector sees the same values as it does from the stream:
@@ -112,33 +113,34 @@ Java decodes each envelope with the rules of the SDK stream decoder, so the proj
    - A request with `end: "parked"` may instead present the sealed incarnation of a clean seal, under the same writer ID, generation, token-hash and placement checks as the clean-sealed release arm.
 2. **Resolve the Turn.** Load the Turn by `turnId` and require its `prompt_id` to match `promptId`.
    - If `harness_event_epoch` differs from `eventEpoch` while the Turn is active, the admission is not recorded yet: answer `managed_event_ingest_not_ready`.
-   - If `dispatch_owner` is not `harness:` + `bootId`, or the lease has lapsed: answer `managed_event_ingest_not_owner`.
+   - If `dispatch_owner` is not `harness:` + `writerId`, or the lease has lapsed: answer `managed_event_ingest_not_owner`.
 3. **Check the cursor.**
    - If `afterSequence` is greater than `harness_last_event_id`, answer `managed_event_ingest_cursor_mismatch` with the committed cursor.
    - If `throughSequence` is at or below the cursor, acknowledge without writing.
 4. **Record.** Walk the envelopes in order with the `consumeStream` rules:
    - Skip foreign and ID-less envelopes.
    - Group deltas up to 64 events or 64 KiB.
-   - Record each other projected event, each retraction and each terminal event in its own call to the existing `recordHarnessEvents` or `retractHarnessTurnOutput`, with owner `harness:` + `bootId` and source keys `bootId:eventEpoch:sourceId`.
+   - Record each other projected event, each retraction and each terminal event in its own call to the existing `recordHarnessEvents` or `retractHarnessTurnOutput`, with owner `harness:` + `writerId` and source keys `writerId:eventEpoch:sourceId`.
    - Each call keeps its current transaction, lock order and checks. A failure part-way leaves a committed prefix. The Harness resends the same request, and the envelopes already at or below the cursor are ignored.
    - Transaction boundaries can differ from the stream's, because a request is its own batch. The recorded events do not differ.
 5. **Advance and renew.** If the Turn is not terminal, advance the cursor to `throughSequence` (the trailing envelopes were filtered) and renew the lease through `renewTurn` with the Harness owner.
 6. **End.**
    - `parked` requires the cursor to equal the head's committed sequence, then calls `parkTurnForAction` with the Harness owner.
    - `recovery_blocked` requires the same cursor condition, then calls `markTurnRecoveryBlocked` with `HARNESS_RECOVERY_BLOCKED`.
-   - Both methods clear `dispatch_owner` under their current predicates. When a predicate refuses, the reply says so, and the Turn later recovers when its lease lapses.
+   - Both methods clear `dispatch_owner` under their current predicates. When the cursor is short or a predicate refuses, the reply is `managed_event_ingest_end_refused`, and the Turn later recovers when its lease lapses.
 
 ### Reply
 
 The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000 }`.
 
-| Reply                                                                                  | Harness action                                            |
-| -------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Success                                                                                | Continue from `cursor`                                    |
-| `managed_event_ingest_cursor_mismatch`                                                 | Re-read the journal from the returned cursor              |
-| `managed_event_ingest_not_ready`                                                       | Retry with backoff, for no longer than the lease duration |
-| `managed_event_ingest_not_owner`, a writer fence refusal or a terminal acknowledgement | Stop pushing for this admission                           |
-| Transport failure                                                                      | Resend the same request                                   |
+| Reply                                                                                  | Harness action                                                                                                    |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Success                                                                                | Continue from `cursor`                                                                                            |
+| `managed_event_ingest_cursor_mismatch`                                                 | Re-read the journal from the returned cursor                                                                      |
+| `managed_event_ingest_not_ready`                                                       | Retry with backoff, for no longer than the lease duration                                                         |
+| `managed_event_ingest_not_owner`, a writer fence refusal or a terminal acknowledgement | Stop pushing for this admission                                                                                   |
+| `managed_event_ingest_end_refused`                                                     | Flush through the committed sequence and retry if the cursor was short; otherwise stop pushing for this admission |
+| Transport failure                                                                      | Resend the same request                                                                                           |
 
 ## 5. Dispatcher changes
 
