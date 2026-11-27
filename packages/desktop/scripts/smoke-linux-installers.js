@@ -71,6 +71,16 @@ const APPIMAGE_HOST_LIBRARIES = new Set([
   'libz.so.1',
 ]);
 
+// The rest of the wayland family. Upstream does not exclude these, but they
+// share libwayland-client's versioning: a library built against the host's
+// newer client rejects these older copies. #18486 verified that dropping all
+// four renders, so the host supplies the siblings too.
+const HOST_PROVIDED_SONAMES = new Set([
+  'libwayland-cursor.so.0',
+  'libwayland-egl.so.1',
+  'libwayland-server.so.0',
+]);
+
 export function findLinuxInstallers(
   bundleRoot,
   required = ['appImage', 'deb'],
@@ -203,7 +213,11 @@ export function verifyAppImageClosure(extractedRoot) {
     for (const [, soname] of result.stdout.matchAll(
       /\(NEEDED\).*\[([^\]]+)\]/g,
     )) {
-      if (!bundled.has(soname) && !APPIMAGE_HOST_LIBRARIES.has(soname)) {
+      if (
+        !bundled.has(soname) &&
+        !APPIMAGE_HOST_LIBRARIES.has(soname) &&
+        !HOST_PROVIDED_SONAMES.has(soname)
+      ) {
         missing.add(soname);
       }
     }

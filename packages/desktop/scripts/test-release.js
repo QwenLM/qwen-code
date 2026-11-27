@@ -1053,14 +1053,42 @@ function testAppImageDependencyClosure(directory, canSpawnShebang) {
       '',
     );
     verifyAppImageClosure(extractedRoot);
-    // libwayland-client.so.0 is host-baseline: the extracted image passing it
-    // through, so the AppImage's LD_LIBRARY_PATH shadows the host copy, breaks
-    // dlopening the host libEGL_mesa.so.0 (issue #18486).
+    // libwayland-client.so.0 is host-baseline, so an image that passes it
+    // through shadows the host copy under the AppImage's LD_LIBRARY_PATH,
+    // breaking the host libEGL_mesa.so.0 (issue #18486).
     writeElf('usr/lib/libwayland-client.so.0');
     assert.throws(
       () => verifyAppImageClosure(extractedRoot),
       /AppImage must not bundle host-baseline libraries: libwayland-client\.so\.0/,
     );
+    fs.rmSync(path.join(extractedRoot, 'usr', 'lib', 'libwayland-client.so.0'));
+    // The wayland siblings resolve from the host too, so a GTK or WebKitGTK
+    // library can depend on them without carrying a copy; that image passes
+    // closure only because nothing else is missing.
+    fs.rmSync(bundledLibrary);
+    const gdk = writeElf('usr/lib/libgdk-3.so.0');
+    fs.writeFileSync(
+      fakeReadelf,
+      [
+        '#!/usr/bin/env sh',
+        'case "$2" in',
+        `  ${gdk})`,
+        "    printf '  (NEEDED) Shared library: [libwayland-egl.so.1]\\n'",
+        "    printf '  (NEEDED) Shared library: [libportal.so.0]\\n'",
+        '    ;;',
+        'esac',
+        '',
+      ].join('\n'),
+    );
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage dependency closure is incomplete: libportal\.so\.0$/,
+    );
+    fs.writeFileSync(
+      path.join(extractedRoot, 'usr', 'lib', 'libportal.so.0'),
+      '',
+    );
+    verifyAppImageClosure(extractedRoot);
   } finally {
     process.env.PATH = previousPath;
   }
