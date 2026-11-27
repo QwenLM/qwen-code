@@ -743,7 +743,7 @@ describe('ModelSelectionPanel unit tests', () => {
 
       mockUseOptionalDaemonWorkspace.mockReturnValue({
         baseUrl: 'https://fanout.example.org:9443',
-        token: 'fanout-secret-token-xyz',
+        token: 'fanout-tok-xyz',
       });
 
       await act(async () => {
@@ -762,7 +762,7 @@ describe('ModelSelectionPanel unit tests', () => {
         'https://fanout.example.org:9443/workspace/auth/deepinfra-models',
         expect.objectContaining({
           headers: expect.objectContaining({
-            Authorization: 'Bearer fanout-secret-token-xyz',
+            Authorization: 'Bearer fanout-tok-xyz',
           }),
         }),
       );
@@ -1027,6 +1027,44 @@ describe('ModelSelectionPanel unit tests', () => {
         { id: 'model-a', contextWindowSize: 128000 },
         { id: 'model-b', contextWindowSize: 32000 },
       ]);
+    });
+
+    it('renders localized strings in zh-CN and ru locales (R1-16)', async () => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="zh-CN">
+            <ModelSelectionPanel
+              provider={mockProvider}
+              value="model-a"
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      expect(container.textContent).toContain('精选');
+      expect(container.textContent).toContain('已选 1 个模型');
+      expect(
+        container.querySelector('button[aria-label="移除 model-a"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="ru">
+            <ModelSelectionPanel
+              provider={mockProvider}
+              value="model-a"
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      expect(container.textContent).toContain('Избранные');
+      expect(container.textContent).toContain('Выбрано моделей: 1');
+      expect(
+        container.querySelector('button[aria-label="Удалить model-a"]'),
+      ).not.toBeNull();
     });
   });
 });
