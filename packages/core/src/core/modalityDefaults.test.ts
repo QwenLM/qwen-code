@@ -116,6 +116,11 @@ describe('defaultModalities', () => {
       ['gpt-4o', IMAGE],
       ['o3', IMAGE],
     ]);
+
+    casesFor('returns text-only for', [
+      ['gpt-oss-120b', TEXT_ONLY],
+      ['openai/gpt-oss-120b:cerebras', TEXT_ONLY],
+    ]);
   });
 
   describe('Anthropic Claude', () => {

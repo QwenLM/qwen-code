@@ -21,6 +21,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
     'qwen4-catalog-override': { context: 400_000 },
+    'gemini-2-5-flash': { context: 1_048_576, output: 65_536 },
     // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
@@ -39,11 +40,13 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
 });
 
 describe('normalize', () => {
-  it('keeps unrecognized batch routing tags out of token lookup', () => {
-    expect(normalize('google/gemini-2.5-flash:batch')).toBe('batch');
-    expect(
-      knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
-    ).toBeUndefined();
+  it.each([
+    'google/gemini-2.5-flash:batch',
+    '  google/gemini-2.5-flash:batch  ',
+  ])('keeps batch route %s out of token lookup', (model) => {
+    expect(normalize(model)).toBe('batch');
+    expect(knownTokenLimit(model, 'input')).toBeUndefined();
+    expect(knownTokenLimit(model, 'output')).toBeUndefined();
   });
 
   it('keeps the model name before a suffix after an org segment', () => {
@@ -502,6 +505,11 @@ describe('variant-tagged model ids', () => {
     // it looks like a tag, so the `family:model` forms stay as they were.
     expect(tokenLimit('qwen|qwen2.5:qwen2.5-1m')).toBe(262_144);
     expect(tokenLimit('  a/b/c|GPT-4o:gpt-4o-2024-05-13-q4  ')).toBe(131_072);
+  });
+
+  it('keeps pipe-separated prefixes out of route suffix matching', () => {
+    expect(tokenLimit('a/b/c|GPT-4o:glm-5.3-flash')).toBe(1_000_000);
+    expect(tokenLimit('org/gpt-4o:novita|gpt-5')).toBe(272_000);
   });
 });
 

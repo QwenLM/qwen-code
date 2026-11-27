@@ -28,8 +28,9 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^gemini-/, FULL_MULTIMODAL],
 
   // -------------------
-  // OpenAI — image by default for all gpt/o-series models
+  // OpenAI — GPT-OSS is text-only. The GPT and o-series fallback allows images.
   // -------------------
+  [/^gpt-oss(?:-|$)/, {}],
   [/^gpt-5/, { image: true }],
   [/^gpt-/, { image: true }],
   [/^o\d/, { image: true }],
