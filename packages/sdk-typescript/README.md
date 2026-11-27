@@ -216,6 +216,14 @@ relay, a build watcher. The program shows up in `qwen sessions ps`, and in the
 by name with `send_message`. It can message them back. It runs on Node only and
 needs nothing beyond Node itself.
 
+`@qwen-code/sdk/peer` limits each discovery call to 16 concurrent socket probes,
+with each distinct inbox probed once per call. Overlapping SDK calls have
+separate probe budgets; this is not a process-wide connection limit. The CLI's
+`list_agents` and `send_message` use a separate discovery implementation.
+Concurrent probes do not change the existing result ordering or newest-twin
+selection: a surviving twin retains the first twin's position, even when the
+input records are not sorted newest-first.
+
 ```typescript
 import { PeerEndpoint } from '@qwen-code/sdk/peer';
 
