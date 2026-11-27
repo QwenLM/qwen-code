@@ -361,6 +361,16 @@ class ManagedRuntimeRetentionGuardTest {
         }
     }
 
+    /**
+     * Applies a per-dialect identity redefinition of ma_session_record on the
+     * contract's own schema, for a dialect test that must widen the column on
+     * the same tables it seeds. Must run after {@link #setup()}, which migrates
+     * the schema.
+     */
+    void configureSessionRecordIdentity(String ddl) {
+        jdbc.execute(ddl);
+    }
+
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
         backgroundEvidence();

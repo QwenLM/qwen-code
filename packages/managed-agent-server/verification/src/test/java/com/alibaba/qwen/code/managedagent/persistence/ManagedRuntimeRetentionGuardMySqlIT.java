@@ -13,6 +13,13 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedRuntimeRetentionGuardMySqlIT {
+    private static final String VARCHAR_512_PERMISSIVE =
+            "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(512)"
+                    + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
+    private static final String VARCHAR_64_PERMISSIVE =
+            "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(64)"
+                    + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
+
     private JdbcTemplate admin;
     private String schema;
     private ManagedRuntimeRetentionGuardTest contract;
@@ -68,15 +75,12 @@ class ManagedRuntimeRetentionGuardMySqlIT {
 
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
-        assertThatThrownBy(() -> admin.execute(
-                "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL"))
+        // The contract seeds and widens ma_session_record on the per-test
+        // schema; only re-seeding the identity column on that same schema can
+        // reproduce the index-length refusal and then drop the indexes.
+        assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
                 .hasMessageContaining("Specified key was too long");
-        admin.execute(
-                "ALTER TABLE ma_session_record DROP INDEX idx_ma_record_task,"
-                        + " DROP INDEX idx_ma_record_session_delivery,"
-                        + " DROP INDEX idx_ma_hook_definition");
-        admin.execute(
-                "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL");
+        contract.configureSessionRecordIdentity(VARCHAR_64_PERMISSIVE);
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 
