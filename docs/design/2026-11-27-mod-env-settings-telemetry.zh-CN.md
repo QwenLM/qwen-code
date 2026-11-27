@@ -62,6 +62,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 任一来源的设置里 `envKey`、`credentialEnv` 或 `apiKeyEnv` 指向的变量也算凭据，因为供应商的 key 可以放在任何名字下。
   - 对凭据，`$.env.get` 回答 `undefined`，和变量未设置时一样。Mod 分不出这两种情况，也就无从知道设置了哪些凭据。
   - `$.settings.read` 去掉任意层级下凭据键对应的字符串，包括顶层 `env` 里的这些变量。每个 MCP 服务器的 `env` 和 `headers` 整个去掉，因为它们的名字没有规律可循。
+  - 设置在加载时会解析 `$VAR` 和 `${VAR}`，所以凭据的值可能出现在普通键下，比如一条命令或 MCP 服务器的 `args`。因此 `$.settings.read` 还会去掉任意层级下包含被遮住变量的值（四个字符及以上）的字符串。
   - 只去掉字符串。这类名字下的数字或开关（比如 `model.sessionTokenLimit`）是限额，不是秘密。
 - **来源对应到 Qwen Code 的作用域。**
   - `user` 是 `~/.qwen/settings.json`。
@@ -115,7 +116,7 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
   - 未知来源、不是字符串的键、带自由文本的 telemetry entry 被拒绝；
   - telemetry 只进调试日志；被拒绝时调用被拒绝；
   - 没有 reads 的宿主拒绝两种读取调用，也不列出它们；
-  - CLI 宿主的凭据规则：变量、设置键、`env`、供应商指向的变量、MCP 的 `env` 和 `headers`，以及不受信任的文件夹；
+  - CLI 宿主的凭据规则：变量、设置键、`env`、供应商指向的变量、MCP 的 `env` 和 `headers`、包含已解析凭据的字符串，以及不受信任的文件夹；
   - `NO_COLOR` 下的 `isColorless`。
 - 集成测试（`integration-tests/cli/mods-env-settings-telemetry.test.ts`）在构建好的 CLI 上安装一个 Mod fixture。它的命令读取 `HOME`、一个凭据变量、设置和单个来源，并记录 telemetry。测试检查：
   - 各项回答；
@@ -124,10 +125,11 @@ Qwen Code 还没有这些方法。每次调用都会抛出 `Mod API not supporte
 
 ## 风险与待定问题
 
-- 按名字的规则会有两类误判：
-  - 遮住不是凭据的变量，比如以字符串形式读的 `SESSION_TOKEN_LIMIT`；
-  - 漏掉名字不符合任何规则的凭据，比如 MCP 设置之外的 `GITHUB_PAT`，或插值进 URL 的 key。
+- 规则可能遮住不是凭据的内容：以字符串形式读的 `SESSION_TOKEN_LIMIT`，或者恰好包含某个被遮住变量的值的设置。需要读被遮住变量的 Mod 目前绕不过这些规则。
+- 规则会漏掉两类凭据：
+  - 直接写在普通键下、背后没有变量的凭据，比如写进 MCP 服务器 `args` 或 `url` 的 token，或带密码的代理 URL；
+  - 名字不符合任何规则的变量里的凭据，比如在 MCP 设置之外使用的 `GITHUB_PAT`。
 
-  第二类可以在设置的 `envKey` 里写上这个变量名来补上。第一类目前没有办法：需要读被遮住变量的 Mod 绕不过这条规则。
+  第二类可以在设置的 `envKey` 里写上这个变量名来补上；第一类是设置文件本身的内容，仍然读得到。
 
 - `local` 和 `flag` 读到 `{}`，可能让期待 Claude Code 里那些来源的 Mod 感到意外。Qwen Code 没有这样的文件。

@@ -86,6 +86,20 @@ describe('modHostReads', () => {
     expect(user.security.auth.apiKey).toBe('sk-1');
   });
 
+  it('leaves out a string that holds a credential once resolved', () => {
+    const resolved = {
+      tools: { command: 'curl -H "Bearer ghp-123456"', timeout: 30 },
+      mcpServers: { docs: { args: ['--key', 'ghp-123456', '--verbose'] } },
+    };
+    const { merged } = modHostReads(loaded({ merged: resolved }), {
+      GITHUB_TOKEN: 'ghp-123456',
+    }).settings();
+    expect(merged).toEqual({
+      tools: { timeout: 30 },
+      mcpServers: { docs: { args: ['--key', '--verbose'] } },
+    });
+  });
+
   it('hides a variable that only one source names', () => {
     const reads = modHostReads(
       loaded({

@@ -140,7 +140,8 @@ VS Code companion draw no Mod output: their sessions receive `surface: null`
 and `isInteractive: false`, as in a headless run. Every ACP session raises
 `session.start` and `session.end`, and `turn.start` and `turn.complete` for
 each prompt that runs `UserPromptSubmit`. `$.model.complete`, `$.store`, the
-`$.session` reads, `$.clock` and `$.turn.abort` work as in the terminal.
+`$.session` reads, `$.env.get`, `$.settings.read`, `$.telemetry`, `$.clock` and
+`$.turn.abort` work as in the terminal.
 
 A Web Shell session raises `ui.render` for the [reply rows](#reply-rows) and
 [thinking rows](#thinking-rows) the Web Shell shows; no ACP session raises it
@@ -482,6 +483,7 @@ supports:
       "clock.sleep",
       "command.register",
       "command.run",
+      "env.get",
       "prompt.submit",
       "session.cwd",
       "session.end",
@@ -494,10 +496,13 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "settings.read",
       "store.delete",
       "store.get",
       "store.keys",
       "store.set",
+      "telemetry.log",
+      "telemetry.mark",
       "tool.call",
       "tool.check",
       "turn.abort",
@@ -510,6 +515,7 @@ supports:
       "clock.now",
       "clock.sleep",
       "command.register",
+      "env.get",
       "prompt.submit",
       "session.cwd",
       "session.id",
@@ -520,10 +526,13 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "settings.read",
       "store.delete",
       "store.get",
       "store.keys",
       "store.set",
+      "telemetry.log",
+      "telemetry.mark",
       "turn.abort",
       "ui.invalidate",
       "ui.log",
@@ -719,8 +728,11 @@ model, a prompt or the store:
   `OPENAI_API_KEY`), and for each variable that a settings `envKey`,
   `credentialEnv` or `apiKeyEnv` names in any source.
 - `$.settings.read` leaves out every string under a key named the same way
-  (`apiKey`, an `Authorization` header), those variables in `env`, and each MCP
-  server's `env` and `headers`.
+  (`apiKey`, an `Authorization` header), those variables in `env`, each MCP
+  server's `env` and `headers`, and every string that contains a hidden
+  variable's value, as a `$VAR` reference resolves to.
+- A credential typed literally under an ordinary key, such as a token in an MCP
+  server's `args`, stays readable.
 
 The settings are keyed as a Qwen Code `settings.json` is. The sources are
 `user` (`~/.qwen/settings.json`), `project` (the workspace's

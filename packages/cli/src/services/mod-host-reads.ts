@@ -29,19 +29,21 @@ function credentialVariables(value: unknown, names: Set<string>): Set<string> {
   return names;
 }
 
-// A string under a credential's name goes, and an MCP server's environment
-// and headers go whole: their names follow no rule.
+// A string the rule drops goes, and an MCP server's environment and headers
+// go whole: their names follow no rule.
 function withoutCredentials(
   value: unknown,
-  hidden: (name: string) => boolean,
+  drops: (key: string, value: string) => boolean,
   level: 'any' | 'servers' | 'server' = 'any',
 ): unknown {
   if (Array.isArray(value))
-    return value.map((item) => withoutCredentials(item, hidden));
+    return value
+      .filter((item) => typeof item !== 'string' || !drops('', item))
+      .map((item) => withoutCredentials(item, drops));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value).flatMap(([key, item]) =>
-      (typeof item === 'string' && hidden(key)) ||
+      (typeof item === 'string' && drops(key, item)) ||
       (level === 'server' && (key === 'env' || key === 'headers'))
         ? []
         : [
@@ -49,7 +51,7 @@ function withoutCredentials(
               key,
               withoutCredentials(
                 item,
-                hidden,
+                drops,
                 level === 'servers'
                   ? 'server'
                   : key === 'mcpServers'
@@ -91,8 +93,16 @@ export function modHostReads(
     env: (name) => (hiding()(name) ? undefined : env[name]),
     settings: () => {
       const hidden = hiding();
+      // Settings resolve `$VAR` as they load, so a credential's value may
+      // sit under any key.
+      const secrets = Object.entries(env)
+        .filter(([name, value]) => value && value.length >= 4 && hidden(name))
+        .map(([, value]) => value!);
+      const drops = (key: string, value: string) =>
+        (key !== '' && hidden(key)) ||
+        secrets.some((secret) => value.includes(secret));
       const clean = (value: unknown) =>
-        withoutCredentials(value, hidden) as Json;
+        withoutCredentials(value, drops) as Json;
       // System defaults name no source a Mod reads; they still count in
       // the merge. An untrusted folder's settings do not apply.
       const layers: ModSettingsLayer[] = [

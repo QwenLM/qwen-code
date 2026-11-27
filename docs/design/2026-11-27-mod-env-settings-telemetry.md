@@ -55,6 +55,7 @@ These follow the 2.1.332 declarations.
   - A variable that a settings `envKey`, `credentialEnv` or `apiKeyEnv` names, in any source, is a credential too: a provider's key may live under any name.
   - `$.env.get` answers `undefined` for a credential, as for a variable that is unset. A Mod cannot tell the two apart, so it learns nothing about which credentials are set.
   - `$.settings.read` leaves out every string under a credential's key at any depth, including those variables in the top-level `env`. It also leaves out each MCP server's `env` and `headers` whole, because their names follow no rule.
+  - Settings resolve `$VAR` and `${VAR}` as they load, so a credential's value can sit under an ordinary key, such as a command or an MCP server's `args`. `$.settings.read` therefore also leaves out every string, at any depth, that contains the value of a hidden variable (four characters or longer).
   - Only strings are left out. A number or a flag under such a name, such as `model.sessionTokenLimit`, is a limit and not a secret.
 - **Sources map onto Qwen Code's scopes.**
   - `user` is `~/.qwen/settings.json`.
@@ -99,11 +100,12 @@ Observed with Qwen Code 0.27.4, the global CLI, with an isolated `HOME` and a Mo
   - an unknown source, a key that is not a string, and a telemetry entry with free text are refused;
   - telemetry reaches the debug log only, and a deny rejects the call;
   - a host with no reads refuses both calls and does not list them;
-  - the CLI host's credential rules for variables, settings keys, `env`, provider-named variables, MCP `env` and `headers`, and an untrusted folder;
+  - the CLI host's credential rules for variables, settings keys, `env`, provider-named variables, MCP `env` and `headers`, a string holding a resolved credential, and an untrusted folder;
   - `isColorless` under `NO_COLOR`.
 - An integration test (`integration-tests/cli/mods-env-settings-telemetry.test.ts`) installs a Mod fixture on the built CLI. Its command reads `HOME`, a credential variable, the settings and one source, and logs telemetry. The test checks the answers, that no credential appears in the output, and that the run sends no model request.
 
 ## Risks and open questions
 
-- The name rules can hide a variable that is not a credential (`SESSION_TOKEN_LIMIT` read as a string), and miss a credential under a name that follows none of them (a `GITHUB_PAT` outside MCP settings, or a key interpolated into a URL). The second can be closed by naming the variable in a settings `envKey`; a Mod that needs a hidden variable has no way around the rule yet.
+- The rules can hide what is not a credential: `SESSION_TOKEN_LIMIT` read as a string, or a setting that happens to contain a hidden variable's value. A Mod that needs a hidden variable has no way around them yet.
+- The rules miss a credential written literally under an ordinary key, with no variable behind it: a token typed into an MCP server's `args` or `url`, or a proxy URL with a password in it. They also miss one in a variable whose name follows no rule, such as `GITHUB_PAT` used outside MCP settings. Naming that variable in a settings `envKey` closes the second case; the first is the settings file's own content and stays readable.
 - `local` and `flag` reading as `{}` may surprise a Mod that expects a source it knows from Claude Code. Qwen Code has no such files.
