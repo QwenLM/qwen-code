@@ -2704,8 +2704,9 @@ describe('deleteDaemonSessions worktree cleanup', () => {
       fs.mkdirSync(archivedDir, { recursive: true });
       fs.chmodSync(archivedDir, 0o000);
 
+      let result: Awaited<ReturnType<typeof deleteDaemonSessions>>;
       try {
-        await deleteDaemonSessions({
+        result = await deleteDaemonSessions({
           sessionIds: [sessionId],
           service,
           bridge: cleanupBridge(),
@@ -2715,6 +2716,16 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         fs.chmodSync(archivedDir, 0o700);
       }
 
+      expect(result.removed).toEqual([]);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          sessionId,
+          error: expect.stringContaining('EACCES'),
+        }),
+      ]);
+      expect(
+        fs.existsSync(sessionPath(workspaceDir, sessionId, 'active')),
+      ).toBe(true);
       expect(warnings()).toContain('worktree cleanup preserved checkout');
       expect(warnings()).toContain('EACCES');
     },

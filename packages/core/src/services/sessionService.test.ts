@@ -70,6 +70,7 @@ import {
   modelText,
   userText,
 } from '../test-utils/model-fixtures.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   prepareUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue({
@@ -5728,11 +5729,12 @@ describe('SessionService', () => {
 
   describe('removeSession dangling worktree sidecars', () => {
     let service: SessionService;
+    let cwd: string;
     let realTmpDir: string;
     let realPath: typeof import('node:path');
     const disk = useRealDisk(
       'remove-dangling-worktree-',
-      (d) => ({ service, realTmpDir, realPath } = d),
+      (d) => ({ service, cwd, realTmpDir, realPath } = d),
     );
     const [sessionId] = realDiskIds;
 
@@ -5790,5 +5792,48 @@ describe('SessionService', () => {
         fs.lstatSync(activePrSidecar, { throwIfNoEntry: false }),
       ).toBeUndefined();
     });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'warns and finishes sibling cleanup when unlinking a dangling archived sidecar hits EACCES',
+      async () => {
+        disk.write(sessionId, [
+          msgLine(sessionId, 'u1', null, 'user', 0, 'hi'),
+        ]);
+        const { service: warnedService, warnings } = withWarnings(cwd);
+        const activePrSidecar = warnedService.getPrSessionPathForArchiveState(
+          sessionId,
+          'active',
+        );
+        const archivedSidecar =
+          warnedService.getWorktreeSessionPathForArchiveState(
+            sessionId,
+            'archived',
+          );
+        const archivedDir = realPath.dirname(archivedSidecar);
+        fs.mkdirSync(archivedDir, { recursive: true });
+        fs.symlinkSync(
+          realPath.join(realTmpDir, 'missing-target'),
+          archivedSidecar,
+        );
+        fs.writeFileSync(activePrSidecar, '{"prs":[]}\n');
+        // Searchable (lstat succeeds and sees the dangling symlink) but
+        // non-writable (unlinkSync raises EACCES).
+        fs.chmodSync(archivedDir, 0o555);
+
+        try {
+          expect(await warnedService.removeSession(sessionId)).toBe(true);
+          expect(
+            fs.lstatSync(archivedSidecar, { throwIfNoEntry: false }),
+          ).toBeDefined();
+          expect(
+            fs.lstatSync(activePrSidecar, { throwIfNoEntry: false }),
+          ).toBeUndefined();
+          expect(warnings.join('\n')).toContain('worktree sidecar not removed');
+          expect(warnings.join('\n')).toContain('EACCES');
+        } finally {
+          fs.chmodSync(archivedDir, 0o700);
+        }
+      },
+    );
   });
 });

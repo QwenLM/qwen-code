@@ -1990,7 +1990,15 @@ export class SessionService {
         present = false;
       }
       if (present) {
-        this.removeFileIfExists(sidecar);
+        try {
+          this.removeFileIfExists(sidecar);
+        } catch (error) {
+          this.warn(
+            `worktree sidecar not removed: ${sidecar}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
     }
   }
