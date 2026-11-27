@@ -1,5 +1,7 @@
 # Compaction Image Stripping + Token Estimation Fix
 
+[English](compaction-image-stripping-design.md) | [简体中文](compaction-image-stripping-design.zh-CN.md)
+
 ## Problem Statement
 
 When `ChatCompressionService` triggers (auto or manual), it ships
@@ -47,11 +49,11 @@ payload built inside `chatCompressionService`.
 
 ## Current State vs Target
 
-| Concern                          | qwen-code today                                      | claude-code reference                                            | Target after this change                                            |
-| -------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Image/document in compact prompt | Sent verbatim                                        | `stripImagesFromMessages` replaces with `[image]` / `[document]` | Sent as `[image: mime]` / `[document: mime]` placeholder            |
-| Binary part token estimation     | `JSON.stringify().length` (wildly off)               | Treated as fixed budget                                          | Configurable constant (default 1,600 tokens / ~6,400 chars)         |
-| Microcompact image cleanup       | Not touched (only text tool results cleared on idle) | Time-based MC clears all                                         | Microcompact also clears stale inline images alongside tool results |
+| Concern                          | qwen-code today                                      | claude-code reference                                            | Target after this change                                                                                                 |
+| -------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Image/document in compact prompt | Sent verbatim                                        | `stripImagesFromMessages` replaces with `[image]` / `[document]` | Sent as `[image: mime]` / `[document: mime]` placeholder                                                                 |
+| Binary part token estimation     | `JSON.stringify().length` (wildly off)               | Treated as fixed budget                                          | Resolution-derived estimate for parseable static images; flat 1,600-token fallback for animated and unparseable payloads |
+| Microcompact image cleanup       | Not touched (only text tool results cleared on idle) | Time-based MC clears all                                         | Microcompact also clears stale inline images alongside tool results                                                      |
 
 ## Proposed Changes
 
@@ -81,8 +83,11 @@ for char-count apportionment. Replace this with an
 `estimateContentChars` helper that:
 
 - For `text` parts: `text.length`
-- For `inlineData` / `fileData` parts: `imageTokenEstimate * 4` (default
-  1,600 × 4 = 6,400 chars).
+- For `inlineData` parts with a parseable static image header: the
+  resolution-derived token estimate × 4 (see Decision 1). Animated
+  payloads (GIF, APNG, animated WebP) and unparseable `inlineData` /
+  `fileData` parts keep `imageTokenEstimate * 4` (default 1,600 × 4 =
+  6,400 chars).
 - For `functionCall` / `functionResponse` parts:
   `JSON.stringify(part).length` (unchanged behavior).
 
@@ -135,13 +140,27 @@ Plus an env override for ops/debug: `QWEN_IMAGE_TOKEN_ESTIMATE`.
 
 ## Key Design Decisions
 
-**Decision 1: `imageTokenEstimate = 1600`.**
-Qwen-VL family caps at 1,280 visual tokens per image without
-`vl_high_resolution_images`; with that flag, up to 16,384. 1,600 is a
-conservative middle ground biased slightly high — overestimating leads
-to earlier compaction (safe), underestimating leads to late compaction
-(unsafe). For non-VL models (Qwen3-Coder, the qwen-code default) the
-constant only matters for token-estimation correctness, since images
+**Decision 1 (revised): resolution-derived default pricing for static
+images; the flat 1600 floor is a fallback, not the model.** Originally
+this design priced every image at a flat 1,600 tokens, biased high on
+purpose — overestimating leads to earlier compaction (safe),
+underestimating to later compaction (unsafe). The maintainer-approved
+revision (#17321) replaces that for parseable static images: the
+estimate is the patch-grid formula the omni pipeline already uses,
+`ceil(width × height / (32 × 32 × 2))`, so a small screenshot and a 4K
+diagram no longer cost the same. The recorded tradeoff: small static
+images now price low and can compact later — accepted as the intended
+correction, not a regression; the counterweight is that char
+apportionment applies `max(resolution, floor)` rather than a branch
+back to flat, so a 4K image still bills its full resolution charge.
+Animated payloads (any GIF, APNG, animated WebP) and unparseable
+binaries keep the flat `imageTokenEstimate` until frame counting lands
+— pricing a 60-frame GIF at the static formula would be a ~27×
+undercount in the unsafe direction. An explicitly configured estimate
+(`QWEN_IMAGE_TOKEN_ESTIMATE` or `chatCompression.imageTokenEstimate`
+set to anything other than the default) is an override and replaces
+both paths. For non-VL models (Qwen3-Coder, the qwen-code default) the
+estimate only matters for token-estimation correctness, since images
 do not reach the model anyway.
 
 **Decision 2: Strip the slimmed copy, not the live history.**
