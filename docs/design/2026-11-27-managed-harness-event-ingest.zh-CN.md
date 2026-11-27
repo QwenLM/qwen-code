@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `43dc924882` 核实。§10 的第一步在同一变更中实现。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
+状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `43dc924882` 核实。§10 的前两步已实现。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
 
 ## 1. 问题与现状
 
@@ -157,11 +157,13 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 ## 6. Harness 的改动
 
 - **能力。** contract 的 features 加入 `event-ingest/1`。池仍要求成员的 features 完全一致。
-- **上报器。** 每个 Session 一个上报器，在存在上报准入时运行。
+- **上报器。** 每个上报准入对应一个上报器。
   - 复用事件路由的 `eventEnvelope` 投影和 `streamedDeltaIds` 初始化，按同样的 250 毫秒节奏从游标调用 `authority.readEvents`。
   - 从准入的 `lastEventId` 开始。
   - 通过 Session Store 客户端新增的 `ingestEvents` 方法发送。
   - 收到 `terminal: true` 的回复、`not_owner`、writer 校验拒绝，或结束标记被确认后停止。
+- **准入。** 格式错误的 `eventDelivery` 返回 400 `invalid_hosted_event_delivery`；没有 HTTP Session Store 的 Session 返回 409 `hosted_event_ingest_unavailable`，派发者会重试，而不是让 Turn 失败。
+- **挂起与关闭。** 上报器视同一条打开的事件流：普通的空闲挂起会等它停止，各条关闭路径都会停掉它。因 Action 停靠而挂起时，会在 seal 之前暂停所有上报器。
 - **停靠。** 确认 seal 之后、释放 placement 之前（#18404），上报器先补发到已提交序号，再带上已 seal 实例发送 `end: "parked"`。如果失败，挂起照常继续，租约过期后走现有的恢复。
 - **recovery block。** 条件与 Java 现在轮询的相同：该 Turn 没有活跃 prompt、`recoveryBlocked` 为真、游标已到已提交序号。条件满足时，上报器发送 `end: "recovery_blocked"`。
 

@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first slice in §10 is implemented in the same change. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
+Status: proposed design, 2026-11-27. Current-state claims are checked against `main` at `43dc924882`. The first two slices in §10 are implemented. This design builds on [the stateless Harness design](2026-11-16-managed-stateless-harness.md) and [suspension placement release](2026-11-26-managed-suspension-placement-release.md).
 
 ## 1. Problem and current state
 
@@ -157,11 +157,13 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 ## 6. Harness changes
 
 - **Capability.** `event-ingest/1` joins the contract features. A pool still requires identical features.
-- **Pusher.** A per-Session pusher runs while an ingest admission is active.
+- **Pusher.** One pusher runs for each ingest admission.
   - It reuses the `eventEnvelope` projection and `streamedDeltaIds` seeding of the events route, and reads `authority.readEvents` from its cursor at the same 250 ms cadence.
   - It starts at the admission's `lastEventId`.
   - It posts through a new `ingestEvents` method on the Session Store client.
   - It stops on a reply with `terminal: true`, on `not_owner`, a writer fence refusal, or an acknowledged end marker.
+- **Admission.** A malformed `eventDelivery` is refused with 400 `invalid_hosted_event_delivery`. A Session without an HTTP Session Store refuses it with 409 `hosted_event_ingest_unavailable`, which the dispatcher retries instead of failing the Turn.
+- **Suspension and close.** A pusher counts as an open event stream: an ordinary idle suspension waits until it stops, and every close path stops it. An Action-parked suspension pauses every pusher before the seal.
 - **Park.** After the seal is confirmed and before the placement is released (#18404), the pusher flushes through the committed sequence and posts `end: "parked"` with the sealed incarnation. If this fails, the suspension continues, and the lapsed lease leads to today's recovery.
 - **Recovery block.** The condition is the one Java polls today: no active prompt for the Turn, `recoveryBlocked`, and the cursor at the committed sequence. When it holds, the pusher posts `end: "recovery_blocked"`.
 
