@@ -1016,6 +1016,7 @@ interface OpenAIChatPromptSource {
   model: string;
   messages?: unknown[];
   tools: unknown;
+  rendering: Record<string, unknown>;
   systemInstruction: GenerateContentConfig['systemInstruction'];
   schemaCompliance?: ContentGeneratorConfig['schemaCompliance'];
 }
@@ -1031,11 +1032,19 @@ function openAIChatPromptSource(
     return undefined;
   }
   const extraBody = filterIsolatedModelOverrides(config.extra_body);
-  const { messages, tools } = {
+  const body = {
     ...filterIsolatedModelOverrides(config.samplingParams),
     ...extraBody,
   };
+  const { messages, tools } = body;
   const rawMessages = Array.isArray(messages) ? messages : undefined;
+  const templateKwargs = body['chat_template_kwargs'] ?? undefined;
+  // Empty template arguments contribute no variables to the renderer.
+  const emptyTemplateKwargs =
+    templateKwargs !== undefined &&
+    typeof templateKwargs === 'object' &&
+    !Array.isArray(templateKwargs) &&
+    Object.keys(templateKwargs).length === 0;
   // The Chat pipeline installs generated tools after sampling params and before
   // the provider applies extra_body. Only compare the tools that survive.
   const generatedTools =
@@ -1046,6 +1055,17 @@ function openAIChatPromptSource(
     model,
     messages: rawMessages,
     tools: generatedTools ?? tools,
+    // These overrides can change the tokens rendered from the same messages and tools.
+    rendering: {
+      chat_template: body['chat_template'],
+      chat_template_kwargs: emptyTemplateKwargs ? undefined : templateKwargs,
+      documents: body['documents'],
+      add_generation_prompt: body['add_generation_prompt'],
+      continue_final_message: body['continue_final_message'],
+      add_special_tokens: body['add_special_tokens'],
+      mm_processor_kwargs: body['mm_processor_kwargs'],
+      truncate_prompt_tokens: body['truncate_prompt_tokens'],
+    },
     systemInstruction: rawMessages ? undefined : generation?.systemInstruction,
     schemaCompliance: generatedTools
       ? (config.schemaCompliance ?? 'auto')
@@ -6458,8 +6478,7 @@ export class LlmChat {
                   const promptSource = fallbackUsesHuggingFace
                     ? fallbackPromptSource
                     : undefined;
-                  // A compatible endpoint can use the primary count as a floor
-                  // when it sends the same model, messages, and tool definitions.
+                  // Reuse the primary count only when the configured prompt inputs match.
                   const usagePromptTokens =
                     usageBackedPrompt &&
                     isDeepStrictEqual(

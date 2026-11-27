@@ -8642,6 +8642,99 @@ describe('LlmChat', async () => {
       },
     );
 
+    const reportTemplateArgs = { report_context: 'The same report context' };
+    it.each([
+      {
+        name: 'extra body template arguments',
+        body: { chat_template_kwargs: reportTemplateArgs },
+        output: 4_000,
+      },
+      {
+        name: 'sampling template arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        output: 4_000,
+      },
+      {
+        name: 'a replacement chat template',
+        body: { chat_template: '{{ messages }}' },
+        output: 4_000,
+      },
+      {
+        name: 'documents injected by the chat template',
+        body: { documents: [{ title: 'Report', text: 'Additional context' }] },
+        output: 4_000,
+      },
+      {
+        name: 'null template arguments clearing sampling arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        body: { chat_template_kwargs: null },
+        output: 32_000,
+      },
+      {
+        name: 'empty template arguments clearing sampling arguments',
+        sampling: { chat_template_kwargs: reportTemplateArgs },
+        body: { chat_template_kwargs: {} },
+        output: 32_000,
+      },
+      {
+        name: 'matching template arguments after the body override',
+        primaryBody: { chat_template_kwargs: reportTemplateArgs },
+        sampling: { chat_template_kwargs: { report_context: 'Ignored' } },
+        body: { chat_template_kwargs: reportTemplateArgs },
+        output: 32_000,
+      },
+    ])(
+      'matches warmed fallback usage against $name',
+      async ({ primaryBody, body, sampling, output }) => {
+        const messages = [{ role: 'user', content: 'Summarize the report.' }];
+        const fallbackModel = 'compatible-minimax';
+        const fallback = vi.fn().mockResolvedValue(textStream('completed'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              baseUrl: 'https://compatible.example/v1',
+              samplingParams: sampling,
+              extra_body: { model: digitalOceanModel, messages, ...body },
+            }),
+          ),
+          {
+            ...narrowPrimary,
+            contextWindowSize: 32_000,
+            extra_body: { messages, ...primaryBody },
+          },
+        );
+        mockCompress(noop());
+        streamMock().mockResolvedValueOnce(
+          textStream('ready', {
+            promptTokenCount: 20_045,
+            totalTokenCount: 20_051,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            { message: 'Read the report.', config: { maxOutputTokens: 1_000 } },
+            'warm-template-first',
+          ),
+        );
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            { message: 'Answer from the report.' },
+            'warm-template-second',
+          ),
+        );
+        expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
+          4_000,
+        );
+        expect(fallback.mock.calls[0][0].config.maxOutputTokens).toBe(output);
+      },
+    );
+
     it.each(['extra_body', 'samplingParams'] as const)(
       'sizes the primary Hugging Face request from fixed messages in %s',
       async (field) => {
