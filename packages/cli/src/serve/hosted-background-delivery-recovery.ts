@@ -89,18 +89,18 @@ function collectKnownRuns(managed: ManagedSession): KnownBackgroundRun[] {
   return runs;
 }
 
-async function resolveUnsettledRuntimeSessions(
+export async function resolveBackgroundRuntimeSessions(
   managed: ManagedSession,
-  unsettledCallIds: ReadonlySet<string>,
+  executionCallIds: ReadonlySet<string>,
 ): Promise<Set<string>> {
   const runtimeSessionIds = new Set<string>();
-  if (unsettledCallIds.size === 0) return runtimeSessionIds;
+  if (executionCallIds.size === 0) return runtimeSessionIds;
   const sessionId = managed.authority.sessionHeader.sessionKey.sessionId;
   const sequence = managed.authority.committedSequence;
   for (const event of managed.authority.eventsInSequenceRange(1, sequence)) {
     if (event.kind !== 'tool.intent') continue;
     const callId = event.payload['executionCallId'];
-    if (typeof callId !== 'string' || !unsettledCallIds.has(callId)) continue;
+    if (typeof callId !== 'string' || !executionCallIds.has(callId)) continue;
     const rawRef = event.payload['argsRef'];
     if (!rawRef || typeof rawRef !== 'object') continue;
     const ref = assertManagedSessionDurableRef(rawRef, 'background tool route');
@@ -159,7 +159,7 @@ export async function detachBackgroundPublishers(
       .map((run) => run.executionCallId),
   );
   if (unsettled.size === 0) return;
-  const runtimeSessionIds = await resolveUnsettledRuntimeSessions(
+  const runtimeSessionIds = await resolveBackgroundRuntimeSessions(
     input.managed,
     unsettled,
   );
@@ -215,7 +215,7 @@ export async function reattachAndDrainBackgroundDeliveries(
     );
     const observedRuns: Record<string, number> = {};
     if (unsettledIds.size > 0) {
-      const runtimeSessionIds = await resolveUnsettledRuntimeSessions(
+      const runtimeSessionIds = await resolveBackgroundRuntimeSessions(
         input.managed,
         unsettledIds,
       );

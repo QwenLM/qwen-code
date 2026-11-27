@@ -703,7 +703,7 @@ final class AgentSessionPolicies {
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
-                || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
+                || hasMcpServers(session)
                 || creationSkills.initialSelection(tenantId, sessionId) != null
                 || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId))
