@@ -1602,6 +1602,9 @@ export class LlmClient {
     this.config
       .getMemoryManager()
       .invalidatePendingExtract(this.config.getSessionId());
+    // The restored timeline also replaces the curated prefix a stable
+    // extraction window was pinned in (#15493).
+    this.config.getMemoryManager().invalidateExtractWindow();
     this.forceFullIdeContext = true;
   }
 
@@ -1642,6 +1645,9 @@ export class LlmClient {
       this.config
         .getMemoryManager()
         .invalidatePendingExtract(this.config.getSessionId());
+      // And for the pinned stable extraction window (#15493): the truncated
+      // history no longer has the prefix that window started at.
+      this.config.getMemoryManager().invalidateExtractWindow();
     }
     this.forceFullIdeContext = true;
   }
@@ -3680,6 +3686,10 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
+        // The curated window is a closure, not a snapshot: the stable-window
+        // experiment (#15493) materializes it only at extraction execution
+        // time, and only while its flag is on. `history` above stays RAW.
+        getCuratedHistory: () => this.getHistoryShallow(true),
         ...(getExtractNoopSkipTurns() > 0 && {
           // The next prompt's known base; see isBelowCompactionWarn.
           belowCompactionWarn: isBelowCompactionWarn(
@@ -6910,6 +6920,9 @@ export class LlmClient {
     this.config
       .getMemoryManager()
       .invalidatePendingExtract(this.config.getSessionId());
+    // The same rewrite replaces the pinned stable extraction window prefix
+    // (#15493).
+    this.config.getMemoryManager().invalidateExtractWindow();
     this.forceFullIdeContext = true;
 
     return info;
