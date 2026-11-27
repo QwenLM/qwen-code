@@ -87,6 +87,7 @@ import {
 } from './input-prompt-model.js';
 import {
   clipToWidth,
+  getCachedStringWidth,
   sanitizeTerminalText,
   truncateToWidth,
 } from '../utils/textUtils.js';
@@ -356,11 +357,13 @@ function FieldText({
   caret,
   placeholder,
   active,
+  maxWidth,
 }: {
   value: string;
   caret: number;
   placeholder?: string;
   active?: boolean;
+  maxWidth: number;
 }) {
   if (value.length === 0 && placeholder) {
     if (!active) return <text fg={C.dim}>{placeholder}</text>;
@@ -373,21 +376,58 @@ function FieldText({
   }
   const spans = caretSpans({ text: value, cursor: caret });
   const before = sanitizeTerminalText(spans.before);
+  const at = sanitizeTerminalText(spans.at) || ' ';
   const after = sanitizeTerminalText(spans.after);
+  const caretWidth = Math.min(maxWidth, getCachedStringWidth(at));
+  const beforeBudget = Math.max(0, maxWidth - caretWidth);
+  const beforeRun =
+    getCachedStringWidth(before) <= beforeBudget
+      ? before
+      : `…${clipFromEndToWidth(
+          before,
+          Math.max(0, beforeBudget - getCachedStringWidth('…')),
+        )}`;
+  const afterBudget = Math.max(
+    0,
+    maxWidth - getCachedStringWidth(beforeRun) - caretWidth,
+  );
+  const afterRun = truncateToWidth(after, afterBudget);
   return (
     <>
-      {before ? <text fg={C.text}>{before}</text> : null}
+      {beforeRun ? <text fg={C.text}>{beforeRun}</text> : null}
       {/* The character belongs to the value whatever owns the focus; only the
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
       {active ? (
-        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
+        <text bg={C.accent}>{clipToWidth(at, maxWidth) || ' '}</text>
       ) : (
-        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
+        <text fg={C.text}>{clipToWidth(at, maxWidth)}</text>
       )}
-      {after ? <text fg={C.text}>{after}</text> : null}
+      {afterRun ? <text fg={C.text}>{afterRun}</text> : null}
     </>
   );
+}
+
+const inputGraphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+function clipFromEndToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return '';
+  const segments = Array.from(
+    inputGraphemeSegmenter.segment(text),
+    ({ segment }) => segment,
+  );
+  let result = '';
+  let width = 0;
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const segment = segments[index]!;
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > maxWidth) break;
+    result = `${segment}${result}`;
+    width += segmentWidth;
+  }
+  return result;
 }
 
 function InputLine({
@@ -403,6 +443,8 @@ function InputLine({
   active?: boolean;
   marginTop?: number;
 }) {
+  const { width } = useTerminalDimensions();
+  const maxWidth = Math.max(1, dialogContentWidth(width) - 2);
   return (
     <box flexDirection="row" marginTop={marginTop}>
       <text fg={C.accent}>{'> '}</text>
@@ -411,6 +453,7 @@ function InputLine({
         caret={caret}
         placeholder={placeholder}
         active={active}
+        maxWidth={maxWidth}
       />
     </box>
   );
@@ -1048,6 +1091,8 @@ function ModelsStep({
 }
 
 function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
   const {
     thinkingEnabled,
     modalityEnabled,
@@ -1174,6 +1219,14 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
           caret={ctxField.caret}
           placeholder="auto"
           active={onCtxRow}
+          maxWidth={Math.max(
+            1,
+            contentWidth -
+              2 -
+              getCachedStringWidth(
+                `${cursor(ctxIdx)} ${t('Context window')}: `,
+              ),
+          )}
         />
       </box>
       <box paddingLeft={4}>
