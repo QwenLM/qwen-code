@@ -8286,6 +8286,162 @@ describe('LlmChat', async () => {
       },
     );
 
+    it.each([
+      { name: 'the same window', primaryWindow: 65_536, keepUsage: true },
+      { name: 'a larger window', primaryWindow: 61_000, keepUsage: true },
+      {
+        name: 'different prepared media',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        image: true,
+      },
+      {
+        name: 'different raw messages',
+        primaryWindow: 65_536,
+        keepUsage: false,
+        messages: [{ role: 'user', content: 'Short alternate prompt' }],
+      },
+    ])(
+      'fits a warmed same-wire fallback with $name',
+      async ({ primaryWindow, keepUsage, image, messages }) => {
+        const fallbackModel = 'another-minimax-account';
+        const fallback = vi
+          .fn()
+          .mockImplementation(async () => textStream('fallback answer'));
+        wireFallbacks(
+          [fallbackModel],
+          vi.fn().mockResolvedValue(
+            fallbackRoute(fallbackModel, fallback, {
+              ...narrowPrimary,
+              model: fallbackModel,
+              extra_body: {
+                model: digitalOceanModel,
+                ...(messages && { messages }),
+              },
+            }),
+          ),
+          { ...narrowPrimary, contextWindowSize: primaryWindow },
+        );
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model = digitalOceanModel) => model,
+        );
+        vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValue({
+          image: true,
+        });
+        mockCompress(noop());
+        streamMock().mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount: 35_000,
+            candidatesTokenCount: 3,
+            totalTokenCount: 35_003,
+          }),
+        );
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: '嗰陣啱啱落雨，我哋喺街口等咗一陣。'.repeat(600),
+              config: { maxOutputTokens: 1_000 },
+            },
+            'warm-fallback-first',
+          ),
+        );
+        expect(chat.getLastPromptTokenCount()).toBe(35_000);
+        streamMock().mockRejectedValueOnce(tpmCapacityError());
+
+        await drain(
+          await chat.sendMessageStream(
+            digitalOceanModel,
+            {
+              message: image
+                ? [{ text: 'What happened next?' }, inline('image/png', 'abc')]
+                : 'What happened next?',
+            },
+            'warm-fallback-second',
+          ),
+        );
+
+        const primaryRequest = streamMock().mock.calls[1][0];
+        const fallbackRequest = fallback.mock.calls[0][0];
+        if (keepUsage) {
+          expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          expect(fallbackRequest.config.maxOutputTokens).toBe(
+            primaryRequest.config!.maxOutputTokens! + 65_536 - primaryWindow,
+          );
+        } else {
+          if (image) {
+            expect(fallbackRequest.contents).not.toEqual(
+              primaryRequest.contents,
+            );
+          } else {
+            expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+          }
+          expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(
+            primaryRequest.config!.maxOutputTokens!,
+          );
+        }
+      },
+    );
+
+    it('does not reuse prior fallback usage for a different wire prompt', async () => {
+      const priorFallback = vi
+        .fn()
+        .mockResolvedValueOnce(
+          textStream('acknowledged', {
+            promptTokenCount: 35_000,
+            totalTokenCount: 35_003,
+          }),
+        )
+        .mockRejectedValue(tpmCapacityError());
+      const nextFallback = vi.fn().mockResolvedValue(textStream('completed'));
+      const routes = {
+        'prior-fallback': fallbackRoute('prior-fallback', priorFallback, {
+          ...narrowPrimary,
+          model: 'prior-fallback',
+          extra_body: {
+            model: digitalOceanModel,
+            messages: [{ role: 'user', content: 'Overridden prior prompt' }],
+          },
+        }),
+        'next-fallback': fallbackRoute('next-fallback', nextFallback, {
+          ...narrowPrimary,
+          model: 'next-fallback',
+          extra_body: { model: digitalOceanModel },
+        }),
+      };
+      wireFallbacks(
+        Object.keys(routes),
+        vi.fn(async (model: keyof typeof routes) => routes[model]),
+        narrowPrimary,
+      );
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model = digitalOceanModel) => model,
+      );
+      mockCompress(noop());
+      streamMock().mockRejectedValue(tpmCapacityError());
+      await drain(
+        await chat.sendMessageStream(
+          digitalOceanModel,
+          { message: 'First question', config: { maxOutputTokens: 1_000 } },
+          'fallback-usage-first',
+        ),
+      );
+      expect(chat.getLastPromptTokenCount()).toBe(35_000);
+      await drain(
+        await chat.sendMessageStream(
+          digitalOceanModel,
+          { message: 'What happened next?' },
+          'fallback-usage-second',
+        ),
+      );
+      const primaryRequest = streamMock().mock.calls[1][0];
+      const fallbackRequest = nextFallback.mock.calls[0][0];
+      expect(fallbackRequest.contents).toEqual(primaryRequest.contents);
+      expect(fallbackRequest.config.maxOutputTokens).toBeGreaterThan(
+        primaryRequest.config!.maxOutputTokens!,
+      );
+    });
+
     /** The primary fails with `error`; the fallback chain stays untouched. */
     async function expectNoFallback(
       error: Error,

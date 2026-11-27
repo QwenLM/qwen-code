@@ -1008,6 +1008,24 @@ function getConfiguredHuggingFaceChatOutputBudget(
   });
 }
 
+function huggingFaceChatPromptSource(
+  config: ContentGeneratorConfig | undefined,
+  model: string | undefined,
+): { model: string; messages: unknown; tools: unknown } | undefined {
+  if (
+    !model ||
+    config?.authType !== AuthType.USE_OPENAI ||
+    !isHuggingFaceRouterUrl(config.baseUrl)
+  ) {
+    return undefined;
+  }
+  const { messages, tools } = {
+    ...config.samplingParams,
+    ...config.extra_body,
+  };
+  return { model, messages, tools };
+}
+
 /**
  * Cap on how many routes' token counts are retained while their route is
  * not the one owning the chat's count slots (#9506). Route identities are
@@ -3800,6 +3818,7 @@ export class LlmChat {
 
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
+    let usageBackedRequestContents: Content[] | undefined;
     let userContentAdded = false;
     let manualPlanExitNoticeVersion: number | undefined;
     let manualPlanExitNoticeText: string | undefined;
@@ -3827,11 +3846,17 @@ export class LlmChat {
       params.config?.maxOutputTokens ??
       cgConfigForThresholds?.samplingParams?.max_tokens ??
       parsedEnvMaxTokensForClamp;
+    const primaryUsesHuggingFace = isHuggingFaceRouterUrl(
+      cgConfigForThresholds?.baseUrl,
+    );
     const budgetModel =
-      cgConfigForThresholds &&
-      isHuggingFaceRouterUrl(cgConfigForThresholds.baseUrl)
+      cgConfigForThresholds && primaryUsesHuggingFace
         ? getRequestModel(cgConfigForThresholds, model)
         : model;
+    const primaryPromptSource = huggingFaceChatPromptSource(
+      cgConfigForThresholds,
+      budgetModel,
+    );
     const hfRoute = getHuggingFaceRoute(
       budgetModel,
       cgConfigForThresholds?.baseUrl,
@@ -4531,7 +4556,8 @@ export class LlmChat {
         // self-corrects when provider usage arrives. An under-count is the ONE
         // way `prompt + max_tokens` can still overflow the window, so keep the
         // pad until provider usage replaces the estimate.
-        if (this.promptCountIsEstimateDerived()) {
+        const promptCountIsEstimated = this.promptCountIsEstimateDerived();
+        if (promptCountIsEstimated) {
           promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
           debugLogger.debug(
             `[clamp] estimate-derived prompt count; padded by ` +
@@ -4557,6 +4583,39 @@ export class LlmChat {
           currentUserContent,
           requestModalities,
         );
+        const usageAnchor = this.toolBudgetUsageAnchor;
+        if (
+          primaryPromptSource &&
+          !promptCountIsEstimated &&
+          usageAnchor?.routeKey === requestRouteKey &&
+          usageAnchor.history.every(
+            (content, index) => content === this.history[index],
+          )
+        ) {
+          // Session counts may be attributed to the primary even when a different
+          // model or prompt supplied the usage. Check the successful dispatch.
+          const usageRequest = this.dispatchedRequest;
+          const primaryConfig = { ...this.generationConfig, ...params.config };
+          if (
+            isDeepStrictEqual(
+              primaryPromptSource,
+              huggingFaceChatPromptSource(
+                usageRequest?.runtimeView?.contentGeneratorConfig,
+                usageRequest?.model,
+              ),
+            ) &&
+            isDeepStrictEqual(
+              primaryConfig.systemInstruction,
+              usageRequest?.generationConfig.systemInstruction,
+            ) &&
+            isDeepStrictEqual(
+              primaryConfig.tools,
+              usageRequest?.generationConfig.tools,
+            )
+          ) {
+            usageBackedRequestContents = requestContents;
+          }
+        }
       }
     } catch (error) {
       if (userContentAdded) {
@@ -6215,9 +6274,42 @@ export class LlmChat {
                       currentUserContent,
                       fallbackModalities ?? {},
                     );
+                  const fallbackParams = self.prepareRequestParams(
+                    resolvedFallbackModel,
+                    params,
+                    fallbackConfig,
+                    Object.hasOwn(
+                      callerParams.config ?? {},
+                      'systemInstruction',
+                    ),
+                  );
+                  const fallbackUsesHuggingFace = isHuggingFaceRouterUrl(
+                    fallbackConfig?.baseUrl,
+                  );
                   const reclampOutput =
-                    isHuggingFaceRouterUrl(cgConfigForThresholds?.baseUrl) ||
-                    isHuggingFaceRouterUrl(fallbackConfig?.baseUrl);
+                    primaryUsesHuggingFace || fallbackUsesHuggingFace;
+                  const minimumPromptTokens =
+                    usageBackedRequestContents &&
+                    isDeepStrictEqual(
+                      primaryPromptSource,
+                      huggingFaceChatPromptSource(
+                        fallbackConfig,
+                        getRequestModel(
+                          fallbackConfig ?? {},
+                          resolvedFallbackModel,
+                        ),
+                      ),
+                    ) &&
+                    isDeepStrictEqual(
+                      params.config?.systemInstruction,
+                      fallbackParams.config?.systemInstruction,
+                    ) &&
+                    isDeepStrictEqual(
+                      usageBackedRequestContents,
+                      fallbackRequestContents,
+                    )
+                      ? promptTokensForClamp
+                      : 0;
                   // Stamp the fallback-served counts under the REQUEST route
                   // key: a fallback serves on behalf of the same session
                   // request (the session model never changes), and the
@@ -6229,15 +6321,7 @@ export class LlmChat {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
-                    self.prepareRequestParams(
-                      resolvedFallbackModel,
-                      params,
-                      fallbackConfig,
-                      Object.hasOwn(
-                        callerParams.config ?? {},
-                        'systemInstruction',
-                      ),
-                    ),
+                    fallbackParams,
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
@@ -6248,7 +6332,9 @@ export class LlmChat {
                     promptTokensForClamp,
                     fallbackConfig,
                     options?.onModelRequestDispatched,
-                    reclampOutput ? { explicitOutputCeiling } : undefined,
+                    reclampOutput
+                      ? { explicitOutputCeiling, minimumPromptTokens }
+                      : undefined,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -6686,7 +6772,10 @@ export class LlmChat {
     promptTokensForClamp = 0,
     contentGeneratorConfig?: ContentGeneratorConfig,
     onModelRequestDispatched?: () => void,
-    outputClamp?: { explicitOutputCeiling: number | undefined },
+    outputClamp?: {
+      explicitOutputCeiling: number | undefined;
+      minimumPromptTokens: number;
+    },
   ): AsyncGenerator<StreamEvent> {
     if (outputClamp) {
       const baseUrl = contentGeneratorConfig?.baseUrl;
@@ -6718,12 +6807,16 @@ export class LlmChat {
       const systemTokens = Math.ceil(
         getCustomSystemPrompt(systemInstruction).length / TOKEN_TO_CHAR_RATIO,
       );
-      promptTokensForClamp =
+      // Keep the usage-backed estimate when the fallback sends the same prompt
+      // to the same model. A character estimate can undercount dense history.
+      promptTokensForClamp = Math.max(
+        outputClamp.minimumPromptTokens,
         estimateContentTokens(
           requestContents,
           resolveSlimmingConfig(this.config.getChatCompression())
             .imageTokenEstimate,
-        ) + Math.max(ESTIMATE_CLAMP_OVERHEAD_PAD, systemTokens);
+        ) + Math.max(ESTIMATE_CLAMP_OVERHEAD_PAD, systemTokens),
+      );
       const maxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
         window,
