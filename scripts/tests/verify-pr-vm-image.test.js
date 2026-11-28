@@ -13,6 +13,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -424,7 +425,75 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         'keep-me',
       );
 
-      // 4. debugfs exiting 0 with stderr error (both rdump: prefix and open-error) or empty tree must fail closed
+      // 4. debugfs stderr handling: benign non-root ownership warnings (both rdump: and dump_file:)
+      // MUST succeed, while fatal lines (standalone or trailing after benign lines) and empty trees fail closed.
+      const nonRootBenignDebugfs = join(root, 'nonroot-benign-debugfs');
+      writeExecutable(
+        nonRootBenignDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin" "$TREE/lost+found"',
+          'printf "base-marker\\n" > "$TREE/bin/base-marker"',
+          'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          'echo "rdump: Operation not permitted while changing ownership of $TREE//lost+found" >&2',
+          'echo "dump_file: Operation not permitted while changing ownership of $TREE//bin/base-marker" >&2',
+          'echo "rdump: Operation not permitted while changing ownership of $TREE/" >&2',
+        ].join('\n') + '\n',
+      );
+      const markerCheckMkfs = join(root, 'marker-check-mkfs');
+      writeExecutable(
+        markerCheckMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'SRC=""',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do',
+          '  if [ "$1" = "-d" ]; then SRC="$2"; shift 2; continue; fi',
+          '  OUT="$1"; shift',
+          'done',
+          'test -f "$SRC/bin/base-marker"',
+          'cat "$SRC/bin/base-marker" > "$OUT"',
+        ].join('\n') + '\n',
+      );
+      const nonRootOut = join(approved, 'nonroot-derived.ext4');
+      const nonRootRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: nonRootOut,
+        approvedRoots: [approved],
+        debugfsBin: nonRootBenignDebugfs,
+        mkfsExt4Bin: markerCheckMkfs,
+        tempParentDir: root,
+      });
+      expect(existsSync(nonRootRes.outputImagePath)).toBe(true);
+      expect(readFileSync(nonRootOut, 'utf8').trim()).toBe('base-marker');
+
+      const mixedFatalDebugfs = join(root, 'mixed-fatal-debugfs');
+      writeExecutable(
+        mixedFatalDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'echo "debugfs 1.47.2 (1-Jan-2025)" >&2',
+          'echo "rdump: Operation not permitted while changing ownership of $TREE//bin" >&2',
+          'echo "dump_file: No space left on device while writing file" >&2',
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'mixed-fatal.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: mixedFatalDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/debugfs extraction failed: dump_file: No space left/);
+
       const silentErrDebugfs = join(root, 'silent-err-debugfs');
       writeExecutable(
         silentErrDebugfs,
@@ -470,7 +539,22 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         }),
       ).toThrow(/empty rootfs tree/);
 
-      // 5. tempParentDir containing spaces AND symlinked mkfs.ext4 -> mke2fs both succeed
+      // 5. tempParentDir containing spaces requires quoted rdump arg, AND symlinked mkfs.ext4 -> mke2fs succeeds
+      const strictQuotedDebugfs = join(root, 'strict-quoted-debugfs');
+      writeExecutable(
+        strictQuotedDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'case "$2" in',
+          "  'rdump / \"'*\\ *'\"') ;;",
+          '  *) echo "rdump: unquoted path with spaces" >&2; exit 0 ;;',
+          'esac',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "base-marker\\n" > "$TREE/bin/base-marker"',
+        ].join('\n') + '\n',
+      );
       const spaceParent = join(root, 'temp dir with spaces');
       mkdirSync(spaceParent, { mode: 0o700 });
       const symlinkMkfs = join(root, 'mkfs.ext4-link');
@@ -480,30 +564,142 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         baseImagePath: golden,
         outputImagePath: spacedOut,
         approvedRoots: [approved],
-        debugfsBin: fakeDebugfs,
+        debugfsBin: strictQuotedDebugfs,
         mkfsExt4Bin: symlinkMkfs,
         tempParentDir: spaceParent,
       });
       expect(existsSync(spacedRes.outputImagePath)).toBe(true);
 
-      // 6. Failing mkfs.ext4 cleans temporary file, leaves no partial output, and adds size hint on ENOSPC
+      // 6. Failing mkfs.ext4 cleans temporary .derive.*.tmp file, leaves no partial output, and adds size hint on ENOSPC
       const failMkfs = join(root, 'fail-mkfs');
       writeExecutable(
         failMkfs,
         '#!/bin/sh\necho "Could not allocate block in ext2 filesystem" >&2\nexit 1\n',
       );
+      const failDir = join(approved, 'fail-check');
       expect(() =>
         deriveExt4GuestImage({
           baseImagePath: golden,
-          outputImagePath: join(approved, 'fail-out.ext4'),
+          outputImagePath: join(failDir, 'fail-out.ext4'),
           approvedRoots: [approved],
           debugfsBin: fakeDebugfs,
           mkfsExt4Bin: failMkfs,
           tempParentDir: root,
         }),
       ).toThrow(/try a larger --size-mib/);
-      expect(existsSync(join(approved, 'fail-out.ext4'))).toBe(false);
+      expect(existsSync(join(failDir, 'fail-out.ext4'))).toBe(false);
+      expect(readdirSync(failDir)).toEqual([]);
+
+      // 7. Positive --bundle-host-python path packages binary, stdlib, dynload-scanned .so, and soname alias
+      const pyDir = join(root, 'host-py');
+      const pyStdlib = join(pyDir, 'python3.12');
+      const pyDynload = join(pyStdlib, 'lib-dynload');
+      const fakeLibs = join(pyDir, 'syslibs');
+      mkdirSync(pyDynload, { recursive: true, mode: 0o700 });
+      mkdirSync(fakeLibs, { recursive: true, mode: 0o700 });
+      writeFileSync(join(pyStdlib, 'os.py'), '# stdlib\n');
+      writeFileSync(join(pyDynload, '_socket.cpython-312.so'), 'elf');
+      const realSo = join(fakeLibs, 'libfoo.so.1.2.3');
+      const aliasSo = join(fakeLibs, 'libfoo.so.1');
+      writeFileSync(realSo, 'shared-lib-bytes');
+      symlinkSync('libfoo.so.1.2.3', aliasSo);
+      const hostPyBin = join(pyDir, 'python3.12-bin');
+      writeExecutable(hostPyBin, '#!/bin/sh\nexit 0\n');
+      const goodLdd = join(pyDir, 'ldd');
+      writeExecutable(
+        goodLdd,
+        `#!/bin/sh\necho "  libfoo.so.1 => ${aliasSo} (0x0000)"\n`,
+      );
+      const pyCheckMkfs = join(root, 'py-check-mkfs');
+      writeExecutable(
+        pyCheckMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'SRC=""',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do',
+          '  if [ "$1" = "-d" ]; then SRC="$2"; shift 2; continue; fi',
+          '  OUT="$1"; shift',
+          'done',
+          'test -x "$SRC/opt/python/bin/python3.12-bin"',
+          'test -L "$SRC/opt/python/bin/python3"',
+          'test -f "$SRC/opt/python/lib/python3.12/os.py"',
+          'test -f "$SRC/opt/python/lib/libfoo.so.1.2.3"',
+          'test -L "$SRC/opt/python/lib/libfoo.so.1"',
+          'printf "py-ok\\n" > "$OUT"',
+        ].join('\n') + '\n',
+      );
+      const pyOut = join(approved, 'bundled-py.ext4');
+      const pyRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: pyOut,
+        approvedRoots: [approved],
+        bundleHostPython: true,
+        pythonBin: hostPyBin,
+        pythonLibDir: pyStdlib,
+        lddBin: goodLdd,
+        debugfsBin: fakeDebugfs,
+        mkfsExt4Bin: pyCheckMkfs,
+        tempParentDir: root,
+      });
+      expect(pyRes.bundledLibraries).toEqual(['libfoo.so.1.2.3']);
+      expect(readFileSync(pyOut, 'utf8').trim()).toBe('py-ok');
+
+      // 8. Golden mutation mid-derivation fails closed BEFORE publishing output,
+      // and concurrent output creation is never clobbered (atomic linkSync EEXIST).
+      const mutGolden = join(root, 'mutating-golden.ext4');
+      writeFileSync(mutGolden, 'original-golden', { mode: 0o644 });
+      const mutatingDebugfs = join(root, 'mutating-debugfs');
+      writeExecutable(
+        mutatingDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin"',
+          'printf "m\\n" > "$TREE/bin/m"',
+          `printf "tampered-golden" > "${mutGolden}"`,
+        ].join('\n') + '\n',
+      );
+      const mutOut = join(approved, 'mut-out.ext4');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: mutGolden,
+          outputImagePath: mutOut,
+          approvedRoots: [approved],
+          debugfsBin: mutatingDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/golden baseImagePath changed digest/);
+      expect(existsSync(mutOut)).toBe(false);
+
+      const raceOut = join(approved, 'race-out.ext4');
+      const racingMkfs = join(root, 'racing-mkfs');
+      writeExecutable(
+        racingMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do OUT="$1"; shift; done',
+          'printf "new-image\\n" > "$OUT"',
+          `printf "existing-precious" > "${raceOut}"`,
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: raceOut,
+          approvedRoots: [approved],
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: racingMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/already exists/);
+      expect(readFileSync(raceOut, 'utf8')).toBe('existing-precious');
     },
-    15_000,
+    20_000,
   );
 });

@@ -166,12 +166,24 @@ def start_model_bridge(vsock_script, *, cid, model_port, unix_model=None):
     assert proc.stdout is not None
     first_line = proc.stdout.readline()
     if not first_line:
-        stderr_out = proc.stderr.read() if proc.stderr else ""
-        proc.wait(timeout=5)
+        try:
+            _, stderr_out = proc.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            stop_process(proc)
+            stderr_out = ""
         raise RuntimeError(
-            f"model-bridge failed before announcing port (rc={proc.returncode}): {stderr_out.strip()}"
+            f"model-bridge failed before announcing port (rc={proc.returncode}): {(stderr_out or '').strip()}"
         )
-    info = json.loads(first_line)
+    try:
+        info = json.loads(first_line)
+    except Exception as exc:
+        stop_process(proc)
+        raise RuntimeError(
+            f"model-bridge announced non-JSON bind address: {first_line.strip()!r}"
+        ) from exc
+    if not isinstance(info, dict):
+        stop_process(proc)
+        raise RuntimeError(f"model-bridge announced invalid bind address: {info!r}")
     host = info.get("host")
     port = info.get("port")
     if (
@@ -460,7 +472,7 @@ def write_self_test_artifacts(
     )
     comment_md = (
         f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)\n\n"
-        "_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill guest-self-test)_\n"
+        "_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill 000000000000)_\n"
     )
     (Path(artifacts_dir) / "comment.md").write_text(comment_md, encoding="utf-8")
 

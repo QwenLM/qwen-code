@@ -27,8 +27,10 @@ import {
   closeSync,
   constants as fsConstants,
   copyFileSync,
+  cpSync,
   existsSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -36,7 +38,6 @@ import {
   readdirSync,
   readSync,
   realpathSync,
-  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -58,6 +59,11 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_IMAGE_SIZE_MIB = 512;
 const MIN_IMAGE_SIZE_MIB = 32;
 const MAX_IMAGE_SIZE_MIB = 16 * 1024;
+const TOOL_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+// Real non-root `debugfs rdump` prints the version banner plus per-directory
+// `rdump:` and per-file `dump_file:` ownership warnings while exiting 0.
+const BENIGN_DEBUGFS_STDERR_LINE =
+  /^(?:debugfs \d|(?:rdump|dump_file): Operation not permitted while changing ownership of )/;
 
 const DEFAULT_GUEST_VSOCK_SRC = fileURLToPath(
   new URL('./verify-pr-vm-guest-vsock.py', import.meta.url),
@@ -205,6 +211,7 @@ function runToolFull(bin, args, { timeoutMs = 180_000 } = {}) {
   const res = spawnSync(bin, args, {
     encoding: 'utf8',
     timeout: timeoutMs,
+    maxBuffer: TOOL_MAX_BUFFER_BYTES,
     env: {
       PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       LANG: 'C.UTF-8',
@@ -309,20 +316,21 @@ function bundleHostPythonIntoTree(
 
   const libBasename = basename(pythonLibDir);
   const targetStdlib = join(pyLibTargetDir, libBasename);
-  runTool('/bin/cp', ['-a', pythonLibDir, targetStdlib]);
+  cpSync(pythonLibDir, targetStdlib, {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
 
   const dynloadDir = join(pythonLibDir, 'lib-dynload');
   const binariesToScan = [realPy];
   if (existsSync(dynloadDir)) {
-    const findOut = runTool('/usr/bin/find', [
-      dynloadDir,
-      '-maxdepth',
-      '1',
-      '-name',
-      '*.so',
-    ]);
-    for (const line of findOut.split(/\r?\n/)) {
-      if (line.trim()) binariesToScan.push(line.trim());
+    for (const entry of readdirSync(dynloadDir, { withFileTypes: true })) {
+      if (
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        entry.name.endsWith('.so')
+      ) {
+        binariesToScan.push(join(dynloadDir, entry.name));
+      }
     }
   }
   const copiedLibs = new Map();
@@ -531,13 +539,15 @@ export function deriveExt4GuestImage({
       `rdump / "${escapeDebugfsArg(extractTree)}"`,
       baseInfo.path,
     ]);
-    if (
-      /^rdump:/m.test(extract.stderr) ||
-      /while trying to open|Bad magic number|Filesystem not open|Operation not permitted|Permission denied|No such file or directory|Input\/output error/i.test(
-        extract.stderr,
-      )
-    ) {
-      throw new Error(`debugfs extraction failed: ${extract.stderr.trim()}`);
+    const fatalLine = extract.stderr
+      .split(/\r?\n/)
+      .find(
+        (line) => line.trim() !== '' && !BENIGN_DEBUGFS_STDERR_LINE.test(line),
+      );
+    if (fatalLine !== undefined) {
+      throw new Error(
+        `debugfs extraction failed: ${fatalLine.trim().slice(0, 600)}`,
+      );
     }
     if (readdirSync(extractTree).length === 0) {
       throw new Error('debugfs extraction produced an empty rootfs tree');
@@ -582,6 +592,16 @@ export function deriveExt4GuestImage({
       }
       copyFileSync(item.srcReal, safeDest);
       chmodSync(safeDest, item.mode);
+      const writtenInfo = sha256SingleLinkRegularFile(
+        safeDest,
+        item.label,
+        realVault,
+      );
+      if (writtenInfo.sha256 !== item.sha256) {
+        throw new Error(
+          `${item.label} changed content between pre-hash and copy`,
+        );
+      }
     }
 
     const tmpFd = openSync(
@@ -612,8 +632,6 @@ export function deriveExt4GuestImage({
         : ['-F', '-b', '4096', '-U', 'random', '-d', extractTree, tmpOut];
     runTool(resolvedMkfs, mkfsArgs);
     chmodSync(tmpOut, 0o644);
-    renameSync(tmpOut, safeOut);
-    promoted = true;
 
     const afterBase = sha256SingleLinkRegularFile(
       baseInfo.path,
@@ -623,6 +641,19 @@ export function deriveExt4GuestImage({
     if (afterBase.sha256 !== baseInfo.sha256) {
       throw new Error('golden baseImagePath changed digest during derivation');
     }
+
+    // Publish via hard link + unlink so a concurrently created output is never clobbered.
+    try {
+      linkSync(tmpOut, safeOut);
+    } catch (error) {
+      if (error.code === 'EEXIST') {
+        throw new Error(`outputImagePath already exists: ${safeOut}`);
+      }
+      throw error;
+    }
+    unlinkSync(tmpOut);
+    promoted = true;
+
     const outInfo = sha256SingleLinkRegularFile(
       safeOut,
       'outputImagePath',

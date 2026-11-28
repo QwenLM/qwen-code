@@ -58,11 +58,11 @@ function makeTwoCommitRepo(repoDir) {
   git(['config', 'user.name', 'Test']);
   writeFileSync(join(repoDir, 'hello.txt'), 'base-v1\n');
   git(['add', '.']);
-  git(['commit', '-m', 'base']);
+  git(['-c', 'commit.gpgsign=false', 'commit', '-m', 'base']);
   const baseRefOid = git(['rev-parse', 'HEAD']);
   writeFileSync(join(repoDir, 'hello.txt'), 'head-v2-verified\n');
   git(['add', '.']);
-  git(['commit', '-m', 'head']);
+  git(['-c', 'commit.gpgsign=false', 'commit', '-m', 'head']);
   const headRefOid = git(['rev-parse', 'HEAD']);
   return { baseRefOid, headRefOid };
 }
@@ -119,6 +119,62 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     );
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/invalid cmdline qwen\.workload_timeout/);
+
+    // Positive cmdline override parsing covers every supported qwen.* token
+    const goodCmdline = join(root, 'good-cmdline');
+    writeFileSync(
+      goodCmdline,
+      'console=ttyS0 qwen.cid=3 qwen.collector_port=5201 qwen.input_port=5301 qwen.model_port=5401 qwen.workload=/opt/qwen/w.sh qwen.workload_timeout=90 qwen.skip_materialize=1\n',
+    );
+    const pyCmdOk = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import argparse, importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ns=argparse.Namespace(from_cmdline=True, cid=2, collector_port=52, input_port=53, model_port=54, workload=None, workload_timeout=600, skip_materialize=False, cmdline_file=${JSON.stringify(goodCmdline)}); mod.apply_cmdline_overrides(ns); print(json.dumps(vars(ns)))`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyCmdOk.status, pyCmdOk.stderr).toBe(0);
+    const parsedCmd = JSON.parse(pyCmdOk.stdout);
+    expect(parsedCmd.cid).toBe(3);
+    expect(parsedCmd.collector_port).toBe(5201);
+    expect(parsedCmd.input_port).toBe(5301);
+    expect(parsedCmd.model_port).toBe(5401);
+    expect(parsedCmd.workload).toBe('/opt/qwen/w.sh');
+    expect(parsedCmd.workload_timeout).toBe(90);
+    expect(parsedCmd.skip_materialize).toBe(true);
+
+    // Malformed non-JSON model-bridge announcement terminates child process instead of leaking it
+    const badBridgeScript = join(root, 'bad-bridge.py');
+    const badBridgePidFile = join(root, 'bad-bridge.pid');
+    writeFileSync(
+      badBridgeScript,
+      [
+        'import os, time',
+        `open(${JSON.stringify(badBridgePidFile)}, "w").write(str(os.getpid()))`,
+        'print("not-valid-json", flush=True)',
+        'time.sleep(30)',
+      ].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const pyBadBridge = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import importlib.util, os, sys; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\ntry:\n  mod.start_model_bridge(${JSON.stringify(badBridgeScript)}, cid=2, model_port=54)\n  sys.exit(2)\nexcept RuntimeError as e:\n  assert "non-JSON" in str(e), str(e)\n`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyBadBridge.status, pyBadBridge.stderr).toBe(0);
+    const leakedPid = Number(readFileSync(badBridgePidFile, 'utf8').trim());
+    let stillAlive = false;
+    try {
+      process.kill(leakedPid, 0);
+      stillAlive = true;
+    } catch {
+      stillAlive = false;
+    }
+    expect(stillAlive).toBe(false);
 
     // Pure-Python bundle header check: accepts advertised base/head and
     // incremental `-<base>` prerequisite, but rejects `-<head>` prerequisite-only bundles.
