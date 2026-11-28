@@ -387,8 +387,9 @@ export function sandboxVerdict(
       };
     }
     const reasons =
-      trust.escalationReasons.length > 0
-        ? ` [${trust.escalationReasons.join(', ')}]`
+      trust.escalationReasons.length > 0 ||
+      (trust.downgradeReasons?.length ?? 0) > 0
+        ? ` [${[...trust.escalationReasons, ...(trust.downgradeReasons ?? [])].join(', ')}]`
         : '';
     return {
       kind: 'refused',
@@ -566,8 +567,9 @@ export function refuseHostExecutionPhase(
   if (opts.trustContext !== undefined) {
     const trust = classifyReviewTrust(opts.trustContext, env, fileSourced);
     const reasons =
-      trust.escalationReasons.length > 0
-        ? ` [${trust.escalationReasons.join(', ')}]`
+      trust.escalationReasons.length > 0 ||
+      (trust.downgradeReasons?.length ?? 0) > 0
+        ? ` [${[...trust.escalationReasons, ...(trust.downgradeReasons ?? [])].join(', ')}]`
         : '';
     trustSuffix = ` (${trust.prTrust} -> ${trust.executionClass}${reasons})`;
   }
@@ -620,6 +622,9 @@ export function describeExecutionBoundary(opts: {
     executionClass,
     backend,
     escalationReasons: trust?.escalationReasons ?? [],
+    ...(trust?.downgradeReasons?.length
+      ? { downgradeReasons: trust.downgradeReasons }
+      : {}),
     ...(opts.teardownStatus !== undefined
       ? { teardownStatus: opts.teardownStatus }
       : {}),

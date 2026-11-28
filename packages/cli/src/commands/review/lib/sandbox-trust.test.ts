@@ -11,7 +11,9 @@ import { join } from 'node:path';
 import {
   classifyReviewTrust,
   detectReviewMandatoryEscalations,
+  externalContentContainerRequested,
   forceHardwareRequested,
+  isReviewContentAllowlistedPath,
   trustInputFromPlan,
 } from './sandbox-trust.js';
 import { buildDiffPlan } from './diff-plan.js';
@@ -444,5 +446,245 @@ describe('trustInputFromPlan', () => {
         'suspicious-path-traversal:src/../scripts/evil.js',
       ]),
     );
+  });
+});
+
+describe('external content-allowlist downgrade (operator opt-in)', () => {
+  const OPT_IN = { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' };
+  const noFileSource = () => false;
+  const externalDocs = (
+    files: Array<{
+      path: string;
+      mode?: string;
+      renameFrom?: string;
+      binary?: boolean;
+    }>,
+  ) => ({
+    isCrossRepository: true,
+    authorAssociation: 'NONE',
+    changedFiles: files,
+  });
+
+  it('reads the opt-in from operator env only, never from repo file-sourced env', () => {
+    for (const val of ['1', 'true', 'YES', ' on ']) {
+      expect(
+        externalContentContainerRequested(
+          { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: val },
+          noFileSource,
+        ),
+      ).toBe(true);
+    }
+    expect(
+      externalContentContainerRequested(
+        { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '0' },
+        noFileSource,
+      ),
+    ).toBe(false);
+    expect(
+      externalContentContainerRequested(
+        { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+        (k) => k === 'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+      ),
+    ).toBe(false);
+  });
+
+  it('allowlists only docs Markdown and the four root prose files', () => {
+    for (const p of [
+      'docs/guide.md',
+      'docs/design/a.zh-CN.md',
+      'README.md',
+      'CHANGELOG.md',
+      'CONTRIBUTING.md',
+      'LICENSE.md',
+      'DOCS/GUIDE.MD',
+      'Readme.md',
+      'LICENSE',
+      'license',
+    ]) {
+      expect(isReviewContentAllowlistedPath(p)).toBe(true);
+    }
+    for (const p of [
+      'src/a.ts',
+      'docs/guide.json',
+      'docs/guide.yaml',
+      'docs/img.png',
+      'docs/../package.json',
+      'packages/cli/README.md',
+      'readme.md.bak',
+      // R4-1: only LICENSE is accepted extensionless; the other three root
+      // prose files require .md (docs and docblock promise exactly this).
+      'README',
+      'CHANGELOG',
+      'CONTRIBUTING',
+      '',
+    ]) {
+      expect(isReviewContentAllowlistedPath(p)).toBe(false);
+    }
+  });
+
+  it('keeps external PRs hardware-isolated when the opt-in is off', () => {
+    const res = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      {},
+      noFileSource,
+    );
+    expect(res.executionClass).toBe('hardware-isolated');
+    expect(res.escalationReasons).toContain('cross-repository-pr');
+    expect(res.downgradeReasons).toBeUndefined();
+  });
+
+  it('downgrades a complete docs-only external diff to shared-kernel with disclosure', () => {
+    const res = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }, { path: 'README.md' }]),
+      OPT_IN,
+      noFileSource,
+    );
+    expect(res.prTrust).toBe('external');
+    expect(res.executionClass).toBe('trusted-shared-kernel');
+    expect(res.escalationReasons).toEqual([]);
+    expect(res.downgradeReasons).toEqual(['external-content-allowlist']);
+  });
+
+  it('downgrades a same-repo non-collaborator (external-author) docs-only diff', () => {
+    // Exercises the `external-author` splice branch, not just cross-repository.
+    const res = classifyReviewTrust(
+      {
+        isCrossRepository: false,
+        authorAssociation: 'NONE',
+        changedFiles: [{ path: 'docs/guide.md' }],
+      },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(res.prTrust).toBe('external');
+    expect(res.executionClass).toBe('trusted-shared-kernel');
+    expect(res.escalationReasons).toEqual([]);
+    expect(res.downgradeReasons).toEqual(['external-content-allowlist']);
+  });
+
+  it('ignores a repo file-sourced opt-in', () => {
+    const res = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      OPT_IN,
+      (k) => k === 'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+    );
+    expect(res.executionClass).toBe('hardware-isolated');
+    expect(res.downgradeReasons).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'mixed executable content',
+      [{ path: 'docs/guide.md' }, { path: 'scripts/x.js' }],
+    ],
+    ['dependency manifest', [{ path: 'package.json' }]],
+    ['non-allowlisted markdown', [{ path: 'packages/cli/README.md' }]],
+    ['data format in docs', [{ path: 'docs/config.json' }]],
+    ['executable mode', [{ path: 'docs/guide.md', mode: '100755' }]],
+    ['symlink mode', [{ path: 'docs/guide.md', mode: '120000' }]],
+    ['submodule mode', [{ path: 'docs/guide.md', mode: '160000' }]],
+    ['binary flag', [{ path: 'docs/guide.md', binary: true }]],
+    ['rename', [{ path: 'docs/guide.md', renameFrom: 'scripts/x.js' }]],
+    [
+      'docs-to-docs rename',
+      [{ path: 'docs/new.md', renameFrom: 'docs/old.md' }],
+    ],
+    ['traversal', [{ path: 'docs/../package.json' }]],
+    ['scripts segment inside docs', [{ path: 'docs/scripts/x.md' }]],
+  ])('still escalates for %s', (_name, files) => {
+    const res = classifyReviewTrust(
+      externalDocs(
+        files as Array<{
+          path: string;
+          mode?: string;
+          renameFrom?: string;
+          binary?: boolean;
+        }>,
+      ),
+      OPT_IN,
+      noFileSource,
+    );
+    expect(res.executionClass).toBe('hardware-isolated');
+    expect(res.downgradeReasons).toBeUndefined();
+  });
+
+  it('still escalates for an incomplete file list or missing list', () => {
+    const partial = classifyReviewTrust(
+      { ...externalDocs([{ path: 'docs/guide.md' }]), partialFileList: true },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(partial.executionClass).toBe('hardware-isolated');
+    expect(partial.downgradeReasons).toBeUndefined();
+    const missing = classifyReviewTrust(
+      { isCrossRepository: true, authorAssociation: 'NONE' },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(missing.executionClass).toBe('hardware-isolated');
+    expect(missing.downgradeReasons).toBeUndefined();
+  });
+
+  it('operator force-hardware overrides the downgrade', () => {
+    const res = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      { ...OPT_IN, QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      noFileSource,
+    );
+    expect(res.executionClass).toBe('hardware-isolated');
+    expect(res.escalationReasons).toContain('operator-force-hardware');
+    expect(res.downgradeReasons).toBeUndefined();
+  });
+
+  it('a CI container-outage cause is recorded distinctly from an operator switch (R1-6)', () => {
+    const outage = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      {
+        QWEN_REVIEW_FORCE_HARDWARE: '1',
+        QWEN_REVIEW_FORCE_HARDWARE_CAUSE: 'container-unavailable',
+      },
+      noFileSource,
+    );
+    expect(outage.executionClass).toBe('hardware-isolated');
+    expect(outage.escalationReasons).toContain('container-tier-unavailable');
+    expect(outage.escalationReasons).not.toContain('operator-force-hardware');
+    const operator = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      noFileSource,
+    );
+    expect(operator.escalationReasons).toContain('operator-force-hardware');
+    const fileSourcedCause = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      {
+        QWEN_REVIEW_FORCE_HARDWARE: '1',
+        QWEN_REVIEW_FORCE_HARDWARE_CAUSE: 'container-unavailable',
+      },
+      (k) => k === 'QWEN_REVIEW_FORCE_HARDWARE_CAUSE',
+    );
+    expect(fileSourcedCause.escalationReasons).toContain(
+      'operator-force-hardware',
+    );
+  });
+
+  it('does not change collaborator or local classification', () => {
+    const collab = classifyReviewTrust(
+      {
+        isCrossRepository: false,
+        authorAssociation: 'MEMBER',
+        changedFiles: [{ path: 'docs/guide.md' }],
+      },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(collab.executionClass).toBe('trusted-shared-kernel');
+    expect(collab.downgradeReasons).toBeUndefined();
+    const local = classifyReviewTrust(
+      { isLocal: true, changedFiles: [{ path: 'docs/guide.md' }] },
+      OPT_IN,
+      noFileSource,
+    );
+    expect(local.executionClass).toBe('trusted-shared-kernel');
+    expect(local.downgradeReasons).toBeUndefined();
   });
 });

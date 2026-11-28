@@ -54,6 +54,7 @@ import {
   sandboxPolicy,
   sandboxVerdict,
 } from './sandboxed-exec.js';
+import { trustInputFromPlan, classifyReviewTrust } from './sandbox-trust.js';
 
 describe('sandboxPolicy', () => {
   it('lets the environment outrank the setting, and defaults to off', () => {
@@ -1140,6 +1141,8 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       'QWEN_REVIEW_PROVIDER_VM_DRIVER',
       'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
       'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
+      'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+      'QWEN_REVIEW_FORCE_HARDWARE_CAUSE',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }
@@ -1346,6 +1349,185 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       backend: 'direct',
       escalationReasons: [],
     });
+  });
+
+  it('discloses the external content-allowlist downgrade in the boundary only when opted in', () => {
+    const trustContext = {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'docs/guide.md' }],
+    };
+    const optedIn = describeExecutionBoundary({
+      policy: 'tiered',
+      backend: 'container',
+      trustContext,
+      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      fileSourced: () => false,
+    });
+    expect(optedIn).toEqual({
+      policy: 'tiered',
+      prTrust: 'external',
+      executionClass: 'trusted-shared-kernel',
+      backend: 'container',
+      escalationReasons: [],
+      downgradeReasons: ['external-content-allowlist'],
+    });
+    const optedOut = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext,
+      env: {},
+      fileSourced: () => false,
+    });
+    expect(optedOut.executionClass).toBe('hardware-isolated');
+    expect(optedOut.downgradeReasons).toBeUndefined();
+    const repoSourced = describeExecutionBoundary({
+      policy: 'tiered',
+      verdict: { kind: 'refused', reason: 'no hardware backend' },
+      trustContext,
+      env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      fileSourced: (k) => k === 'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+    });
+    expect(repoSourced.executionClass).toBe('hardware-isolated');
+    expect(repoSourced.downgradeReasons).toBeUndefined();
+  });
+
+  it('the capability-gate fixture plan reads through the real plan reader and its CONTENT drives the class (R4-1 / N1)', () => {
+    // F1: read the gate script's OWN plan literal instead of copying its shape,
+    // so an edit to the script's fixture (drop diffStat / authorAssociation)
+    // reds this test through the real reader.
+    const script = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../../../.github/scripts/ensure-tiered-review-cli.sh',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const literal = script.match(/printf '(\{"pr":0.*\})\\n' "\$wt"/)?.[1];
+    expect(literal).toBeDefined();
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-gate-fixture-plan-'));
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, (literal as string).replace('%s', join(dir, 'wt')));
+    const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+    // Pin the script literal's own completeness advertising: the reader only
+    // consults diffStat when diffPath is null, so assert the literal directly.
+    expect(plan.diffStat).toBeDefined();
+    expect(plan.diffStat.files).toBe(plan.files.length);
+    try {
+      const trustContext = trustInputFromPlan(planPath);
+      expect(trustContext).toBeDefined();
+      // Pin the parsed shape, not just "defined".
+      expect(trustContext?.isCrossRepository).toBe(false);
+      expect(trustContext?.authorAssociation).toBe('MEMBER');
+      expect(trustContext?.changedFiles?.map((f) => f.path)).toEqual([
+        'src/a.ts',
+      ]);
+      expect(trustContext?.partialFileList).not.toBe(true);
+      // Without the force switch the plan CONTENT must classify as a trusted
+      // collaborator; a drifted plan (unknown association) would not.
+      const unforced = classifyReviewTrust(trustContext, {}, () => false);
+      expect(unforced.prTrust).toBe('collaborator');
+      expect(unforced.executionClass).toBe('trusted-shared-kernel');
+      const boundary = describeExecutionBoundary({
+        policy: 'tiered',
+        verdict: { kind: 'refused', reason: 'no hardware backend' },
+        trustContext,
+        env: { QWEN_REVIEW_SANDBOX: 'tiered', QWEN_REVIEW_FORCE_HARDWARE: '1' },
+        fileSourced: () => false,
+      });
+      expect(boundary.policy).toBe('tiered');
+      expect(boundary.executionClass).toBe('hardware-isolated');
+      expect(boundary.backend).toBe('refused');
+      expect(boundary.escalationReasons).toContain('operator-force-hardware');
+      // Negative cells: an unreadable plan or one missing authorAssociation
+      // must NOT classify as a trusted collaborator even without force.
+      const missing = trustInputFromPlan(join(dir, 'does-not-exist.json'));
+      expect(classifyReviewTrust(missing, {}, () => false).executionClass).toBe(
+        'hardware-isolated',
+      );
+      const { authorAssociation: _drop, ...noAssoc } = plan;
+      const noAssocPath = join(dir, 'plan-no-assoc.json');
+      writeFileSync(noAssocPath, JSON.stringify(noAssoc));
+      const noAssocCtx = trustInputFromPlan(noAssocPath);
+      expect(noAssocCtx?.authorAssociation).toBeUndefined();
+      expect(
+        classifyReviewTrust(noAssocCtx, {}, () => false).executionClass,
+      ).toBe('hardware-isolated');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real external docs-only plan file plus the opt-in downgrades end to end (R2-5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-downgrade-plan-'));
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        pr: 7,
+        head: 'h',
+        base: 'b',
+        mergeBase: 'b',
+        isCrossRepository: true,
+        authorAssociation: 'NONE',
+        diffStat: { files: 1, added: 1, deleted: 0 },
+        files: [
+          { path: 'docs/guide.md', added: 1, deleted: 0, mode: '100644' },
+        ],
+        worktree: join(dir, '.qwen', 'tmp', 'review-pr-7'),
+      }),
+    );
+    try {
+      const trustContext = trustInputFromPlan(planPath);
+      const boundary = describeExecutionBoundary({
+        policy: 'tiered',
+        backend: 'container',
+        trustContext,
+        env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+        fileSourced: () => false,
+      });
+      expect(boundary.prTrust).toBe('external');
+      expect(boundary.executionClass).toBe('trusted-shared-kernel');
+      expect(boundary.downgradeReasons).toEqual(['external-content-allowlist']);
+      const off = describeExecutionBoundary({
+        policy: 'tiered',
+        verdict: { kind: 'refused', reason: 'no hardware backend' },
+        trustContext,
+        env: {},
+        fileSourced: () => false,
+      });
+      expect(off.executionClass).toBe('hardware-isolated');
+      expect(off.downgradeReasons).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a downgraded refusal names the downgrade cause in its suffix (R2-6)', () => {
+    const trustContext = {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'docs/guide.md' }],
+    };
+    const verdict = sandboxVerdict(
+      'tiered',
+      { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      () => null,
+      trustContext,
+      undefined,
+      () => false,
+    );
+    // With the opt-in the class is trusted-shared-kernel; without a container
+    // runtime the verdict refuses and the suffix must name the downgrade.
+    expect(verdict.kind).toBe('refused');
+    if (verdict.kind === 'refused') {
+      expect(verdict.reason).toContain('external-content-allowlist');
+      expect(verdict.reason).toContain('trusted-shared-kernel');
+    }
   });
 
   it('handOffRefused also rejects unsupported hand-offs under tiered and forceHardware', () => {

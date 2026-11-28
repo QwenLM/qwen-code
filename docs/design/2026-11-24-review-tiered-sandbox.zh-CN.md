@@ -2,7 +2,7 @@
 
 [English](2026-11-24-review-tiered-sandbox.md) | [简体中文](2026-11-24-review-tiered-sandbox.zh-CN.md)
 
-**状态：** Phase 1 与 Phase 2-B 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、`guest-exec-v1` UDS/vsock 本地微虚机实时执行桥接含纯内容打包与身份核验 VMM 回收、旁路子命令门禁、结构化边界披露）；CI workflow 切换（Phase 2-A）与云端 `provider-vm` HTTP/SDK 数据面作为后续阶段。
+**状态：** Phase 1、Phase 2-B、Phase 2-A 与 Phase 2-D 已实现（信任分类与高风险强制升级、轻量容器硬化与可验证回收、分层 fail-closed 后端选路与启动计划器、`guest-exec-v1` UDS/vsock 本地微虚机实时执行桥接含纯内容打包与身份核验 VMM 回收、旁路子命令门禁、结构化边界披露、CI workflow 切换至 `QWEN_REVIEW_SANDBOX=tiered` 并联动 fail-closed 的 `QWEN_REVIEW_FORCE_HARDWARE` 与按行为探测的生产 CLI 能力门禁，以及操作者 opt-in 的外部内容白名单降级至硬化容器）；云端 `provider-vm` HTTP/SDK 数据面与可选的微虚机化 `drive` 执行作为后续阶段。
 **日期：** 2026-11-24
 **关联文档：** [`/verify-pr` 分信任等级 microVM 隔离设计](2026-11-23-verify-pr-tiered-microvm.zh-CN.md)、[Review CPU for Tokens](review-cpu-for-tokens.md)
 
@@ -26,11 +26,10 @@
 - 为 `drive`、`ab-drive`、`capture-tui` 接入同一套 fail-closed 沙箱门禁，在 `required`、`tiered` 或 `QWEN_REVIEW_FORCE_HARDWARE=1` 下绝不静默在宿主机跑待审脚本。
 - 在各执行子命令报告中附带结构化 `executionBoundary`，并在 `fetch-pr` 中以零额外 GitHub API 调用补齐 `authorAssociation` 与 `isCrossRepository` 供下游信任分类使用。
 
-### 非目标（Phase 1 / 2-B）
+### 非目标（Phase 1 / 2-A / 2-B）
 
 - 不把整个 `/review` 编排器 LLM Agent 塞进 microVM（遵循 `/verify-pr` 设计 §3.5：保留现有 `working_dir`、fan-out、覆盖台账与 `--fix` 宿主机写入目标，仅隔离待审代码的执行适配器）。
-- 本次不修改 `.github/workflows/qwen-code-pr-review.yml`，也不配置生产云端 VM 凭据（留待 Phase 2-A）。
-- 本次不在 `packages/cli` 中内置云端 `provider-vm`（`fcsandbox` / `aliyun-ecs`）的 HTTP/SDK 数据面；本地微虚机后端（`firecracker`、`vfkit`）在硬件前提与 `QWEN_REVIEW_VM_BRIDGE_SOCKET` 就绪时已可通过 `guest-exec-v1` UDS/vsock 实时执行，其余情况继续严格 fail-closed 拒绝，绝不静默降级。
+- 本次不配置生产云端 VM 凭据，也不在 `packages/cli` 中内置云端 `provider-vm`（`fcsandbox` / `aliyun-ecs`）的 HTTP/SDK 数据面（留作后续；本地微虚机后端 `firecracker` 与 `vfkit` 在硬件前提与 `QWEN_REVIEW_VM_BRIDGE_SOCKET` 就绪时可通过 `guest-exec-v1` UDS/vsock 实时执行，其余情况继续严格 fail-closed 拒绝，绝不静默降级）。
 
 ## 3. 架构与设计决策
 
@@ -61,7 +60,7 @@
   - `external`：fork PR（`isCrossRepository: true`）或非协作者关联（`CONTRIBUTOR`、`FIRST_TIME_CONTRIBUTOR`、`FIRST_TIMER`、`NONE`、`MANNEQUIN`）。
   - `unknown`：PR 评审缺少 `isCrossRepository` 或 `authorAssociation`，或值无法识别。
 - **`executionClass`**：
-  - `trusted-shared-kernel`：仅当 `prTrust` 为 `local-owner` 或 `collaborator`、`forceHardware` 为 false、PR 变更文件列表完整（非增量收窄或已降级回全量、`files.length === diffStat.files`、且 diff 捕获未崩溃/缺失）且零条强制升级规则命中时成立。
+  - `trusted-shared-kernel`：仅当 `prTrust` 为 `local-owner` 或 `collaborator`、`forceHardware` 为 false、PR 变更文件列表完整（非增量收窄或已降级回全量、`files.length === diffStat.files`、且 diff 捕获未崩溃/缺失）且零条强制升级规则命中时成立——或经下文操作者内容白名单 opt-in 降级的 `external` PR。
   - `hardware-isolated`：其余所有情况（`external`、`unknown`、`forceHardware`、PR 缺少或存在增量/不完整变更文件列表、畸形 plan JSON 或命中任意强制升级规则）。
 - **强制升级触发器（`detectReviewMandatoryEscalations`）**：
   - 供应链与依赖清单：`package.json`、`package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`bun.lock*`、`.npmrc`、`.yarnrc*`、`.pnpmfile.mjs`、`patches/**`、`pom.xml`、`.mvn/**`、`mvnw*`、`Cargo.toml`、`Cargo.lock`、`go.mod`、`go.sum`、`pyproject.toml`、`requirements*.txt`、`setup.py`、`Gemfile*`、`build.gradle*`、`settings.gradle*`、`gradlew*`。
@@ -69,6 +68,7 @@
   - 构建 / 沙箱 / 验证 / JS 执行型工具链配置：`**/scripts/**`、`build.{js,mjs,cjs,ts}`、`Dockerfile*`、`docker-compose*`、`(GNU)Makefile`、`*.mk`、`justfile`、`Taskfile.ya?ml`、`turbo.json`、`esbuild/vite/vitest/babel/webpack/rollup/jest/playwright/postcss/tailwind/next/prettier/eslint.config.*`、`tsconfig*.json`、`.eslintrc*`、`.prettierrc.{js,cjs,mjs}`。
   - 可执行文件、符号链接、子模块、二进制或路径遍历：git mode `100755`、`120000`、`160000`（从 unified diff 头部的 `new/deleted file mode`、`new/old mode` 与 `index <old>..<new> <mode>` 解析进入 `FileMetric.mode` 并由 `trustInputFromPlan` 透传）、`binary: true`、`..` 路径遍历段，或可执行脚本/二进制扩展名（`.sh`、`.bash`、`.zsh`、`.py`、`.rb`、`.pl`、`.ps1`、`.bat`、`.cmd`、`.exe`、`.dll`、`.so`、`.dylib`）。
   - 同时对 `file.path` 与 `file.renameFrom` 做路径归一化与检测，防止通过重命名或冗余斜杠绕过升级。
+- **操作者 opt-in 的外部内容降级（Phase 2-D，`QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER`，默认关）：** 在无硬件隔离的 runner（如无 `/dev/kvm` 的阿里云 ECS）上，操作者可以允许 `external` PR 使用硬化共享内核容器，**仅当**其完整 diff 可证明不含可执行内容：无变更条目为重命名，可执行/symlink/submodule mode 与 binary 标记已由强制升级拦截，且每个变更路径落在窄白名单内——`docs/**` 下的 Markdown 加根目录 `README.md` / `CHANGELOG.md` / `CONTRIBUTING.md` / `LICENSE.md` 与无扩展名 `LICENSE`（仅 license 文件可无 `.md`；其余三个根 prose 文件必须带 `.md`）——同时零条强制升级、文件列表完整、`forceHardware` 关闭。降级只移除作者身份升级（`cross-repository-pr` / `external-author`），其余任何升级仍然优先。降级以 `downgradeReasons: ['external-content-allowlist']` 在分类与 `executionBoundary` 中如实披露，`prTrust` 保持 `external`——绝不静默。该键加入 `PROJECT_ENV_HARDCODED_EXCLUSIONS` 并经 `isFileSourcedEnvKey()` 读取，被审仓库无法自授共享内核档。与其它 review 沙箱键一致，凡 file-sourced（含 home `~/.qwen/.env`）一律忽略，操作者须通过 shell 环境或用户设置开启；被丢弃的 file-sourced 值是刻意的 no-op，而非静默授权。操作者接受的残差风险：执行的是 main 的工具链解析攻击者控制的*数据*（Markdown/frontmatter/夹具解析器 bug 仍可达）、install 仍拉取 main 锁文件依赖、持久池上共享内核逃逸仍触及 CI 凭据；白名单把注入代码面缩到零，但不消除共享内核边界。
 
 ### 3.3 轻量容器档硬化（`lib/sandboxed-exec.ts`）
 
@@ -117,26 +117,38 @@
 
 **执行前读取信任上下文。** plan 位于容器可读写的评审临时目录内，被审代码在一次受信运行期间可以改写它。因此每个阶段都只在执行第一条命令前读取一次 `ReviewTrustInput`，报告使用这份已捕获的值；`build-test` 不再在构建结束后重读 plan 来生成 `executionBoundary`。这不影响门禁不变量：`hardware-isolated` 的 plan 在任何被审代码执行前就被拒绝，因而其代码没有机会改写 plan；受信运行的后续阶段可能看到被改写的 plan，但这个 PR 本来就已经被允许执行，且被改写的 plan 无法让 `hardware-isolated` 运行获得执行许可。完全没有信任上下文的执行会如实标记为 `executionClass: 'unclassified'`，而不是误标为 `hardware-isolated`。
 
+### 3.7 CI Workflow 切换（Phase 2-A：`.github/workflows/qwen-code-pr-review.yml`）
+
+`Resolve review sandbox` 预检与 `Run review` 步骤在 CI 中无条件强制启用 `tiered`，彻底移除所有 `policy='off'` 降级路径：
+
+- **解耦容器就绪态与策略输出：** `Resolve review sandbox` 探测 `/usr/bin/docker info` 并通过 `.github/scripts/resolve-sandbox-image.mjs` 解析 digest-pinned 镜像，经由 `$GITHUB_OUTPUT` 输出 `policy=tiered` 与 `force_hardware=''|1`（通过表达式上下文而非 `$GITHUB_ENV` 传递给 `Run review`，防止后续步骤篡改）。`container_ready` 只是 shell 局部变量并体现在 step summary 中，**不是** step output。
+- **容器就绪路径（`container_ready=true`、`force_hardware=''`）：** `Run review` 收到 `QWEN_REVIEW_SANDBOX=tiered`、`QWEN_REVIEW_FORCE_HARDWARE=''` 与 digest-pinned `QWEN_SANDBOX_IMAGE`。受信同仓低风险 PR（`trusted-shared-kernel`）在硬化容器内执行；外部/fork PR 及触及高风险路径的 PR（`hardware-isolated`）要求硬件隔离后端（microVM 桥接），不可用时 fail-closed 退化为静态审查——除非操作者内容白名单 opt-in（§3.2）对可证明非执行的外部 diff 降级，CI 默认关闭该 opt-in。
+- **容器不可用路径（`container_ready=false`、`force_hardware=1`）：**
+  - 在持久 `self-hosted` 池上，fork head（或无 payload 触发器中无法读出 `HEAD_REPO` 的 PR）在输出任何 step output 与启动 yolo agent 前直接 `exit 1` 拒绝，同时保护 CI 凭据与共享宿主机。
+  - 其余所有运行（hosted 上的 fork PR 以及同仓 PR）均保持 `QWEN_REVIEW_SANDBOX=tiered` 并附带 `QWEN_REVIEW_FORCE_HARDWARE=1`。设置 `force_hardware=1` 可阻断「`docker info` 成功但镜像拉取失败」时 CLI 回退到未 digest-pin 的默认标签，也避免把镜像拉取故障误归因给待审 PR——每个执行阶段均要求硬件隔离或以结构化 `executionBoundary` 干净拒绝。预检同时输出 `force_hardware_cause=container-unavailable`（经 step-output 绑定到 `QWEN_REVIEW_FORCE_HARDWARE_CAUSE`），使 boundary 把常规 CI 故障记为 `container-tier-unavailable` 而非操作者决策（`operator-force-hardware`）；降级后又被拒绝的阶段会在拒绝后缀中点名降级原因（`downgradeReasons`），保持 boundary 可审计。
+- **生产 CLI 能力门禁（`Ensure tiered-capable review CLI`，body 位于 `.github/scripts/ensure-tiered-review-cli.sh`）：** 评审 runner 上已发布的 CLI 可能早于本设计（其策略解析器只认识 `off | auto | required`，会把未知的 `tiered` 静默映射为 `off`，重新打开宿主机执行路径）。版本号无法证明能力，因此门禁探测**行为**：在 `QWEN_REVIEW_SANDBOX=tiered` + `QWEN_REVIEW_FORCE_HARDWARE=1` 下，用候选 CLI 自身的 `review build-test` 跑一个由工作流编写的受信夹具（含受影响文件的根包，其 `preinstall` 写入 canary 标记）。有能力的 CLI 会在执行任何内容前拒绝——报告带 `executionBoundary.policy=tiered`、`executionClass=hardware-isolated`、`backend=refused` 且不存在 canary；静默降级的 CLI 会执行 canary 和/或缺少 boundary。探针中只会运行脚本自己的夹具代码，绝不运行 PR 代码。该步骤位于 `Resolve review sandbox` **之后**，预检将拒绝的评审不必付出门禁的最坏开销。探针失败时门禁先尝试最新已发布版本，再从受信 base 检出构建 CLI（`QWEN_SKIP_PREPARE=1 corepack pnpm install --frozen-lockfile` 使 `scripts/prepare.js` 不在 install 行 build+bundle，随后仅一次显式 `npm run build` + `npm run bundle`），把 bundle 的 wrapper 置于 `GITHUB_PATH` 首位（在任何 PR 代码运行前追加；评审 agent 自身的 `GITHUB_PATH` 已被 decoy），复探，仍不支持则以明确的 `review CLI capability gate` 错误附探针日志尾部 `exit 1`——绝不放行不支持的 CLI。wrapper 是检出内的固定名目录，每次构建覆盖重写，除非本次运行将其追加到 `GITHUB_PATH` 否则不起作用，并由下一次运行的 checkout clean（`actions/checkout` `clean=true` 执行 `git clean -ffdx`）回收。body 放在兄弟脚本中使 workflow 保持尺寸棘轮之内。
+
 ## 4. 风险与缓解
 
-| 风险                                                                                                     | 缓解措施                                                                                                                                                |
-| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 破坏现有本地或 CI 的 `off`/`auto`/`required` 用法                                                        | `off`/`auto`/`required` 保持既有默认行为不变；`tiered` 与 `QWEN_REVIEW_FORCE_HARDWARE` 为显式 opt-in。                                                  |
-| `--pids-limit` 误杀合法并行构建/测试                                                                     | 默认设为 `512`，远高于常规 Node/Vitest/esbuild 并发需求，同时阻断 fork bomb。                                                                           |
-| 恶意 PR 通过 `.qwen/.env` 篡改 `QWEN_REVIEW_SANDBOX_BACKEND=container` 或 `QWEN_REVIEW_FORCE_HARDWARE=0` | 所有 review 沙箱环境变量全部加入 `PROJECT_ENV_HARDCODED_EXCLUSIONS` 并做 `isFileSourcedEnvKey()` 校验。                                                 |
-| 宿主机设置了 `review.sandbox` 影响 `drive`/`ab-drive`/`capture-tui` 单测                                 | 既有单测在默认 `off` 或隔离操作者配置下运行；新增单测显式覆盖 `off`/`auto` 放行与 `required`/`tiered`/`QWEN_REVIEW_FORCE_HARDWARE=1` fail-closed 拒绝。 |
+| 风险                                                                                                     | 缓解措施                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 破坏现有本地或 CI 的 `off`/`auto`/`required` 用法                                                        | `off`/`auto`/`required` 保持既有默认行为不变；`tiered` 与 `QWEN_REVIEW_FORCE_HARDWARE` 为显式 opt-in。                                                                                |
+| `--pids-limit` 误杀合法并行构建/测试                                                                     | 默认设为 `512`，远高于常规 Node/Vitest/esbuild 并发需求，同时阻断 fork bomb。                                                                                                         |
+| 恶意 PR 通过 `.qwen/.env` 篡改 `QWEN_REVIEW_SANDBOX_BACKEND=container` 或 `QWEN_REVIEW_FORCE_HARDWARE=0` | 所有 review 沙箱环境变量全部加入 `PROJECT_ENV_HARDCODED_EXCLUSIONS` 并做 `isFileSourcedEnvKey()` 校验。                                                                               |
+| 操作者内容白名单降级让外部 PR 在持久池触及共享内核                                                       | 默认关且仅操作者；窄 Markdown 白名单、完整 diff 与零升级前提、`forceHardware` 覆盖、仓库 `.env` 拒绝、显式 `downgradeReasons` 披露；残差的数据解析器/内核逃逸风险是操作者接受的权衡。 |
+| 宿主机设置了 `review.sandbox` 影响 `drive`/`ab-drive`/`capture-tui` 单测                                 | 既有单测在默认 `off` 或隔离操作者配置下运行；新增单测显式覆盖 `off`/`auto` 放行与 `required`/`tiered`/`QWEN_REVIEW_FORCE_HARDWARE=1` fail-closed 拒绝。                               |
 
 ## 5. 验证计划与验收标准
 
 1. **单元测试**：
-   - `sandbox-trust.test.ts`：覆盖 `local-owner` / `collaborator` / `external` / `unknown`、全部强制升级触发规则（依赖、lockfile、patches、workflows、`.qwen`、脚本、可执行权限、symlink、submodule、重命名）、缺少文件列表的 fail-closed 行为以及 `QWEN_REVIEW_FORCE_HARDWARE=1`。
+   - `sandbox-trust.test.ts`：覆盖 `local-owner` / `collaborator` / `external` / `unknown`、全部强制升级触发规则（依赖、lockfile、patches、workflows、`.qwen`、脚本、可执行权限、symlink、submodule、重命名）、缺少文件列表的 fail-closed 行为以及 `QWEN_REVIEW_FORCE_HARDWARE=1`；另覆盖 Phase 2-D 内容白名单降级（opt-in 关/仓库 file-sourced 拒绝、白名单命中/未命中、混入可执行内容、依赖清单、数据格式、可执行/symlink/submodule mode、binary 标记、重命名、路径遍历、不完整/缺失列表、force-hardware 覆盖、collaborator/local 分类不变）。
    - `sandbox-backends.test.ts`：覆盖各平台后端选路顺序、`QWEN_REVIEW_SANDBOX_BACKEND` 显式覆盖、`hardware-isolated` 拒绝 `container`、前提缺失时 fail-closed 以及 `firecracker`/`vfkit`/`provider-vm`（`fcsandbox`/`aliyun-ecs`）启动计划校验。
    - `sandboxed-exec.test.ts`：覆盖 `tiered` 策略严格度优先级、仓库 `.env` 对新增变量的拦截、容器硬化参数（`--cap-drop=ALL`、`--security-opt=no-new-privileges:true`、`--pids-limit=512`）、`reapContainer()` 干净/失败校验以及 `refuseHostExecutionPhase()`。
    - `build-test` / `test-efficacy` / `test-delta` / `drive` / `ab-drive` / `capture-tui` 单测：验证 `executionBoundary` 字段、基于 plan 的信任分档执行与旁路子命令的 fail-closed 拒绝。
    - `guest-exec-bridge.test.ts`：覆盖 `guest-exec-v1` 帧编解码、UDS 路径上限与 symlink socket 拒绝、纯内容工作区打包（拒绝 symlink、非普通文件与超预算）、截断/伪造摘要拦截、按身份核验的 `reapVmWorker()`（拒绝不匹配 PID、强杀抗 `SIGTERM` 存活目标并保留无辜 canary 进程），以及真实 Unix Domain Socket 独立子进程 guest-agent 在 `tiered` + 外部 fork PR 下驱动 `runBuildTest` 与 `runTestDelta` 的端到端闭环。
-2. **构建与静态检查**：`npm run build && npm run typecheck` 及 `packages/cli` 中所有受影响单测全部通过。
+   - `scripts/tests/qwen-pr-review-workflow.test.js`：验证 Phase 2-A 的 CI workflow 切换（`QWEN_REVIEW_SANDBOX`、`QWEN_REVIEW_FORCE_HARDWARE` 与 `QWEN_SANDBOX_IMAGE` 的 step-output 绑定、移除 `policy='off'` 降级，以及通过真实 `/bin/bash` 回放 `Resolve review sandbox` 在容器就绪、daemon 不可达、镜像拉取失败、self-hosted fork 拒绝与无 payload `gh api` 解析等全场景的行为），并以桩 CLI 真实回放 CLI 能力门禁：有能力的 CLI 无需升级/构建即通过；静默降级的旧 CLI、报新版本号但仍执行 canary 的 CLI、发出拒绝报告但仍执行 canary 的 CLI、以及返回无 `executionBoundary` 且无 canary 的干净报告的 CLI，在无可用升级/构建时均被拒绝；base 检出构建成功但行为仍似旧 CLI 时由最终复探拒绝；有能力的已发布版本无需构建即被接受；无能力的已发布 CLI 仅经由 base 检出构建路径被接受。
+2. **构建与静态检查**：`npm run build && npm run typecheck`、workflow lint/格式检查，以及 `packages/cli` 和 `scripts/tests` 中受影响单测全部通过。
 
 ## 6. 后续工作
 
-- 更新 `.github/workflows/qwen-code-pr-review.yml`（及 workflow meta-tests），移除外部 PR 在容器/VM 不可用时回退到 `policy=off` 的降级逻辑，将 CI 切换为 `QWEN_REVIEW_SANDBOX=tiered`（Phase 2-A）。
 - 接入云端 `provider-vm`（`fcsandbox` / `aliyun-ecs`）的 HTTP/SDK 数据面，以及可选的微虚机化 `drive` 执行。
