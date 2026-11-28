@@ -141,6 +141,8 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Explicitly control whether prompt-time reads may persist sidecars. */
+  allowSidecarWrite?: boolean;
   /** Paginate the combined persisted/live catalog, including unfiltered reads. */
   paginateMerged?: boolean;
   includeGroups?: boolean;
@@ -154,6 +156,7 @@ export interface ListWorkspaceSessionsReadOptions {
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  allowSidecarWrite?: boolean;
   paginateMerged?: boolean;
   includeGroups?: boolean;
   runtimeBaseDir: string;
@@ -2082,6 +2085,9 @@ export async function listWorkspaceSessionsForResponse(
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
           : {}),
+        ...(readOptions.allowSidecarWrite !== undefined
+          ? { allowSidecarWrite: readOptions.allowSidecarWrite }
+          : {}),
         ...(readOptions.paginateMerged !== undefined
           ? { paginateMerged: readOptions.paginateMerged }
           : {}),
@@ -2128,10 +2134,23 @@ async function enrichPromptTimes(
   sessions: BridgeSessionSummary[],
   service: SessionService,
   archiveState: SessionArchiveState,
-  readOptions: Pick<ListWorkspaceSessionsReadOptions, 'signal'>,
+  readOptions: Pick<
+    ListWorkspaceSessionsReadOptions,
+    'signal' | 'mergeLive' | 'allowSidecarWrite'
+  >,
   preferCache = false,
 ): Promise<void> {
   let nextIndex = 0;
+  const allowSidecarWrite =
+    readOptions.allowSidecarWrite ?? readOptions.mergeLive !== false;
+  const promptReadOptions =
+    preferCache || readOptions.signal || !allowSidecarWrite
+      ? {
+          ...(preferCache ? { preferCache: true } : {}),
+          ...(readOptions.signal ? { signal: readOptions.signal } : {}),
+          ...(!allowSidecarWrite ? { allowSidecarWrite: false } : {}),
+        }
+      : undefined;
   await Promise.all(
     Array.from({ length: Math.min(2, sessions.length) }, async () => {
       while (nextIndex < sessions.length) {
@@ -2139,10 +2158,12 @@ async function enrichPromptTimes(
         const session = sessions[nextIndex++]!;
         try {
           session.lastUserPromptAt = await waitForQuestionTime(
-            preferCache
-              ? service.getLastUserPromptAt(session.sessionId, archiveState, {
-                  preferCache: true,
-                })
+            promptReadOptions
+              ? service.getLastUserPromptAt(
+                  session.sessionId,
+                  archiveState,
+                  promptReadOptions,
+                )
               : service.getLastUserPromptAt(session.sessionId, archiveState),
             readOptions.signal,
           );
