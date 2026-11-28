@@ -760,17 +760,19 @@ describe('auto-memory relevant recall', () => {
     expect(result.prompt).not.toContain('Complete memory tree');
   });
 
-  it('threads folder trust into the legacy project scan universe', async () => {
+  it('threads folder trust and the owner into the legacy project scan', async () => {
     // The repo-local root only joins the scan for a trusted folder; an
     // untrusted folder must not have repo-shipped memory injected.
     vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const owner = { cwd: '/tmp/launch', memoryBaseDir: '/tmp/memory' };
     const trusting = {
       ...config,
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      getProjectMemoryOwner: () => owner,
     } as unknown as Config;
     const distrusting = {
-      ...config,
+      ...trusting,
       isTrustedFolder: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
@@ -784,6 +786,7 @@ describe('auto-memory relevant recall', () => {
       undefined,
       true,
       true,
+      owner,
     );
 
     await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'query', {
@@ -794,6 +797,7 @@ describe('auto-memory relevant recall', () => {
       undefined,
       false,
       true,
+      owner,
     );
   });
 

@@ -22,6 +22,9 @@
   font-variant-numeric: tabular-nums;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .reading:disabled {
@@ -30,7 +33,19 @@
 
 .reading:not(:disabled):hover,
 .reading:focus-visible {
+  background: var(--subtle-bg);
   color: var(--foreground);
+}
+
+.reading:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reading {
+    transition: none;
+  }
 }
 
 .group {

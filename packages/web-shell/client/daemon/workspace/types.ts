@@ -331,6 +331,8 @@ export interface DaemonChannelPairingActions {
 /** One recorded fire of a recurring scheduled task, newest last in
  * {@link DaemonScheduledTask.runs}. Mirrors the daemon's wire shape. */
 export interface DaemonScheduledTaskRun {
+  /** Distinguishes runs of the same task at the same timestamp. */
+  runId?: string;
   /** Fire time (epoch ms). */
   at: number;
   /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
@@ -553,6 +555,19 @@ export interface DaemonAutofixPrWatchList {
   /** State files that could not be read, with the reason. */
   unreadable?: Array<{ pr: number; error: string }>;
 }
+
+/** Input history kinds persisted per workspace on the daemon. */
+export type DaemonInputHistoryKind = 'prompt' | 'shell';
+
+/** Result of `GET /workspace/input-history` (or workspace-qualified). */
+export type DaemonInputHistoryResult =
+  | { notModified: true }
+  | {
+      notModified: false;
+      kind: DaemonInputHistoryKind;
+      entries: string[];
+      revision: string;
+    };
 
 /** One entry of a Channel's event journal (`GET .../channels/events`). */
 export type DaemonChannelEventEntry = DaemonChannelEvent;
@@ -810,22 +825,48 @@ export interface DaemonWorkspaceActions
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
+  /** Reject before executing a prompt or recording a run when this daemon
+   * cannot safely select the exact expected owner. */
+  assertScheduledTaskOwnerSelection(
+    expectedSessionId?: string | null,
+  ): Promise<void>;
+  /** The optional expected owner disambiguates same-id records; null means
+   * unbound, while omitting it retains compatibility for unique ids. */
   updateScheduledTask(
     id: string,
     patch: DaemonUpdateScheduledTaskRequest,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
   /** Run now. Persistent tasks are only recorded here and are executed by the
    * caller; per-run tasks are dispatched into a fresh daemon session. */
   runScheduledTask(
     id: string,
     workspaceId?: string,
+    expectedSessionId?: string | null,
   ): Promise<DaemonScheduledTask>;
-  deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+  deleteScheduledTask(
+    id: string,
+    workspaceId?: string,
+    expectedSessionId?: string | null,
+  ): Promise<void>;
 
   /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
   listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** Workspace-scoped prompt/shell input history (`workspace_input_history`). */
+  loadInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    limit?: number;
+    workspaceId?: string;
+    ifNoneMatch?: string;
+  }): Promise<DaemonInputHistoryResult>;
+  recordInputHistory(opts: {
+    kind: DaemonInputHistoryKind;
+    entry: string;
+    workspaceId?: string;
+  }): Promise<void>;
 
   /** The provider workspace's Channel event journal, newest last. A scoped
    * workspace reads its own through its client. */

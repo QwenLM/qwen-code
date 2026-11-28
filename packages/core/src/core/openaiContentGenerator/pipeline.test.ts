@@ -38,6 +38,7 @@ import { determineProvider } from './index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
+  DEFAULT_OPENAI_BASE_URL,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_GUARD_TIMEOUT_MS,
@@ -60,11 +61,13 @@ import {
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { getErrorStatus } from '../../utils/errors.js';
 import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+const mockPipelineWarn = vi.hoisted(() => vi.fn());
 /** Span attribute writes made through the attempt handle, keyed as recorded. */
 const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
@@ -84,6 +87,19 @@ vi.mock('./converter.js', async (importOriginal) => {
   };
 });
 vi.mock('openai');
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'OPENAI_PIPELINE'
+        ? { ...logger, warn: mockPipelineWarn }
+        : logger;
+    },
+  };
+});
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
 }));
@@ -283,6 +299,7 @@ describe('ContentGenerationPipeline', () => {
     mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
+      baseURL: DEFAULT_OPENAI_BASE_URL,
       chat: {
         completions: {
           create: vi.fn(),
@@ -462,6 +479,32 @@ describe('ContentGenerationPipeline', () => {
     createMock().mockResolvedValue(stream);
     return pipeline.executeStream(request, promptId);
   }
+
+  it('preserves an explicit DashScope samplingParams.tool_stream opt-out', async () => {
+    const model = 'qwen3.8-max';
+    pipelineWith({
+      model,
+      baseUrl: DASHSCOPE_URL,
+      enableCacheControl: false,
+      enableRequestMetadata: false,
+      samplingParams: { tool_stream: false },
+    });
+    mockCliConfig = {
+      getContentGeneratorConfig: () => mockContentGeneratorConfig,
+    } as Config;
+    pipelineOnProvider(DashScopeOpenAICompatibleProvider);
+    mockForcedTool();
+
+    await collect(
+      await streamFrom(streamOf(), userRequest(model, forcedToolConfig(false))),
+    );
+
+    expect(sentBody()).toMatchObject({
+      stream: true,
+      tools: [{ type: 'function', function: { name: 'respond_in_schema' } }],
+      tool_stream: false,
+    });
+  });
 
   /** Makes the chunk converter return `responses`, one per call. */
   function convertChunksTo(...responses: GenerateContentResponse[]) {
@@ -704,12 +747,36 @@ describe('ContentGenerationPipeline', () => {
       expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
         'auto',
+        false,
       );
       expect(createMock()).toHaveBeenCalledWith(
         expect.objectContaining({ tools: mockTools }),
         expect.objectContaining({ signal: undefined }),
       );
     });
+
+    it.each([
+      { baseUrl: DASHSCOPE_URL, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: undefined, clientUrl: DASHSCOPE_URL, enabled: true },
+      { baseUrl: '', clientUrl: DEFAULT_OPENAI_BASE_URL, enabled: false },
+    ])(
+      'sets schema opening to $enabled for SDK endpoint $clientUrl (configured: $baseUrl)',
+      async ({ baseUrl, clientUrl, enabled }) => {
+        const request = userRequest('qwen4-max', {
+          tools: [{ functionDeclarations: [{ name: 'test-function' }] }],
+        });
+        mockClient.baseURL = clientUrl;
+        (mockConverter.convertLlmToolsToOpenAI as Mock).mockResolvedValue([]);
+
+        await executeWith({ baseUrl }, request);
+
+        expect(mockConverter.convertLlmToolsToOpenAI).toHaveBeenCalledWith(
+          request.config!.tools,
+          'auto',
+          enabled,
+        );
+      },
+    );
 
     it('should skip empty tools array in request', async () => {
       // tools: [] must NOT reach the API request
@@ -5990,6 +6057,102 @@ describe('ContentGenerationPipeline', () => {
         'modelProviders[providerId][].generationConfig.streamIdleTimeoutMs',
       );
       expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+    });
+
+    it.each(
+      named({
+        'keeps a valid tool name': {
+          toolName: 'structured_output',
+          expectedName: 'structured_output',
+        },
+        'omits a status marker': {
+          toolName: 'example HTTP_STATUS/429',
+          expectedName: null,
+        },
+        'omits a multiline name': {
+          toolName: 'example\nname',
+          expectedName: null,
+        },
+        'omits an oversized name': {
+          toolName: 'x'.repeat(65),
+          expectedName: null,
+        },
+      }),
+    )(
+      '$name in tool argument timeout diagnostics',
+      async ({ toolName, expectedName }) => {
+        await withRealChunkConverter(async () => {
+          const { gated, run } = await drainGated(1000);
+          gated.push(
+            chunkOf({
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: toolName, arguments: '{"docs": [' },
+                },
+              ],
+            }),
+          );
+          await vi.advanceTimersByTimeAsync(1000);
+          const error = await run.done;
+          expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+          expect(getErrorStatus(error)).toBeUndefined();
+          expect(error).toMatchObject({
+            code: 'ETIMEDOUT',
+            idleMs: 1000,
+            chunksReceived: 1,
+            openToolCallName: expectedName,
+          });
+          const message = (error as Error).message;
+          const label = expectedName
+            ? `tool call "${expectedName}"`
+            : 'a tool call';
+          expect(message).toContain(
+            `the arguments of ${label} were still open`,
+          );
+          if (expectedName === null) {
+            expect(message).not.toContain(toolName);
+          }
+          expect(mockPipelineWarn).toHaveBeenCalledWith(
+            'OpenAI stream inactivity timeout',
+            expect.objectContaining({ openToolCallName: expectedName }),
+          );
+          expect(gated.wasReturned()).toBe(true);
+        });
+      },
+    );
+
+    it('keeps an idle timeout after a length finish generic', async () => {
+      await withRealChunkConverter(async () => {
+        const { gated, run } = await drainGated(1000);
+        gated.push(
+          chunkOf({
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'structured_output',
+                  arguments: '{"docs": [',
+                },
+              },
+            ],
+          }),
+        );
+        gated.push(chunkOf({}, 'length'));
+        await vi.advanceTimersByTimeAsync(1000);
+        const error = await run.done;
+        expect(error).toBeInstanceOf(StreamInactivityTimeoutError);
+        expect(error).toMatchObject({
+          code: 'ETIMEDOUT',
+          chunksReceived: 2,
+          openToolCallName: undefined,
+        });
+        expect((error as Error).message).not.toContain('structured_output');
+      });
     });
 
     it('uses the default stream idle timeout when no override is configured', async () => {

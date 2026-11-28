@@ -589,6 +589,28 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
+  it('passes allowSidecarWrite: false when listing an untrusted project runtime (R2-3)', async () => {
+    const harness = makeHarness();
+    (harness.projectRuntime as { trusted: boolean }).trusted = false;
+    listWorkspaceSessionsForResponse
+      .mockResolvedValueOnce({ sessions: [] })
+      .mockResolvedValueOnce({ sessions: [] });
+
+    await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'list_threads',
+      arguments: { limit: 10 },
+    });
+
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      harness.projectBridge,
+      '/project',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/project', allowSidecarWrite: false },
+    );
+  });
+
   it('returns every pinned task while applying limit only to ordinary tasks', async () => {
     const harness = makeHarness();
     listWorkspaceSessionsForResponse

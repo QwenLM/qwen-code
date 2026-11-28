@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedMcpRecords;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.StreamSupport;
 
 import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.readBody;
 import static com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore.require;
@@ -41,9 +43,9 @@ final class ManagedModelDiagnosticProjection {
     static boolean hasActivityDiagnostics(byte[] records,
             List<JournalResourceWrites.ValidatedResource> validated) {
         boolean activity = validated.stream().anyMatch(resource ->
-                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
+                ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
         boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
-            JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            JsonNode envelope = ManagedExtensionRecordStore.parse(line);
             return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
         });
         return activity || measured;
@@ -195,7 +197,7 @@ final class ManagedModelDiagnosticProjection {
                 requireMonotonicStatistics(previous.get(field), statistics.get(field));
             }
             for (JsonNode gap : previous.path("coverage").path("gaps")) {
-                require(java.util.stream.StreamSupport.stream(statistics.path("coverage").path("gaps").spliterator(), false)
+                require(StreamSupport.stream(statistics.path("coverage").path("gaps").spliterator(), false)
                         .anyMatch(gap::equals), "Statistics coverage gaps cannot be forgotten.");
             }
         }

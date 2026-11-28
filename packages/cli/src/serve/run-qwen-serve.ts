@@ -3611,24 +3611,6 @@ async function runQwenServeImpl(
           ? optsIn.conversationsDir
           : readEnvironmentVariable(baseEnv, 'QWEN_CONVERSATIONS_DIR'),
     });
-  const launchMemoryProjectScopeValue =
-    baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
-    ? launchMemoryProjectScopeValue
-    : undefined;
-  const memoryProjectScopeValue =
-    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
-  const memoryProjectScopeSource =
-    optsIn.memoryProjectScope !== undefined
-      ? 'option'
-      : launchMemoryProjectScope !== undefined
-        ? 'environment'
-        : 'default';
-  const resolvedMemoryProjectScope =
-    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
-      ? 'workspace'
-      : 'git-root';
-  baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = memoryProjectScopeValue;
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
   // keep loader vars — dev-mode ACP children and channel workers need the
@@ -4621,11 +4603,6 @@ async function runQwenServeImpl(
       reportConfiguredChannelStartupFailure(error);
     }
   }
-  daemonLog.info('project memory scope resolved', {
-    projectMemoryScope: resolvedMemoryProjectScope,
-    projectMemoryScopeSource: memoryProjectScopeSource,
-    projectMemoryScopeRaw: memoryProjectScopeValue,
-  });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or
@@ -5464,6 +5441,12 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    // Contract: pairing teardown is fire-and-forget from the drain's point of
+    // view. Both services' close() destroys tracked survivors (including
+    // upgraded sockets closeAllConnections() cannot reach), so dispose settles
+    // promptly even over a non-answering paired peer; awaiting it here would
+    // let a future wedged dispose hang the whole drain, while process exit
+    // remains the final backstop for any socket that outlives it.
     const remoteAccessService = app.locals?.['remoteAccessService'] as
       | RemoteAccessService
       | undefined;
@@ -5712,24 +5695,53 @@ async function runQwenServeImpl(
       });
     };
     logRuntimeEnvFileReadFailures(boundWorkspace, runtimeEnvSnapshot);
+    const bindRuntimeEffectiveEnv = (
+      workspace: string,
+      runtimeBaseDir: string,
+      initialEnv: Readonly<NodeJS.ProcessEnv>,
+    ) => {
+      const memoryBaseKey = 'QWEN_CODE_MEMORY_BASE_DIR';
+      const memoryBaseOverride = readEnvironmentVariable(
+        initialEnv,
+        memoryBaseKey,
+      );
+      const pinnedMemoryBase = memoryBaseOverride
+        ? core.getMemoryBaseDir(
+            runtimeBaseDir,
+            { [memoryBaseKey]: memoryBaseOverride },
+            workspace,
+          )
+        : memoryBaseOverride;
+      const effectiveEnv: NodeJS.ProcessEnv = {};
+      const replace = (nextEnv: Readonly<NodeJS.ProcessEnv>): void => {
+        for (const key of Object.keys(effectiveEnv)) {
+          delete effectiveEnv[key];
+        }
+        for (const [key, value] of Object.entries(nextEnv)) {
+          const envKey = process.platform === 'win32' ? key.toUpperCase() : key;
+          if (envKey !== memoryBaseKey) effectiveEnv[key] = value;
+        }
+        effectiveEnv['QWEN_RUNTIME_DIR'] = runtimeBaseDir;
+        if (pinnedMemoryBase !== undefined) {
+          effectiveEnv[memoryBaseKey] = pinnedMemoryBase;
+        }
+      };
+      replace(initialEnv);
+      return { effectiveEnv, replace };
+    };
     const primarySessionRuntimeBaseDir = resolveSessionRuntimeBaseDir(
       boundWorkspace,
       runtimeBootSettings,
       runtimeEnvSnapshot.effectiveEnv,
     );
-    const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
-      ...runtimeEnvSnapshot.effectiveEnv,
-      QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
-    };
-    const replaceRuntimeEffectiveEnv = (
-      nextEnv: Readonly<NodeJS.ProcessEnv>,
-    ): void => {
-      for (const key of Object.keys(runtimeEffectiveEnv)) {
-        delete runtimeEffectiveEnv[key];
-      }
-      Object.assign(runtimeEffectiveEnv, nextEnv);
-      runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
-    };
+    const {
+      effectiveEnv: runtimeEffectiveEnv,
+      replace: replaceRuntimeEffectiveEnv,
+    } = bindRuntimeEffectiveEnv(
+      boundWorkspace,
+      primarySessionRuntimeBaseDir,
+      runtimeEnvSnapshot.effectiveEnv,
+    );
     const primaryRuntimeEnv: {
       mode: 'runtime-overlay';
       overlayKeys: string[];
@@ -6998,10 +7010,11 @@ async function runQwenServeImpl(
         settings,
         snapshot.effectiveEnv,
       );
-      const effectiveEnv: NodeJS.ProcessEnv = {
-        ...snapshot.effectiveEnv,
-        QWEN_RUNTIME_DIR: sessionRuntimeBaseDir,
-      };
+      const { effectiveEnv, replace } = bindRuntimeEffectiveEnv(
+        workspace,
+        sessionRuntimeBaseDir,
+        snapshot.effectiveEnv,
+      );
       const metadata: {
         mode: 'runtime-overlay';
         overlayKeys: string[];
@@ -7025,13 +7038,7 @@ async function runQwenServeImpl(
         metadata,
         effectiveEnv,
         sessionRuntimeBaseDir,
-        replace(nextEnv) {
-          for (const key of Object.keys(effectiveEnv)) {
-            delete effectiveEnv[key];
-          }
-          Object.assign(effectiveEnv, nextEnv);
-          effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
-        },
+        replace,
       };
     };
 
@@ -8910,7 +8917,7 @@ async function runQwenServeImpl(
           runtimeAppForCleanup;
         const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
           'stopScheduledTaskKeepaliveForWorkspace'
-        ] as ((workspaceCwd: string) => void) | undefined;
+        ] as ((workspaceCwd: string) => Promise<void> | undefined) | undefined;
         try {
           stopScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain.workspaceCwd);
         } catch (err) {
@@ -9066,13 +9073,19 @@ async function runQwenServeImpl(
               runtimeAppForCleanup;
             const stopWorkspaceGitStateForWorkspace = app?.locals?.[
               'stopWorkspaceGitStateForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             const releaseWebTerminalsForWorkspace = app?.locals?.[
               'releaseWebTerminalsForWorkspace'
-            ] as ((workspaceCwd: string) => void) | undefined;
+            ] as
+              | ((workspaceCwd: string) => Promise<void> | undefined)
+              | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -9082,7 +9095,7 @@ async function runQwenServeImpl(
               );
             }
             try {
-              stopScheduledTaskKeepaliveForWorkspace?.(
+              await stopScheduledTaskKeepaliveForWorkspace?.(
                 runtimeToDrain.workspaceCwd,
               );
             } catch (err) {

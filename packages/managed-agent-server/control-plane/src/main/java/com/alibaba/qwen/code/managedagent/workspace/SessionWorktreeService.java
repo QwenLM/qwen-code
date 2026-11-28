@@ -14,11 +14,17 @@ import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.LeaseRenewalRunner;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -38,7 +44,7 @@ public class SessionWorktreeService {
     private SessionWorktreeOperations.Factory gitFactory;
     private WorktreeFiles worktreeFiles;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public void configureWorktreeFiles(WorktreeFiles files, SessionWorktreeOperations.Factory factory) {
         worktreeFiles = files;
         gitFactory = factory;
@@ -75,7 +81,7 @@ public class SessionWorktreeService {
         return broker.isSessionWorktreesEnabled() && broker.isEnabled() && broker.isDurableLocalProcess()
                 && "local-process".equals(broker.getProvisioner())
                 && "session".equals(broker.getBoundSessionIsolationClass())
-                && java.nio.charset.StandardCharsets.UTF_8.name().equalsIgnoreCase(System.getProperty("sun.jnu.encoding", ""))
+                && StandardCharsets.UTF_8.name().equalsIgnoreCase(System.getProperty("sun.jnu.encoding", ""))
                 && !System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
     }
 
@@ -164,8 +170,8 @@ public class SessionWorktreeService {
         boolean preparing = "PREPARING".equals(row.state());
         try (renewal) {
             if (preparing && !store.active(row) && row.identityJson() == null) {
-                if (java.nio.file.Files.exists(java.nio.file.Path.of(row.plan().root()).resolve(row.plan().worktreeRoot()),
-                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                if (Files.exists(Path.of(row.plan().root()).resolve(row.plan().worktreeRoot()),
+                        LinkOption.NOFOLLOW_LINKS)) {
                     store.complete(row, owner, "READY", worktreeFiles.verify(row.plan(), null), null);
                 } else {
                     store.complete(row, owner, "FAILED", null, "worktree_session_closed");
@@ -214,7 +220,7 @@ public class SessionWorktreeService {
                 store.defer(row, owner, code);
             } else if (!"maintenance_stop_unverified".equals(code) && row.attempts() < 15
                     && (exception instanceof ChildWorkspaceException child && child.retryable()
-                    || exception instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException broker && broker.isRetryable())) {
+                    || exception instanceof RuntimeBrokerException broker && broker.isRetryable())) {
                 store.retry(row, owner, code);
             } else {
                 String state = "maintenance_stop_unverified".equals(code) || "worktree_identity_conflict".equals(code)
@@ -247,7 +253,7 @@ public class SessionWorktreeService {
                 default -> "worktree_git_failed";
             };
         }
-        if (exception instanceof com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException broker) {
+        if (exception instanceof RuntimeBrokerException broker) {
             return broker.getCode();
         }
         return "worktree_git_unavailable";

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.ContextCompressionState;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
@@ -18,10 +19,14 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -31,6 +36,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -41,7 +47,7 @@ final class AgentExecutionOperations {
     private final AgentSessionPolicies sessionPolicies;
     private final AgentSessionQueries sessionQueries;
     private final AgentStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
+    private final WorktreeFiles worktreeFiles;
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final JdbcManagedWorkspaceRegistry workspaces;
@@ -53,7 +59,7 @@ final class AgentExecutionOperations {
             AgentSessionPolicies sessionPolicies,
             AgentSessionQueries sessionQueries,
             AgentStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             JdbcTemplate jdbc,
             Clock clock,
             JdbcManagedWorkspaceRegistry workspaces,
@@ -209,8 +215,8 @@ final class AgentExecutionOperations {
                 tenantId, sessionId).isEmpty()) {
             return;
         }
-        var transactions = new org.springframework.transaction.support.TransactionTemplate(
-                new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
+        var transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(jdbc.getDataSource()));
         transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId));
     }
 
@@ -227,7 +233,7 @@ final class AgentExecutionOperations {
         }
         long through = ((Number) head.get("journal_revision")).longValue();
         long scanned = 0;
-        com.fasterxml.jackson.databind.JsonNode latest = null;
+        JsonNode latest = null;
         while (scanned < through) {
             var page = jdbc.queryForList("SELECT journal_revision, record_bytes, byte_length, record_digest FROM"
                     + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision > ?"
@@ -300,8 +306,8 @@ final class AgentExecutionOperations {
             jdbc.update("INSERT IGNORE INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
                     + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES"
                     + " ('SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?)",
-                    ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.ref(
-                            com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.OWNER_REF_BYTES,
+                    ManagedSchemaKeys.identity(ManagedIdentityRefs.ref(
+                            ManagedIdentityRefs.OWNER_REF_BYTES,
                             sessionId, "hosted_context_compaction", "latest")), revision,
                     tenantId, workspace, sessionId, resourceId, now);
         }
@@ -581,7 +587,7 @@ final class AgentExecutionOperations {
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active",
                     "The Session is " + session.status().toLowerCase(
-                            java.util.Locale.ROOT)
+                            Locale.ROOT)
                             + " and accepts no task cancellation.");
         }
         // The task row is the projection its own commits update, so the
@@ -645,7 +651,7 @@ final class AgentExecutionOperations {
                                 sessionId,
                                 "taskId",
                                 taskId)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                ManagedSchemaKeys.key(
                         idempotencyKey),
                 tenantId,
                 sessionId,
@@ -800,7 +806,7 @@ final class AgentExecutionOperations {
                 (result, row) -> new JournalEvidence(result.getString("admitted_digest"),
                         result.getLong("sealed") > 0),
                 tenantId, sessionId,
-                ManagedSchemaKeys.identity(com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.commandRef(operation, commandId)),
+                ManagedSchemaKeys.identity(ManagedIdentityRefs.commandRef(operation, commandId)),
                 tenantId, sessionId, sessionId);
     }
 

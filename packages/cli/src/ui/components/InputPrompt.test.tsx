@@ -3141,6 +3141,40 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should submit a slash command with arguments while its completion is stale', async () => {
+    // The stale dropdown still lists the command token; accepting it here
+    // rewrites the typed command (`/defer-probe todo` -> `/model todo`) and
+    // swallows the Enter, so the command never runs.
+    props.slashCommands = [
+      {
+        name: 'defer-probe',
+        kind: CommandKind.FILE,
+        description: 'Deferred command probe',
+      },
+    ];
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [{ label: 'model', value: 'model' }],
+      activeSuggestionIndex: 0,
+      completionMode: CompletionMode.SLASH,
+    });
+    props.buffer.setText('/defer-probe fold the readiness hop in');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      '/defer-probe fold the readiness hop in',
+      expect.objectContaining({ deferUntilIdle: false }),
+    );
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should submit a perfect match on Enter when suggestions were not navigated', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,

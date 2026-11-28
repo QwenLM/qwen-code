@@ -424,8 +424,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: true,
         description:
           'Refuse new sessions with 503 system_overloaded while host load ' +
-          'or daemon event-loop lag stays saturated. Live sessions and the ' +
-          'control plane are never gated. Use --no-load-admission to disable.',
+          'stays saturated corroborated by daemon event-loop lag, or while ' +
+          'event-loop lag alone is severe. Live sessions and the control ' +
+          'plane are never gated. Use --no-load-admission to disable.',
       })
       .option('max-pending-prompts-per-session', {
         type: 'number',
@@ -454,9 +455,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         choices: MEMORY_PROJECT_SCOPES,
         description:
-          'Choose how project memory is partitioned. ' +
-          'Defaults to "workspace" so each daemon workspace stays isolated; "git-root" preserves the legacy shared scope. ' +
-          'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
+          'Deprecated compatibility option. Project memory uses the registered workspace path.',
       })
       .option('max-connections', {
         type: 'number',

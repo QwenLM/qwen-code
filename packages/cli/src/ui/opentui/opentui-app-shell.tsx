@@ -316,6 +316,7 @@ interface ActionModal {
   kind: 'action';
   id: number;
   prompt: ReactNode;
+  allowHistoryScroll?: boolean;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -685,7 +686,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }),
       presentAction: (
         prompt: ReactNode,
-        options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+        options?: Pick<
+          ConfirmationRequest,
+          'signal' | 'isCurrent' | 'allowHistoryScroll'
+        >,
       ) =>
         new Promise<boolean>((resolve) => {
           const signal = options?.signal;
@@ -720,6 +724,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               kind: 'action',
               id,
               prompt,
+              allowHistoryScroll: options?.allowHistoryScroll,
               resolve: (confirmed) => finish(confirmed),
             },
           ]);
@@ -778,8 +783,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // app level; without it a `.mcp.json` checked into the project is never
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
-  const hooksApproval = useProjectHooksApproval(config, settings, (text) =>
-    addInfoItem({ type: MessageType.INFO, text }),
+  const hooksApproval = useProjectHooksApproval(config, settings, (notice) =>
+    onTranscriptEvent?.(notice),
   );
 
   const shellControl = props.foregroundShellControl;
@@ -888,13 +893,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
     const historyScroll = historyScrollRef.current;
+    const reviewingHistory =
+      activeModal?.kind === 'action' && activeModal.allowHistoryScroll;
     if (
-      props.screenReader &&
+      (props.screenReader || reviewingHistory) &&
       historyScroll &&
       key.eventType !== 'release' &&
       !shellFocused &&
       !dialog &&
-      !activeModal &&
+      (!activeModal || reviewingHistory) &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
       !hooksApproval.isProjectHooksApprovalDialogOpen

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
@@ -22,6 +23,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +32,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -748,7 +751,7 @@ public final class ToolPublicationDataStore {
 
     /** Broker-only lookup of the immutable terminal envelope after FINISHED. */
     public JsonNode finishedForBroker(
-            com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {
+            ToolExecutionRecord execution) {
         String publicationId = (String) execution.getReference().get("publicationId");
         if (publicationId == null) {
             return null;
@@ -783,7 +786,7 @@ public final class ToolPublicationDataStore {
         return finishedInternal(key, publicationId);
     }
 
-    public JsonNode verifyReceiptForLifecycle(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {
+    public JsonNode verifyReceiptForLifecycle(ToolExecutionRecord execution) {
         JsonNode finished = finishedForBroker(execution);
         if (finished == null) {
             return null;
@@ -794,7 +797,7 @@ public final class ToolPublicationDataStore {
     }
 
     public JsonNode receiptForBroker(
-            com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {
+            ToolExecutionRecord execution) {
         JsonNode finished = finishedForBroker(execution);
         if (finished == null) {
             return null;
@@ -1802,7 +1805,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    byte[] readResource(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    byte[] readResource(JsonNode key, String publicationId, String resourceId, ArtifactReadLease lease, Runnable guard) {
         guard.run();
         byte[] bytes = readResourceInternal(key, publicationId, resourceId, lease, guard);
         lease.check();
@@ -1810,7 +1813,7 @@ public final class ToolPublicationDataStore {
         return bytes;
     }
 
-    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId, ArtifactReadLease lease, Runnable guard) {
         lease.requireScope(key);
         lease.check();
         String scope = scope(key);
@@ -1866,7 +1869,7 @@ public final class ToolPublicationDataStore {
     private byte[] readRangeInternal(JsonNode key, String publicationId,
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
             long offset, int length, boolean requireFinished,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable heartbeat) {
+            ArtifactReadLease lease, Runnable heartbeat) {
         require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT, "Invalid publication range");
         lease.requireScope(key);
         Runnable guard = () -> {
@@ -1879,7 +1882,7 @@ public final class ToolPublicationDataStore {
 
     VerifiedStream openReferencedStream(JsonNode key, String publicationId,
             JsonNode outcomeRef, JsonNode manifestRef, JsonNode expectedIdentity,
-            String streamId, long revision, long sequence, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+            String streamId, long revision, long sequence, ArtifactReadLease lease, Runnable guard) {
         lease.requireScope(key);
         guard.run();
         requireReferenced(key, publicationId, outcomeRef, revision, sequence);
@@ -1914,7 +1917,7 @@ public final class ToolPublicationDataStore {
             predicates.add("(scope_ref = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_session r WHERE r.tenant_id = ?"
                     + " AND r.session_id = ? AND r.retired_at IS NOT NULL) AND publication_id IN ("
-                    + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + "))");
+                    + String.join(",", Collections.nCopies(ids.size(), "?")) + "))");
             arguments.add(scope(key));
             arguments.add(text(key, "tenantId"));
             arguments.add(text(key, "workspaceId"));
@@ -1930,14 +1933,14 @@ public final class ToolPublicationDataStore {
                 + " receipt_revision, receipt_sequence, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE " + String.join(" OR ", predicates),
                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), arguments.toArray());
-        Map<ScopedPublication, Map<String, Object>> result = new java.util.HashMap<>();
+        Map<ScopedPublication, Map<String, Object>> result = new HashMap<>();
         for (var row : rows) {
             result.put(new ScopedPublication((String) row.get("scope_ref"), (String) row.get("publication_id")), row);
         }
         return result;
     }
 
-    private VerifiedStream verifiedStream(JsonNode key, String publicationId, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, ArtifactReadLease lease, Runnable guard) {
         guard.run();
         String scope = scope(key);
         var publications = jdbc.query("SELECT binding_json, producer_phase,"
@@ -2050,10 +2053,10 @@ public final class ToolPublicationDataStore {
         private final String publicationId;
         private final long size;
         private final List<StreamPart> parts;
-        private final com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease;
+        private final ArtifactReadLease lease;
 
         private VerifiedStream(String scope, String publicationId, long size,
-                List<StreamPart> parts, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease) {
+                List<StreamPart> parts, ArtifactReadLease lease) {
             this.scope = scope;
             this.publicationId = publicationId;
             this.size = size;
@@ -2142,7 +2145,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum, ArtifactReadLease lease, Runnable guard) {
         guard.run();
         Resource resource = catalogResource(key, publicationId, text(ref, "resourceId"));
         require(refMatches(resource, ref, kind) && resource.length() <= maximum,
@@ -2178,13 +2181,13 @@ public final class ToolPublicationDataStore {
 
     private void copyVerified(Resource resource, String scope, String publicationId,
             long offset, byte[] target, int targetOffset, int length,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable heartbeat) {
+            ArtifactReadLease lease, Runnable heartbeat) {
         require(offset >= 0 && length >= 0 && offset <= resource.length()
                 && length <= resource.length() - offset, "Publication copy range is invalid");
         MessageDigest hash = sha256();
         lease.check();
         try (InputStream input = resource.objectKey() == null
-                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey(), () -> {
+                ? new ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey(), () -> {
                     lease.check();
                     heartbeat.run();
                 })) {

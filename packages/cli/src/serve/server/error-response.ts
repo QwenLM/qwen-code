@@ -90,6 +90,7 @@ import {
   WorktreeResetUnsupportedError,
   WorktreeSessionSupersededError,
 } from './worktree-reset-errors.js';
+import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -284,6 +285,15 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    err.code === 'session_retirement_fenced'
+  ) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(409).json({ code: err.code, error: err.message });
+    return;
+  }
   if (err instanceof SessionAttachmentUploadError) {
     if (err.status >= 500) {
       reportBridgeError(err.cause ?? err, ctx, daemonLog);
@@ -607,6 +617,11 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+      ...(err.dimension !== 'snapshot' ? { dimension: err.dimension } : {}),
+      ...(err.measuredBytes !== undefined
+        ? { measuredBytes: err.measuredBytes }
+        : {}),
+      ...(err.retryable !== undefined ? { retryable: err.retryable } : {}),
     });
     return;
   }
@@ -750,6 +765,14 @@ export function sendBridgeError(
       code: 'worktree_session_superseded',
       sessionId: err.sessionId,
       replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeRestoreUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: err.code,
+      ...(ctx?.sessionId === undefined ? {} : { sessionId: ctx.sessionId }),
     });
     return;
   }
@@ -1370,6 +1393,9 @@ export function sendBridgeError(
           sessionId?: string;
           snapshotSize?: number;
           maxBytes?: number;
+          dimension?: string;
+          measuredBytes?: number;
+          retryable?: boolean;
         };
         res.status(413).json({
           error: errorMessage(err),
@@ -1379,6 +1405,15 @@ export function sendBridgeError(
             ? { snapshotSize: d.snapshotSize }
             : {}),
           ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+          ...(typeof d.dimension === 'string' && d.dimension !== 'snapshot'
+            ? { dimension: d.dimension }
+            : {}),
+          ...(typeof d.measuredBytes === 'number'
+            ? { measuredBytes: d.measuredBytes }
+            : {}),
+          ...(typeof d.retryable === 'boolean'
+            ? { retryable: d.retryable }
+            : {}),
         });
         return;
       }

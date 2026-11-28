@@ -562,7 +562,6 @@ export default {
   'Max Session Turns': 'Nombre maximum de tours de session',
   'Skip Next Speaker Check':
     'Ignorer la vérification du prochain interlocuteur',
-  'Skip Loop Detection': 'Ignorer la détection de boucle',
   'Skip Startup Context': 'Ignorer le contexte de démarrage',
   'Enable OpenAI Logging': 'Activer la journalisation OpenAI',
   'OpenAI Logging Directory': 'Répertoire de journalisation OpenAI',
@@ -854,6 +853,8 @@ export default {
   'Manage Qwen Code hooks': 'Gérer les hooks Qwen Code',
   'List all configured hooks': 'Lister tous les hooks configurés',
   Hooks: 'Hooks',
+  'A hook stopped the turn: {{reason}}':
+    'Un hook a interrompu le tour : {{reason}}',
   'Loading hooks...': 'Chargement des hooks...',
   'Error loading hooks:': 'Erreur lors du chargement des hooks :',
   'Press Escape to close': 'Appuyez sur Escape pour fermer',

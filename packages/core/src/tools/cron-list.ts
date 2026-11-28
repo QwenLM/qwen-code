@@ -99,7 +99,15 @@ class CronListInvocation extends BaseToolInvocation<
         error: { message },
       };
     }
-    const live = new Map(scheduler.list().map((job) => [job.id, job]));
+    const live = new Map(
+      scheduler
+        .list()
+        .filter((job) => job.durable)
+        .map((job) => [
+          JSON.stringify([job.boundSessionId ?? null, job.id]),
+          job,
+        ]),
+    );
     const gateStatusOf = (status: CronGateStatus | undefined) =>
       status ? { gateStatus: status } : {};
     const jobs: ListedJob[] = [
@@ -117,7 +125,10 @@ class CronListInvocation extends BaseToolInvocation<
         ...(task.gate ? { gate: task.gate } : {}),
         // The scheduler's in-memory summary is newer than the file's after a
         // quiet fire, which is persisted only with the next slot stamp.
-        ...gateStatusOf(live.get(task.id)?.gateStatus ?? task.gateStatus),
+        ...gateStatusOf(
+          live.get(JSON.stringify([task.sessionId ?? null, task.id]))
+            ?.gateStatus ?? task.gateStatus,
+        ),
       })),
       ...scheduler
         .list()

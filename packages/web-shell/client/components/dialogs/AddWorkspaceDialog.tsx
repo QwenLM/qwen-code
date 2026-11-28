@@ -8,7 +8,6 @@ import {
 import type { WebShellWorkspaceDirectoryPicker } from '../../customization';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import {
@@ -598,9 +597,9 @@ export function AddWorkspaceDialog({
         // resolve it, so report that the job is gone instead of leaving the
         // user in an endless "Check again" loop.
         if (
-          err instanceof DaemonHttpError &&
-          err.status === 404 &&
-          (err.body as { code?: unknown } | undefined)?.code ===
+          err instanceof Error &&
+          (err as { status?: unknown }).status === 404 &&
+          (err as { body?: { code?: unknown } }).body?.code ===
             'clone_job_not_found'
         ) {
           setError(t('sidebar.gitCloneJobGone'));

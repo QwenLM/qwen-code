@@ -329,4 +329,53 @@ describe('WorkspaceMenu', () => {
       )?.disabled,
     ).toBe(true);
   });
+
+  it('offers Trust workspace when provided and disables it while pending', async () => {
+    const trust = vi.fn();
+    await render(
+      <WorkspaceMenu
+        workspace={{ ...workspace, trusted: false }}
+        actions={{ trust, remove: vi.fn() }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Trust workspace', 'Remove workspace']);
+
+    await act(async () => {
+      click(items[0]!);
+    });
+    expect(trust).toHaveBeenCalledTimes(1);
+
+    await render(
+      <WorkspaceMenu
+        workspace={{ ...workspace, trusted: false }}
+        actions={{ trust, trustPending: true, remove: vi.fn() }}
+      />,
+    );
+    const pendingItems = await open();
+    expect(labels(pendingItems)).toEqual(['Trusting…', 'Remove workspace']);
+    expect(pendingItems[0]?.getAttribute('data-disabled')).not.toBeNull();
+  });
+
+  it('filters management entries by managementTargets and drops an empty group', async () => {
+    const openManagement = vi.fn();
+    await render(
+      <WorkspaceMenu
+        workspace={workspace}
+        actions={{
+          openManagement,
+          managementTargets: ['mcp', 'extensions', 'settings'],
+        }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['MCP', 'Extensions', 'Settings']);
+
+    expect(
+      hasWorkspaceMenuActions({
+        openManagement,
+        managementTargets: [],
+      }),
+    ).toBe(false);
+  });
 });

@@ -979,4 +979,20 @@ describe('build artifact — transcript entry (#11031)', () => {
       expect(katexIndex).toBeGreaterThan(preflightIndex);
     }
   });
+
+  it('keeps all eight CI zero-daemon bundle-gate markers alive in the built daemon package', () => {
+    const daemonBundle = readPackageJavascript();
+    for (const marker of [
+      'DaemonSessionProvider',
+      'DaemonWorkspaceProvider',
+      'useDaemonWorkspace must be used within',
+      'The daemon is unavailable. Automatic refresh is paused.',
+      '__qwenWebShellDaemonWorkspaceProviderCopies',
+      'DaemonUnavailableError',
+      'web-shell:mcp-status:v1:',
+      'web-shell:tasks-status:v1:',
+    ]) {
+      expect(daemonBundle).toContain(marker);
+    }
+  });
 });

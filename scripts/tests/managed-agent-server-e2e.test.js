@@ -803,8 +803,7 @@ describe('managed-agent-server e2e runner', () => {
 
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
     const sequence = [
-      33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
-      36417, 36418, 36419,
+      33061, 33231, 36301, 36301, 36303, 38943, 36417, 36417, 36418,
     ];
     const createServer = () => ({
       once() {},
@@ -828,13 +827,36 @@ describe('managed-agent-server e2e runner', () => {
       'createServer',
     )(createServer);
     const ports = [];
-    for (const count of [4, 3]) {
+    for (const count of [3, 2]) {
       for (let index = 0; index < count; index++) ports.push(await freePort());
       const proxy = await startHeldExecutionStartProxy('http://127.0.0.1:1');
       ports.push(Number(new URL(proxy.baseUrl).port));
       await proxy.close();
     }
-    expect(new Set(ports).size).toBe(9);
+    expect(new Set(ports).size).toBe(7);
+  });
+
+  it('shares Spring origins with Broker while retaining distinct fault proxies', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).not.toMatch(/\b(?:brokerPort|replacementBrokerPort)\b/);
+    expect(source).not.toMatch(
+      /QWEN_MANAGED_AGENT_RUNTIME_BROKER_(?:HOST|PORT)/,
+    );
+    expect(source).toContain(
+      'heldStartProxy = await startHeldExecutionStartProxy(springUrl)',
+    );
+    expect(source).toMatch(
+      /startHeldExecutionStartProxy\(\s*replacementSpringUrl,\s*false,/,
+    );
+    expect(
+      source.match(/heldStartProxy\?\.baseUrl \?\? springUrl/g),
+    ).toHaveLength(2);
+    expect(
+      source.match(
+        /replacementBrokerProxy\?\.baseUrl \?\? replacementSpringUrl/g,
+      ),
+    ).toHaveLength(2);
+    expect(source).toContain('replacementBrokerUrl = replacementSpringUrl');
   });
 
   // #14481 step 2: a lost reply is a reply the server already committed and
@@ -1690,11 +1712,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain('QWEN_E2E_DROP_LOAD_REPLY: session.id');
     expect(source).toContain("'Takeover load reply lost'");
     expect(source).toContain('E2E dropping first load reply');
-    const harnessSource = read(
-      'packages/cli/src/serve/hosted-harness-session.ts',
+    const sessionOpenSource = read(
+      'packages/cli/src/serve/hosted-harness-session/session-open.ts',
     );
-    expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
-    expect(harnessSource).toContain('E2E dropping first load reply');
+    expect(sessionOpenSource).toContain(
+      "process.env['QWEN_E2E_DROP_LOAD_REPLY']",
+    );
+    expect(sessionOpenSource).toContain('E2E dropping first load reply');
     // B3a crashes the replacement inside the window after its post-tool stream
     // Finished marker is durable but before the assistant commit, via a
     // test-gated hook set only on that generation. The barrier proves the
@@ -1786,10 +1810,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(
       /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
     );
-    expect(harnessSource).toContain(
+    const turnSource = read(
+      'packages/cli/src/serve/hosted-harness-session/turn.ts',
+    );
+    expect(turnSource).toContain(
       "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
     );
-    expect(harnessSource).toContain(
+    expect(turnSource).toContain(
       'E2E holding finished turn before assistant commit',
     );
     // A3 crashes the replacement inside a two-call approval batch — sibling[0]
@@ -4976,27 +5003,6 @@ describe('managed-agent-server e2e runner', () => {
     const readme = read('packages/managed-agent-server/README.md');
     expect(readme).toContain('-e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0');
     expect(readme).toMatch(/with no `-p` at all/);
-    // RuntimeBrokerHttpServer refuses a non-loopback broker bind unless the
-    // allow-non-loopback flag is set, so a documented broker wildcard opt-in
-    // must name the flag in the same block: the unguarded pair crash-loops
-    // the container the moment the broker is enabled.
-    for (const document of [dockerfile, readme]) {
-      const wildcard = document.indexOf(
-        'QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST=0.0.0.0',
-      );
-      if (wildcard === -1) continue;
-      const before = document.lastIndexOf('\n\n', wildcard);
-      const after = document.indexOf('\n\n', wildcard);
-      expect(
-        document.slice(
-          before === -1 ? 0 : before,
-          after === -1 ? undefined : after,
-        ),
-        'a documented broker wildcard bind must name ALLOW_NON_LOOPBACK=true',
-      ).toMatch(
-        /QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='?true'?/,
-      );
-    }
     // BrokerSecurity refuses a non-loopback server.address under the
     // shipped auto / allow-insecure-bind=false defaults, so a documented
     // wildcard opt-in whose command names neither override crash-loops the

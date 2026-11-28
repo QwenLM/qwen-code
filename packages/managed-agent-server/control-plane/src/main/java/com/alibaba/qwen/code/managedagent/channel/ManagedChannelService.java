@@ -40,12 +40,14 @@ import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.Pendin
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -95,7 +97,7 @@ public class ManagedChannelService {
     private final Duration claimLease;
     private final Supplier<Long> clock;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ManagedChannelService(ChannelInstanceStore instances,
             ChannelRouteRepository routes, ChannelDeliveryRepository deliveries,
             ChannelSegmentRepository segments, ManagedAgentService sessions,
@@ -143,7 +145,7 @@ public class ManagedChannelService {
         String policyJson;
         try {
             policyJson = mapper.writeValueAsString(request.policy());
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The channel policy is not serializable.");
         }
@@ -1111,7 +1113,7 @@ public class ManagedChannelService {
         }
         try {
             return mapper.readTree(text);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException(context + " is not JSON", error);
         }
     }

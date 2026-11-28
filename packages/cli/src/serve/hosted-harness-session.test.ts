@@ -742,6 +742,68 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it('pushes the events of a replayed admission that asks for ingest', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const submit = (clientId: string, turnId?: string) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest,
+          ...(turnId ? { eventDelivery: { mode: 'ingest', turnId } } : {}),
+        });
+    const admitted = await submit(created.body.clientId as string);
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    expect(state.ingestRequests).toHaveLength(0);
+
+    // The in-memory admission answers the retry.
+    const replayed = await submit(created.body.clientId as string, 'turn_a');
+    expect(replayed.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(state.ingestRequests[0]).toMatchObject({
+        turnId: 'turn_a',
+        promptId: PROMPT_ID,
+        afterSequence: replayed.body.lastEventId,
+      });
+    });
+
+    // After a reload the journal answers it.
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const fromJournal = await submit(loaded.body.clientId as string, 'turn_b');
+    expect(fromJournal.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(
+        state.ingestRequests.find((request) => request['turnId'] === 'turn_b'),
+      ).toMatchObject({
+        promptId: PROMPT_ID,
+        afterSequence: fromJournal.body.lastEventId,
+      });
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   it('replays a settled prompt admission from the journal after a reload', async () => {
     // After a load, session.admissions is empty, so the idempotent retry is
     // answered from the journal's input.accepted watermark. That watermark
@@ -2135,6 +2197,52 @@ describe('Hosted Harness no-tool session', () => {
     expect(settled.payload['outcome']).toBe('error');
     expect(settled.payload['stopReason']).toBe(stopReason);
     expect(state.model).not.toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('answers committed recovery status to a control plane that did not load the Session', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'status from another instance' }];
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest: digest })
+      .expect(202);
+    const statusPath = `/session/${SESSION_ID}/status?promptId=${PROMPT_ID}`;
+    await vi.waitFor(
+      async () => {
+        const owner = await headers(supertest(server).get(statusPath)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        );
+        expect(owner.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const owner = await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(200);
+    // Another control-plane instance holds no client id; it reads the same
+    // committed evidence without attaching.
+    const other = await headers(supertest(server).get(statusPath)).expect(200);
+    expect(other.body).toEqual(owner.body);
+    // A client id that is not this Session's attachment is still refused.
+    await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', randomUUID())
+      .expect(404);
+    await headers(supertest(server).get(statusPath))
+      .set('X-Qwen-Client-Id', '')
+      .expect(404);
+    await headers(
+      supertest(server).get(`/session/${randomUUID()}/status`),
+    ).expect(404);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 });

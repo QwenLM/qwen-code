@@ -107,13 +107,33 @@ describe('qwen-triage-finalize workflow', () => {
     expect(script).toContain(
       'select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))',
     );
-    // CI-region, approve-marker, and new-head-marker lookups embed the marker
-    // inside the body (not at the start), so contains is the correct match —
-    // still author-filtered.
+    // CI-region and new-head-marker lookups embed the marker inside the body
+    // (not at the start), so contains is the correct match — still
+    // author-filtered.
     const authorFiltered = script.match(
       /select\(\.user\.login == \$bot\) \| select\(\.body \| contains\(\$m\)\)/g,
     );
-    expect(authorFiltered?.length).toBeGreaterThanOrEqual(3);
+    expect(authorFiltered?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('honors the approve marker only in a bot-authored Stage 3 comment', () => {
+    // Bot authorship alone is forgeable-by-proxy: other bot lanes (serve-ab,
+    // visuals) publish bodies a fork PR's own scripts generated, so an
+    // approve-on-green marker planted there must stay inert. The Stage 3
+    // first-line marker is publisher-enforced (triage-publish.mjs guarantees
+    // the exact first-line marker — prepending/normalizing it and rejecting
+    // mismatched leading triage markers), which makes startswith the structural
+    // filter — the skill emits approve-on-green only in that comment.
+    expect(script).toContain("STAGE3_MARKER='<!-- qwen-triage stage=3 -->'");
+    expect(script).toContain(
+      'select(.user.login == $bot) | select(.body | startswith($s3)) | select(.body | contains($m))',
+    );
+    // The bare author+contains shape must not survive on the approval path.
+    const approveLookup = script.slice(
+      script.indexOf('HAS_MARKER='),
+      script.indexOf('[ "$HAS_MARKER" -gt 0 ]'),
+    );
+    expect(approveLookup).toContain('startswith($s3)');
   });
 
   it('pins the deferred approval to the reviewed SHA and fails closed', () => {

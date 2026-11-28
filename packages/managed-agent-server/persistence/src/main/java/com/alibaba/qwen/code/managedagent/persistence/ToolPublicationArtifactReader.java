@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
@@ -8,6 +9,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.List;
@@ -54,9 +57,9 @@ public class ToolPublicationArtifactReader
         var lease = lease(artifact);
         try {
             var input = open(artifact, lease, guard);
-            return new java.io.FilterInputStream(input) {
+            return new FilterInputStream(input) {
                 @Override
-                public void close() throws java.io.IOException {
+                public void close() throws IOException {
                     try (lease) {
                         super.close();
                     }
@@ -72,7 +75,7 @@ public class ToolPublicationArtifactReader
         }
     }
 
-    public InputStream open(Artifact artifact, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    public InputStream open(Artifact artifact, ArtifactReadLease lease, Runnable guard) {
         lease.requireScope(artifact.source().sessionKey());
         Runnable protectedGuard = () -> {
             lease.check();
@@ -93,7 +96,7 @@ public class ToolPublicationArtifactReader
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+            ArtifactReadLease lease, Runnable guard) {
         ToolPublicationContract.require(offset >= 0 && length >= 0 && length <= 1024 * 1024
                         && offset <= artifact.descriptor().path("byte_length").asLong()
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
@@ -115,12 +118,12 @@ public class ToolPublicationArtifactReader
         });
     }
 
-    public com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease(Artifact artifact) {
+    public ArtifactReadLease lease(Artifact artifact) {
         return data().readLease(artifact.source().sessionKey());
     }
 
     ToolPublicationDataStore.VerifiedStream verified(Artifact artifact,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+            ArtifactReadLease lease, Runnable guard) {
         guard.run();
         var source = artifact.source();
         var binding = artifact.binding();

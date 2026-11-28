@@ -6,8 +6,22 @@
 
 export const MAX_INDEX_LINE_CHARS = 150;
 export const MAX_INDEX_LINES = 200;
-// Keep the existing UTF-16 code-unit budget; the warning is appended separately.
 export const MAX_INDEX_CHARS = 25_000;
+const SMALL_CONTEXT_WINDOW = 128_000;
+
+export function getProjectIndexBudget(contextWindowSize?: number): {
+  maxLines: number;
+  maxChars: number;
+} {
+  const small =
+    contextWindowSize !== undefined &&
+    contextWindowSize > 0 &&
+    contextWindowSize < SMALL_CONTEXT_WINDOW;
+  return small
+    ? { maxLines: MAX_INDEX_LINES / 2, maxChars: MAX_INDEX_CHARS / 2 }
+    : { maxLines: MAX_INDEX_LINES, maxChars: MAX_INDEX_CHARS };
+}
+
 export const INDEX_TRUNCATION_NOTICE_START =
   '\n\n> WARNING: MEMORY.md is too large; only part of it was written.';
 export const INDEX_SCAN_CAP_NOTICE_START =
@@ -17,6 +31,8 @@ export const INDEX_TRUNCATION_NOTICE = `\n\n${INDEX_TRUNCATION_WARNING}`;
 
 export const MAX_NAMED_DROPPED_ENTRIES = 3;
 const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
+export const MAX_DROPPED_INDEX_DESCRIPTION_CHARS =
+  MAX_NAMED_DROPPED_ENTRIES * (MAX_DROPPED_ENTRY_NAME_CHARS + 4) + 80;
 const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
 
 function droppedEntryName(line: string): string {
@@ -109,11 +125,13 @@ export interface IndexTrimResult {
 export function trimIndexToBudgetDetailed(
   lines: readonly string[],
   priorityPrefixLength = 0,
+  maxLines = MAX_INDEX_LINES,
+  maxChars = MAX_INDEX_CHARS,
 ): IndexTrimResult {
-  const entries = lines.slice(0, MAX_INDEX_LINES);
-  const overLineCap = lines.slice(MAX_INDEX_LINES);
+  const entries = lines.slice(0, maxLines);
+  const overLineCap = lines.slice(maxLines);
   const raw = entries.join('\n');
-  if (raw.length <= MAX_INDEX_CHARS) {
+  if (raw.length <= maxChars) {
     return { content: raw, dropped: overLineCap };
   }
 
@@ -127,14 +145,14 @@ export function trimIndexToBudgetDetailed(
     [0, boundary],
     [boundary, entries.length],
   ]) {
-    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
+    for (const limit of [MAX_INDEX_LINE_CHARS, maxChars]) {
       for (let index = start; index < end; index++) {
         const line = entries[index];
         if (kept.has(index) || line.length > limit) {
           continue;
         }
         const next = size + (kept.size > 0 ? 1 : 0) + line.length;
-        if (next > MAX_INDEX_CHARS) {
+        if (next > maxChars) {
           continue;
         }
         size = next;

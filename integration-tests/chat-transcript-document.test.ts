@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
@@ -738,35 +739,66 @@ describe('ExportTranscriptDocument browser gate', () => {
   });
 
   it('opens V1 and rejects V2 with the pinned pre-V2 public renderer', async () => {
-    const legacyIdentity = '0.28.3+88485ce86a090982';
+    const legacyVersion = '0.28.3';
+    const legacyIdentity = legacyVersion + '+88485ce86a090982';
+    const legacyBase = `https://unpkg.com/@qwen-code/qwen-code@${legacyVersion}/`;
     const legacyAssets = [
       {
-        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.js',
+        file: 'export-transcript-document.js',
         integrity:
           'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
         bytes: 2_149_861,
       },
       {
-        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.css',
+        file: 'export-transcript-document.css',
         integrity:
           'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
         bytes: 2_426_053,
       },
-    ];
-    // Fetch immutable public bytes and verify them before serving only these
-    // two requests through Chromium's route handler.
-    const publishedAssets = await Promise.all(
-      legacyAssets.map(async ({ url, integrity, bytes }) => {
-        const response = await fetch(url);
-        expect(response.ok, `${url}: HTTP ${response.status}`).toBe(true);
-        const asset = Buffer.from(await response.arrayBuffer());
-        expect(asset.byteLength).toBe(bytes);
-        expect(
-          `sha384-${createHash('sha384').update(asset).digest('base64')}`,
-        ).toBe(integrity);
-        return asset;
-      }),
-    );
+    ].map((asset) => ({ ...asset, url: legacyBase + asset.file }));
+    const readPublishedFile = async (url: string, timeoutMs: number) => {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+      return Buffer.from(await response.arrayBuffer());
+    };
+    let publishedAssets: Buffer[];
+    try {
+      publishedAssets = await Promise.all(
+        legacyAssets.map(({ url }) => readPublishedFile(url, 10_000)),
+      );
+    } catch (cdnFailure) {
+      try {
+        // Some CI runners cannot reach unpkg. Use the original npm package's
+        // identical, immutable bytes when the CDN is unavailable.
+        const tarball = await readPublishedFile(
+          `https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-${legacyVersion}.tgz`,
+          180_000,
+        );
+        publishedAssets = legacyAssets.map(({ file, bytes }) =>
+          execFileSync('tar', ['-xOzf', '-', `package/${file}`], {
+            input: tarball,
+            maxBuffer: bytes + 1,
+            timeout: 30_000,
+          }),
+        );
+      } catch (registryFailure) {
+        throw new AggregateError(
+          [cdnFailure, registryFailure],
+          'Cannot load the published renderer from the CDN or npm',
+        );
+      }
+    }
+    // Both sources must match the same pinned bytes before Chromium uses them.
+    legacyAssets.forEach(({ url, integrity, bytes }, index) => {
+      const asset = publishedAssets[index]!;
+      expect(asset.byteLength, url).toBe(bytes);
+      expect(
+        `sha384-${createHash('sha384').update(asset).digest('base64')}`,
+        url,
+      ).toBe(integrity);
+    });
 
     const prompt = '/loop 60 seconds: preserve this V1 instruction';
     const cronRecord = {

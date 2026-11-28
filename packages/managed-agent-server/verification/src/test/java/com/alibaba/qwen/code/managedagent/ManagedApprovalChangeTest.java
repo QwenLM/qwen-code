@@ -91,6 +91,29 @@ class ManagedApprovalChangeTest {
     }
 
     @Test
+    void externalDeploymentProjectsTheNegotiatedSkillsCapabilityWithoutOtherLanes() {
+        // The external lane admits the caller catalog, so the Web Shell projection
+        // must ask the Harness instead of hard-coding false; plan mode and input
+        // attachments stay closed. Dropping `harness.supportsSessionSkills()` for
+        // `false` reddens both assertions.
+        var properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setProvisioner(
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(service,
+                "configureExternalFiles", properties);
+
+        when(harness.supportsSessionSkills()).thenReturn(true);
+        var enabled = service.queryWebShellSessionOptions(tenant, "actor", "qwen-code");
+        assertThat(enabled.skillsSupported()).isTrue();
+        assertThat(enabled.planModeSupported()).isFalse();
+        assertThat(enabled.inputAttachments()).isFalse();
+
+        when(harness.supportsSessionSkills()).thenReturn(false);
+        assertThat(service.queryWebShellSessionOptions(tenant, "actor", "qwen-code").skillsSupported())
+                .isFalse();
+    }
+
+    @Test
     void publishesExplicitFullAccessAndPreservesTheInitialPolicyAcrossRoundTrips() {
         assertThat(service.queryWebShellSessionOptions(tenant, "actor", "qwen-code").availableApprovalModes())
                 .containsExactly("default", "auto-edit", "yolo");

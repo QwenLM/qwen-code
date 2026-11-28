@@ -178,6 +178,18 @@
   padding: 12px;
 }
 
+.selectPrompt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 24px 16px;
+  border-radius: 8px;
+  border: 1px dashed var(--border);
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
 .sessionErrors {
   display: flex;
   flex-direction: column;
