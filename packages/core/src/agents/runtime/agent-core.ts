@@ -1655,6 +1655,16 @@ export class AgentCore {
           terminateMode = AgentTerminateMode.TIMEOUT;
           break;
         }
+        // A cancel that lands while the request or a chunk is pending makes
+        // the stream reject with the abort reason (llm-chat's
+        // abortableProviderStream, and Turn under throwErrors). That is this
+        // agent's CANCELLED, as the same cancel seen between chunks already
+        // is; rethrowing it ended the run as ERROR, so the parent read a
+        // failure instead of a user cancel.
+        if (abortController.signal.aborted) {
+          terminateMode = AgentTerminateMode.CANCELLED;
+          break;
+        }
         throw error;
       } finally {
         retryWaitScope?.close();

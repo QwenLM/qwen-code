@@ -2664,6 +2664,72 @@ describe('subagent.ts', () => {
       });
 
       describe.each(LOOPS)(
+        'parent cancel while a request is pending ($name loop)',
+        (loop) => {
+          let expectLoop: () => void;
+          beforeEach(() => {
+            expectLoop = useAgentLoop(loop);
+          });
+          afterEach(() => expectLoop());
+
+          // Like llm-chat's abortableProviderStream: on abort, the pending
+          // request or chunk rejects with the signal's reason.
+          const rejectOnAbort = (signal: AbortSignal) =>
+            new Promise<never>((_resolve, reject) =>
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              }),
+            );
+          const variants = {
+            'the request is pending': (params: unknown) =>
+              rejectOnAbort(signalOf(params)),
+            'a chunk is pending': async (params: unknown) =>
+              (async function* () {
+                await rejectOnAbort(signalOf(params));
+                yield doneChunk;
+              })(),
+          };
+
+          it.each(Object.entries(variants))(
+            'ends as CANCELLED when %s',
+            async (_name, respond) => {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                respond(params),
+              );
+              const { scope } = await createScope({ max_turns: 5 });
+              const parent = new AbortController();
+              const run = scope.execute(new ContextState(), parent.signal);
+              await vi.waitFor(() =>
+                expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+              );
+              parent.abort();
+              await expect(run).resolves.toBeUndefined();
+              expect(scope.getTerminateMode()).toBe(
+                AgentTerminateMode.CANCELLED,
+              );
+              expect(scope.getLastError()).toBeUndefined();
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            },
+          );
+
+          it('still ends as ERROR when the request fails without a cancel', async () => {
+            mockSendMessageStream.mockImplementation(async () =>
+              (async function* () {
+                await Promise.resolve();
+                throw new Error('upstream 500');
+                yield doneChunk;
+              })(),
+            );
+            const { scope } = await createScope({ max_turns: 5 });
+            await expect(
+              scope.execute(new ContextState(), new AbortController().signal),
+            ).rejects.toThrow('upstream 500');
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+          });
+        },
+      );
+
+      describe.each(LOOPS)(
         'agent time limit during a wait ($name loop)',
         (loop) => {
           let expectLoop: () => void;
@@ -2854,9 +2920,9 @@ describe('subagent.ts', () => {
               });
               await vi.advanceTimersByTimeAsync(10_000);
               parent.abort();
-              await run.catch(() => {});
-              expect(scope.getTerminateMode()).not.toBe(
-                AgentTerminateMode.TIMEOUT,
+              await run;
+              expect(scope.getTerminateMode()).toBe(
+                AgentTerminateMode.CANCELLED,
               );
               await vi.advanceTimersByTimeAsync(120_000);
               expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
