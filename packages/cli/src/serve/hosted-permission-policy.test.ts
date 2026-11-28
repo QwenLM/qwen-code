@@ -99,4 +99,18 @@ describe('Hosted permission evaluation', () => {
       ),
     ).resolves.toBe('default');
   });
+
+  it('checks glob rules against the requested path, not result entries', async () => {
+    const rules = { ...empty, deny: ['Read(./secret/**)'] };
+
+    await expect(
+      evaluateHostedPermissionRules(rules, call('glob', { pattern: '**/*' })),
+    ).resolves.toBe('default');
+    await expect(
+      evaluateHostedPermissionRules(
+        rules,
+        call('glob', { pattern: '**/*', path: 'secret' }),
+      ),
+    ).resolves.toBe('deny');
+  });
 });

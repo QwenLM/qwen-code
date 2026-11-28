@@ -225,6 +225,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // The latest measured merged tree re-tracks this ceiling to 2,162,642,
 // which is 1,713 bytes above its 2,160,929-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
+//
+// The tool-summary parsing for permission-omitted search results (#15144)
+// adds about 463 bytes on top of main, under this ceiling.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against
