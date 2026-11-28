@@ -6,6 +6,10 @@
 
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import {
+  RELEVANT_MEMORY_HEADING,
+  wrapSystemReminder,
+} from '../core/environmentContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ProjectMemoryOwner } from './paths.js';
 import {
@@ -466,9 +470,10 @@ export function buildLegacyRelevantAutoMemoryPrompt(
   docs: readonly ScannedAutoMemoryDocument[],
 ): string {
   if (docs.length === 0) return '';
-  return [
-    '## Relevant memory',
+  const prompt = [
+    RELEVANT_MEMORY_HEADING,
     '',
+    'Automatically recalled saved context, not a new user request. Do not acknowledge these memories separately.',
     'Use the following memories only when they are directly relevant to the current request. Verify file/function claims before relying on them.',
     '',
     ...docs.flatMap((doc) => {
@@ -489,6 +494,7 @@ export function buildLegacyRelevantAutoMemoryPrompt(
       ];
     }),
   ].join('\n');
+  return wrapSystemReminder(prompt);
 }
 
 export interface ResolveRelevantAutoMemoryPromptOptions {
