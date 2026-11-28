@@ -1223,4 +1223,45 @@ describe('useDaemonChatControllerFromState', () => {
       controller!.operations.find((op) => op.kind === 'submit')?.state,
     ).toBe('established');
   });
+
+  it('reflects caller responding state in controller.phase and delegates cancelPrompt override', async () => {
+    let controller: SessionChatController | undefined;
+    let rerender!: () => void;
+    let responding = true;
+    const cancelPrompt = vi.fn(async () => 'unknown' as const);
+
+    function RespondingProbe() {
+      const [, bump] = useReducer((n: number) => n + 1, 0);
+      rerender = () => act(() => bump());
+      controller = useDaemonChatControllerFromState({
+        connection:
+          harness.connection as unknown as DaemonChatControllerFromStateOptions['connection'],
+        actions: {
+          cancel: harness.cancel,
+          submitPermission: harness.submitPermission,
+          respondToPermission: harness.respondToPermission,
+        },
+        transcriptHistory: harness.history,
+        messages: [],
+        pendingApprovals: [],
+        pendingQuestions: [],
+        pendingSignature: '',
+        responding,
+        cancelPrompt,
+      });
+      return null;
+    }
+
+    mountReact(<RespondingProbe />);
+    expect(controller!.phase).toBe('running');
+
+    const result = await controller!.cancel();
+    expect(cancelPrompt).toHaveBeenCalledTimes(1);
+    expect(harness.cancel).not.toHaveBeenCalled();
+    expect(result.admission).toBe('unknown');
+
+    responding = false;
+    rerender();
+    expect(controller!.phase).toBe('idle');
+  });
 });
