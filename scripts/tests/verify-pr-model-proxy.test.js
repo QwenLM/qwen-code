@@ -984,6 +984,10 @@ describe('local container recipe pins', () => {
           /"\$\(cat ~\/\.cache\/qwen-verify-guard\/pr<n>\/<round-id>\/guard\.sha256\)"/g,
           '<guard-digest>',
         )
+        .replace(
+          /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/review-threads\.sha256\)"/g,
+          '<review-digest>',
+        )
         .replace(/(^|\s)--repo=/g, '$1--repo ')
         .replaceAll('[--round <r>]', '--round <r>')
         .replaceAll('[--artifact-dir <dir>]', '--artifact-dir <artifact-dir>')
@@ -1023,13 +1027,15 @@ describe('local container recipe pins', () => {
       if (kind === 'check') {
         const match = text.match(
           exact(
-            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)? (${pathValue})`,
+            String.raw` --context (${pathValue}) --context-sha256 <digest>(?: --context-root (${pathValue}))?(?: --execution-record <execution-record> --execution-record-sha256 <execution-record-sha256>)?(?: --require-guard --guard (${pathValue}) --guard-sha256 <guard-digest>)?(?: --review-threads (${pathValue}) --review-threads-sha256 <review-digest>)? (${pathValue})`,
           ),
         );
         return (
           match !== null &&
           (match[3] === undefined ||
             match[3].startsWith('~/.cache/qwen-verify-guard/prN/roundId/')) &&
+          (match[4] === undefined ||
+            match[4] === '~/.cache/qwen-verify/prN/review-threads.json') &&
           match
             .slice(1)
             .every((path) => path === undefined || validDocumentedPath(path))
@@ -6815,6 +6821,7 @@ describe('local container recipe pins', () => {
             }
             if (
               raw === `> ${cacheRoot}/pr.sha256` ||
+              raw === `> ${cacheRoot}/review-threads.sha256` ||
               raw === `> ${guardCacheRoot}/guard.sha256`
             ) {
               return name === 'sed';
@@ -6947,9 +6954,12 @@ describe('local container recipe pins', () => {
               return (
                 values.length === 1 &&
                 (relativeDataPath(rawValues[0]) ||
-                  ['prepare.log', 'pr.sha256', 'proxy.pid'].some((suffix) =>
-                    cachePath(rawValues[0], suffix),
-                  ) ||
+                  [
+                    'prepare.log',
+                    'pr.sha256',
+                    'review-threads.sha256',
+                    'proxy.pid',
+                  ].some((suffix) => cachePath(rawValues[0], suffix)) ||
                   ['guard.log', 'guard.sha256'].some((suffix) =>
                     guardCachePath(rawValues[0], suffix),
                   ))
@@ -7007,6 +7017,7 @@ describe('local container recipe pins', () => {
               ) {
                 return (
                   cachePath(rawValues[2], 'pr.sha256') ||
+                  cachePath(rawValues[2], 'review-threads.sha256') ||
                   guardCachePath(rawValues[2], 'guard.sha256')
                 );
               }
@@ -7112,6 +7123,7 @@ describe('local container recipe pins', () => {
                           'prepare.log',
                           'pr.sha256',
                           'review-threads.json',
+                          'review-threads.sha256',
                           'previous-report.md',
                           'proxy.json',
                           'proxy.err',
@@ -7326,7 +7338,8 @@ describe('local container recipe pins', () => {
               valid =
                 rawValues.length === 3 &&
                 rawValues[0] === '-n' &&
-                ((rawValues[1] === "'s/^  context-sha256  //p'" &&
+                (((rawValues[1] === "'s/^  context-sha256  //p'" ||
+                  rawValues[1] === "'s/^  review-sha256  //p'") &&
                   cachePath(rawValues[2], 'prepare.log')) ||
                   (rawValues[1] === "'s/^  guard-sha256  //p'" &&
                     guardCachePath(rawValues[2], 'guard.log')));
@@ -7690,6 +7703,27 @@ describe('local container recipe pins', () => {
         skill.replace(
           '--execution-record <execution-record> \\',
           '--execution-record /tmp/evil.json \\',
+        ),
+      ],
+      [
+        'review-threads.sha256 written outside host verify cache',
+        skill.replace(
+          '> ~/.cache/qwen-verify/pr<n>/review-threads.sha256',
+          '> /tmp/review-threads.sha256',
+        ),
+      ],
+      [
+        'review-threads path redirected inside PR clone',
+        skill.replace(
+          '--review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \\',
+          '--review-threads <pr-clone>/tmp/verify-context/pr<n>-review-threads.json \\',
+        ),
+      ],
+      [
+        'review-threads passed without digest in publish check',
+        skill.replace(
+          '--review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \\',
+          '',
         ),
       ],
     ]) {

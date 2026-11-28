@@ -69,8 +69,32 @@ export const EXECUTION_RECORD_SCHEMA = 'verify-pr-exec-record-v1';
 export const GUARD_VERDICT_SCHEMA = 'verify-pr-guard-verdict-v1';
 export const DEFAULT_GUARD_MAX_AGE_SEC = 600;
 export const MAX_GUARD_AGE_SEC = 86400;
+export const REVIEW_COVERAGE_STATUSES = [
+  'reproduced',
+  'not-reproduced',
+  'not-measured',
+  'no-defect-claimed',
+];
 const GUARD_FUTURE_SKEW_MS = 60_000;
 const GUARD_ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const MAINTAINER_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const CI_VERIFY_FOOTER = /^— _Qwen Code · sandboxed verification_$/;
+const IGNORED_BOT_COMMENT_HEADER =
+  /^\s*<!--\s*(?:qwen-verify|qwen-triage\s+lifecycle|qwen-review-fallback|qwen-release-comment|qwen-autofix|pr-ui-verify|qwen-pr-precheck|qwen-review-ack|qwen-resolve-result|td-patrol|qwen:web-shell-visuals|pr-evidence)\b/i;
+const PR_URL_COORDINATES_RE =
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[#/?].*)?$/;
+const BRACKET_BLOCKING_TAG_RE =
+  /(?:\[|【)\s*(?:P0|P1|Critical|Blocker)\s*(?:\]|】)/i;
+const LINE_LEADING_BLOCKING_TAG_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__)?(?:\s*(?:[:：—–-]|$|\())/i;
+const BARE_BLOCKING_HEADING_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)?(?:\*\*|__)?(?:P0|P1|Critical|Blocker|Blockers)(?:\*\*|__)?\s*$/i;
+const SEVERITY_KV_BLOCKING_TAG_RE =
+  /\bseverity\s*[:=]\s*(?:\*\*|__)?(?:P0|P1|Critical|Blocker)\b/i;
+const ZERO_OR_NONE_BLOCKING_LINE_RE =
+  /(?:[:：—–-]\s*(?:none|0|n\/a|无)\s*$|\(\s*0\s*\)\s*$)/i;
+const NONE_ONLY_LINE_RE =
+  /^\s*(?:>\s*)?(?:[-*+]\s+)?(?:none|0|n\/a|无)\.?\s*$/i;
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -100,7 +124,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--guard <verdict>] [--guard-sha256 <digest>] [--guard-max-age-sec <sec>] [--require-guard] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--execution-record <record>] [--execution-record-sha256 <digest>] [--guard <verdict>] [--guard-sha256 <digest>] [--guard-max-age-sec <sec>] [--require-guard] [--review-threads <snapshot>] [--review-threads-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -178,6 +202,16 @@ OPEN PR state, and have fresh start/now/compare timestamps within
 Pass --require-guard before local publication so missing guard evidence or a
 missing --guard-sha256 fails closed. A guard-verdict.json planted inside the
 PR-writable artifact directory is always refused.
+
+With --review-threads <snapshot> (host-held review-threads.json prepared by
+verify-pr-prepare.mjs), the checker extracts open blocking inline threads and
+maintainer top-level blocking comments (Critical, Blocker, P0, P1) and verifies
+that assertions.json reviewCoverage accounts for every item before allowing
+merge-ready (with evidence referenced in report.md for not-reproduced items).
+Pass --review-threads-sha256 <digest> (printed by prepare as review-sha256) to
+bind its bytes; --require-guard fails closed when --review-threads is passed
+without a digest. A review-threads.json planted inside the PR-writable artifact
+directory is always refused.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -370,6 +404,14 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     }
     if (!Array.isArray(gate.signals) || gate.signals.length === 0) {
       return ['boundary-gate.json records no isolation signals'];
+    }
+    if (
+      gate.uid !== undefined &&
+      (!Number.isInteger(gate.uid) ||
+        gate.uid < 0 ||
+        gate.uid > Number.MAX_SAFE_INTEGER)
+    ) {
+      return ['boundary-gate.json uid must be a non-negative integer'];
     }
   }
   return [];
@@ -1634,6 +1676,385 @@ export function checkGuardVerdict(
   return errors;
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parsePrUrlCoordinates(url) {
+  if (typeof url !== 'string') return null;
+  const match = PR_URL_COORDINATES_RE.exec(url);
+  if (!match) return null;
+  const number = Number(match[3]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  return { owner: match[1], repo: match[2], number };
+}
+
+function coordinatesMismatch(url, coordinates) {
+  if (!coordinates || typeof url !== 'string' || url.trim() === '') return null;
+  const parsed = parsePrUrlCoordinates(url);
+  if (!parsed) {
+    return `--review-threads contains a non-PR URL ${JSON.stringify(url)} that cannot be bound to ${coordinates.owner}/${coordinates.repo}#${coordinates.number}`;
+  }
+  if (
+    parsed.owner.toLowerCase() !== coordinates.owner.toLowerCase() ||
+    parsed.repo.toLowerCase() !== coordinates.repo.toLowerCase() ||
+    parsed.number !== coordinates.number
+  ) {
+    return `--review-threads targets ${parsed.owner}/${parsed.repo}#${parsed.number}, not ${coordinates.owner}/${coordinates.repo}#${coordinates.number}`;
+  }
+  return null;
+}
+
+export function hasBlockingSeverityTag(body) {
+  if (typeof body !== 'string' || body.trim() === '') return false;
+  const lines = normalizeNewlines(body).split('\n');
+  let fenceChar = null;
+  let fenceLen = 0;
+  let fenceQuoted = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fenceChar !== null && fenceQuoted && !/^\s*>/.test(line)) {
+      fenceChar = null;
+      fenceLen = 0;
+      fenceQuoted = false;
+    }
+    const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const prefix = fenceMatch[1];
+      const marker = fenceMatch[2];
+      const rest = line.slice(fenceMatch[0].length);
+      if (fenceChar === null) {
+        // CommonMark forbids backticks in a backtick fence info string, so a
+        // line like ```foo``` [P1] is an inline code span, not an open fence.
+        if (marker[0] !== '`' || !rest.includes('`')) {
+          fenceChar = marker[0];
+          fenceLen = marker.length;
+          fenceQuoted = prefix.includes('>');
+          continue;
+        }
+      } else if (
+        marker[0] === fenceChar &&
+        marker.length >= fenceLen &&
+        rest.trim() === ''
+      ) {
+        fenceChar = null;
+        fenceLen = 0;
+        fenceQuoted = false;
+        continue;
+      }
+    }
+    if (fenceChar !== null) continue;
+    if (BRACKET_BLOCKING_TAG_RE.test(line)) return true;
+    if (SEVERITY_KV_BLOCKING_TAG_RE.test(line)) return true;
+    if (
+      LINE_LEADING_BLOCKING_TAG_RE.test(line) &&
+      !ZERO_OR_NONE_BLOCKING_LINE_RE.test(line)
+    ) {
+      if (BARE_BLOCKING_HEADING_RE.test(line)) {
+        let next = '';
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].trim() !== '') {
+            next = lines[j];
+            break;
+          }
+        }
+        if (next && NONE_ONLY_LINE_RE.test(next)) continue;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function isIgnoredTopLevelReviewComment(comment) {
+  const body = normalizeNewlines(comment?.body ?? '');
+  if (IGNORED_BOT_COMMENT_HEADER.test(body)) return true;
+  const nonEmptyLines = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  if (nonEmptyLines.length === 0) return true;
+  const firstParagraph = body.trimStart().split(/\n\s*\n/)[0] ?? '';
+  const lastLine = nonEmptyLines[nonEmptyLines.length - 1] ?? '';
+  if (
+    /\bVerdict:\s*(?:merge-ready|findings|blocked|inconclusive)\b/.test(
+      firstParagraph,
+    ) &&
+    (FOOTER.test(lastLine) || CI_VERIFY_FOOTER.test(lastLine))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Extracts open blocking inline threads and maintainer top-level blocking
+ * comments from a parsed review-threads.json snapshot. Fails closed on
+ * malformed payloads or cross-PR URLs when trusted coordinates are provided.
+ */
+export function extractBlockingReviewItems(
+  reviewData,
+  { coordinates = null } = {},
+) {
+  const errors = [];
+  const items = [];
+  if (!isPlainObject(reviewData)) {
+    return {
+      errors: ['--review-threads snapshot must be a JSON object'],
+      items,
+    };
+  }
+  if (!Array.isArray(reviewData.threads)) {
+    errors.push('--review-threads snapshot threads must be an array');
+  }
+  if (!Array.isArray(reviewData.changeRequests)) {
+    errors.push('--review-threads snapshot changeRequests must be an array');
+  }
+  if (
+    reviewData.issueComments !== undefined &&
+    !Array.isArray(reviewData.issueComments)
+  ) {
+    errors.push('--review-threads snapshot issueComments must be an array');
+  }
+  if (errors.length > 0) return { errors, items };
+
+  const seenUrls = new Set();
+  const pushItem = (item) => {
+    if (seenUrls.has(item.url)) return;
+    seenUrls.add(item.url);
+    items.push(item);
+  };
+
+  const standingChangeRequestUrls = new Set();
+  for (const request of reviewData.changeRequests) {
+    if (!isPlainObject(request)) {
+      errors.push(
+        '--review-threads snapshot changeRequests entries must be objects',
+      );
+      continue;
+    }
+    const mismatch = coordinatesMismatch(request.url, coordinates);
+    if (mismatch) errors.push(mismatch);
+    const requestUrl =
+      typeof request.url === 'string' ? request.url.trim() : '';
+    if (requestUrl !== '') {
+      standingChangeRequestUrls.add(requestUrl);
+    }
+    if (
+      MAINTAINER_ASSOCIATIONS.has(request.association) &&
+      !isIgnoredTopLevelReviewComment(request) &&
+      hasBlockingSeverityTag(request.body)
+    ) {
+      if (requestUrl === '') {
+        errors.push(
+          '--review-threads contains a blocking change request with no url',
+        );
+      } else {
+        pushItem({
+          kind: 'change-request',
+          url: requestUrl,
+          author: typeof request.author === 'string' ? request.author : null,
+        });
+      }
+    }
+  }
+
+  for (const thread of reviewData.threads) {
+    if (!isPlainObject(thread) || !Array.isArray(thread.comments)) {
+      errors.push(
+        '--review-threads snapshot threads entries must be objects with comments arrays',
+      );
+      continue;
+    }
+    for (const comment of thread.comments) {
+      if (!isPlainObject(comment)) {
+        errors.push(
+          '--review-threads snapshot thread comments must be objects',
+        );
+        continue;
+      }
+      const mismatch = coordinatesMismatch(comment.url, coordinates);
+      if (mismatch) errors.push(mismatch);
+      const reviewMismatch = coordinatesMismatch(comment.review, coordinates);
+      if (reviewMismatch) errors.push(reviewMismatch);
+    }
+    const first = thread.comments[0];
+    if (!isPlainObject(first)) continue;
+    if (!MAINTAINER_ASSOCIATIONS.has(first.association)) continue;
+    const firstReview =
+      typeof first.review === 'string' ? first.review.trim() : '';
+    const isOpen =
+      thread.resolved !== true ||
+      (firstReview !== '' && standingChangeRequestUrls.has(firstReview));
+    if (!isOpen) continue;
+    if (!hasBlockingSeverityTag(first.body)) continue;
+    const firstUrl = typeof first.url === 'string' ? first.url.trim() : '';
+    if (firstUrl === '') {
+      errors.push(
+        '--review-threads contains an open blocking thread with no url',
+      );
+      continue;
+    }
+    pushItem({
+      kind: 'thread',
+      url: firstUrl,
+      author: typeof first.author === 'string' ? first.author : null,
+    });
+  }
+
+  for (const comment of reviewData.issueComments ?? []) {
+    if (!isPlainObject(comment)) {
+      errors.push(
+        '--review-threads snapshot issueComments entries must be objects',
+      );
+      continue;
+    }
+    const mismatch = coordinatesMismatch(comment.url, coordinates);
+    if (mismatch) errors.push(mismatch);
+    if (!MAINTAINER_ASSOCIATIONS.has(comment.association)) continue;
+    if (isIgnoredTopLevelReviewComment(comment)) continue;
+    if (!hasBlockingSeverityTag(comment.body)) continue;
+    const commentUrl =
+      typeof comment.url === 'string' ? comment.url.trim() : '';
+    if (commentUrl === '') {
+      errors.push(
+        '--review-threads contains a blocking issue comment with no url',
+      );
+      continue;
+    }
+    pushItem({
+      kind: 'issue-comment',
+      url: commentUrl,
+      author: typeof comment.author === 'string' ? comment.author : null,
+    });
+  }
+
+  return { errors, items };
+}
+
+export function checkReviewThreads(
+  reviewThreadsText,
+  { coordinates = null } = {},
+) {
+  let parsed;
+  try {
+    parsed = JSON.parse(reviewThreadsText);
+  } catch {
+    return { errors: ['--review-threads is not valid JSON'], items: [] };
+  }
+  return extractBlockingReviewItems(parsed, { coordinates });
+}
+
+function reportMentionsReviewUrl(reportText, url) {
+  if (typeof reportText !== 'string' || reportText.trim() === '') return false;
+  if (reportText.includes(url)) return true;
+  const hashIndex = url.indexOf('#');
+  if (hashIndex === -1) return false;
+  const fragment = url.slice(hashIndex + 1);
+  if (fragment && reportText.includes(fragment)) return true;
+  const digitMatch = /(\d{6,})$/.exec(fragment);
+  if (digitMatch) {
+    return new RegExp(`(?<![0-9])${digitMatch[1]}(?![0-9])`).test(reportText);
+  }
+  return false;
+}
+
+function checkReviewCoverage(
+  reviewCoverage,
+  blockingItems,
+  { verdict = null, reportText = null } = {},
+) {
+  const errors = [];
+  const warnings = [];
+  const coverageByUrl = new Map();
+
+  if (reviewCoverage !== undefined) {
+    if (!Array.isArray(reviewCoverage)) {
+      errors.push(
+        `assertions.json reviewCoverage must be an array of { url, status, evidence | reason } entries (${REVIEW_COVERAGE_STATUSES.join(' | ')})`,
+      );
+    } else {
+      for (const entry of reviewCoverage) {
+        if (
+          !isPlainObject(entry) ||
+          typeof entry.url !== 'string' ||
+          entry.url.trim() === '' ||
+          !REVIEW_COVERAGE_STATUSES.includes(entry.status)
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entries each need a non-empty url and status of ${REVIEW_COVERAGE_STATUSES.join(' | ')}`,
+          );
+          continue;
+        }
+        const url = entry.url.trim();
+        if (coverageByUrl.has(url)) {
+          errors.push(
+            `assertions.json reviewCoverage lists duplicate url ${url}`,
+          );
+          continue;
+        }
+        if (
+          (entry.status === 'reproduced' ||
+            entry.status === 'not-reproduced') &&
+          (typeof entry.evidence !== 'string' || entry.evidence.trim() === '')
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entry for ${url} (${entry.status}) needs a non-empty evidence string`,
+          );
+          continue;
+        }
+        if (
+          (entry.status === 'not-measured' ||
+            entry.status === 'no-defect-claimed') &&
+          (typeof entry.reason !== 'string' || entry.reason.trim() === '')
+        ) {
+          errors.push(
+            `assertions.json reviewCoverage entry for ${url} (${entry.status}) needs a non-empty reason string`,
+          );
+          continue;
+        }
+        coverageByUrl.set(url, entry);
+        if (
+          verdict === 'merge-ready' &&
+          (entry.status === 'reproduced' || entry.status === 'not-measured')
+        ) {
+          errors.push(
+            `merge-ready with blocking review item ${url} marked ${entry.status}: open blocking review findings must be verified not-reproduced before merge-ready`,
+          );
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(blockingItems)) {
+    for (const item of blockingItems) {
+      const entry = coverageByUrl.get(item.url);
+      if (!entry) {
+        const who = item.author ? ` by ${item.author}` : '';
+        if (verdict === 'merge-ready') {
+          errors.push(
+            `merge-ready omits open blocking ${item.kind} ${item.url}${who}: verify it on the verified head and record it in assertions.json reviewCoverage before merge-ready`,
+          );
+        } else {
+          warnings.push(
+            `assertions.json reviewCoverage omits open blocking ${item.kind} ${item.url}${who}`,
+          );
+        }
+      } else if (
+        entry.status === 'not-reproduced' &&
+        verdict === 'merge-ready' &&
+        !reportMentionsReviewUrl(reportText, item.url)
+      ) {
+        errors.push(
+          `report.md does not reference verified blocking ${item.kind} ${item.url} recorded as not-reproduced in assertions.json reviewCoverage`,
+        );
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
 /**
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
@@ -1657,6 +2078,7 @@ export function checkArtifacts({
   expectedContextSha256 = null,
   requiredExecutionClass = null,
   trustClassification = undefined,
+  reviewThreadsText = null,
 }) {
   const errors = [];
   const warnings = [];
@@ -1689,6 +2111,7 @@ export function checkArtifacts({
   let counts = null;
   let attributions = null;
   let ledgerPresent = false;
+  let reviewCoverage = undefined;
   if (files.assertions && files.assertions.trim() !== '') {
     let parsed;
     let parsedOk = true;
@@ -1709,6 +2132,7 @@ export function checkArtifacts({
         'assertions.json must be an object with pass, fail and total',
       );
     } else if (parsedOk) {
+      reviewCoverage = parsed.reviewCoverage;
       const fields = ['pass', 'fail', 'total'];
       const valid = fields.every(
         (field) => Number.isInteger(parsed?.[field]) && parsed[field] >= 0,
@@ -1822,6 +2246,27 @@ export function checkArtifacts({
         `${verdict} with ${counts.fail} failed assertion${plural} and none attributed to the PR (${[...new Set(attributions)].join(', ')}): re-encode an A/A-proven environment red as an expected-red pass and move the lost coverage to Not covered, and report a harness fault as inconclusive`,
       );
     }
+  }
+
+  if (reviewThreadsText !== null && reviewThreadsText !== undefined) {
+    const reviewCheck = checkReviewThreads(reviewThreadsText, { coordinates });
+    errors.push(...reviewCheck.errors);
+    if (reviewCheck.errors.length === 0) {
+      const coverageCheck = checkReviewCoverage(
+        reviewCoverage,
+        reviewCheck.items,
+        { verdict, reportText: files.report ?? null },
+      );
+      errors.push(...coverageCheck.errors);
+      warnings.push(...coverageCheck.warnings);
+    }
+  } else if (reviewCoverage !== undefined) {
+    const coverageCheck = checkReviewCoverage(reviewCoverage, null, {
+      verdict,
+      reportText: files.report ?? null,
+    });
+    errors.push(...coverageCheck.errors);
+    warnings.push(...coverageCheck.warnings);
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
@@ -1959,6 +2404,27 @@ export function checkArtifacts({
     (boundaryBackend === 'provider-vm' ||
       executionRecord?.backend === 'provider-vm');
 
+  if (
+    boundaryMode === 'container' &&
+    files.boundaryGate &&
+    files.boundaryGate.trim() !== ''
+  ) {
+    try {
+      const parsedGate = JSON.parse(files.boundaryGate);
+      if (
+        isPlainObject(parsedGate) &&
+        parsedGate.gate !== 'ci-lane' &&
+        parsedGate.uid === 0
+      ) {
+        warnings.push(
+          'boundary-gate.json records uid=0 (root) inside the verification container: root bypasses non-root permission, chown, and ownership-warning code paths (such as debugfs rdump ownership warnings); run the container with --user "$(id -u):$(id -g)" or explicitly exercise non-root paths and record any root-only coverage under Not covered',
+        );
+      }
+    } catch {
+      // Malformed boundary-gate.json is reported by checkBoundary above.
+    }
+  }
+
   // Disclose the coordinate-check downgrade: a waiver/vm whose approval
   // permalink was only shape-checked (no trusted repo/pr coordinates) must
   // not read as "the approval was compared against this PR".
@@ -2054,6 +2520,8 @@ function main(argv) {
   let guardMaxAgeSec = DEFAULT_GUARD_MAX_AGE_SEC;
   let guardMaxAgeProvided = false;
   let requireGuard = false;
+  let reviewThreadsPath = null;
+  let reviewThreadsSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -2133,6 +2601,22 @@ function main(argv) {
       guardMaxAgeProvided = true;
     } else if (arg === '--require-guard') {
       requireGuard = true;
+    } else if (arg === '--review-threads') {
+      reviewThreadsPath = argv[++index];
+      if (!reviewThreadsPath) {
+        process.stderr.write(
+          `verify-pr check: --review-threads requires a host review snapshot path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--review-threads-sha256') {
+      reviewThreadsSha = argv[++index];
+      if (!reviewThreadsSha || !/^[0-9a-f]{64}$/.test(reviewThreadsSha)) {
+        process.stderr.write(
+          `verify-pr check: --review-threads-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -2166,6 +2650,12 @@ function main(argv) {
   if (guardMaxAgeProvided && !guardPath) {
     process.stderr.write(
       `verify-pr check: --guard-max-age-sec applies to --guard; pass --guard too\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (reviewThreadsSha && !reviewThreadsPath) {
+    process.stderr.write(
+      `verify-pr check: --review-threads-sha256 binds a --review-threads snapshot; pass --review-threads too\n\n${HELP}`,
     );
     return 2;
   }
@@ -2866,6 +3356,95 @@ function main(argv) {
     );
   }
 
+  // Refuse a guest-planted review-threads.json inside the PR-writable artifact dir.
+  const reviewThreadsErrors = [];
+  const plantedReviewThreadsPath = join(canonicalDir, 'review-threads.json');
+  try {
+    lstatSync(plantedReviewThreadsPath);
+    reviewThreadsErrors.push(
+      'review-threads.json must not reside inside the PR-writable artifact directory: pass the host-held review snapshot via --review-threads',
+    );
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      reviewThreadsErrors.push(
+        `could not verify absence of planted review-threads.json (${error?.code ?? 'error'})`,
+      );
+    }
+  }
+
+  let reviewThreadsText = null;
+  let reviewThreadsWarning = null;
+  if (reviewThreadsPath) {
+    let realReviewThreads;
+    try {
+      realReviewThreads = realPath(reviewThreadsPath);
+    } catch {
+      realReviewThreads = resolve(reviewThreadsPath);
+    }
+    const reviewDerivedRoots = deriveTrustRoots();
+    if (reviewDerivedRoots.error) {
+      process.stderr.write(`verify-pr check: ${reviewDerivedRoots.error}\n`);
+      return 1;
+    }
+    const reviewMatchedRoot =
+      reviewDerivedRoots.roots.find((root) => isFilesystemRoot(root)) ??
+      reviewDerivedRoots.roots.find((root) =>
+        withinRoot(root, realReviewThreads),
+      ) ??
+      null;
+    const reviewInsideByPath = reviewMatchedRoot !== null;
+    let reviewIsAlias = false;
+    let reviewLinks = 0;
+    if (!reviewInsideByPath) {
+      try {
+        const reviewStat = statSync(realReviewThreads);
+        if (reviewStat.isFile()) {
+          reviewLinks = reviewStat.nlink;
+          reviewIsAlias = reviewStat.nlink !== 1;
+        }
+      } catch {
+        // Missing/unreadable review snapshot is refused below.
+      }
+    }
+    if (reviewInsideByPath || reviewIsAlias) {
+      let reason;
+      if (reviewIsAlias) {
+        reason = `--review-threads ${reviewThreadsPath} is a hard link (${reviewLinks} names); copy the snapshot into host-held storage instead of linking it`;
+      } else if (isFilesystemRoot(reviewMatchedRoot)) {
+        reason = `--review-threads ${reviewThreadsPath} cannot be trusted under root-level trust root '${reviewMatchedRoot}'`;
+      } else {
+        reason = `--review-threads must not point inside the PR-writable worktree (${reviewThreadsPath}): pass a host-held review snapshot outside the artifact tree`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
+      return 1;
+    }
+    const rawReviewThreads = readIfExists(reviewThreadsPath);
+    if (rawReviewThreads === null || rawReviewThreads === UNREADABLE) {
+      process.stderr.write(
+        `verify-pr check: --review-threads ${reviewThreadsPath} is missing or unreadable (symlinks, directories, FIFOs, and oversized files are refused)\n`,
+      );
+      return 1;
+    }
+    if (reviewThreadsSha) {
+      const actualReviewSha = createHash('sha256')
+        .update(rawReviewThreads, 'utf8')
+        .digest('hex');
+      if (actualReviewSha !== reviewThreadsSha) {
+        process.stderr.write(
+          `verify-pr check: --review-threads ${reviewThreadsPath} does not match --review-threads-sha256\n`,
+        );
+        return 1;
+      }
+    } else if (requireGuard) {
+      reviewThreadsErrors.push(
+        '--require-guard requires --review-threads-sha256 when --review-threads is passed',
+      );
+    } else {
+      reviewThreadsWarning = `--review-threads ${reviewThreadsPath} has no --review-threads-sha256 binding; pass the host digest prepare printed to bind its bytes`;
+    }
+    reviewThreadsText = rawReviewThreads;
+  }
+
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
@@ -2885,6 +3464,7 @@ function main(argv) {
     expectedContextSha256: contextSha ?? hostContextSha256,
     requiredExecutionClass,
     trustClassification,
+    reviewThreadsText,
   });
   let executionMode = null;
   try {
@@ -2999,7 +3579,9 @@ function main(argv) {
     );
   }
   result.errors.push(...guardErrors);
+  result.errors.push(...reviewThreadsErrors);
   result.errors.unshift(...unreadableErrors);
+  if (reviewThreadsWarning) result.warnings.unshift(reviewThreadsWarning);
   if (guardWarning) result.warnings.unshift(guardWarning);
   if (executionRecordWarning) result.warnings.unshift(executionRecordWarning);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);

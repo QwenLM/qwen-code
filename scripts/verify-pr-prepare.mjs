@@ -2271,6 +2271,9 @@ function main(argv) {
   // stage below rechecks the registration after these calls complete.
   const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
   const review = fetchReviewState(owner, name, context.pr);
+  const reviewBytes = review.state
+    ? `${JSON.stringify(review.state, null, 2)}\n`
+    : null;
 
   const writeRound = () => {
     if (executionApproval?.source === 'comment') {
@@ -2482,9 +2485,7 @@ function main(argv) {
         path: reviewPath,
         label: 'review snapshot',
         expectedParent: contextDirCanonical,
-        next: review.state
-          ? `${JSON.stringify(review.state, null, 2)}\n`
-          : null,
+        next: reviewBytes,
       },
     ];
     if (outPath) {
@@ -2508,12 +2509,15 @@ function main(argv) {
     }
     const { error } = commitWriteRecords(records);
     if (error) return fail(3, error);
-    // The digest binds the snapshot's content for the checker
-    // (--context-sha256): it is computed only after every write succeeded.
+    // The digests bind the snapshot bytes for the checker (--context-sha256,
+    // --review-threads-sha256): computed only after every write succeeded.
     const contextSha256 = createHash('sha256')
       .update(contextBytes, 'utf8')
       .digest('hex');
-    return { contextSha256, reportedContextPath };
+    const reviewSha256 = reviewBytes
+      ? createHash('sha256').update(reviewBytes, 'utf8').digest('hex')
+      : null;
+    return { contextSha256, reviewSha256, reportedContextPath };
   };
 
   let written;
@@ -2532,7 +2536,7 @@ function main(argv) {
     );
   }
   if (typeof written === 'number') return written;
-  const { contextSha256, reportedContextPath } = written;
+  const { contextSha256, reviewSha256, reportedContextPath } = written;
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach
@@ -2550,6 +2554,7 @@ function main(argv) {
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
+    ...(reviewSha256 ? [`  review-sha256  ${reviewSha256}`] : []),
     `  artifacts  ${artifacts}`,
     `  execution  ${options.execution}${executionApproval ? ` (${executionApproval.source}, head ${executionApproval.head}, round ${executionApproval.round})` : ''}`,
     `  trust      ${trust.prTrust} -> ${trust.executionClass}${trust.escalationReasons.length > 0 ? ` (${trust.escalationReasons.slice(0, 3).join(', ')}${trust.escalationReasons.length > 3 ? ', …' : ''})` : ''}`,
@@ -2710,6 +2715,12 @@ export function requireBoundary(artifactDir = null, options = {}) {
     // record itself, this corroborates an operator who ran the round in the
     // container — it is not proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
+    const uid =
+      options.uid !== undefined
+        ? options.uid
+        : typeof process.getuid === 'function'
+          ? process.getuid()
+          : undefined;
     const record = {
       gate: 'require-isolation',
       passed: true,
@@ -2719,6 +2730,7 @@ export function requireBoundary(artifactDir = null, options = {}) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
+      ...(Number.isInteger(uid) && uid >= 0 ? { uid } : {}),
       nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
     // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or

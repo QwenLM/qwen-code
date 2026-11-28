@@ -523,9 +523,11 @@ guard snapshots are never mounted into the container.
    grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }
    rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
-   rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json
+   rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.sha256
    if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then
      cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json
+     sed -n 's/^  review-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/review-threads.sha256
+     grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify/pr<n>/review-threads.sha256 || { echo "prepare printed no valid review-sha256; see prepare.log" >&2; exit 1; }
    fi
    ME="$(gh api user --jq .login)" || { echo "could not read the gh user" >&2; exit 1; }
    PREV="$(gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp \
@@ -643,7 +645,15 @@ guard snapshots are never mounted into the container.
    refuses any non-empty `OPENAI_API_KEY` (it cannot tell a proxy token from
    a real key), and this name is not a credential signal. Running as the host
    uid keeps files written into the mounted tree — including the round's
-   artifacts — owned by the maintainer, not root.
+   artifacts — owned by the maintainer, not root. Keeping the non-root `--user`
+   mapping above is also load-bearing for verification accuracy:
+   `verify-pr-prepare.mjs` (under `--require-isolation`) records the container
+   process `uid` in `boundary-gate.json`, and `verify-pr-check.mjs` warns when
+   `uid` is `0` (root), because running as root silently bypasses non-root
+   permission, chown, and ownership-warning code paths (for example `debugfs`
+   `rdump` ownership warnings). Never certify `merge-ready` from a root-only
+   container run when the diff touches file permissions, ownership restoration,
+   or unprivileged tool invocation.
 
 4. **Point the provider at the proxy** in the container's fresh
    `$HOME/.qwen/settings.json`; the runtime reads the credential from
@@ -1161,6 +1171,21 @@ and a production change.
   often come from the fix commits themselves.
   Measured example: one fix commit turned a transient 429 into a
   permanent `RECOVERY_BLOCKED`.
+- **New production logic in a follow-up or mid-round delta needs fresh-round
+  adversarial verification.** When `P..H` — including a commit that lands
+  mid-round and triggers a delta re-check — adds new production functions,
+  branches, or gating predicates, re-running the previous round's probes,
+  old guard mutations, and mock/fake-binary unit suites does **not** verify
+  the new delta and cannot certify `merge-ready`. Write at least one new
+  real-input probe targeting the new logic (including a false-negative
+  counterexample for any new gate or trigger predicate) plus new mutation
+  rows for the new guards, or list the new delta under _Not covered_ and
+  degrade to `inconclusive`. Measured example: on PR #18581, commit
+  `2490bb3f` landed mid-round adding 164 lines of non-root ext4 ownership
+  capture/restoration; the delta re-check re-ran the prior root-only probes,
+  old 7-guard mutations, and fake-binary unit tests to sign off `88/88`
+  `merge-ready`, and a manual review 28 minutes later (`#issuecomment-7239998370`)
+  reproduced a P2 ownership-skip defect directly in those new lines.
 - **Any "byte-identical" comparison needs a positive control** showing the
   comparator can report a difference; two empty outputs also hash equal.
   Measured example: a "behaviour-neutral" claim rested on a file compiling
@@ -1544,6 +1569,8 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   --require-guard \
   --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
   --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
+  --review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \
+  --review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \
   "$rd"
 ```
 
@@ -1551,7 +1578,7 @@ For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker,
 vfkit, or provider VM), run the same per-round refresh, compare, and
 `guard.sha256` extraction above, then keep the runner's host execution record,
 digest, and vault artifact directory in the same final check together with the
-guard flags:
+guard and review-threads flags:
 
 ```bash
 node <trusted-clone>/scripts/verify-pr-check.mjs \
@@ -1562,8 +1589,15 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   --require-guard \
   --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
   --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
+  --review-threads ~/.cache/qwen-verify/pr<n>/review-threads.json \
+  --review-threads-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/review-threads.sha256)" \
   <artifact-dir>
 ```
+
+When `prepare` failed to fetch `review-threads.json` (so neither the snapshot
+nor `review-threads.sha256` exists), omit `--review-threads` and
+`--review-threads-sha256`, list review findings under _Not covered_, and do not
+publish `merge-ready`.
 
 A `--snapshot` refresh re-checks `reviews` and `reviewComments`, runs
 incremental `since`-based checks on inline review comments and top-level
@@ -1684,6 +1718,49 @@ secondary claims. Budget by value:
    `handledCheckouts` with an ignored sibling, over-refusal of standalone
    external `--separate-git-dir` repos, and external `objects/` symlinked back
    into ignored `.qwen/tmp/git-objects/`.
+
+   For **extract-repack and fidelity-preserving transform diffs** — whenever
+   the diff derives, unpacks and repacks, converts, or copies filesystem
+   images, archives, or directory trees (`debugfs`/`mkfs.ext4`, `tar`/`zip`,
+   rootfs/VM image builders, ownership/metadata restoration) — apply the same
+   diff-triggered rule. Name the core preservation invariant (every source
+   entry, file type, hard-link topology, and metadata attribute not explicitly
+   overwritten must survive intact, or the operation must fail closed), keep
+   the adversarial budget open in follow-up rounds too, and sweep five axes
+   (list which ran in the report and move any skipped axis to _Not covered_):
+   - **Source-anchored full differential oracle**: enumerate the **source**
+     image or tree as ground truth and diff every path, type, inode link
+     topology, and metadata field against the output — never spot-check a
+     single plain text file, and never anchor validation on a lossy
+     intermediate extract directory (which silently omits dropped objects).
+   - **File-type matrix**: include regular files, directories, valid symlinks,
+     dangling symlinks, **FIFOs (named pipes)**, and special files in the
+     real-tool fixture.
+   - **Inode topology**: include **hard links** (multiple paths sharing one
+     inode, link count 2 or more) and verify the link relationship survives in
+     the output rather than splitting into independent copies.
+   - **Metadata, ownership, and xattrs**: test non-builder UID/GID across
+     separate shapes — regular file owned by another UID/GID, **symlink-only
+     different UID/GID** (all dirs/files already match the caller UID/GID),
+     and source matching the caller UID/GID plus newly injected files that
+     still require target ownership (such as `0:0`) — together with special
+     mode bits and **extended attributes (xattrs)**.
+   - **Unprivileged execution context**: whenever the entry point supports
+     non-root callers, execute the real-tool harness as a non-root user
+     (non-zero `uid`, matching step 3's non-root `--user` container mapping or
+     an explicit unprivileged subprocess) and record the execution `uid`. A
+     root-only container run (`boundary-gate.json` `uid` is `0`) leaves non-root
+     ownership and permission paths unverified; move them to _Not covered_ and
+     do not certify `merge-ready`.
+     Measured example: across three rounds on PR #18581, root-container
+     real-`e2fsprogs` harnesses checked only one plain text file and certified
+     `88/88` `merge-ready`; a manual review 28 minutes later
+     (`#issuecomment-7239998370`) used a real 32 MiB ext4 fixture to reproduce
+     both P1 silent loss of FIFOs, hard links, and xattrs (missed because the
+     code validated from `extractTree` instead of the source image) and P2
+     non-root symlink-only UID mismatch skipping `restoreOutputOwnership` and
+     leaving both the symlink and newly injected `opt/poc/init` owned by the
+     build user instead of `14001:14002` and `0:0`.
 
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
@@ -1811,6 +1888,24 @@ differs only by the change under test; the verdict is the pair of counts.
   by walking the neighbouring doors. The fix's own new test pins the
   reported shape by construction; the siblings are exactly what it does
   not pin.
+- **Attack proxy-signal gates with false-negative counterexamples.** When
+  code uses an indirect side effect — a tool's stderr warning line, a log
+  substring, or a fallback error code — to decide whether to run a
+  restoration or safety path, construct inputs where the target invariant
+  still requires that path while the side effect stays silent. Measured
+  example: on PR #18581 (`2490bb3f`), `verify-pr-vm-image.mjs` gated
+  `restoreOutputOwnership` on `debugfs` `rdump` emitting `Operation not
+permitted` warnings; when only a symlink had a non-builder UID/GID (or
+  all source entries matched the builder UID/GID), `rdump` emitted zero
+  warnings and skipped restoration entirely, leaving both the symlink and
+  newly injected `opt/poc/init` owned by the build user instead of `0:0`.
+- **Verify newly fixed external-tool semantics against the real binary, not
+  shell fakes.** When a unit suite stubs an external binary (`debugfs`,
+  `mkfs.ext4`, `tar`, `git`, `docker`) with shell fakes, any new fix that
+  depends on how that tool behaves (stderr lines, exit codes, supported file
+  types, preserved metadata) must be exercised against the real binary in a
+  harness; fake scripts encode the author's assumption, not the tool's
+  reality.
 - **Untrusted text reaching a parser is a scaling question, not only a
   correctness one.** When the PR adds or changes a regex, tokenizer, or
   scanner that runs over input an outsider writes — a PR body, a diff, a
@@ -2989,6 +3084,18 @@ the report what the count holds.
    `inconclusive` when nothing else failed) if any remains `not measured`.
    When `issueCommentCount > 100`, disclose under _Not covered_ that only the
    latest 100 top-level comments were snapshotted.
+   When `verify-pr-check.mjs` is invoked with `--review-threads` (required on
+   local `--publish` rounds whenever `prepare` wrote `review-threads.json`),
+   record every open blocking inline thread, blocking standing change-request
+   body, and blocking maintainer top-level comment in `assertions.json` under
+   `reviewCoverage` as an entry carrying `url`, `status`, and `evidence` or
+   `reason`, where `status` is one of `reproduced`, `not-reproduced`,
+   `not-measured`, or `no-defect-claimed` (`evidence` required for `reproduced`
+   and `not-reproduced`; `reason` required for `not-measured` and
+   `no-defect-claimed`, such as an author's fix-summary reply quoting `[P1]`):
+   `verify-pr-check.mjs` refuses `merge-ready` when any blocking item is
+   omitted, marked `reproduced` or `not-measured`, or lacks a matching
+   URL/comment-ID reference in `report.md` when marked `not-reproduced`.
 5. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label
