@@ -544,33 +544,55 @@ export function validateContext(json) {
   };
 }
 
+const MAINTAINER_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
 // The CI lane's verify job runs this query and reshapes it with jq into the
 // same review-threads.json; a test runs both over the same pages.
 export const REVIEW_STATE_QUERY =
-  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
+  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } comments(last: 100) { totalCount nodes { createdAt updatedAt url body author { login } authorAssociation isMinimized } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
 
 /**
  * Reshapes `gh api graphql --paginate --slurp` pages of REVIEW_STATE_QUERY into
  * the review state a round reads: every review thread, resolved ones included
- * (resolving is the author's claim, not a measurement), and each reviewer's
- * standing CHANGES_REQUESTED review. Null when the pages are not that query's
- * answer.
+ * (resolving is the author's claim, not a measurement), each reviewer's
+ * standing CHANGES_REQUESTED review, and non-minimized top-level PR comments
+ * from OWNER/MEMBER/COLLABORATOR reviewers (so top-level `[P1]` / `Critical`
+ * reviews are visible without exposing untrusted commenter prose). Null when
+ * the pages are not that query's answer.
  */
 export function reviewState(pages) {
   if (!Array.isArray(pages) || pages.length === 0) return null;
-  const isObject = (value) => value !== null && typeof value === 'object';
+  const isObject = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  const isObjectOrNull = (value) => value == null || isObject(value);
   const pulls = pages.map((page) => page?.data?.repository?.pullRequest);
   if (
     pulls.some(
       (pull) =>
+        !isObject(pull) ||
         !Array.isArray(pull?.reviewThreads?.nodes) ||
         !Array.isArray(pull?.latestOpinionatedReviews?.nodes) ||
-        !pull.latestOpinionatedReviews.nodes.every(isObject) ||
+        !Array.isArray(pull?.comments?.nodes) ||
+        !pull.latestOpinionatedReviews.nodes.every(
+          (review) =>
+            isObject(review) &&
+            isObjectOrNull(review.author) &&
+            isObjectOrNull(review.commit),
+        ) ||
+        !pull.comments.nodes.every(
+          (comment) => isObject(comment) && isObjectOrNull(comment.author),
+        ) ||
         !pull.reviewThreads.nodes.every(
           (thread) =>
             isObject(thread) &&
             Array.isArray(thread.comments?.nodes) &&
-            thread.comments.nodes.every(isObject),
+            thread.comments.nodes.every(
+              (comment) =>
+                isObject(comment) &&
+                isObjectOrNull(comment.author) &&
+                isObjectOrNull(comment.originalCommit) &&
+                isObjectOrNull(comment.pullRequestReview),
+            ),
         ),
     )
   ) {
@@ -607,6 +629,20 @@ export function reviewState(pages) {
         commit: review.commit?.oid ?? null,
         url: review.url ?? null,
         body: review.body ?? null,
+      })),
+    issueCommentCount: pulls[0].comments.totalCount ?? null,
+    issueComments: pulls[0].comments.nodes
+      .filter(
+        (comment) =>
+          !comment.isMinimized &&
+          MAINTAINER_ASSOCIATIONS.has(comment.authorAssociation),
+      )
+      .map((comment) => ({
+        ...who(comment),
+        createdAt: comment.createdAt ?? null,
+        updatedAt: comment.updatedAt ?? null,
+        url: comment.url ?? null,
+        body: comment.body ?? null,
       })),
   };
 }
