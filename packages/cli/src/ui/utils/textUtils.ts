@@ -8,6 +8,7 @@ import stripAnsi from 'strip-ansi';
 import ansiRegex from 'ansi-regex';
 import { stripVTControlCharacters } from 'node:util';
 import stringWidth from 'string-width';
+import { stripBidiControls } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
 
 /**
  * Calculates the maximum *visual* width (terminal cells) of a multi-line
@@ -343,10 +344,6 @@ const regex = ansiRegex();
 // eslint-disable-next-line no-control-regex
 const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
-// Unicode bidirectional override / isolate characters (the "Trojan Source"
-// attack class, CVE-2021-42572) that can visually reorder rendered text.
-const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-
 /**
  * Full sanitization for raw, untrusted text about to be rendered into a
  * terminal `<Text>` (e.g. tool output in the Ctrl+O transcript, or a caught
@@ -356,9 +353,9 @@ const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
  * (Trojan Source). Single source of truth so every render site stays aligned.
  */
 export function sanitizeTerminalText(value: string): string {
-  return escapeAnsiCtrlCodes(value)
-    .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
-    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+  return stripBidiControls(
+    escapeAnsiCtrlCodes(value).replace(BARE_C0_CONTROL_CHARS_REGEX, ''),
+  );
 }
 
 /**
@@ -369,9 +366,10 @@ export function sanitizeTerminalText(value: string): string {
  * newline paints a second row the caller's width budget never charged.
  */
 export function sanitizeTerminalLine(value: string): string {
-  return stripUnsafeCharacters(value)
-    .replace(BIDI_OVERRIDE_CHARS_REGEX, '')
-    .replace(/[\t\r\n]+/g, ' ');
+  return stripBidiControls(stripUnsafeCharacters(value)).replace(
+    /[\t\r\n]+/g,
+    ' ',
+  );
 }
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
