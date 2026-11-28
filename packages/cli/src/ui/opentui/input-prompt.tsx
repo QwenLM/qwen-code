@@ -1275,13 +1275,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         try {
           const directory = path.join(Storage.getGlobalTempDir(), 'clipboard');
           await mkdir(directory, { recursive: true });
-          for (const imagePath of paths) {
-            const source = path.resolve(
-              config?.getTargetDir() ?? process.cwd(),
-              imagePath,
-            );
+          // The classifier only returns absolute paths, so nothing to resolve.
+          for (const source of paths) {
             if (!(await stat(source)).isFile())
-              throw new Error(`Not an image file: ${imagePath}`);
+              throw new Error(`Not an image file: ${source}`);
             const destination = path.join(
               directory,
               `clipboard-${randomUUID()}${path.extname(source)}`,
@@ -1300,7 +1297,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         }
       });
     },
-    [config, queuePaste],
+    [queuePaste],
   );
 
   const deleteSelectedAttachment = useCallback(() => {
