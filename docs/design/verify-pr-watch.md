@@ -55,8 +55,10 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   completion write two consecutive rounds on PR #16866 skipped, leaving the
   file two heads stale. The file holds three lists, `verifiedHeads`,
   `inFlightHeads` and `deferredHeads`, each entry carrying its own head,
-  round, artifact directory and timestamp; deferred entries and in-flight
-  markers also carry a monotonic `seq` and a retry count (below). The
+  round, artifact directory and timestamp; an in-flight marker registered
+  ahead of prepare (R17-2) carries a `null` artifact directory until
+  `--complete` records it. Deferred entries and in-flight markers also
+  carry a monotonic `seq` and a retry count (below). The
   top-level `verifiedHead`/`previousHead` fields are a compatibility view
   over the most recent completions.
   Verified heads dedupe **as a list**: a fire for any sha already verified

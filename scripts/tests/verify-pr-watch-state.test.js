@@ -1345,6 +1345,94 @@ describe('releaseRound', () => {
     ).toBeUndefined();
   });
 
+  // A1 (#17371 round-8): every writer emits seqCounter. releaseRound was the one
+  // writer that could emit a list-bearing body without one (a legacy pre-list
+  // state has none to inherit via ...existing). Release a legacy no-seqCounter
+  // state and assert the written body carries an integer seqCounter, so the read
+  // guard's "*Heads list implies seqCounter" invariant holds for every writer.
+  it('release emits seqCounter even for a legacy no-seqCounter state', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        inFlightHead: HEAD,
+        startedAt: '2026-11-18T00:00:00Z',
+      }) + '\n',
+    );
+    expect(readState(root, 1).seqCounter).toBeUndefined();
+    expect(releaseRound(root, { pr: 1, head: HEAD }).released).toBe(true);
+    const state = readState(root, 1);
+    expect(Number.isInteger(state.seqCounter)).toBe(true);
+    expect(state.releasedHeads.length).toBe(1);
+  });
+
+  // R1-9 (#17371): the release folds the released entry's seq into the counter
+  // like its three siblings — nextSeq never reads releasedHeads, so a release
+  // that only inherits would let a later push mint a seq at or below the
+  // released entry's. Seed a counter below the marker's seq (a hand-edited
+  // shape no writer produces) so the fold is pinned independently of the ?? 0
+  // fallback the legacy case above covers.
+  it('release folds the released entry seq into seqCounter', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        seqCounter: 1,
+        inFlightHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'r10',
+            startedAt: '2026-11-18T00:00:00Z',
+            seq: 7,
+            retries: 0,
+          },
+        ],
+        verifiedHeads: [],
+        deferredHeads: [],
+      }) + '\n',
+    );
+    expect(releaseRound(root, { pr: 1, head: HEAD }).released).toBe(true);
+    const state = readState(root, 1);
+    expect(state.seqCounter).toBe(7);
+    expect(state.releasedHeads[0].seq).toBe(7);
+  });
+
+  // Round-2 (#17371): the fold must also PRESERVE a counter already above the
+  // marker's seq — the ordering every writer-produced state satisfies.
+  // Replacing Math.max with entry.seq ?? 0 would lower it; the inherit-only
+  // ?? 0 form keeps it (but reds the fold case above). This pins the
+  // preserve-higher branch independently of the fold.
+  it('release preserves a seqCounter already above the released seq', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        seqCounter: 9,
+        inFlightHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'r10',
+            startedAt: '2026-11-18T00:00:00Z',
+            seq: 7,
+            retries: 0,
+          },
+        ],
+        verifiedHeads: [],
+        deferredHeads: [],
+      }) + '\n',
+    );
+    expect(releaseRound(root, { pr: 1, head: HEAD }).released).toBe(true);
+    expect(readState(root, 1).seqCounter).toBe(9);
+  });
+
   it('refuses a marker belonging to another head', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });

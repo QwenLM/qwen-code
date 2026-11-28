@@ -375,6 +375,13 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
   return [];
 }
 
+// The nonce scan's aggregate bounds (B2, #17371): hoisted to module scope and
+// exported so both the refusal message and the skill's bound-phrase pin are
+// built from them — a silent constant change reds both pins instead of
+// shipping a bound the scan no longer enforces or the docs deny (R2-4).
+export const TOTAL_BUDGET = 64 * 1024 * 1024;
+export const MAX_ENTRIES = 20000;
+
 /**
  * Whether a round log carries a `container-nonce: <value>` line whose value's
  * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
@@ -391,16 +398,17 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
  * PR-planted dir of huge no-newline files, many empty files, or a forest of
  * empty dirs cannot stall the check (R3-3, R4-4). Returns { found, bounded } so
  * the caller can tell "no marker" from "stopped at the bound" (R4-1). The
- * plaintext lives only container-local, so a host battery cannot produce a match.
+ * nonce is minted container-local, but the step-5 echo copies it into the
+ * PR-writable round dir: the binding proves the harness read the container-local
+ * value at echo time, not that the battery ran in the container — a later
+ * writer with the round dir can reuse the echoed line (R1-1, #17371).
  */
 function nonceLogMatches(roundDir, expected) {
   const CHUNK_BYTES = 1024 * 1024;
-  const TOTAL_BUDGET = 64 * 1024 * 1024;
   // The carry is capped to bound the per-chunk concatenation (a no-newline file
   // would otherwise grow it quadratically), but the partial line is SCANNED
   // before capping so a marker at its head is never lost (R3-3).
   const CARRY_CAP = 256;
-  const MAX_ENTRIES = 20000;
   const buf = Buffer.alloc(CHUNK_BYTES);
   let budget = TOTAL_BUDGET;
   let visited = 0;
@@ -541,7 +549,7 @@ export function containerNonceErrors(boundaryText, gateText, roundDir) {
     if (found) return [];
     if (bounded) {
       return [
-        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
+        `the nonce log scan hit its resource bound (${TOTAL_BUDGET / (1024 * 1024)} MiB total / ${MAX_ENTRIES} entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round's non-evidence log volume and consolidate it into fewer files or directories so the scan reaches the marker within the bound (the walk is unsorted, so an 'early' log is not read first); if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration`,
       ];
     }
   }

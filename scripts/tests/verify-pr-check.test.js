@@ -3328,12 +3328,19 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       join(dir, 'harness.log'),
       'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
     );
-    const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
-    expect(message).toMatch(/hit its resource bound/);
-    expect(message).toMatch(/--execution host\|vm/);
-    expect(message).toMatch(/BEFORE the battery/);
-    expect(message).toMatch(/never hand-write the declaration/);
-    expect(message).not.toMatch(/declare mode:"waived"/);
+    const refusal = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(refusal).toMatch(/hit its resource bound/);
+    // B2 (#17371 round-7): pin the exact constants the bound is documented at,
+    // so a silent TOTAL_BUDGET / MAX_ENTRIES change reds this, not just the phrase.
+    expect(refusal).toMatch(/64 MiB total \/ 20000 entries/);
+    // B1 (#17371 round-7): the remedy must not imply log order controls the
+    // unsorted walk — the "early log" advice is retracted.
+    expect(refusal).toMatch(/unsorted/);
+    expect(refusal).not.toMatch(/echo the nonce into an early log/);
+    expect(refusal).toMatch(/--execution host\|vm/);
+    expect(refusal).toMatch(/BEFORE the battery/);
+    expect(refusal).toMatch(/never hand-write the declaration/);
+    expect(refusal).not.toMatch(/declare mode:"waived"/);
   });
 
   // R4-4: directories count against the entry cap, so a planted forest of empty
@@ -3368,6 +3375,52 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       `container-nonce: ${NONCE}\n`,
     );
     expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // B3 (#17371 round-7): the entry cap is aggregate across the whole walk, not
+  // reset per directory — a forest split under nested parents still trips it.
+  // A per-directory reset would keep each parent under the cap and ship green.
+  it('counts entries against the cap across nested directories', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 200; i++) {
+      const sub = join(dir, `p${i}`);
+      mkdirSync(sub);
+      for (let j = 0; j < 101; j++) mkdirSync(join(sub, `d${j}`));
+    }
+    const refusal = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(refusal).toMatch(/hit its resource bound/);
+    // R1-7 (#17371): an entry-cap refusal must name the entry-side remedy too —
+    // directories and empty files charge no bytes, so trimming volume alone
+    // cannot clear it.
+    expect(refusal).toMatch(/consolidate it into fewer files or directories/);
+  });
+
+  // B3 (#17371 round-7): the byte budget is aggregate across files too — two
+  // 33 MiB logs carrying no nonce line exhaust it together. A per-file reset
+  // would read each under the budget and answer "no marker" instead of the
+  // bound refusal. Both files sit outside the byte-exempt top-level evidence/
+  // subtree, so this witnesses the budget, not the exemption.
+  it('spends the byte budget across files, not per file', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(join(dir, 'a.log'), 'x'.repeat(33 * 1024 * 1024));
+    writeFileSync(join(dir, 'b.log'), 'y'.repeat(33 * 1024 * 1024));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // D17-10 (#17371): the walk uses withFileTypes and never follows a symlink —
+  // a symlinked directory carrying a nonce log is not recursed, so the marker
+  // is not found through it (fail-closed, not a followed alias).
+  it('does not follow a symlinked log directory', () => {
+    const dir = dirWithLog(null);
+    const real = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-real-'));
+    tmpDirs.push(real);
+    writeFileSync(join(real, 'run.log'), `container-nonce: ${NONCE}\n`);
+    symlinkSync(real, join(dir, 'logs'));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /carry no container-nonce line/,
+    );
   });
 
   it('refuses a plaintext-only legacy record with no nonceSha256', () => {

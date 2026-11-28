@@ -448,7 +448,6 @@ describe('detectIsolation', () => {
       isolated: false,
       signals: [],
       observed: [],
-      sandboxRuntime: null,
       seatbelt: false,
     });
     // A self-chosen container= string is a declaration, not an observed mark.
@@ -456,21 +455,18 @@ describe('detectIsolation', () => {
       isolated: true,
       signals: ['container=podman'],
       observed: [],
-      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(detectIsolation({ SANDBOX: 'docker' }, () => false)).toEqual({
       isolated: true,
       signals: ['SANDBOX=docker'],
       observed: [],
-      sandboxRuntime: 'docker',
       seatbelt: false,
     });
     expect(detectIsolation({}, (path) => path === '/.dockerenv')).toEqual({
       isolated: true,
       signals: ['/.dockerenv'],
       observed: ['/.dockerenv'],
-      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(
@@ -479,7 +475,6 @@ describe('detectIsolation', () => {
       isolated: true,
       signals: ['/run/.containerenv'],
       observed: ['/run/.containerenv'],
-      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -492,7 +487,6 @@ describe('detectIsolation', () => {
       isolated: false,
       signals: [],
       observed: [],
-      sandboxRuntime: null,
       seatbelt: true,
     });
     // A boolean-looking value reads as "disabled", not as a container name.
@@ -500,7 +494,6 @@ describe('detectIsolation', () => {
       isolated: false,
       signals: [],
       observed: [],
-      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -4322,6 +4315,51 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+
+  // D1 (#17371 round-7): exercise the homedir() throw path itself, not only the
+  // post-catch home:null seam — a throwing homedir must reach the exit-3 refusal
+  // and invalidate the stale record, not escape as an uncaught exit 1.
+  it('fails the gate when homedir() itself throws', () => {
+    const cwd = process.cwd();
+    const sandbox = makeTmpDir();
+    process.chdir(sandbox);
+    try {
+      const art = makeTmpDir();
+      writeFileSync(
+        join(art, 'boundary-gate.json'),
+        JSON.stringify({ gate: 'require-isolation', passed: true }),
+      );
+      const rc = requireBoundary(art, {
+        env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+        exists: (p) => p === '/.dockerenv',
+        homedir: () => {
+          throw new Error('no passwd entry for the UID');
+        },
+      });
+      expect(rc).toBe(3);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+      expect(existsSync(join(sandbox, '.qwen-verify-nonce'))).toBe(false);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  // R2-5 (#17371): the gate's own nonce comment must carry the same echo-time
+  // scoping as the skill and the checker — the echoed plaintext rides the
+  // PR-writable round dir, so the binding does not establish where the battery
+  // ran. Restoring the retracted "execution inside THIS container" /
+  // "corroborates an operator who ran the round in the container" claim reds
+  // this.
+  it('describes the nonce binding as echo-time scoping, not battery location', () => {
+    const source = readFileSync('scripts/verify-pr-prepare.mjs', 'utf8');
+    expect(source).not.toContain(
+      'corroborates an operator who ran the round in the container',
+    );
+    expect(source).not.toContain(
+      'ties the declaration to execution inside THIS',
+    );
+    expect(source).toContain('not where the battery ran');
   });
 
   it('prints the prepare-first recovery for a declared-only marker', () => {

@@ -918,6 +918,12 @@ export function releaseRound(
           retries: entry.retries ?? 0,
         },
       ],
+      // Every writer emits seqCounter so the read guard's "*Heads list implies
+      // seqCounter" invariant holds for the released body too — a legacy
+      // pre-list state has none to inherit via ...existing. Fold the released
+      // entry's seq in like the sibling writers: nextSeq never reads
+      // releasedHeads, so the counter is that seq's only carrier.
+      seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0),
     });
     writeState(stateRoot, pr, state);
     return {

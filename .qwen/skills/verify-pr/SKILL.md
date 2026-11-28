@@ -694,10 +694,19 @@ guard snapshots are never mounted into the container.
    holds the binary PNG artifacts and is skipped by the scan. The checker
    (step 7's authoritative gate) matches only that prefix and hashes the first
    whitespace-delimited token after it, so any other spelling (a bare nonce,
-   `verify nonce=<value>`, a separate nonce file) is refused. This ties the
-   `mode:"container"` declaration to execution inside this container — a
-   battery run on the host cannot read the container-local nonce, and the
-   record's hash does not reveal it. If the battery cannot run in this
+   `verify nonce=<value>`, a separate nonce file) is refused. This binds the
+   `mode:"container"` declaration to a container-local value the round's
+   harness read at echo time — not to execution inside this container: a
+   battery with no access to this container cannot produce the matching
+   `container-nonce:` line without the container-local plaintext, but the
+   mandated echo writes that plaintext into the PR-writable round dir, so any
+   later writer with the round dir can reuse the echoed line, and the record's
+   hash does not reveal the nonce. The scan is bounded (64 MiB
+   of non-`evidence/` logs / 20000 entries in total): a round whose marker lies
+   beyond the bound is refused, so keep the non-evidence log volume under it
+   and consolidate logs into fewer files or directories (empty files and
+   directories count against the entry cap, not the byte budget).
+   If the battery cannot run in this
    container (e.g. a Java-heavy round whose image carries no JDK), stop: do
    NOT declare `mode:"container"`, and do not hand-write a waiver. Keep the
    current head/round in-flight registration while changing modes, then re-run
@@ -808,8 +817,10 @@ guard snapshots are never mounted into the container.
      # checker refuses mode:"container" unless a round log carries a
      # container-nonce: line whose sha256 matches it. The battery echoes the
      # container-local plaintext ($HOME/.qwen-verify-nonce) into its logs in
-     # step 5; a host battery cannot read that file, and the hash does not
-     # reveal it.
+     # step 5; the file itself is container-local, but the echoed copy rides
+     # the PR-writable round dir — the binding proves the harness read the
+     # container-local value at echo time, not that the battery ran in the
+     # container. The hash does not reveal the nonce.
      # Fill in the detail with the image and network policy you used — the
      # checker refuses the skill's <placeholder> template strings.
      printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > "$rd/boundary.json" || rc=1
@@ -985,9 +996,11 @@ equality and states no ordering — the registered head can never prepare:
 `--release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"` it and do not
 restart it — the live head is delivered by the next fire (the gate cursor
 tracks the live head), or is already in the deferred list the release prints,
-which you then start. The started head is its own round — repeat its head and
-round in `--complete`, not the released head's. Do not `git checkout` the named
-head under the old marker.
+which you then start — except a head the list names under the terminal "not
+covered after repeated inconclusive rounds" group, which needs a new head move
+(the exit-3 contract below). The started head is its own round — repeat its
+head and round in `--complete`, not the released head's. Do not `git checkout`
+the named head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -1005,7 +1018,9 @@ Exit 3 has several shapes, each with its own reaction:
   round that owns the blocking head may have finished without `--complete`;
   if it is no longer running, recover with
   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"`
-  and then start the last deferred head, or the deferral is never delivered.
+  and then start the last deferred head the release lists as **awaiting a
+  round** (never one it lists under "not covered"), or the deferral is never
+  delivered.
   Here `<r>` is the dead round's number (the blocking marker's), not this
   round's. Read it from the state file's in-flight entry and pass it (reading
   the state is allowed; only hand-writing the JSON is forbidden): an omitted
