@@ -64,6 +64,7 @@ export function registerHostedHarnessSessionRoutes(
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
+  freeColdOpenSlots: () => number;
   beginOperation?: () => () => void;
   suspensionStats: () => HostedSuspensionStats;
 } {
@@ -263,7 +264,7 @@ export function registerHostedHarnessSessionRoutes(
     void pass();
   }
 
-  registerHostedSessionOpenRoutes({
+  const { freeColdOpenSlots } = registerHostedSessionOpenRoutes({
     app,
     sessions,
     openings,
@@ -334,6 +335,7 @@ export function registerHostedHarnessSessionRoutes(
 
   return {
     accepting: acceptingWork,
+    freeColdOpenSlots: () => (acceptingWork() ? freeColdOpenSlots() : 0),
     beginOperation: instance?.beginOperation,
     owns: (id) =>
       [...sessions.keys(), ...openings.inFlight].some(

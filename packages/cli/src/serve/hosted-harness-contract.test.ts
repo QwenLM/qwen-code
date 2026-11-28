@@ -13,6 +13,7 @@ import {
   HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
   HOSTED_HARNESS_PROTOCOL_HEADER,
   HOSTED_HARNESS_UPGRADE,
+  HOSTED_HARNESS_WORK_URL_ENV,
   HOSTED_LIFECYCLE_V2_PROFILES_ENV,
   installHostedHarnessContractMiddleware,
   isHostedHarnessCapabilityDigest,
@@ -120,6 +121,24 @@ describe('Hosted Harness private contract', () => {
         'hosted-workspace-mcp/1',
       ]),
     ).toThrow('once');
+  });
+
+  it('advertises work pull only for a pool member with a work URL', () => {
+    vi.stubEnv('QWEN_HOSTED_HARNESS_INSTANCE_ID', undefined);
+    const features = (instanceId?: string, workPull?: boolean) =>
+      createHostedHarnessContract(DIGEST, BOOT_ID, [], instanceId, workPull)
+        .features;
+    expect(features('pod-a', true)).toEqual(
+      expect.arrayContaining([
+        'harness-pool-owner/1',
+        'harness-instance-lifecycle/1',
+        'work-pull/1',
+      ]),
+    );
+    expect(features('pod-a', false)).not.toContain('work-pull/1');
+    expect(features(undefined, true)).not.toContain('work-pull/1');
+    vi.stubEnv(HOSTED_HARNESS_WORK_URL_ENV, 'http://127.0.0.1:8081');
+    expect(features('pod-a')).toContain('work-pull/1');
   });
 
   it('honors complete environment overrides, including explicit disablement', () => {

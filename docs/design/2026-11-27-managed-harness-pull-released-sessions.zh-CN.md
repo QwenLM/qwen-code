@@ -123,11 +123,13 @@
 
 ### Harness 侧
 
-- 在 `hosted-harness` profile 下，设置了 `QWEN_MANAGED_HARNESS_WORK_URL` 时运行 poll 循环，使用 `QWEN_HOSTED_HARNESS_INSTANCE_ID` 和 `QWEN_SERVER_TOKEN`。
-- 每个认领的 `load` 请求体交给现有的 load 处理逻辑执行，就像 Java 发来的一样，并像任何 load 一样占用一个冷启动槽位。load 会像现在一样拒绝没有把本进程列为 writer 和 placement owner 的描述符。这项检查只保护这条 load 路径（§15）。
+- 在 `hosted-harness` profile 下，设置了 `QWEN_MANAGED_HARNESS_WORK_URL` 时运行 poll 循环，使用 `QWEN_HOSTED_HARNESS_INSTANCE_ID` 和 `QWEN_SERVER_TOKEN`。该 URL 是控制面的内部 origin，只有 loopback 上允许明文 HTTP。缺少实例 ID，或 Harness 监听器启用了 TLS（认领要经这个监听器加载）时，启动会拒绝。只有设置了该 URL，Harness 才声明 `work-pull/1`；池要求各成员能力完全一致，所以每个池成员都要设置它。
+- 每个认领的 `load` 请求体交给现有的 load 处理逻辑执行，就像 Java 发来的一样：Harness 把它提交到自己 loopback 监听器上的 `/session/{sessionId}/load`。它像任何 load 一样占用一个冷启动槽位。load 会像现在一样拒绝没有把本进程列为 writer 和 placement owner 的描述符。这项检查只保护这条 load 路径（§15）。
 - load 中的 writer 获取会消费预留。load 失败时，Harness 记录日志，让预留自然过期。
+- 带有认领的应答会列出本进程的全部有效预留，所以只有上一次这样的应答没有带上的认领才是新的。空应答不改变任何记录，因为 poll 的截止时间可能在某个认领提交的过程中到达，下一次 poll 会重提供它。对加载中或已失败的认领的重提供不会再次加载。应答只带这类重提供时，Harness 先暂停一秒再 poll，而不是立即 poll，因为 writer 获取之前 Java 会立即应答。
+- Harness 只在有空闲冷启动槽位时 poll，排空中的 Harness 没有空闲槽位：没有槽位，收到的重提供本来也加载不了。上报的槽位已扣除在途冷启动（包括认领的 load），所以认领的 load 占到槽位之后、writer 获取之前，这个认领被计了两次，这段时间 Harness 少认领一个；这是安全的方向。
 - 每个请求在进程内交给 Harness 自己的 HTTP 处理逻辑执行。Harness 用请求项的方法、路径、请求头和请求体构造请求，加上用自己的 `QWEN_SERVER_TOKEN`（即现在 Java 发给成员的 token）生成的 `Authorization: Bearer`，并重新计算分帧头。它把状态码、固定白名单内（SDK 客户端会读取的）响应头（其中包括 `X-Qwen-Harness-Boot-Id`）、响应体以及自己的 `instanceId` 和 `bootId` 提交到 `POST /internal/managed-harness-work/v1/requests/{requestId}:reply`。应答路由像 poll 一样校验 bearer token（第 1 步）。
-- 传输失败时退避重试。收到 403 时退避一分钟并记录日志，因为这说明 Harness 与 Java 对契约的认识不一致。
+- 传输失败和其他失败的 poll（例如控制面开关关闭时的 404）从一秒开始退避，每次翻倍，最多五秒，远小于兜底窗口。收到 403 时退避一分钟并记录日志，因为这说明 Harness 与 Java 对契约的认识不一致。失败在首次出现或变化时记录一次，恢复时记录一次。
 
 ## 5. 认领预留
 

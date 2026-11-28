@@ -286,7 +286,7 @@ export function registerHostedSessionOpenRoutes({
     | 'cleanupOriginalRecovery'
   >;
   extensionsManager: HostedExtensionsManager;
-}): void {
+}): { freeColdOpenSlots: () => number } {
   const { suspensions, dropSuspension, armFor, noteActivity } = suspension;
   const {
     refusedAdoptions,
@@ -3715,4 +3715,8 @@ export function registerHostedSessionOpenRoutes({
       return error(res, 409, 'session_context_busy');
     next();
   });
+
+  return {
+    freeColdOpenSlots: () => Math.max(0, coldOpenLimit - coldOpensInFlight),
+  };
 }
