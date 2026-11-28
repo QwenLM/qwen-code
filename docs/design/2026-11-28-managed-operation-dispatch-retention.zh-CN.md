@@ -68,4 +68,6 @@
 
 每条唤醒最多推进一页，和 SQL 轮询共用领取与分页事务。秒级轮询负责续页、延期任务、历史补账，以及漏投或租约过期后的恢复。API 副本可设 `worker-enabled=false`，仍可发唤醒。至少保留一个 worker。将三项 MQ 配置都清空即可回到仅轮询模式。带外部资源、capture 或 journal pack 的会话会被暂缓。实现沿用 V1 schema 和现有工具发布调度。
 
+SDK Java 的多节点任务复用 MySQL 和 RocketMQ 环境运行 `rocketMqWakeupsAndPolling`。它在现有 LiteTopic 测试资源之外创建专用 DELAY topic 和普通消费组。Maven profile 要求提供 GC 连接参数，Failsafe 报告必须记录该指定用例通过。缺失、跳过或失败均会使任务失败。
+
 [配置参考](../users/managed-agent-configuration-reference.zh-CN.md#qwenmanaged-agentsession-resource-gc)

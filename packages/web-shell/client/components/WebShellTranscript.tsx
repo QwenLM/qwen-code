@@ -32,6 +32,8 @@ import {
 } from '../customization';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageList } from './MessageList';
+import { DaemonStatusCardsContext } from './messages/daemon-status-cards-context';
+import { DAEMON_STATUS_CARD_RENDERERS } from './messages/daemon-status-cards';
 import { RootErrorFallback } from './RootErrorFallback';
 import {
   I18nProvider,
@@ -309,45 +311,49 @@ function WebShellTranscriptContent({
                     timeline={todoTimeline}
                     details={todoDetails}
                   >
-                    {/* Embedded read-only transcript API (not the main chat):
-                      keep tool groups unmerged so hosts see the full record,
-                      independent of the main app's always-on compact view. */}
-                    <CompactModeContext.Provider value={false}>
-                      <div
-                        ref={rootRef}
-                        className={rootClassName}
-                        style={rootStyle}
-                        data-web-shell-root
-                        data-web-shell-shadcn
-                        data-transcript-render-mode={renderMode}
-                        data-document-expanded={
-                          documentMode ? String(documentExpanded) : undefined
-                        }
-                        lang={resolvedLanguage}
-                      >
+                    <DaemonStatusCardsContext.Provider
+                      value={DAEMON_STATUS_CARD_RENDERERS}
+                    >
+                      {/* Embedded read-only transcript API (not the main chat):
+                        keep tool groups unmerged so hosts see the full record,
+                        independent of the main app's always-on compact view. */}
+                      <CompactModeContext.Provider value={false}>
                         <div
-                          className={`${styles.content} ${styles.contentHasMessages}`}
+                          ref={rootRef}
+                          className={rootClassName}
+                          style={rootStyle}
+                          data-web-shell-root
+                          data-web-shell-shadcn
+                          data-transcript-render-mode={renderMode}
+                          data-document-expanded={
+                            documentMode ? String(documentExpanded) : undefined
+                          }
+                          lang={resolvedLanguage}
                         >
-                          <MessageList
-                            messages={messages}
-                            sourceSessionId={sourceSessionId}
-                            sourceEntries={
-                              documentMode ? undefined : sourceEntries
-                            }
-                            onSourceOpen={onSourceOpen}
-                            pendingApproval={null}
-                            isResponding={false}
-                            workspaceCwd={workspaceCwd}
-                            virtualScrollThreshold={
-                              documentMode
-                                ? Number.MAX_SAFE_INTEGER
-                                : virtualScrollThreshold
-                            }
-                            hideSessionTimeline={documentMode}
-                          />
+                          <div
+                            className={`${styles.content} ${styles.contentHasMessages}`}
+                          >
+                            <MessageList
+                              messages={messages}
+                              sourceSessionId={sourceSessionId}
+                              sourceEntries={
+                                documentMode ? undefined : sourceEntries
+                              }
+                              onSourceOpen={onSourceOpen}
+                              pendingApproval={null}
+                              isResponding={false}
+                              workspaceCwd={workspaceCwd}
+                              virtualScrollThreshold={
+                                documentMode
+                                  ? Number.MAX_SAFE_INTEGER
+                                  : virtualScrollThreshold
+                              }
+                              hideSessionTimeline={documentMode}
+                            />
+                          </div>
                         </div>
-                      </div>
-                    </CompactModeContext.Provider>
+                      </CompactModeContext.Provider>
+                    </DaemonStatusCardsContext.Provider>
                   </TodoContextsProvider>
                 </WebShellCustomizationProvider>
               </TranscriptDocumentExpandedProvider>
