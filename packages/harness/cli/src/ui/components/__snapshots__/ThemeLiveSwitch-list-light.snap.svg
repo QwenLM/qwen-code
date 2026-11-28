@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="105" viewBox="0 0 380 105">
+  <style>
+    text { font-family: Consolas, "Courier New", monospace; font-size: 14px; dominant-baseline: text-before-edge; white-space: pre; }
+  </style>
+  <rect width="380" height="105" fill="#000000" />
+  <g transform="translate(10, 10)">
+    <text x="0" y="19" fill="#1a1917" textLength="126" lengthAdjust="spacingAndGlyphs">Row 2 expanded</text>
+    <text x="0" y="36" fill="#1a1917" textLength="45" lengthAdjust="spacingAndGlyphs">Row 3</text>
+    <text x="0" y="53" fill="#1a1917" textLength="45" lengthAdjust="spacingAndGlyphs">Row 4</text>
+    <text x="0" y="70" fill="#1a1917" textLength="45" lengthAdjust="spacingAndGlyphs">Row 5</text>
+  </g>
+</svg>

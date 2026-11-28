@@ -214,12 +214,13 @@ export function sharedModelRound(
     answered,
     runBatch: (batchExecutor) => {
       supply(batchExecutor);
-      return run!.then(({ reason, parts, responses }) => ({
+      return run!.then(({ reason, parts, responses, hookStopReason }) => ({
         parts: parts ?? [],
         ...(responses ? { responses } : {}),
         ...(reason === 'next_round' || reason === 'completed'
           ? {}
           : { stop: reason }),
+        ...(hookStopReason !== undefined ? { hookStopReason } : {}),
       }));
     },
     close: async () => {

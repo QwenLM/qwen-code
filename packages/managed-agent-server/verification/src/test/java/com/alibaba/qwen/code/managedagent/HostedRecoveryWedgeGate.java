@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -116,7 +115,7 @@ public class HostedRecoveryWedgeGate {
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
 
-        String tenant = "wedge-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         List<Path> workspaces = new ArrayList<>();
         List<String> workspaceIds = List.of("workspace-a", "workspace-b", "workspace-c");
         for (String name : List.of("alpha", "beta", "gamma")) {
@@ -151,7 +150,6 @@ public class HostedRecoveryWedgeGate {
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -222,14 +220,13 @@ public class HostedRecoveryWedgeGate {
             for (int index = 0; index < workspaces.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
-            EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             Path phaseFile = temporary.resolve("phase");
             Path clearedFile = temporary.resolve("cleared");
             Path config = temporary.resolve("driver.json");
             var driverConfig = new java.util.LinkedHashMap<String, Object>();
             driverConfig.put("tenantId", tenant);
             driverConfig.put("storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort());
-            driverConfig.put("brokerUrl", broker.getBaseUri().toString());
+            driverConfig.put("brokerUrl", "http://127.0.0.1:" + spring.getWebServer().getPort());
             driverConfig.put("cliEntry", cli.toString());
             driverConfig.put("driveFault", !control);
             driverConfig.put("control", control);

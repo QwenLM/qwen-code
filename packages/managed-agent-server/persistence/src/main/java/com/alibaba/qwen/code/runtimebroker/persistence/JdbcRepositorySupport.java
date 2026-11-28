@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 
 import javax.sql.DataSource;
 
@@ -18,7 +19,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-final class JdbcRepositorySupport {
+public final class JdbcRepositorySupport {
     private JdbcRepositorySupport() {
     }
 
@@ -37,7 +38,7 @@ final class JdbcRepositorySupport {
         return RuntimeRequestKeys.scopeKey(scope);
     }
 
-    static String valueKey(String value) {
+    public static String valueKey(String value) {
         return RuntimeRequestKeys.valueKey(value);
     }
 
@@ -169,18 +170,29 @@ final class JdbcRepositorySupport {
         return false;
     }
 
-    static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
-        statement.setBytes(index, value == null ? null
-                : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+    public static void setIdentity(PreparedStatement statement, int index, String value) throws SQLException {
+        // Connector/J does not support ParameterMetaData by default; only H2
+        // needs the binary-column probe. MySQL binds text through the driver.
+        if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {
+            int type = statement.getParameterMetaData().getParameterType(index);
+            if (type == Types.BINARY
+                    || type == Types.VARBINARY
+                    || type == Types.LONGVARBINARY) {
+                statement.setBytes(index, value == null ? null
+                        : ManagedSchemaKeys.identity(value));
+                return;
+            }
+        }
+        statement.setString(index, value);
     }
 
-    static void setStringParameter(java.sql.PreparedStatement statement, int index, String value)
+    static void setStringParameter(PreparedStatement statement, int index, String value)
             throws SQLException {
         if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {
             int type = statement.getParameterMetaData().getParameterType(index);
-            if (type == java.sql.Types.BINARY
-                    || type == java.sql.Types.VARBINARY
-                    || type == java.sql.Types.LONGVARBINARY) {
+            if (type == Types.BINARY
+                    || type == Types.VARBINARY
+                    || type == Types.LONGVARBINARY) {
                 setIdentity(statement, index, value);
                 return;
             }

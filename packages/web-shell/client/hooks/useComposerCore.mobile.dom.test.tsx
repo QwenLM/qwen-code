@@ -18,6 +18,8 @@ import {
   type UseComposerCoreReturn,
 } from './useComposerCore';
 import type { WebShellComposerInput } from '../customization';
+import type { CommandInfo } from '../adapters/types';
+import type { SkillInfo } from '../completions/slashCompletion';
 import { TOUCH_COMPOSER_QUERY } from './useIsTouchComposer';
 import { createFakeIndexedDB } from '../test/fake-indexeddb';
 import { getComposerDraftSession } from './composer-draft-session';
@@ -56,6 +58,11 @@ function Harness({
   onSubmit,
   prepareSubmit,
   onInputTextChange,
+  commands = [],
+  skills = [],
+  allowEmptySlashMenu,
+  disabled,
+  dialogOpen,
   sessionId,
   atWorkspaceCwd,
   expanded = false,
@@ -70,6 +77,11 @@ function Harness({
   onSubmit: ReturnType<typeof vi.fn>;
   prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
   onInputTextChange?: (text: string) => void;
+  commands?: CommandInfo[];
+  skills?: SkillInfo[];
+  allowEmptySlashMenu?: boolean;
+  disabled?: boolean;
+  dialogOpen?: boolean;
   sessionId?: string;
   atWorkspaceCwd?: string;
   expanded?: boolean;
@@ -83,7 +95,11 @@ function Harness({
     onSubmit,
     prepareSubmit,
     onInputTextChange,
-    commands: [],
+    commands,
+    skills,
+    allowEmptySlashMenu,
+    disabled,
+    dialogOpen,
     editorTheme: {},
     composerInput,
     composerInputVersion,
@@ -108,7 +124,11 @@ function Harness({
           value={composer.mobileComposer.value}
           onChange={composer.mobileComposer.onChange}
           onBlur={composer.mobileComposer.onBlur}
-          onSelect={() => composer.resetVerticalColumn()}
+          onSelect={(event) => {
+            composer.resetVerticalColumn();
+            composer.mobileComposer?.onSelect?.(event);
+          }}
+          onKeyDown={composer.mobileComposer.onKeyDown}
           placeholder={composer.mobileComposer.placeholder}
           data-web-shell-composer-editor
         />
@@ -138,6 +158,11 @@ async function mount({
   onSubmit = vi.fn(),
   prepareSubmit,
   onInputTextChange,
+  commands = [],
+  skills = [],
+  allowEmptySlashMenu,
+  disabled,
+  dialogOpen,
   sessionId,
   atWorkspaceCwd,
   expanded = false,
@@ -151,6 +176,11 @@ async function mount({
   onSubmit?: ReturnType<typeof vi.fn>;
   prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
   onInputTextChange?: (text: string) => void;
+  commands?: CommandInfo[];
+  skills?: SkillInfo[];
+  allowEmptySlashMenu?: boolean;
+  disabled?: boolean;
+  dialogOpen?: boolean;
   sessionId?: string;
   atWorkspaceCwd?: string;
   expanded?: boolean;
@@ -166,6 +196,11 @@ async function mount({
   let currentSessionId = sessionId;
   let currentWorkspaceCwd = atWorkspaceCwd;
   let currentAttachmentsEnabled = attachmentsEnabled;
+  let currentCommands = commands;
+  let currentSkills = skills;
+  let currentAllowEmptySlashMenu = allowEmptySlashMenu;
+  let currentDisabled = disabled;
+  let currentDialogOpen = dialogOpen;
   let currentComposerInput = composerInput;
   let currentComposerInputVersion = composerInput ? 1 : 0;
   let currentExpanded = expanded;
@@ -182,6 +217,11 @@ async function mount({
             onSubmit={onSubmit}
             prepareSubmit={prepareSubmit}
             onInputTextChange={onInputTextChange}
+            commands={currentCommands}
+            skills={currentSkills}
+            allowEmptySlashMenu={currentAllowEmptySlashMenu}
+            disabled={currentDisabled}
+            dialogOpen={currentDialogOpen}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
             expanded={currentExpanded}
@@ -203,6 +243,22 @@ async function mount({
     setComposerInput(next: WebShellComposerInput) {
       currentComposerInput = next;
       currentComposerInputVersion += 1;
+      act(() => render());
+    },
+    updateProps(next: {
+      commands?: CommandInfo[];
+      skills?: SkillInfo[];
+      allowEmptySlashMenu?: boolean;
+      disabled?: boolean;
+      dialogOpen?: boolean;
+    }) {
+      if (next.commands !== undefined) currentCommands = next.commands;
+      if (next.skills !== undefined) currentSkills = next.skills;
+      if (next.allowEmptySlashMenu !== undefined) {
+        currentAllowEmptySlashMenu = next.allowEmptySlashMenu;
+      }
+      if (next.disabled !== undefined) currentDisabled = next.disabled;
+      if (next.dialogOpen !== undefined) currentDialogOpen = next.dialogOpen;
       act(() => render());
     },
     setExpanded(next: boolean) {
@@ -276,6 +332,8 @@ afterEach(() => {
   for (let index = localStorage.length - 1; index >= 0; index--) {
     const key = localStorage.key(index);
     if (
+      key?.startsWith('qwen-web-shell-history:') ||
+      key?.startsWith('qwen-web-shell-command-history:') ||
       key?.startsWith('qwen-web-shell-session-draft:') ||
       key?.startsWith('qwen-web-shell-pending-task-draft:')
     ) {
@@ -1897,5 +1955,352 @@ describe('touch editing-row keys', () => {
     });
     expect(el.scrollTop).toBe(600);
     styleSpy.mockRestore();
+  });
+});
+
+describe('mobile composer slash completion', () => {
+  const sampleCommands: CommandInfo[] = [
+    { name: 'help', description: 'Show available commands' },
+    { name: 'skills', description: 'Invoke a skill' },
+    { name: 'theme', description: 'Switch theme' },
+    {
+      name: 'verify-pr',
+      description: 'Verify a pull request',
+      source: 'skill',
+      argumentHint: '<pr>',
+    },
+    {
+      name: 'review',
+      description: 'Review changed code',
+      source: 'skill',
+    },
+  ];
+  const sampleSkills: SkillInfo[] = [
+    {
+      name: 'verify-pr',
+      description: 'Verify a pull request',
+      argumentHint: '<pr>',
+    },
+    { name: 'review', description: 'Review changed code' },
+  ];
+
+  function typeAt(text: string, start = text.length, end = start) {
+    const textarea = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    act(() => {
+      latest!.mobileComposer!.onChange({
+        target: Object.assign(textarea, {
+          value: text,
+          selectionStart: start,
+          selectionEnd: end,
+        }),
+      } as React.ChangeEvent<HTMLTextAreaElement>);
+    });
+  }
+
+  it('opens slashMenu on / with skills, filters as typed, and accepts a skill into the textarea', async () => {
+    mockTouchDevice();
+    await mount({ commands: sampleCommands, skills: sampleSkills });
+
+    typeAt('/');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toContain(
+      '/verify-pr',
+    );
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toContain(
+      '/review',
+    );
+
+    typeAt('/ver');
+    expect(latest!.slashMenu).toMatchObject({ from: 0, to: 4 });
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toEqual([
+      '/verify-pr',
+    ]);
+
+    const textarea = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    let accepted = false;
+    act(() => {
+      accepted = latest!.acceptSlashCompletion(0, true);
+    });
+    expect(accepted).toBe(true);
+    expect(latest!.getText()).toBe('/verify-pr ');
+    expect(textarea.value).toBe('/verify-pr ');
+    expect(textarea.selectionStart).toBe('/verify-pr '.length);
+    expect(textarea.selectionEnd).toBe('/verify-pr '.length);
+    expect(document.activeElement).toBe(textarea);
+    expect(latest!.slashMenu).toBeNull();
+
+    typeAt('');
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('transitions from /skills to skill subcommands starting at index 0', async () => {
+    mockTouchDevice();
+    await mount({ commands: sampleCommands, skills: sampleSkills });
+
+    typeAt('/sk');
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toEqual([
+      '/skills',
+    ]);
+
+    act(() => {
+      latest!.acceptSlashCompletion(0, true);
+    });
+    expect(latest!.getText()).toBe('/skills ');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.kind).toBe('subcommand');
+    expect(latest!.slashMenu!.selectedIndex).toBe(0);
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toEqual([
+      'verify-pr',
+      'review',
+    ]);
+
+    act(() => {
+      latest!.acceptSlashCompletion(1, true);
+    });
+    expect(latest!.getText()).toBe('/skills review ');
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('refreshes an open mobile slashMenu when lazily loaded skills arrive', async () => {
+    mockTouchDevice();
+    const mounted = await mount({
+      commands: [{ name: 'help', description: 'Show available commands' }],
+      skills: [],
+      allowEmptySlashMenu: true,
+    });
+
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items).toEqual([]);
+
+    mounted.updateProps({
+      commands: sampleCommands,
+      skills: sampleSkills,
+      allowEmptySlashMenu: false,
+    });
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toEqual([
+      '/verify-pr',
+    ]);
+  });
+
+  it('handles multiline slash queries, preserves sibling lines, and tracks selection changes', async () => {
+    mockTouchDevice();
+    await mount({ commands: sampleCommands, skills: sampleSkills });
+
+    const draft = 'context\n/ver\ntrailing';
+    typeAt(draft, 'context\n/ver'.length);
+    expect(latest!.slashMenu).toMatchObject({ from: 8, to: 12 });
+
+    const textarea = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    // Non-empty selection closes the menu.
+    act(() => {
+      textarea.setSelectionRange(9, 12);
+      latest!.mobileComposer!.onSelect?.({
+        currentTarget: textarea,
+      } as React.SyntheticEvent<HTMLTextAreaElement>);
+    });
+    expect(latest!.slashMenu).toBeNull();
+
+    // Moving caret back to end of the slash line reopens it.
+    act(() => {
+      textarea.setSelectionRange(12, 12);
+      latest!.mobileComposer!.onSelect?.({
+        currentTarget: textarea,
+      } as React.SyntheticEvent<HTMLTextAreaElement>);
+    });
+    expect(latest!.slashMenu).toMatchObject({ from: 8, to: 12 });
+
+    // Accepting replaces only the active slash range and places the caret after it.
+    act(() => {
+      latest!.acceptSlashCompletion(0, true);
+    });
+    expect(latest!.getText()).toBe('context\n/verify-pr \ntrailing');
+    expect(textarea.selectionStart).toBe('context\n/verify-pr '.length);
+    expect(textarea.selectionEnd).toBe('context\n/verify-pr '.length);
+
+    // Moving caret onto a non-slash line closes an open menu.
+    typeAt('context\n/ver', 12);
+    expect(latest!.slashMenu).not.toBeNull();
+    act(() => {
+      textarea.setSelectionRange(3, 3);
+      latest!.mobileComposer!.onSelect?.({
+        currentTarget: textarea,
+      } as React.SyntheticEvent<HTMLTextAreaElement>);
+    });
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('keeps slashMenu open on keepSlashMenu blur and closes it on ordinary blur, dialog, shell, disabled, clear, and session switch', async () => {
+    mockTouchDevice();
+    const mounted = await mount({
+      commands: sampleCommands,
+      skills: sampleSkills,
+      sessionId: 'session-1',
+      atWorkspaceCwd: '/work',
+      shellModeEnabled: true,
+    });
+
+    typeAt('/');
+    expect(latest!.slashMenu).not.toBeNull();
+
+    // Blur while interacting with the slash panel keeps it open and still saves draft.
+    act(() => {
+      latest!.mobileComposer!.onBlur(undefined, { keepSlashMenu: true });
+    });
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(localStorage.getItem(getSessionDraftKey('session-1'))).toBe('/');
+
+    // Ordinary blur closes the menu.
+    act(() => {
+      latest!.mobileComposer!.onBlur();
+    });
+    expect(latest!.slashMenu).toBeNull();
+
+    // dialogOpen closes the menu on touch.
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    mounted.updateProps({ dialogOpen: true });
+    expect(latest!.slashMenu).toBeNull();
+    mounted.updateProps({ dialogOpen: false });
+
+    // shellMode closes the menu on touch.
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    act(() => latest!.setShellMode(true));
+    expect(latest!.slashMenu).toBeNull();
+    act(() => latest!.setShellMode(false));
+
+    // disabled closes the menu on touch.
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    mounted.updateProps({ disabled: true });
+    expect(latest!.slashMenu).toBeNull();
+    mounted.updateProps({ disabled: false });
+
+    // clear() closes the menu on touch.
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    act(() => latest!.clear());
+    expect(latest!.slashMenu).toBeNull();
+
+    // Switching sessions closes the menu on touch.
+    typeAt('/ver');
+    expect(latest!.slashMenu).not.toBeNull();
+    mounted.switchSession('session-2', '/work');
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('does not open main composer slashMenu while typing in the expanded editor dialog', async () => {
+    mockTouchDevice();
+    await mount({
+      commands: sampleCommands,
+      skills: sampleSkills,
+      expanded: true,
+    });
+    const expanded =
+      container!.querySelector<HTMLTextAreaElement>('[data-expanded]')!;
+    act(() => {
+      latest!.mobileComposer!.onChange({
+        target: Object.assign(expanded, {
+          value: '/ver',
+          selectionStart: 4,
+          selectionEnd: 4,
+        }),
+      } as React.ChangeEvent<HTMLTextAreaElement>);
+    });
+    expect(latest!.getText()).toBe('/ver');
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('supports hardware keyboard navigation and ignores composing keys while mobile slashMenu is open', async () => {
+    mockTouchDevice();
+    await mount({ commands: sampleCommands, skills: sampleSkills });
+    typeAt('/');
+    expect(latest!.slashMenu!.selectedIndex).toBe(0);
+    const textarea = container!.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+
+    const fireKey = (key: string, isComposing = false) => {
+      const preventDefault = vi.fn();
+      act(() => {
+        latest!.mobileComposer!.onKeyDown?.({
+          key,
+          keyCode: isComposing ? 229 : 0,
+          shiftKey: false,
+          metaKey: false,
+          ctrlKey: false,
+          altKey: false,
+          currentTarget: textarea,
+          nativeEvent: { isComposing },
+          preventDefault,
+        } as unknown as React.KeyboardEvent<HTMLTextAreaElement>);
+      });
+      return preventDefault;
+    };
+
+    expect(fireKey('ArrowDown', true)).not.toHaveBeenCalled();
+    expect(latest!.slashMenu!.selectedIndex).toBe(0);
+
+    expect(fireKey('ArrowDown')).toHaveBeenCalledOnce();
+    expect(latest!.slashMenu!.selectedIndex).toBe(1);
+
+    expect(fireKey('ArrowUp')).toHaveBeenCalledOnce();
+    expect(latest!.slashMenu!.selectedIndex).toBe(0);
+
+    expect(fireKey('Escape')).toHaveBeenCalledOnce();
+    expect(latest!.slashMenu).toBeNull();
+
+    typeAt('/ver');
+    expect(fireKey('Enter')).toHaveBeenCalledOnce();
+    expect(latest!.getText()).toBe('/verify-pr ');
+    expect(latest!.slashMenu).toBeNull();
+  });
+
+  it('opens mobile slashMenu via openSlashMenu, insertText("/"), and the touch editing-row slash key', async () => {
+    mockTouchDevice();
+    await mount({ commands: sampleCommands, skills: sampleSkills });
+
+    let opened = false;
+    act(() => {
+      opened = latest!.openSlashMenu();
+    });
+    expect(opened).toBe(true);
+    expect(latest!.getText()).toBe('/');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toContain(
+      '/verify-pr',
+    );
+
+    act(() => latest!.clear());
+    expect(latest!.slashMenu).toBeNull();
+
+    act(() => latest!.insertText('/'));
+    expect(latest!.getText()).toBe('/');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toContain(
+      '/review',
+    );
+
+    act(() => latest!.clear());
+    act(() => latest!.pressEditingKey('slash'));
+    expect(latest!.getText()).toBe('/');
+    expect(latest!.slashMenu).not.toBeNull();
+    expect(latest!.slashMenu!.items.map((item) => item.label)).toContain(
+      '/verify-pr',
+    );
+
+    // Mid-line slash remains literal without popping the slash menu.
+    typeAt('abc', 3);
+    act(() => latest!.pressEditingKey('slash'));
+    expect(latest!.getText()).toBe('abc/');
+    expect(latest!.slashMenu).toBeNull();
   });
 });

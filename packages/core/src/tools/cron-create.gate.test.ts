@@ -48,6 +48,7 @@ function makeConfig(
     getPermissionManager: () =>
       over.evaluate ? { evaluate: over.evaluate } : null,
     getCurrentSessionScheduledTaskCreator: () => over.creator,
+    getSessionId: () => 'session-1',
     getSessionSourceType: () => undefined,
     _scheduler: scheduler,
   } as unknown as Config & { _scheduler: CronScheduler };
@@ -356,6 +357,8 @@ describe('CronCreateTool gate', () => {
           withTaskGate(
             {
               id: 'cron-current',
+              sessionId: 'session-1',
+              sessionMode: 'persistent',
               cron: request.cron,
               prompt: request.prompt,
               recurring: request.recurring,
@@ -402,6 +405,8 @@ describe('CronCreateTool gate', () => {
           ...tasks,
           {
             id: 'cron-old',
+            sessionId: 'session-1',
+            sessionMode: 'persistent',
             cron: request.cron,
             prompt: request.prompt,
             recurring: request.recurring,

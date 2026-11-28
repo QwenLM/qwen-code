@@ -15,6 +15,7 @@ import java.time.Clock;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedReceiptScopeTest {
     @Test
@@ -25,16 +26,18 @@ class ManagedReceiptScopeTest {
             var tx = new TransactionTemplate(new DataSourceTransactionManager(fixture.source()));
             var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                     new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            for (int size : List.of(384, 385, 512)) {
-                String tenant = "tenant-" + size;
-                String actor = new WorkspaceActor(tenant, "😀".repeat(size)).getActorId();
+            // The budget is code points, not bytes; H2's VARCHAR bound counts
+            // UTF-16 units, so the supplementary-plane case stays within 36.
+            for (String admitted : List.of("工".repeat(35), "工".repeat(36), "😀".repeat(18))) {
+                String tenant = "tenant-" + admitted.codePointCount(0, admitted.length());
+                String actor = new WorkspaceActor(tenant, admitted).getActorId();
                 byte[] actorBytes = actor.getBytes(StandardCharsets.UTF_8);
                 jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                                 + " display_name, config_ref, policy_ref, state)"
                                 + " VALUES (?, 'workspace', 1, 'storage', 'workspace', 'config', 'policy', 'ACTIVE')",
                         tenant);
                 jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actorBytes);
+                                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, actor);
                 var admission = tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId(tenant)
                         .actorId(actor)
@@ -65,19 +68,21 @@ class ManagedReceiptScopeTest {
     }
 
     @Test
-    void actorReceiptScopesPreserveCaseAndTrailingSpace() {
+    void actorReceiptScopesPreserveCaseAndRejectTrailingSpace() {
         try (var fixture = ConsolidatedStoreFixture.open("receipt_identity")) {
             ManagedSchema.initialize(fixture.source());
             var jdbc = new ManagedSchemaJdbcTemplate(fixture.source());
-            for (String actor : List.of("actor", "Actor", "actor ")) {
+            for (String actor : List.of("actor", "Actor")) {
                 byte[] bytes = new WorkspaceActor("tenant", actor).getActorId().getBytes(StandardCharsets.UTF_8);
                 ManagedReceipts.insertCreation(jdbc, "tenant", bytes, "same-key", "digest", actor, null, 1);
             }
-            for (String actor : List.of("actor", "Actor", "actor ")) {
+            for (String actor : List.of("actor", "Actor")) {
                 assertThat(ManagedReceipts.creation(jdbc, "tenant", actor.getBytes(StandardCharsets.UTF_8), "same-key")
                         .sessionId()).isEqualTo(actor);
             }
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class)).isEqualTo(3);
+            assertThatThrownBy(() -> new WorkspaceActor("tenant", "actor "))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt", Integer.class)).isEqualTo(2);
         }
     }
 }

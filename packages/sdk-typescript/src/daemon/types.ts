@@ -1220,6 +1220,21 @@ export interface DaemonStatusReport {
     error?: string;
     sessions: { active: number };
     permissions: { pending: number; policy: string };
+    /**
+     * Load-based fresh-session admission state. Additive — older daemons
+     * omit this field, and `enabled: false` marks the operator opt-out or
+     * an injected bridge. While `overloaded`, new child spawns are refused
+     * with 503 `system_overloaded`; live sessions and the control plane stay
+     * open. `reason` is widened to string per the SDK convention.
+     */
+    loadAdmission?: {
+      enabled: boolean;
+      overloaded: boolean;
+      reason: string | null;
+      loadRatio: number;
+      eventLoopLagP99Ms: number;
+      sampledAtMs: number;
+    };
     channel: { live: boolean };
     // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
     // widened to string to avoid coupling the wire type to the daemon's unions.
@@ -1489,6 +1504,10 @@ export interface DaemonWorktreeInfo {
    * not re-list pre-session work. Absent when unknown.
    */
   baseBranch?: string;
+  /** An owned checkout removed after capturing its retained snapshot. */
+  worktreeRemoved?: { archiveKey: string };
+  /** True only after a matching archive pair passed strict validation. */
+  canRestore?: boolean;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -2604,6 +2623,11 @@ export interface DaemonArtifactLibraryMemberError {
   status: number;
   code: string;
   message: string;
+  snapshotSize?: number;
+  maxBytes?: number;
+  dimension?: 'snapshot' | 'line' | 'index' | 'replay' | 'artifact_library';
+  measuredBytes?: number;
+  retryable?: boolean;
 }
 
 export interface DaemonWorkspaceArtifactLibraryResult {
@@ -4148,6 +4172,26 @@ export interface DaemonSessionWorkflowTaskStatus {
   error?: string;
 }
 
+export interface DaemonSessionScheduledTaskStatus {
+  id: string;
+  /** 'cron' for session-scoped cron_create jobs, 'wakeup' for self-paced loop_wakeup. */
+  source: 'cron' | 'wakeup';
+  cronExpr: string;
+  prompt: string;
+  recurring: boolean;
+  createdAt: number;
+  expiresAt: number | null;
+  lastFiredAt: number | null;
+  nextRunAt: number | null;
+  gate?: string;
+  /** False when the owning session's scheduler has been disabled. */
+  enabled?: boolean;
+}
+
+export type DaemonSessionCancelableTaskKind =
+  | DaemonSessionTaskWithWorkflowStatus['kind']
+  | 'cron';
+
 export type DaemonSessionTaskStatus =
   | DaemonSessionAgentTaskStatus
   | DaemonSessionShellTaskStatus
@@ -4164,6 +4208,8 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
   /** Present when requested with `includeSubSessions`. */
   subSessions?: DaemonSessionSubSessionTaskStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 /**
@@ -4250,6 +4296,8 @@ export interface DaemonSessionWorkflowTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskWithWorkflowStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: DaemonSessionScheduledTaskStatus[];
 }
 
 export interface DaemonLspServerStatus {
@@ -4429,8 +4477,10 @@ export type DaemonUsageRange = 'today' | 'week' | 'month';
 export interface DaemonUsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;
@@ -4457,10 +4507,11 @@ export interface DaemonUsageSkillCall {
   count: number;
 }
 
-/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+/** Tokens plus distinct active-session counts for daily charts. Mirrors `UsageDailyPoint`. */
 export interface DaemonUsageDailyPoint {
   date: string;
   tokens: number;
+  /** Distinct `sessionId`s from ended non-supplement records and ledger rows on this date. */
   sessions: number;
 }
 
@@ -4485,7 +4536,7 @@ export interface DaemonUsageDashboard {
   models: DaemonUsageModelShare[];
   /** Skill invocations for the range, sorted by count desc. */
   skills: DaemonUsageSkillCall[];
-  /** Per-day tokens + sessions across the range window. */
+  /** Per-day tokens + distinct active-session counts across the range window. */
   daily: DaemonUsageDailyPoint[];
   /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
   heatmap: Record<string, DaemonUsageHeatmapDay>;
@@ -4769,6 +4820,12 @@ export interface DaemonSettingDescriptor {
   description?: string;
   requiresRestart: boolean;
   default: unknown;
+  /**
+   * The value a host writes when it toggles a boolean that has no stored
+   * value and no schema default, mirroring `unsetToggleValue` in the CLI
+   * settings dialogs. Absent when the schema does not declare one.
+   */
+  unsetToggleValue?: boolean;
   options?: ReadonlyArray<{ value: string | number; label: string }>;
   values: {
     effective: unknown;

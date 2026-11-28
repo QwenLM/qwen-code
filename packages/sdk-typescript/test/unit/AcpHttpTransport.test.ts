@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 
 // ---------------------------------------------------------------------------
@@ -750,6 +751,30 @@ describe('AcpHttpTransport — subscribeEvents (session-scoped /acp stream)', ()
     }
     return out;
   }
+
+  it('unblocks prompt submission on an accepted idle ACP HTTP stream', async () => {
+    const { fetch } = initAwareFetch({
+      subsequentReply: () =>
+        new Response(new ReadableStream(), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const transport = new AcpHttpTransport('http://d', undefined, fetch);
+    const client = new DaemonClient({ baseUrl: 'http://d', transport });
+    const session = new DaemonSessionClient({
+      client,
+      session: { sessionId: 'sa-1', workspaceCwd: '', attached: false },
+    });
+    const controller = new AbortController();
+    const read = session.events({ signal: controller.signal }).next();
+    try {
+      await session.waitForEventStream(AbortSignal.timeout(1000));
+    } finally {
+      controller.abort();
+      await read.catch(() => undefined);
+      transport.dispose();
+    }
+  });
 
   it('opens GET /acp with Acp-Session-Id + Acp-Connection-Id (not REST /session/:id/events)', async () => {
     const { fetch, calls } = sessionStreamFetch([]);

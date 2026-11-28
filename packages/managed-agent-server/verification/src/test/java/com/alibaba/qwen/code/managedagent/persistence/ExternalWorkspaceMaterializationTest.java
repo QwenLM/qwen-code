@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
@@ -583,7 +584,7 @@ class ExternalWorkspaceMaterializationTest {
             register("tenant", "healthy");
             store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
             jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
-                    "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    "workspace");
 
             assertThat(registry.listReadable("tenant", "owner", null, 10))
                     .hasSize(2)
@@ -601,6 +602,51 @@ class ExternalWorkspaceMaterializationTest {
                             "workspace", 1, "workspace", false))
                     .containsEntry("healthy", new com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ReadableGrant(
                             "healthy", 1, "healthy", true));
+        }
+    }
+
+    @Test
+    void ephemeralWorkspaceUsesTheSameRegistrationEligibilityAsExternal() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            new ExternalWorkspaceRegistrationService(registrations, store).ensureEphemeralRegistered(
+                    "tenant", "owner", "ephemeral",
+                    new EphemeralWorkspaceRegistration(
+                            properties.getRuntimeBroker().getExternalProviderId(),
+                            "ephemeral-workspace", "/worker/ephemeral", 1),
+                    "Ephemeral");
+
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isTrue();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isTrue();
+
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
+                    "ephemeral-workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isFalse();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isFalse();
         }
     }
 
@@ -636,13 +682,13 @@ class ExternalWorkspaceMaterializationTest {
 
     @Test
     void rejectsPersistedTupleDriftAndBusyOwnersWithoutPartialMaterialization() {
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage", String.class);
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage", String.class);
         for (String mutation : List.of("storage_kind = 'LOCAL'", "registration_state = 'RETIRING'",
-                "registration_revision = 2", "physical_key = 'wrong'")) {
+                "registration_revision = 2", "physical_id = 'wrong'")) {
             jdbc.update("UPDATE ma_storage SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
             jdbc.update("UPDATE ma_storage SET storage_kind = 'EXTERNAL', registration_state = 'REGISTERED',"
-                    + " registration_revision = 1, physical_key = ?", physical);
+                    + " registration_revision = 1, physical_id = ?", physical);
         }
         String registration = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration.replace("\"tenantWorkspaceId\":\"workspace\"",
@@ -656,12 +702,19 @@ class ExternalWorkspaceMaterializationTest {
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         }
         jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
+        // An unreadable stored registration is a permanent ownership refusal
+        // (409), not a malformed-request 400 from the decode exception.
+        for (String malformed : List.of("not-json", "{\"kind\":\"ephemeral\"}")) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", malformed);
+            conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
+        }
+        jdbc.update("UPDATE ma_storage SET registration_json = ?", registration);
         new TransactionTemplate(manager).executeWithoutResult(status ->
                 conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "workspace_unavailable"));
-        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_key = 'held'", "maintenance_id = 'maintenance'")) {
+        for (String mutation : List.of("mount_root = '/other'", "mount_revision = 2", "holder_id = 'held'", "maintenance_id = 'maintenance'")) {
             jdbc.update("UPDATE ma_storage_owner SET " + mutation);
             conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
-            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_key = NULL, maintenance_id = NULL");
+            jdbc.update("UPDATE ma_storage_owner SET mount_root = '/worker/workspace', mount_revision = 1, holder_id = NULL, maintenance_id = NULL");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace_access", Integer.class)).isZero();
@@ -675,7 +728,7 @@ class ExternalWorkspaceMaterializationTest {
                 + " 'Existing', ?, ?, 'REMOVED')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         conflict(() -> store.materialize("tenant", "workspace", "Name", "owner", "key"), "external_workspace_conflict");
         register("tenant", "second");
-        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_id, scope_id, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind,"
                 + " storage_id, runtime_generation, binding_state, attestation_generation, is_drain_requested,"
                 + " operation_generation, record_version, last_active_at)"

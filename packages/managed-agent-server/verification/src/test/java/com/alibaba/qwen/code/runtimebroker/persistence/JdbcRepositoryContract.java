@@ -106,14 +106,14 @@ public final class JdbcRepositoryContract {
         placement.put("capability_digest", scope.getCapabilityDigest());
         placement.put("isolation_class", scope.getIsolationClass());
         Map<String, Object> slot = new LinkedHashMap<>(placement);
-        slot.put("request_key", JdbcRepositorySupport.requestKey(request));
+        slot.put("request_id", JdbcRepositorySupport.requestKey(request));
         slot.put("isolation_key", request.getIsolationKey());
         slot.put("provisioner_kind", request.getProvisionerKind());
         Map<String, Object> binding = new LinkedHashMap<>(slot);
         slot.put("last_generation", 1);
         slot.put("active_binding_id", prefix + "-binding");
         binding.put("binding_id", prefix + "-binding");
-        binding.put("scope_key", JdbcRepositorySupport.scopeKey(scope));
+        binding.put("scope_id", JdbcRepositorySupport.scopeKey(scope));
         binding.put("runtime_generation", 1);
         binding.put("binding_state", "PROVISIONING");
         binding.put("attestation_generation", 0);
@@ -122,7 +122,7 @@ public final class JdbcRepositoryContract {
         binding.put("record_version", 3);
         binding.put("last_active_at", java.sql.Timestamp.from(START));
         Map<String, Object> session = new LinkedHashMap<>(placement);
-        session.put("scope_key", JdbcRepositorySupport.scopeKey(scope));
+        session.put("scope_id", JdbcRepositorySupport.scopeKey(scope));
         session.put("runtime_session_id", prefix + "-session");
         session.put("harness_session_id", prefix + "-harness");
         session.put("turn_kind", "bootstrap");
@@ -138,15 +138,12 @@ public final class JdbcRepositoryContract {
             for (String state : List.of("PREPARED", "UNKNOWN", "SETTLED")) {
                 String id = prefix + "-" + state;
                 Map<String, Object> execution = new LinkedHashMap<>();
-                execution.put("execution_call_id_hash", JdbcRepositorySupport.valueKey(id));
                 execution.put("execution_call_id", id);
-                execution.put("idempotency_key_hash", JdbcRepositorySupport.valueKey(id + "-key"));
                 execution.put("idempotency_key", id + "-key");
                 execution.put("binding_id", prefix + "-binding");
                 execution.put("runtime_generation", 1);
                 execution.put("harness_session_id", prefix + "-harness");
                 execution.put("runtime_session_id", prefix + "-session");
-                execution.put("runtime_session_key", JdbcRepositorySupport.valueKey(prefix + "-session"));
                 execution.put("turn_id", "turn");
                 execution.put("tool_call_id", "call");
                 execution.put("request_digest", "digest");
@@ -1130,11 +1127,12 @@ public final class JdbcRepositoryContract {
                         prefix + "-dispatcher-a",
                         stickyForged.getDispatchGeneration()));
 
-        // Forge a session-key collision: the full-id comparison must still
-        // exclude a row whose hash matches the queried session.
-        tamper(dataSource, "runtime_session_key", sticky.getExecutionCallId(),
-                JdbcRepositorySupport.valueKey(
-                        prefix + "-collision-runtime-session"));
+        // Forge a session-identity near-match: the full-id comparison must
+        // still exclude a row whose stored session differs from the queried
+        // one, even by a trailing space.
+        tamper(dataSource, "runtime_session_id", "execution_call_id",
+                sticky.getExecutionCallId(),
+                prefix + "-collision-runtime-session ");
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-collision-runtime-session"));
     }
@@ -1341,34 +1339,55 @@ public final class JdbcRepositoryContract {
                 prefix + "-other-digest").withVersion(unknown.getVersion()),
                 result("cancelled"), START));
 
-        // Reading a record checks each stored hash against the value it
-        // indexes.
-        String keyed = repository.findOrCreate(execution(
-                prefix + "-keyed-execution", prefix + "-keyed-idempotency",
-                prefix + "-keyed-digest")).getExecutionCallId();
-        tamper(dataSource, "idempotency_key_hash", keyed,
-                JdbcRepositorySupport.valueKey(prefix + "-other-key"));
-        assertEquals("Tool idempotency hash is invalid",
-                assertThrows(IllegalStateException.class,
-                        () -> repository.findByExecutionCallId(keyed))
-                        .getMessage());
-        String indexed = repository.findOrCreate(execution(
-                prefix + "-indexed-execution",
+        // H2 compares trailing spaces exactly, but MySQL's utf8mb4_bin is
+        // PAD SPACE. A folded SQL match must trip the Java identity guard;
+        // an exact database miss returns null. Neither path returns the
+        // tampered row.
+        boolean padSpace;
+        try (Connection connection = dataSource.getConnection()) {
+            padSpace = !"H2".equals(connection.getMetaData().getDatabaseProductName());
+        }
+        String keyedKey = prefix + "-keyed-idempotency";
+        repository.findOrCreate(execution(
+                prefix + "-keyed-execution", keyedKey,
+                prefix + "-keyed-digest"));
+        tamper(dataSource, "idempotency_key", "execution_call_id",
+                prefix + "-keyed-execution", keyedKey + " ");
+        if (padSpace) {
+            assertEquals("Tool idempotency hash collision",
+                    assertThrows(IllegalStateException.class,
+                            () -> repository.findByIdempotencyKey(keyedKey))
+                            .getMessage());
+        } else {
+            assertNull(repository.findByIdempotencyKey(keyedKey));
+        }
+        String indexedId = prefix + "-indexed-execution";
+        repository.findOrCreate(execution(
+                indexedId,
                 prefix + "-indexed-idempotency",
-                prefix + "-indexed-digest")).getExecutionCallId();
-        tamper(dataSource, "execution_call_id_hash", indexed,
-                JdbcRepositorySupport.valueKey(prefix + "-other-id"));
-        assertEquals("Tool execution-call hash is invalid",
-                assertThrows(IllegalStateException.class,
-                        () -> repository.findByIdempotencyKey(
-                                prefix + "-indexed-idempotency"))
-                        .getMessage());
-        tamper(dataSource, "runtime_session_key", id,
-                JdbcRepositorySupport.valueKey(prefix + "-other-session"));
-        assertEquals("Tool Runtime Session hash is invalid",
-                assertThrows(IllegalStateException.class,
+                prefix + "-indexed-digest"));
+        tamper(dataSource, "execution_call_id", "execution_call_id",
+                indexedId, indexedId + " ");
+        if (padSpace) {
+            assertEquals("Tool execution-call hash collision",
+                    assertThrows(IllegalStateException.class,
+                            () -> repository.findByExecutionCallId(indexedId))
+                            .getMessage());
+        } else {
+            assertNull(repository.findByExecutionCallId(indexedId));
+        }
+        // The runtime-session tamper must stay admissible (no trailing space):
+        // reading the record validates it before the reference guard runs. A
+        // valid identity that disagrees with the reference still trips the
+        // guard, and the raw exact lookup now finds the active row under it.
+        tamper(dataSource, "runtime_session_id", "execution_call_id", id,
+                prefix + "-other-session");
+        assertEquals("reference identity does not match execution identity",
+                assertThrows(IllegalArgumentException.class,
                         () -> repository.findByExecutionCallId(id))
                         .getMessage());
+        assertTrue(repository.hasActiveByRuntimeSession(
+                prefix + "-other-session"));
     }
 
     private static ToolExecutionRecord execution(String executionCallId,
@@ -1405,13 +1424,13 @@ public final class JdbcRepositoryContract {
     }
 
     private static void tamper(DataSource dataSource, String column,
-            String executionCallId, String value) throws SQLException {
+            String selectorColumn, String selectorValue, String value) throws SQLException {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(
                         "UPDATE ma_tool_execution SET " + column
-                                + " = ? WHERE execution_call_id = ?")) {
+                                + " = ? WHERE " + selectorColumn + " = ?")) {
             statement.setString(1, value);
-            statement.setString(2, executionCallId);
+            statement.setString(2, selectorValue);
             assertEquals(1, statement.executeUpdate());
         }
     }

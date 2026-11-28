@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -135,7 +134,7 @@ public class HostedBackgroundPublicationGate {
         temporary = temporary.toRealPath();
         Files.createDirectory(temporary.resolve("runtime"));
 
-        String tenant = "publication-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         record SessionSpec(String name, String role, String shellCommand) {}
         List<SessionSpec> specs = List.of(
                 new SessionSpec("alpha", "background",
@@ -170,7 +169,6 @@ public class HostedBackgroundPublicationGate {
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -241,13 +239,12 @@ public class HostedBackgroundPublicationGate {
             for (int index = 0; index < workspaces.size(); index++) {
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
-            EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
             Path phaseFile = temporary.resolve("phase");
             Path config = temporary.resolve("driver.json");
             var driverConfig = new LinkedHashMap<String, Object>();
             driverConfig.put("tenantId", tenant);
             driverConfig.put("storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort());
-            driverConfig.put("brokerUrl", broker.getBaseUri().toString());
+            driverConfig.put("brokerUrl", "http://127.0.0.1:" + spring.getWebServer().getPort());
             driverConfig.put("cliEntry", cli.toString());
             driverConfig.put("arm", "publication");
             driverConfig.put("driveFault", true);

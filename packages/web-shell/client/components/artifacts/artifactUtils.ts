@@ -1,11 +1,18 @@
-import {
-  DaemonHttpError,
-  isSessionLevelNotFound,
-  type DaemonSessionArtifact,
-  type DaemonWorkspaceFileBytes,
+import type {
+  DaemonSessionArtifact,
+  DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { escapeAttribute } from '../preview/web-preview.js';
+import {
+  AUDIO_EXTENSIONS,
+  isAudioArtifact,
+  normalizeArtifactMimeType,
+  pathExtension,
+  workspaceFileExtension,
+} from './artifact-mime.js';
+
+export { isAudioArtifact, normalizeArtifactMimeType, pathExtension };
 
 export function artifactKindLabel(
   kind: string,
@@ -92,8 +99,6 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
   '.odp',
 ]);
 
-const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
-
 // Previewable Office types are allowed before this shared fallback is checked.
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
@@ -176,26 +181,6 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   return false;
 }
 
-export function pathExtension(workspacePath?: string): string {
-  return workspaceFileExtension((workspacePath ?? '').split(/[?#]/, 1)[0]);
-}
-
-function workspaceFileExtension(workspacePath?: string): string {
-  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
-  const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
-}
-
-export function isAudioArtifact(
-  workspacePath?: string,
-  mimeType?: string,
-): boolean {
-  return (
-    AUDIO_EXTENSIONS.has(pathExtension(workspacePath)) ||
-    normalizeArtifactMimeType(mimeType).startsWith('audio/')
-  );
-}
-
 // Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the
 // Web Shell client cannot import.
 const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
@@ -239,10 +224,6 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
 
 export const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
 const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 256 * 1024;
-
-export function normalizeArtifactMimeType(mimeType?: string): string {
-  return mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-}
 
 export function getArtifactImageMimeType(
   artifact: Pick<DaemonSessionArtifact, 'mimeType' | 'workspacePath'>,
@@ -661,8 +642,18 @@ export interface DaemonHttpErrorInfo {
   message: string;
 }
 
+function isDaemonHttpErrorLike(
+  error: unknown,
+): error is Error & { status: number; body: unknown } {
+  return (
+    error instanceof Error &&
+    error.name === 'DaemonHttpError' &&
+    typeof (error as { status?: unknown }).status === 'number'
+  );
+}
+
 export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
-  if (error instanceof DaemonHttpError) {
+  if (isDaemonHttpErrorLike(error)) {
     const body =
       typeof error.body === 'object' &&
       error.body !== null &&
@@ -693,7 +684,18 @@ export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
 }
 
 export function isSessionNotFoundArtifactError(error: unknown): boolean {
-  return isSessionLevelNotFound(error);
+  if (!isDaemonHttpErrorLike(error) || error.status !== 404) {
+    return false;
+  }
+  const body =
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    !Array.isArray(error.body)
+      ? (error.body as Record<string, unknown>)
+      : undefined;
+  if (body?.['code'] !== 'session_not_found') return false;
+  const toolCallId = body['toolCallId'];
+  return toolCallId === undefined || toolCallId === null;
 }
 
 export function isArtifactSnapshotUnavailableError(error: unknown): boolean {

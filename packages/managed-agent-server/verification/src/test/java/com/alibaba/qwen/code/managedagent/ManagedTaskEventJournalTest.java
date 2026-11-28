@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
@@ -66,10 +67,14 @@ class ManagedTaskEventJournalTest {
                     chain.get(index).required("occurredAt").longValue());
             if (taskId == null) {
                 taskId = jdbc.queryForObject(
-                        "SELECT CONCAT('task_', record_key) FROM"
+                        "SELECT domain, record_id FROM"
                                 + " ma_session_record"
                                 + " WHERE tenant_id = ? AND session_id = ?",
-                        String.class, TENANT, sessionId);
+                        (row, rowNum) -> ManagedExtensionProjection.taskId(
+                                ManagedExtensionProjection.recordKey(sessionId,
+                                        row.getString("domain"),
+                                        row.getString("record_id"))),
+                        TENANT, sessionId);
             }
         }
         EventPage page = events.read(TENANT, sessionId, taskId, 0, 100);
@@ -254,8 +259,8 @@ class ManagedTaskEventJournalTest {
         events.appendArtifact(TENANT, sessionId, taskId, "artifact-a", 1);
         // The clobber the old write shape could carry: a writer holding the
         // outdated empty list. The compare-and-set latch must refuse it.
-        int rewritten = jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_key=NULL WHERE tenant_id=? AND session_id=?"
-                        + " AND stream_kind='TASK' AND stream_id=? AND artifact_refs_resource_key IS NULL",
+        int rewritten = jdbc.update("UPDATE ma_event_stream SET artifact_refs_resource_ref=NULL WHERE tenant_id=? AND session_id=?"
+                        + " AND stream_kind='TASK' AND stream_id=? AND artifact_refs_resource_ref IS NULL",
                 TENANT, sessionId, taskId);
         assertThat(rewritten).isZero();
         assertThat(events.positions(TENANT, sessionId,

@@ -97,7 +97,7 @@ class HarnessConfigurationTest {
             sdk.when(HostedHarnessClient::builder).thenReturn(builder);
             try (var connector = new HarnessConfiguration().hostedHarnessConnector(properties,
                     sessions, mock(JdbcWorkspaceExecutionStore.class), actions, mock(JdbcManagedAgentDefinitionStore.class),
-                    resources, mock(JdbcSshWorkspaceStore.class), mock(JdbcHarnessPlacementStore.class), skills, json, extensions)) {
+                    resources, mock(JdbcSshWorkspaceStore.class), mock(JdbcHarnessPlacementStore.class), skills, json, extensions, false)) {
                 assertThat(connector.createOrLoad("tenant", sessionId, false).bootId()).isEqualTo(bootId);
                 var request = ArgumentCaptor.forClass(CreateHarnessSession.class);
                 verify(client).createSession(request.capture());
@@ -143,7 +143,7 @@ class HarnessConfigurationTest {
             when(capabilities.getInstanceId()).thenReturn("h1");
             when(capabilities.getBootId()).thenReturn("boot");
             when(capabilities.getFeatures()).thenReturn(
-                    List.of("harness-pool-owner/1", "harness-instance-lifecycle/1"));
+                    List.of("work-pull/1", "harness-pool-owner/1", "harness-instance-lifecycle/1"));
             when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of());
             when(client.readInstance()).thenReturn(Map.of("state", "ACCEPTING"));
             var builder = mock(HostedHarnessClient.Builder.class, RETURNS_SELF);
@@ -157,10 +157,12 @@ class HarnessConfigurationTest {
                         mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
                         mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
                         mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
-                        new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class))) {
+                        new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class), true)) {
                     Object pool = ReflectionTestUtils.getField(connector, "delegate");
                     ReflectionTestUtils.invokeMethod(pool, "refresh");
-                    accepted.put(base, ((List<?>) ReflectionTestUtils.getField(pool, "accepting")).size());
+                    int accepting = ((List<?>) ReflectionTestUtils.getField(pool, "accepting")).size();
+                    accepted.put(base, accepting);
+                    assertThat(connector.acceptsWorkPullClaims("h1", "boot")).isEqualTo(accepting == 1);
                 }
             }
         }
@@ -168,6 +170,29 @@ class HarnessConfigurationTest {
                 Map.entry("http://127.0.0.1:4170", 1),
                 Map.entry(" http://127.0.0.1:4170 ", 0),
                 Map.entry("http://qwen_harness:4170", 0));
+    }
+
+    @Test
+    void refusesWorkPullWithoutAPoolAtStartup() {
+        var properties = new ManagedAgentProperties();
+        var harness = properties.getHarness();
+        harness.setEnabled(true);
+        harness.setBaseUrl("http://127.0.0.1:4170");
+        harness.setToken("test-harness-token");
+        harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+        properties.getSessionStore().setEnabled(true);
+        properties.getSessionStore().setBaseUrl("https://store.example");
+        properties.getSessionStore().setWorkspaceId("workspace");
+        properties.getSessionStore().setBindingKey("b".repeat(64));
+        assertThatThrownBy(() -> new HarnessConfiguration().hostedHarnessConnector(properties,
+                mock(AgentStateStore.class), mock(JdbcWorkspaceExecutionStore.class),
+                mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
+                mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
+                mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
+                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class), true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("harness-pull.enabled")
+                .hasMessageContaining("harness.pool.enabled");
     }
 
     @Test
@@ -189,7 +214,7 @@ class HarnessConfigurationTest {
                 mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
                 mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
                 mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
-                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class)))
+                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class), false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Harness pool discovery must be static");
     }

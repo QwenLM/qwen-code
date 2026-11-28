@@ -105,6 +105,14 @@ export interface ManagedSessionCommitProof {
   readonly committedPrefixHash: string;
 }
 
+export interface ManagedSessionParkedTurn {
+  readonly promptId: string;
+  readonly wakeAt: number;
+  readonly approvalRevision?: number;
+  /** A wake-started Turn, which only the wake-recovery scan can resume. */
+  readonly owner?: 'wake';
+}
+
 /** What the wake pump would pick from the committed prefix at suspension. */
 export interface ManagedSessionWakeStamp {
   /** Whether a deliverable wake input remains. */
@@ -117,6 +125,7 @@ export interface ManagedSessionWakeStamp {
    * the seal certifies it for the control plane's recovery view.
    */
   readonly backgroundHeld?: boolean;
+  readonly parkedTurn?: ManagedSessionParkedTurn;
 }
 
 /**

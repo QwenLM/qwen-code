@@ -6,7 +6,10 @@
 import express from 'express';
 import request from 'supertest';
 import { createServer } from 'node:http';
-import { createServer as createHttpsServer } from 'node:https';
+import {
+  createServer as createHttpsServer,
+  request as httpsRequest,
+} from 'node:https';
 import type { Server } from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -291,6 +294,31 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
 -----END PRIVATE KEY-----
 `;
 
+  function probeTls(
+    server: Server,
+    headers: Record<string, string>,
+  ): Promise<number> {
+    return new Promise((resolve, reject) => {
+      // An IP literal cannot be SNI. Keep it only in Host/Origin while the
+      // loopback TLS handshake uses its valid hostname.
+      const request = httpsRequest({
+        host: '127.0.0.1',
+        port: (server.address() as AddressInfo).port,
+        servername: 'localhost',
+        method: 'POST',
+        path: '/probe',
+        headers,
+      });
+      request.once('error', reject);
+      request.once('response', (response) => {
+        response.resume();
+        response.once('end', () => resolve(response.statusCode ?? 0));
+        response.once('error', reject);
+      });
+      request.end();
+    });
+  }
+
   async function withTlsServer(
     run: (server: Server) => Promise<void>,
   ): Promise<void> {
@@ -319,17 +347,17 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
 
   it('derives the scheme from the socket and strips :443 from Host', async () => {
     await withTlsServer(async (server) => {
-      const authed = await request(server)
-        .post('/probe')
-        .set('Host', '192.168.1.2:443')
-        .set('Origin', 'https://192.168.1.2')
-        .set('Authorization', 'Bearer secret');
-      expect(authed.status).toBe(204);
-      const unauthed = await request(server)
-        .post('/probe')
-        .set('Host', '192.168.1.2:443')
-        .set('Origin', 'https://192.168.1.2');
-      expect(unauthed.status).toBe(401);
+      const authed = await probeTls(server, {
+        Host: '192.168.1.2:443',
+        Origin: 'https://192.168.1.2',
+        Authorization: 'Bearer secret',
+      });
+      expect(authed).toBe(204);
+      const unauthed = await probeTls(server, {
+        Host: '192.168.1.2:443',
+        Origin: 'https://192.168.1.2',
+      });
+      expect(unauthed).toBe(401);
     });
   });
 
@@ -340,12 +368,12 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
         'https://192.168.1.2:443',
         'https://192.168.1.2:4171',
       ]) {
-        const response = await request(server)
-          .post('/probe')
-          .set('Host', '192.168.1.2:443')
-          .set('Origin', origin)
-          .set('Authorization', 'Bearer secret');
-        expect(response.status).toBe(403);
+        const response = await probeTls(server, {
+          Host: '192.168.1.2:443',
+          Origin: origin,
+          Authorization: 'Bearer secret',
+        });
+        expect(response).toBe(403);
       }
     });
   });
@@ -354,12 +382,12 @@ ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
     // The crossed arm of the http :443 pin: only the scheme's own default
     // port may be stripped, so an :80 Host under https never matches.
     await withTlsServer(async (server) => {
-      const response = await request(server)
-        .post('/probe')
-        .set('Host', '192.168.1.2:80')
-        .set('Origin', 'https://192.168.1.2')
-        .set('Authorization', 'Bearer secret');
-      expect(response.status).toBe(403);
+      const response = await probeTls(server, {
+        Host: '192.168.1.2:80',
+        Origin: 'https://192.168.1.2',
+        Authorization: 'Bearer secret',
+      });
+      expect(response).toBe(403);
     });
   });
 });

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -13,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
@@ -22,6 +24,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -45,6 +48,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isV3Family;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
@@ -68,6 +72,14 @@ final class RuntimeExecutionDispatcher {
     private final AtomicBoolean closed;
     private final ConcurrentMap<String, CompletableFuture<Void>> dispatches =
             new ConcurrentHashMap<>();
+    // The shared-dispatch waits own their PREPARED row: a close that discards
+    // the queued tick must settle it, and the wait must end so the dispatch
+    // map entry is removed.
+    private final ConcurrentMap<String, Awaiting> awaiting =
+            new ConcurrentHashMap<>();
+    private record Awaiting(CompletableFuture<Void> queued,
+            ToolExecutionRecord prepared) {
+    }
     // Executions whose transport.execute call is in flight in this process,
     // as opposed to dispatches, which also covers a claim being fenced.
     private final Set<String> invocations = ConcurrentHashMap.newKeySet();
@@ -105,6 +117,19 @@ final class RuntimeExecutionDispatcher {
     }
 
     void cancelPendingOperations() {
+        // A shared-dispatch wait owns its PREPARED row: close() rejects every
+        // queued tick with shutdownNow(), so settle here before unblocking the
+        // wait, or the row stays active and fences the binding's release.
+        awaiting.values().forEach(wait -> {
+            try {
+                settleStrandedPrepared(wait.prepared(), "dispatch_failed",
+                        "Shared Workspace dispatch failed before claim");
+            } catch (RuntimeException | Error ignored) {
+                // Close still has to unblock the caller's wait below.
+            }
+            wait.queued().completeExceptionally(unavailable(
+                    "runtime_admission_closed", "Runtime broker is closing"));
+        });
         dispatches.values().forEach(future -> future.cancel(false));
     }
 
@@ -115,12 +140,26 @@ final class RuntimeExecutionDispatcher {
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload) {
-        beginDispatch(context, prepared, payload, null);
+        beginDispatch(context, prepared, payload, null, null);
     }
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
+        beginDispatch(context, prepared, payload, grant, null);
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant, String requestDigest, String toolName) {
+        beginDispatch(context, prepared, payload, grant,
+                VerifiedDispatchPayload.of(requestDigest, toolName));
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
@@ -147,7 +186,7 @@ final class RuntimeExecutionDispatcher {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload, grant);
+            operation = dispatch(context, prepared, payload, grant, verifiedPayload);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -169,10 +208,170 @@ final class RuntimeExecutionDispatcher {
 
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
-        ToolExecutionRecord claimed = executionRepository.claimDispatch(
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
+        ToolExecutionRecord claimed = claimDispatchForPayload(
+                context, prepared, verifiedPayload);
+        if (claimed == null
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(
+                                context.binding().getRequest())
+                && HarnessOwnership.sharesRuntimeSessions(
+                        context.binding().getRequest())) {
+            return awaitSharedDispatch(context, prepared, payload, grant,
+                    verifiedPayload);
+        }
+        return dispatchClaimed(context, claimed, payload, grant);
+    }
+
+    private ToolExecutionRecord claimDispatchForPayload(
+            SessionContext context, ToolExecutionRecord prepared,
+            VerifiedDispatchPayload payload) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                .isExternalWorkspaceRequest(
+                        context.binding().getRequest())
+                || !HarnessOwnership.sharesRuntimeSessions(
+                        context.binding().getRequest())) {
+            return executionRepository.claimDispatch(
+                    prepared.getExecutionCallId(), brokerOwnerId,
+                    dispatchLeaseDuration);
+        }
+        return executionRepository.claimValidatedDispatch(
                 prepared.getExecutionCallId(), brokerOwnerId,
-                dispatchLeaseDuration);
+                dispatchLeaseDuration, payload);
+    }
+
+    private CompletionStage<Void> awaitSharedDispatch(
+            SessionContext context, ToolExecutionRecord prepared,
+            Map<String, Object> payload, RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
+        // Keep a single Future per waiting request; a long-lived UNKNOWN
+        // occupant must not build a recursive chain. The wait is bounded like
+        // the v3 result poll: backoff between attempts and a deadline, so an
+        // occupant that never settles answers a conflict instead of retrying
+        // forever on the shared coordination thread.
+        CompletableFuture<Void> queued = new CompletableFuture<>();
+        Awaiting wait = new Awaiting(queued, prepared);
+        awaiting.put(prepared.getExecutionCallId(), wait);
+        queued.whenComplete((ignored, error) ->
+                awaiting.remove(prepared.getExecutionCallId(), wait));
+        java.time.Instant deadline = clock.instant().plus(v3ResultWindow);
+        java.util.concurrent.atomic.AtomicInteger attempt =
+                new java.util.concurrent.atomic.AtomicInteger();
+        Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                if (queued.isDone()) {
+                    return;
+                }
+                try {
+                    requireOpen(closed);
+                    if (!clock.instant().isBefore(deadline)) {
+                        // The slot never freed. The conflict below feeds a
+                        // write-only future (dispatches is consumed solely by
+                        // cancelPendingOperations), so it can never surface to
+                        // the caller on its own. Settle the stranded PREPARED
+                        // execution first, so the record the caller polls
+                        // carries the refusal instead of hanging PREPARED with
+                        // no dispatch owner.
+                        settleStrandedPrepared(prepared, "dispatch_timeout",
+                                "Shared Workspace dispatch slot did not free in time");
+                        throw conflict("runtime_execution_conflict",
+                                "Shared Workspace dispatch slot did not free in time");
+                    }
+                    ToolExecutionRecord waiting =
+                            executionRepository.findByExecutionCallId(
+                                    prepared.getExecutionCallId());
+                    if (waiting == null || !waiting.sameIdentity(prepared)
+                            || waiting.getState()
+                                    != ToolExecutionRecord.State.PREPARED) {
+                        queued.complete(null);
+                        return;
+                    }
+                    ToolExecutionRecord next;
+                    context.lock();
+                    try {
+                        bindingRegistry.requireReadySessionRecord(context);
+                        bindingRepository.requireHarnessAdmission(
+                                context.binding().getRequest(),
+                                context.session().getScope(),
+                                context.session().getHarnessSessionId(),
+                                null);
+                        next = claimDispatchForPayload(
+                                context, prepared, verifiedPayload);
+                    } finally {
+                        context.unlock();
+                    }
+                    if (next == null) {
+                        scheduler.schedule(this,
+                                v3PollDelayMillis(attempt.getAndIncrement()),
+                                TimeUnit.MILLISECONDS);
+                    } else {
+                        dispatchClaimed(
+                                context, next, payload, grant)
+                                .whenComplete((ignored, error) -> {
+                                    if (error == null) {
+                                        queued.complete(null);
+                                    } else {
+                                        queued.completeExceptionally(
+                                                unwrap(error));
+                                    }
+                                });
+                    }
+                } catch (RuntimeException | Error error) {
+                    // Every exceptional exit feeds the same write-only future,
+                    // so the stranded PREPARED row must settle here too or it
+                    // hangs the caller's poll and fences the binding's release
+                    // forever (the reconciler skips PREPARED rows).
+                    try {
+                        settleStrandedPrepared(prepared, "dispatch_failed",
+                                "Shared Workspace dispatch failed before claim");
+                    } catch (RuntimeException | Error settleFailure) {
+                        error.addSuppressed(settleFailure);
+                    }
+                    queued.completeExceptionally(error);
+                }
+            }
+        };
+        try {
+            requireOpen(closed);
+            scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
+        } catch (RuntimeException | Error rejected) {
+            // The dispatch between the null claim and this first schedule can
+            // race a closing broker: the scheduler is shut down, so the
+            // PREPARED row would otherwise stay active with no owner and fence
+            // the binding's release forever. Settle it before propagating,
+            // exactly like the tick's own exceptional exit.
+            awaiting.remove(prepared.getExecutionCallId(), wait);
+            try {
+                settleStrandedPrepared(prepared, "dispatch_failed",
+                        "Shared Workspace dispatch failed before claim");
+            } catch (RuntimeException | Error settleFailure) {
+                rejected.addSuppressed(settleFailure);
+            }
+            throw rejected;
+        }
+        return queued;
+    }
+
+    private void settleStrandedPrepared(ToolExecutionRecord prepared,
+            String errorType, String message) {
+        ToolExecutionRecord stranded = executionRepository
+                .findByExecutionCallId(prepared.getExecutionCallId());
+        if (stranded != null && stranded.sameIdentity(prepared)
+                && stranded.getState() == ToolExecutionRecord.State.PREPARED) {
+            executionRepository.settlePrepared(stranded, Map.of(
+                    "executionStatus", "not_started",
+                    "responseParts", List.of(),
+                    "error", Map.of("type", errorType, "message", message)),
+                    clock.instant());
+        }
+    }
+
+    private CompletionStage<Void> dispatchClaimed(
+            SessionContext context, ToolExecutionRecord claimed,
+            Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
         if (claimed == null
                 || claimed.getState()
                         != ToolExecutionRecord.State.DISPATCHING) {
@@ -456,7 +655,10 @@ final class RuntimeExecutionDispatcher {
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
-                || !com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                // Shared workspace bindings carry no session isolation key; ownership
+                // there rests on belongsTo + bindingId + generation + scope above, the
+                // same shape acquireRecovery uses (#16023 R1-25).
+                || !HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         && !execution.getHarnessSessionId().equals(binding.getRequest().getIsolationKey())) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
         }

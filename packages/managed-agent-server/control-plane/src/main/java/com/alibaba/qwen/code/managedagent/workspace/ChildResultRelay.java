@@ -14,12 +14,15 @@ import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -90,10 +93,10 @@ public class ChildResultRelay {
     private final Supplier<Long> clock;
     private final String owner = "child-relay-" + UUID.randomUUID();
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
-            org.springframework.beans.factory.ObjectProvider<RuntimeBrokerOperations> broker,
+            ObjectProvider<RuntimeBrokerOperations> broker,
             HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
             ChildWorkspaceService childWorkspaces) {
@@ -103,7 +106,7 @@ public class ChildResultRelay {
 
     ChildResultRelay(ChildResultRelayStore relayStore,
             ManagedAgentService sessions,
-            org.springframework.beans.factory.ObjectProvider<RuntimeBrokerOperations> broker,
+            ObjectProvider<RuntimeBrokerOperations> broker,
             HarnessConnector harness, ObjectMapper mapper,
             ChildLifecycleAdmissions childCloses,
             ChildWorkspaceService childWorkspaces,
@@ -776,7 +779,7 @@ public class ChildResultRelay {
     private int jsonBytes(String text) {
         try {
             return mapper.writeValueAsBytes(text).length;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+        } catch (JsonProcessingException error) {
             throw new IllegalStateException("A conflict path is not serializable", error);
         }
     }
@@ -867,8 +870,8 @@ public class ChildResultRelay {
         }
     }
 
-    private static final java.util.Set<String> SETTLED_FINISH_REFUSALS =
-            java.util.Set.of("child_workspace_conflict",
+    private static final Set<String> SETTLED_FINISH_REFUSALS =
+            Set.of("child_workspace_conflict",
                     "child_workspace_finishing", "child_workspace_not_found");
 
     private void bind(RelayRow row, long now) {

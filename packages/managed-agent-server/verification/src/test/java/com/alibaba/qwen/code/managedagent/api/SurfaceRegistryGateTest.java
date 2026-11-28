@@ -45,6 +45,7 @@ import static org.mockito.Mockito.mock;
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.session-store.enabled=true",
         "qwen.managed-agent.client-files.enabled=true",
+        "qwen.managed-agent.harness-pull.enabled=true",
         "qwen.managed-agent.tool-publication.entry-concurrency=4"
 })
 @Import(SurfaceRegistryGateTest.ExtraControllers.class)
@@ -196,7 +197,7 @@ class SurfaceRegistryGateTest {
             return new TerminalTicketController(
                     mock(com.alibaba.qwen.code.managedagent.workspace.runtime
                             .WorkspaceTerminalRelayService.class),
-                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+                    mock(TerminalTicketStore.class));
         }
     }
 }

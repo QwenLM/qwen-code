@@ -24,7 +24,7 @@ Web Shell 在两个地方绘制思考。旁边没有工具的思考自成一行�
 - 子代理的思考，无论在工具卡片内还是卡片外，与终端的子代理视图相同。
 - 导出的对话记录，按原样绘制思考。
 - 在 `$.ui.invalidate('ui.render')` 时重绘页面已经持有的思考，与回复行相同。
-- 移除 `MessageRewriteMiddleware`。两个站点都绘制之后 Web Shell 不再需要它，但 VS Code companion 仍会显示它的改写消息，所以是否移除需要单独决定。
+- 移除 `MessageRewriteMiddleware`。两个站点都绘制之后 Web Shell 不再需要它，但 VS Code companion 仍会显示它的改写消息，所以是否移除需要单独决定。之后已将其移除：[移除 MessageRewriteMiddleware](2026-11-23-remove-message-rewrite-middleware.zh-CN.md)。
 
 ## 兼容契约
 

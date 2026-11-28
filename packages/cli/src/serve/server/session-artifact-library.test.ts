@@ -15,7 +15,9 @@ import {
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
+import { SessionTranscriptTooLargeError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
+  artifactLibraryMemberError,
   readPersistedWorkspaceArtifactLibrary,
   readPersistedWorkspaceSessionMetadata,
 } from './session-artifact-library.js';
@@ -163,6 +165,29 @@ describe('artifact library session metadata', () => {
       createdAt,
       archiveState: 'active',
       sourceType: 'default',
+    });
+  });
+
+  it('preserves detailed transcript limit failures for workspace artifact-library members', () => {
+    const error = new SessionTranscriptTooLargeError(
+      id,
+      64 * 1024 * 1024,
+      32 * 1024 * 1024,
+      {
+        dimension: 'artifact_library',
+        measuredBytes: 64 * 1024 * 1024,
+        retryable: true,
+      },
+    );
+    expect(artifactLibraryMemberError(error)).toEqual({
+      status: 413,
+      code: 'transcript_too_large',
+      message: error.message,
+      snapshotSize: 64 * 1024 * 1024,
+      maxBytes: 32 * 1024 * 1024,
+      dimension: 'artifact_library',
+      measuredBytes: 64 * 1024 * 1024,
+      retryable: true,
     });
   });
 
