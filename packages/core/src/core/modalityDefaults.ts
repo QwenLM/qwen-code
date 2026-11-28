@@ -159,7 +159,7 @@ export function defaultModalities(model: string): InputModalities {
   delete fromCatalog.pdf;
   // normalize() drops Ollama's size tag, so `gemma3:1b` (text-only) would
   // otherwise read as the vision sizes of `gemma3`.
-  if (/(?:^|\/)gemma3:1b(?:-|$)/i.test(model.trim())) {
+  if (/(?:^|[/:])gemma-?3:1b(?:-|$)/i.test(model.trim())) {
     return fromCatalog;
   }
   for (const [regex, modalities] of MODALITY_PATTERNS) {

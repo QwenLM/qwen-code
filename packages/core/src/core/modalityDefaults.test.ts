@@ -319,6 +319,8 @@ describe('defaultModalities', () => {
       ['Gemma 3 270M (text model)', TEXT_ONLY, 'google/gemma-3-270m-it'],
       ['gemma3:1b (Ollama)', TEXT_ONLY, 'gemma3:1b'],
       ['gemma3:1b QAT (Ollama)', TEXT_ONLY, 'gemma3:1b-it-qat'],
+      ['gemma3:1b behind an auth prefix', TEXT_ONLY, 'ollama:gemma3:1b'],
+      ['gemma-3:1b', TEXT_ONLY, 'gemma-3:1b'],
       ['gemma3n (not Gemma 3)', TEXT_ONLY, 'google/gemma-3n-E4B-it'],
       ['Gemma 2', TEXT_ONLY, 'google/gemma-2-9b-it'],
     ]);
