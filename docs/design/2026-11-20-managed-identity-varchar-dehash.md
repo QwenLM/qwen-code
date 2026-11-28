@@ -612,13 +612,14 @@ equality" proposal above, and the interim decision to keep actor columns at
 
 ### 2026-11-27 narrow collation correction
 
-The direct-seeding registry contract exercises Unicode identifiers, rather than
-only receipt-minted application identifiers. `ma_workspace.workspace_id` uses
-`utf8mb4_0900_as_cs` (NO PAD), so these values also keep exact equality in a join
-or recursive traversal. The admission-side trailing-space rejection remains
-unchanged, as do the other tables and canonical refs. The matching MySQL fixture
-now rejects an impermissible altered column size before construction; it does
-not turn a rejected schema change into a false collation test.
+The direct-seeding registry contract retains distinct trailing-space identifiers
+at insertion by using `utf8mb4_0900_as_cs` (NO PAD) for `ma_workspace.workspace_id`.
+Case and accent sensitivity do not imply byte identity: this UCA collation folds
+some ignored-codepoint and Unicode-normalization differences, mixed joins retain
+the admission-side trailing-space policy, and recursive traversal uses explicit
+binary predicates. The matching MySQL fixture rejects an impermissible altered
+column size before construction rather than treating that refusal as a collation
+success.
 
 ### Actor columns
 

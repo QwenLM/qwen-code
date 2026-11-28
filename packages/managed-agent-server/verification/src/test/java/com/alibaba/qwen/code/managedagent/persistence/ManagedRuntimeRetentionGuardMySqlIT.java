@@ -73,8 +73,7 @@ class ManagedRuntimeRetentionGuardMySqlIT {
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
         // The contract then applies the same collation at the declared width,
-        // which is the only legal form here: a 512-wide identity column would
-        // push these tables' composite keys past InnoDB's 3072-byte limit.
+        // required by ma_session_record's composite key byte limit.
         assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
                 .hasStackTraceContaining("Specified key was too long; max key length is 3072 bytes");
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();

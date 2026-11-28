@@ -488,11 +488,11 @@ pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL �
 
 ### 2026-11-27 窄范围排序规则修正
 
-直接建表的 registry 契约覆盖 Unicode 标识符，而不只覆盖回执派生的应用标识符。
-`ma_workspace.workspace_id` 使用 NO PAD 的 `utf8mb4_0900_as_cs`，使这些值在 join 和
-递归遍历中仍保持精确等值。其他表、canonical ref 和准入侧拒绝尾随空格的策略不变。
-对应的 MySQL 夹具在构造前拒绝不允许的列宽变更，不再把失败的 schema 变更误当作
-排序规则测试。
+直接写入 registry 表的契约通过为 `ma_workspace.workspace_id` 使用 NO PAD 的
+`utf8mb4_0900_as_cs` 保留不同的尾随空格标识符。大小写与重音敏感不等同于字节
+等值：该 UCA 排序规则会折叠部分可忽略码点和 Unicode 规范化差异；混合 join
+仍依赖准入侧拒绝尾随空格，递归遍历使用显式 binary 谓词。对应的 MySQL 夹具
+在构造前拒绝不允许的列宽变更，不再将拒绝误当作排序规则测试通过。
 
 ### actor 列
 

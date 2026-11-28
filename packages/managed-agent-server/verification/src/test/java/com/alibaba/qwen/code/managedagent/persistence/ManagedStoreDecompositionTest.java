@@ -43,12 +43,15 @@ class ManagedStoreDecompositionTest {
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
             JournalCommit.class,
+            ManagedAgentReadEntries.class,
             ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
         for (Class<?> component : COMPONENTS) {
-            assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            if (component != ManagedAgentReadEntries.class) {
+                assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
+            }
             assertThat(Modifier.isPublic(component.getModifiers())).isFalse();
             assertThat(component.getInterfaces()).isEmpty();
             assertNoSpringComponent(component);
@@ -59,6 +62,10 @@ class ManagedStoreDecompositionTest {
             assertThat(Arrays.stream(component.getDeclaredMethods()))
                     .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
             requireAcyclic(component, new HashSet<>());
+        }
+        for (Class<?> ancestor = ManagedAgentStore.class.getSuperclass();
+                ancestor != Object.class; ancestor = ancestor.getSuperclass()) {
+            assertThat(COMPONENTS).as(ancestor.getSimpleName()).contains(ancestor);
         }
     }
 
