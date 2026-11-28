@@ -157,6 +157,22 @@ describe('WorkflowTool registration', () => {
   });
 });
 
+// #17320 R4-6: the registerLazy wiring is the only path that makes the
+// tool reachable; a previous round's mutation (deleting the registerLazy
+// block) kept the whole surface suite green, so pin it here against the
+// real registry.
+describe('GetContextRemaining registration', () => {
+  it('is registered unconditionally by createToolRegistry', async () => {
+    const cfg = new Config({ ...baseParams });
+    const registry = await cfg.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toContain(
+      ToolNames.GET_CONTEXT_REMAINING,
+    );
+  });
+});
+
 // FIX-G (Round 4 test Important): regression test for the FIX-8 anti-recursion
 // guard. A subagent spawned BY a workflow must not be able to call the
 // Workflow tool again — that would create unbounded O(k^n) fan-out. Without
@@ -197,5 +213,29 @@ describe('Workflow anti-recursion guard', () => {
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.MANAGE_MEMORY)).toBe(
       true,
     );
+  });
+
+  it('GetContextRemaining is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    // The tool reports the BASE session's context numbers through
+    // deriveConfig's prototype chain, so a subagent calling it would read
+    // the parent's window, not its own (#17320 F1).
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(
+      EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.GET_CONTEXT_REMAINING),
+    ).toBe(true);
+  });
+
+  it('GetContextRemaining is in EXCLUDED_TOOLS_FOR_TEAMMATES', async () => {
+    // Same base-session hazard on the teammate path: an in-process
+    // teammate's Config is also built through deriveConfig, so the leader's
+    // chat would answer (#17320 R6-1).
+    const { EXCLUDED_TOOLS_FOR_TEAMMATES } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(
+      EXCLUDED_TOOLS_FOR_TEAMMATES.has(ToolNames.GET_CONTEXT_REMAINING),
+    ).toBe(true);
   });
 });

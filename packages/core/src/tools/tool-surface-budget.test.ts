@@ -24,6 +24,7 @@ import { EnterWorktreeTool } from './enter-worktree.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
 import { ExitWorktreeTool } from './exit-worktree.js';
 import { GlobTool } from './glob.js';
+import { GetContextRemainingTool } from './get-context-remaining.js';
 import { GrepTool } from './grep.js';
 import { ImageGenTool } from './image-gen.js';
 import { ListAgentsTool } from './list-agents.js';
@@ -174,6 +175,7 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
 /** Tools that stay out of the first request until `tool_search` loads them. */
 const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
   ['get_goal', (c) => new GetGoalTool(c)],
+  ['get_context_remaining', (c) => new GetContextRemainingTool(c)],
   ['list_agents', (c) => new ListAgentsTool(c)],
   ['propose_goal', (c) => new ProposeGoalTool(c)],
   ['update_goal', (c) => new UpdateGoalTool(c)],

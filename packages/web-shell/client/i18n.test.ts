@@ -199,6 +199,15 @@ describe('web-shell i18n catalog', () => {
     ).toBe('再显示 3 个');
   });
 
+  it('labels the context-remaining tool in both Chinese catalogs', () => {
+    expect(getTranslator('zh-CN')('toolName.get_context_remaining')).toBe(
+      '查询剩余上下文',
+    );
+    expect(getTranslator('zh-TW')('toolName.get_context_remaining')).toBe(
+      '查詢剩餘上下文',
+    );
+  });
+
   it('localizes the scheduled-task workspace host-lock hint', () => {
     expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
       'Fixed by host',

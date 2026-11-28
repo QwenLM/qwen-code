@@ -852,6 +852,7 @@ export const ZH: Messages = {
   'toolName.savememory': '保存记忆',
   'toolName.askuserquestion': '询问用户',
   'toolName.toolsearch': '工具搜索',
+  'toolName.get_context_remaining': '查询剩余上下文',
   'about.auth': '认证',
   'about.baseUrl': 'Base URL',
   'about.fastModel': '快速模型',

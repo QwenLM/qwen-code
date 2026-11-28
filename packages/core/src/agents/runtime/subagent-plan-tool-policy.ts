@@ -81,6 +81,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // Recall state and shared memory writes belong to the parent session.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
+  // Reports the BASE session's numbers through deriveConfig's prototype
+  // chain — a subagent would read the parent's context, not its own
+  // (#17320 F1). The full fix (per-turn chat handle) is a follow-up.
+  ToolNames.GET_CONTEXT_REMAINING,
 ]);
 
 /**
@@ -189,6 +193,9 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Teammates also share the leader's memory state.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
+  // Same base-session hazard as the subagent set: the tool reports the
+  // leader's chat through the deriveConfig prototype chain (#17320 R6-1).
+  ToolNames.GET_CONTEXT_REMAINING,
 ]);
 
 /**

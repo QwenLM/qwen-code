@@ -279,6 +279,7 @@ export default {
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.ListAgents': '列出 Agent',
+  'toolDisplayName.GetContextRemaining': '查询剩余上下文',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
