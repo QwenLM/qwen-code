@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import { renderHook, act } from '@testing-library/react';
 import type {
@@ -1002,6 +1002,140 @@ describe('useTextBuffer', () => {
       );
       act(() => result.current.insert('README.md', { paste: true }));
       expect(getBufferState(result).text).toBe('@README.md ');
+    });
+
+    it('should handle double-quoted Windows, relative, and home-directory paths', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'E:\\docs\\说明.md' ||
+            p === 'C:\\Users\\my file.txt' ||
+            p === './my file.md' ||
+            p === '~/my file.md',
+        }),
+      );
+      act(() => result.current.insert('"E:\\docs\\说明.md"', { paste: true }));
+      expect(getBufferState(result).text).toBe('@E:\\docs\\说明.md ');
+
+      act(() => result.current.setText(''));
+      act(() =>
+        result.current.insert('"C:\\Users\\my file.txt"', { paste: true }),
+      );
+      expect(getBufferState(result).text).toBe('@C:\\Users\\my\\ file.txt ');
+
+      act(() => result.current.setText(''));
+      act(() => result.current.insert('"./my file.md"', { paste: true }));
+      expect(getBufferState(result).text).toBe('@./my\\ file.md ');
+
+      act(() => result.current.setText(''));
+      act(() => result.current.insert('"~/my file.md"', { paste: true }));
+      expect(getBufferState(result).text).toBe('@\\~/my\\ file.md ');
+    });
+
+    it('should handle multi-line CRLF and space-separated double-quoted paths', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'E:\\project\\说明.md' ||
+            p === 'E:\\project\\README.md' ||
+            p === "/tmp/don't.md",
+        }),
+      );
+      act(() =>
+        result.current.insert(
+          '"E:\\project\\说明.md"\r\n"E:\\project\\README.md"',
+          { paste: true },
+        ),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@E:\\project\\说明.md @E:\\project\\README.md ',
+      );
+
+      act(() => result.current.setText(''));
+      act(() =>
+        result.current.insert('"/tmp/don\'t.md" "E:\\project\\README.md"', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe(
+        "@/tmp/don\\'t.md @E:\\project\\README.md ",
+      );
+    });
+
+    it('should handle double-quoted bare filenames and preserve invalid, mixed, mismatched, or shell-mode content while short-circuiting', () => {
+      const isValidPath = vi.fn(
+        (p: string) => p === 'README.md' || p === 'E:\\project\\README.md',
+      );
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath,
+        }),
+      );
+      act(() => result.current.insert('"README.md"', { paste: true }));
+      expect(getBufferState(result).text).toBe('@README.md ');
+
+      isValidPath.mockClear();
+      act(() => result.current.setText(''));
+      const mixed = 'Check "E:\\project\\README.md" "E:\\project\\README.md"';
+      act(() => result.current.insert(mixed, { paste: true }));
+      expect(getBufferState(result).text).toBe(mixed);
+      expect(isValidPath).toHaveBeenCalledTimes(1);
+
+      isValidPath.mockClear();
+      act(() => result.current.setText(''));
+      const jsonLine =
+        '{"a": "/p/1", "b": "./2", "c": "E:\\\\project\\\\README.md"}';
+      act(() => result.current.insert(jsonLine, { paste: true }));
+      expect(getBufferState(result).text).toBe(jsonLine);
+      expect(isValidPath).toHaveBeenCalledTimes(1);
+
+      isValidPath.mockClear();
+      act(() => result.current.setText(''));
+      const invalidFirst = '"E:\\project\\missing.md" "E:\\project\\README.md"';
+      act(() => result.current.insert(invalidFirst, { paste: true }));
+      expect(getBufferState(result).text).toBe(invalidFirst);
+      expect(isValidPath).toHaveBeenCalledTimes(1);
+
+      act(() => result.current.setText(''));
+      const mismatched = '"E:\\project\\README.md\'';
+      act(() => result.current.insert(mismatched, { paste: true }));
+      expect(getBufferState(result).text).toBe(mismatched);
+
+      const shellHook = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: () => true,
+          shellModeActive: true,
+        }),
+      );
+      const doubleQuoted = '"E:\\project\\README.md"';
+      act(() => shellHook.result.current.insert(doubleQuoted, { paste: true }));
+      expect(getBufferState(shellHook.result).text).toBe(doubleQuoted);
+    });
+
+    it('should skip path validation on UNC shares', () => {
+      const isValidPath = vi.fn(() => true);
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath,
+        }),
+      );
+
+      for (const unc of [
+        '"\\\\attacker.example\\share\\pic.png"',
+        '"//attacker.example/share/pic.png"',
+        '\\\\attacker.example\\share\\notes.md',
+      ]) {
+        act(() => result.current.setText(''));
+        act(() => result.current.insert(unc, { paste: true }));
+        expect(getBufferState(result).text).toBe(unc);
+      }
+
+      expect(isValidPath).not.toHaveBeenCalled();
     });
   });
 
