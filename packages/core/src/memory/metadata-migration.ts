@@ -549,6 +549,7 @@ async function generateMemoryMetadataWithAgent(
       terminateReasonMessage(
         result.terminateReason,
         'Metadata migration agent failed',
+        result.loopType,
       ),
     );
   }
