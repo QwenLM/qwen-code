@@ -613,6 +613,13 @@ describe('tokenLimit with output type', () => {
     it('should return correct output limits for Kimi', () => {
       expect(tokenLimit('kimi-k2.5', 'output')).toBe(32768);
     });
+
+    it("should give Kimi Code's bare K3 aliases the K3 output limit", () => {
+      expect(tokenLimit('k3.1-pro', 'output')).toBe(131072);
+      expect(tokenLimit('k3.1-pro-highspeed', 'output')).toBe(131072);
+      expect(tokenLimit('moonshot/k3.1-pro', 'output')).toBe(131072);
+      expect(tokenLimit('k3-256k', 'output')).toBe(131072);
+    });
   });
 
   describe('default output limits', () => {
