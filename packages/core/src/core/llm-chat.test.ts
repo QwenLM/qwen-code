@@ -8685,6 +8685,10 @@ describe('LlmChat', async () => {
     const reportTools = [
       { type: 'function', function: { name: 'submit_report' } },
     ];
+    const namedReportTool = {
+      type: 'function',
+      function: { name: 'submit_report' },
+    };
     const requireReportTool = {
       tools: [{ functionDeclarations: [{ name: 'submit_report' }] }],
       toolConfig: {
@@ -8700,7 +8704,9 @@ describe('LlmChat', async () => {
       body?: Record<string, unknown>;
       sampling?: Record<string, unknown>;
       generation?: Pick<GenerateContentConfig, 'tools' | 'toolConfig'>;
-      output: number;
+      fallbackWindow?: number;
+      output?: number;
+      measuredInput?: number;
     }>([
       {
         name: 'extra body template arguments',
@@ -8965,6 +8971,86 @@ describe('LlmChat', async () => {
         output: kimiRoute.primaryOutput,
       },
       {
+        name: 'the named sole MiniMax tool',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the named sole Kimi tool',
+        primaryBody: { tools: reportTools },
+        body: { tools: reportTools, tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the named sole generated Kimi tool',
+        generation: { tools: requireReportTool.tools },
+        body: { tool_choice: namedReportTool },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'auto fallback after a named Kimi tool choice',
+        primaryBody: { tools: reportTools, tool_choice: namedReportTool },
+        body: { tools: reportTools, tool_choice: 'auto' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a named Kimi tool overriding a nested required choice',
+        primaryBody: {
+          tools: reportTools,
+          chat_template_kwargs: { tool_choice: 'required' },
+        },
+        body: {
+          tools: reportTools,
+          tool_choice: namedReportTool,
+          chat_template_kwargs: { tool_choice: 'required' },
+        },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_750,
+          warmPromptTokens: 28_744,
+          primaryOutput: 4_000,
+        },
+        name: 'a required tool choice in a 32768-token compatible window',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_768,
+        measuredInput: 28_780,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_000,
+          warmPromptTokens: 28_744,
+          primaryOutput: 3_256,
+        },
+        name: 'a required tool choice in a 32032-token compatible window',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_032,
+        measuredInput: 28_780,
+      },
+      {
+        primary: {
+          ...kimiRoute,
+          primaryWindow: 32_000,
+          warmPromptTokens: 28_744,
+          primaryOutput: 3_256,
+        },
+        name: 'a required tool choice after a named tool in a compatible window',
+        primaryBody: { tools: reportTools, tool_choice: namedReportTool },
+        body: { tools: reportTools, tool_choice: 'required' },
+        fallbackWindow: 32_032,
+        measuredInput: 28_780,
+      },
+      {
         primary: { ...kimiRoute, wireModel: 'moonshotai/Kimi-K3' },
         name: 'the default tool choice on an unpinned Kimi route',
         primaryBody: { tools: reportTools },
@@ -9068,7 +9154,9 @@ describe('LlmChat', async () => {
         body,
         sampling,
         generation,
+        fallbackWindow,
         output,
+        measuredInput,
       }) => {
         const { wireModel, primaryWindow, warmPromptTokens, primaryOutput } =
           primary;
@@ -9083,6 +9171,7 @@ describe('LlmChat', async () => {
               model: fallbackModel,
               baseUrl: 'https://compatible.example/v1',
               samplingParams: sampling,
+              ...(fallbackWindow && { contextWindowSize: fallbackWindow }),
               extra_body: { model: wireModel, messages, ...body },
             }),
           ),
@@ -9121,7 +9210,15 @@ describe('LlmChat', async () => {
         expect(streamMock().mock.calls[1][0].config?.maxOutputTokens).toBe(
           primaryOutput,
         );
-        expect(fallback.mock.calls[0][0].config.maxOutputTokens).toBe(output);
+        const fallbackOutput = fallback.mock.calls[0][0].config.maxOutputTokens;
+        if (measuredInput !== undefined && fallbackWindow !== undefined) {
+          expect(fallbackOutput + measuredInput).toBeLessThanOrEqual(
+            fallbackWindow,
+          );
+          expect(fallbackOutput).toBeGreaterThan(3_000);
+        } else {
+          expect(fallbackOutput).toBe(output);
+        }
       },
     );
 
