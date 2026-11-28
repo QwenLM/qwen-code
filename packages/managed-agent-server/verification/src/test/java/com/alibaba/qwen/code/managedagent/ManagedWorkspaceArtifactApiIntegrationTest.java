@@ -25,8 +25,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -64,6 +67,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     JsonNode stdout;
     JsonNode stderr;
     String realOperationSource;
+    boolean denySessionTwoContent;
 
     protected javax.sql.DataSource dataSource() {
         return null;
@@ -90,7 +94,8 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
             public boolean publishPreview(String tenant, String workspace, String session) { return true; }
             public boolean readOriginal(String tenant, String actor, String workspace, String session) {
-                return "reader".equals(actor);
+                return "reader".equals(actor)
+                        && (!denySessionTwoContent || !"session-2".equals(session));
             }
         };
         mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
@@ -217,6 +222,28 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 + " stream_id, creation_sequence FROM ma_artifact WHERE artifact_id = ? LIMIT 1",
                 artifactId, resultId, scope, descriptor.toString(), stdout.path("id").asText());
         return artifactId;
+    }
+
+    private int copyPublicationReceipt(String sessionId, String publicationId) {
+        String scope = ManagedIdentityRefs.publicationScopeRef(TENANT, WORKSPACE, sessionId);
+        return fixture.jdbc().update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, is_quarantined)"
+                + " SELECT ?, tenant_id, workspace_id, ?, publication_id, execution_call_id, capture_id,"
+                + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
+                + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
+                + " FROM ma_output_capture WHERE publication_id = ?",
+                scope.getBytes(StandardCharsets.UTF_8), sessionId, publicationId);
+    }
+
+    private static JsonNode row(JsonNode page, String artifactId) {
+        for (var row : page.required("data")) {
+            if (artifactId.equals(row.required("artifact").required("id").asText())) {
+                return row;
+            }
+        }
+        throw new AssertionError("Artifact is missing from page: " + artifactId);
     }
 
     @Test
@@ -526,6 +553,49 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("workspace_not_found"));
         verify(registry, times(3)).canRead(TENANT, "reader", WORKSPACE);
+    }
+
+    @Test
+    void readsAvailabilityOnceAcrossSessionsThatShareAPublicationId() throws Exception {
+        String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String third = seedArtifactSession("session-3", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
+                .orElseThrow().publicationId();
+        assertThat(copyPublicationReceipt("session-2", publicationId)).isEqualTo(1);
+        var jdbc = spy(fixture.jdbc());
+        ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
+
+        denySessionTwoContent = true;
+        var response = page("reader", body(null, null));
+        assertThat(ids(response)).containsExactlyInAnyOrder(second, third,
+                stdout.path("id").asText(), stderr.path("id").asText());
+        for (var row : response.required("data")) {
+            var artifact = row.required("artifact");
+            boolean available = !third.equals(artifact.required("id").asText());
+            assertThat(artifact.required("availability").asText()).isEqualTo(available ? "available" : "unavailable");
+            assertThat(row.required("access").required("can_read_content").booleanValue())
+                    .isEqualTo("session-1".equals(artifact.required("session_id").asText()));
+        }
+        verify(jdbc).query(ArgumentMatchers.contains("FROM ma_output_capture"),
+                ArgumentMatchers.any(RowMapper.class), ArgumentMatchers.any(Object[].class));
+    }
+
+    @Test
+    void excludesReceiptsFromRetiredSourceSessions() throws Exception {
+        String retired = seedArtifactSession(
+                "session-retired", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        String publicationId = fixture.results().findArtifact(TENANT, "session-1", stdout.path("id").asText())
+                .orElseThrow().publicationId();
+        assertThat(copyPublicationReceipt("session-retired", publicationId)).isEqualTo(1);
+        fixture.jdbc().update("UPDATE ma_session SET retired_at = 1 WHERE tenant_id = ? AND session_id = ?",
+                TENANT, "session-retired");
+
+        var response = page("reader", body(null, null));
+
+        assertThat(row(response, retired).required("artifact").required("availability").asText())
+                .isEqualTo("unavailable");
+        assertThat(row(response, stdout.path("id").asText()).required("artifact").required("availability").asText())
+                .isEqualTo("available");
     }
 
     @Test

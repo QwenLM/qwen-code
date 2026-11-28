@@ -138,8 +138,9 @@ tenant/actor/workspace 与请求不符、数值字段不能转为 long、`waterm
 
 ### 可用性与内容策略
 
-`reader.availability(artifacts)` 每页执行一次；reader 内部已按来源会话 key
-分组，跨会话页可正确批量。任一行不可用时，重检一次工作区读授权——会话页
+`reader.availability(artifacts)` 通过一次 SQL 查询读取非空页的回执。每个来源会话
+使用各自的作用域、退役状态检查和发布 ID，结果按作用域和发布 ID 匹配。
+任一行不可用时，重检一次工作区读授权——会话页
 `session()` 重检的工作区类比——授权丢失回 `404 workspace_not_found`，而非
 静默返回该页。
 

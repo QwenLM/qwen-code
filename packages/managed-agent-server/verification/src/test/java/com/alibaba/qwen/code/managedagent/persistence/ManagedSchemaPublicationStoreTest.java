@@ -22,6 +22,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
@@ -29,6 +30,8 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITE
 import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Exercises actual writer/Broker/publication stores over the fresh schema. */
 public class ManagedSchemaPublicationStoreTest {
@@ -114,6 +117,21 @@ public class ManagedSchemaPublicationStoreTest {
                 String.class, "tenant-1", "session-1", resourceId)).isEqualTo("REFERENCED");
         assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 String.class, "tenant-1", "session-1", resourceId)).isEqualTo("VERIFIED");
+    }
+
+    @Test
+    void emptyPublicationGroupsSkipTheReceiptQuery() {
+        DataSource source = dataSource();
+        ManagedSchema.initialize(source);
+        var bucket = new Bucket();
+        var fixture = PublicationJournalFixture.create(source, bucket, null);
+        var jdbc = spy(fixture.jdbc);
+        var data = new ToolPublicationDataStore(jdbc, fixture.manager, fixture.store, fixture.sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+
+        assertThat(data.referencedPublications(Map.of(fixture.binding.path("sessionKey"), Set.of()))).isEmpty();
+        verifyNoInteractions(jdbc);
     }
 
     private static final class Bucket implements ToolPublicationObjectStore {

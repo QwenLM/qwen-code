@@ -35,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>every pin maps to an existing class (no stale pins).</li>
  * </ol>
  *
- * <p>Ratchet discipline: ceilings only ever go down. When a class shrinks,
+ * <p>Ratchet discipline: ceilings only ever go down apart from reviewed,
+ * exactly accounted import-only allowances. When a class shrinks,
  * lower its ceiling; when a class is deleted or renamed, remove its entry;
  * {@link #GLOBAL_MAX_LINES} lowers as the remaining large classes are split.
  * See {@code docs/design/2026-11-04-managed-agent-class-size-ratchet.md}.
@@ -45,10 +46,12 @@ class ClassSizeRatchetTest {
     // 2026-11-11: lowered from 2662 after the JdbcRuntimeBindingRepository
     // admission/fence extraction. #17478 lowers it again to 2483 after the
     // publication seal-manifest extraction. #18085 moved ossScope to
-    // ToolPublicationContract and lowered the maximum to 2482. This change
-    // replaces three calls with ToolPublicationObjectKeys and removes the
-    // resulting unused import, lowering the current maximum to 2481.
-    private static final int GLOBAL_MAX_LINES = 2481;
+    // ToolPublicationContract (2482); ToolPublicationObjectKeys lowered it to
+    // 2481. #17846 lowered its branch through 2476 and 2470 to 2306 by
+    // extracting guards and the receipt predicate and merging those main-line
+    // reductions. #18325's reviewed import-only allowance added three lines,
+    // bringing the store and both ceilings to 2309; the store remains maximum.
+    private static final int GLOBAL_MAX_LINES = 2309;
     private static final String PIN_RESOURCE = "/class-size-ratchet.properties";
     private static final List<String> SOURCE_ROOTS =
             List.of("persistence/src/main/java", "runtime-broker/src/main/java");
