@@ -16,6 +16,8 @@ export interface SemanticColors {
   };
   background: {
     primary: string;
+    surface?: string;
+    code?: string;
     diff: {
       added: string;
       removed: string;

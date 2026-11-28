@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import open from 'open';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../../contexts/DialogSizeContext.js';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { t } from '../../../../i18n/index.js';
 import {
@@ -87,13 +87,16 @@ export const DiscoverTab = ({
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
 
-  const { columns, rows } = useTerminalSize();
-  const availableWidth = Math.max(24, columns - 8);
+  const { columns, rows, isDialog } = useDialogSize();
+  const availableWidth = isDialog
+    ? Math.max(1, columns)
+    : Math.max(24, columns - 8);
   // Each item renders as 3 lines (title, description, gap). Reserve rows for
-  // the tab bar, header, search box, scroll hints, status and footer.
+  // the header, search box, gap and scroll hints. The dialog provider already
+  // reserves the parent tab bar, border and footer.
   const visibleCount = Math.max(
-    3,
-    Math.min(6, Math.floor(((rows || 24) - 13) / 3)),
+    isDialog ? 1 : 3,
+    Math.min(6, Math.floor(((rows || 24) - (isDialog ? 7 : 13)) / 3)),
   );
 
   const extensionManager = config.getExtensionManager();
@@ -695,14 +698,16 @@ export const DiscoverTab = ({
                       {checkbox}
                     </Text>
                   </Box>
-                  <Text bold color={titleColor}>
+                  <Text bold color={titleColor} wrap="truncate-end">
                     {plugin.name}
                   </Text>
-                  <Text color={theme.text.secondary}>{meta}</Text>
+                  <Text color={theme.text.secondary} wrap="truncate-end">
+                    {meta}
+                  </Text>
                 </Box>
                 {plugin.description ? (
                   <Box paddingLeft={4}>
-                    <Text color={theme.text.secondary}>
+                    <Text color={theme.text.secondary} wrap="truncate-end">
                       {truncateText(plugin.description, availableWidth - 4)}
                     </Text>
                   </Box>

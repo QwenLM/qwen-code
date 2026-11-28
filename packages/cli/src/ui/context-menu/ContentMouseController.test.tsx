@@ -170,7 +170,12 @@ describe('ContentMouseController', () => {
       return null;
     };
     const selectionQueryRef = {
-      current: selectionRange ? { getRange: () => selectionRange } : null,
+      current: selectionRange
+        ? {
+            getRange: () => selectionRange,
+            getBounds: () => viewportRect,
+          }
+        : null,
     };
     render(
       <ContextMenuProvider>
@@ -489,6 +494,26 @@ describe('ContentMouseController', () => {
       fire(makeEvent('left-press', 8, 2));
       expect(copyToClipboard).toHaveBeenCalledWith('here');
       expect(getMenu()).toBeNull();
+    });
+
+    it('clips Copy Selection to its viewport on every selected row', () => {
+      const first = [...'AAhelloZZ'].map((ch) => makeCell(ch));
+      const second = [...'BBworldYY'].map((ch) => makeCell(ch));
+      frame = {
+        width: 9,
+        height: 2,
+        cells: [first, second],
+        boundaries: [Array(9).fill(null), Array(9).fill(null)],
+      } as ReadonlyFrame;
+      viewportRect = { x: 2, y: 0, width: 5, height: 2 };
+      const { fire, getMenu } = mount({ sx: 2, sy: 0, ex: 6, ey: 1 });
+      fire(makeEvent('right-press', 5, 1));
+      const item = getMenu()?.items.find(
+        (entry) => entry.id === 'copy-selection',
+      );
+      expect(item).toBeDefined();
+      item!.onSelect();
+      expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld');
     });
 
     it('scroll closes the menu', () => {

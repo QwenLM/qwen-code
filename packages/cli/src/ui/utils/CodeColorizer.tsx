@@ -236,6 +236,16 @@ export interface ColorizeCodeOptions {
   settings?: LoadedSettings;
   tabWidth?: number;
   startLineNumber?: number;
+  highlightCache?: CodeHighlightCache;
+}
+
+export interface CodeHighlightCache {
+  context?: {
+    theme: Theme;
+    language: string | null;
+    lowlight: Lowlight | null;
+  };
+  lines: Map<string, React.ReactNode>;
 }
 
 export function colorizeCode(
@@ -245,7 +255,13 @@ export function colorizeCode(
   maxWidth?: number,
   options: ColorizeCodeOptions = {},
 ): React.ReactNode {
-  const { theme, settings, tabWidth = 4, startLineNumber = 1 } = options;
+  const {
+    theme,
+    settings,
+    tabWidth = 4,
+    startLineNumber = 1,
+    highlightCache,
+  } = options;
   const firstLineNumber = Math.max(1, Math.trunc(startLineNumber));
   const codeToHighlight = code
     .replace(/\n$/, '')
@@ -277,6 +293,45 @@ export function colorizeCode(
       }
     }
 
+    const previousHighlights =
+      highlightCache?.context?.theme === activeTheme &&
+      highlightCache.context.language === language &&
+      highlightCache.context.lowlight === lowlight
+        ? highlightCache.lines
+        : undefined;
+    const nextHighlights = highlightCache
+      ? new Map<string, React.ReactNode>()
+      : undefined;
+    const renderedLines = lines.map((line, index) => {
+      const contentToRender = previousHighlights?.has(line)
+        ? previousHighlights.get(line)
+        : highlightAndRenderLine(line, language, activeTheme, lowlight);
+      // Retry fallback text on a later render if highlighting failed transiently.
+      if (typeof contentToRender !== 'string') {
+        nextHighlights?.set(line, contentToRender);
+      }
+
+      return (
+        <Box key={index}>
+          {showLineNumbers && (
+            <Text color={activeTheme.colors.Gray} selectable={false}>
+              {`${String(index + firstLineNumber + hiddenLinesCount).padStart(
+                padWidth,
+                ' ',
+              )} `}
+            </Text>
+          )}
+          <Text color={activeTheme.defaultColor} wrap="wrap">
+            {contentToRender}
+          </Text>
+        </Box>
+      );
+    });
+    if (highlightCache && nextHighlights) {
+      highlightCache.context = { theme: activeTheme, language, lowlight };
+      highlightCache.lines = nextHighlights;
+    }
+
     return (
       <MaxSizedBox
         maxHeight={availableHeight}
@@ -284,29 +339,7 @@ export function colorizeCode(
         additionalHiddenLinesCount={hiddenLinesCount}
         overflowDirection="top"
       >
-        {lines.map((line, index) => {
-          const contentToRender = highlightAndRenderLine(
-            line,
-            language,
-            activeTheme,
-            lowlight,
-          );
-
-          return (
-            <Box key={index}>
-              {showLineNumbers && (
-                <Text color={activeTheme.colors.Gray} selectable={false}>
-                  {`${String(
-                    index + firstLineNumber + hiddenLinesCount,
-                  ).padStart(padWidth, ' ')} `}
-                </Text>
-              )}
-              <Text color={activeTheme.defaultColor} wrap="wrap">
-                {contentToRender}
-              </Text>
-            </Box>
-          );
-        })}
+        {renderedLines}
       </MaxSizedBox>
     );
   } catch (error) {

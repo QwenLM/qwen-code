@@ -279,6 +279,17 @@ describe('TUI product evidence', () => {
     },
   );
 
+  it('R3-1 selects render acceptance for the dialog-bounds suite alone', async () => {
+    const { outputs, core } = await impact([
+      { filename: 'integration-tests/interactive/tui-dialog-bounds.test.ts' },
+    ]);
+    expect(core.setFailed).not.toHaveBeenCalled();
+    expect(outputs).toMatchObject(flags(['component', 'render']));
+    expect(condition(named('parity', 'Targeted product').if, outputs)).toBe(
+      true,
+    );
+  });
+
   it('unions both rename paths and reports only fixed reasons, never untrusted path text', async () => {
     const filename = 'packages/unknown/$(touch injected)\n<script>.ts';
     const files = [
@@ -405,7 +416,7 @@ describe('TUI product evidence', () => {
     }
   };
   const groupFiles = {
-    render: ['tui-migration', 'statusline-parity'],
+    render: ['tui-migration', 'tui-dialog-bounds', 'statusline-parity'],
     input: ['tui-input-ownership', 'tui-editor-parity', 'tui-clipboard-source'],
     recovery: ['tui-session-recovery'],
     integration: [

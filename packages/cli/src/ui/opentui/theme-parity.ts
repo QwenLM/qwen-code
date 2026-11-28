@@ -70,6 +70,7 @@ export function paletteFromInkTheme(theme: Theme): Palette {
     borderFocused: semantic.border.focused,
     borderDefault: semantic.border.default,
     hover: semantic.background.primary,
+    surface: semantic.background.surface,
   };
 }
 

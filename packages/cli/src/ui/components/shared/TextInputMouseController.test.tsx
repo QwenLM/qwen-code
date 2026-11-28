@@ -17,9 +17,13 @@ import {
   layoutRowForEvent,
 } from '../../utils/measure-element-position.js';
 import { type MouseEvent } from '../../utils/mouse.js';
+import { TextSelectionController } from '../../selection/use-text-selection.js';
 
 vi.mock('../../hooks/useMouseEvents.js', () => ({ useMouseEvents: vi.fn() }));
 vi.mock('../../hooks/useTerminalSize.js', () => ({ useTerminalSize: vi.fn() }));
+vi.mock('../../selection/use-text-selection.js', () => ({
+  TextSelectionController: vi.fn(() => null),
+}));
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: vi.fn(),
   layoutRowForEvent: vi.fn(),
@@ -39,6 +43,11 @@ function makeEvent(
     button: 'left',
     ...partial,
   } as MouseEvent;
+}
+
+function click(handler: (event: MouseEvent) => void, row: number, col: number) {
+  handler(makeEvent({ name: 'left-press', row, col }));
+  handler(makeEvent({ name: 'left-release', row, col }));
 }
 
 describe('TextInputMouseController', () => {
@@ -93,24 +102,26 @@ describe('TextInputMouseController', () => {
     return call[0];
   }
 
-  it('moves the cursor to the clicked offset on left-press', () => {
+  it('moves the cursor to the clicked offset only on release', () => {
     const handler = mountAndGetHandler();
     // row 6 → visual row 0 ('abc'); col 4 → text col 1 → between 'a' and 'b'.
     handler(makeEvent({ name: 'left-press', row: 6, col: 4 }));
+    expect(moveToOffset).not.toHaveBeenCalled();
+    handler(makeEvent({ name: 'left-release', row: 6, col: 4 }));
     expect(moveToOffset).toHaveBeenCalledWith(1);
   });
 
   it('maps a click on the second visual line through the newline', () => {
     const handler = mountAndGetHandler();
     // row 7 → visual row 1 ('def'); col 4 → text col 1 → logical (1,1) → offset 5.
-    handler(makeEvent({ name: 'left-press', row: 7, col: 4 }));
+    click(handler, 7, 4);
     expect(moveToOffset).toHaveBeenCalledWith(5);
   });
 
   it('applies the visual scroll offset', () => {
     const handler = mountAndGetHandler(makeBuffer({ visualScrollRow: 1 }));
     // row 6 → visual row 0 + scroll 1 = absolute visual row 1 ('def').
-    handler(makeEvent({ name: 'left-press', row: 6, col: 3 }));
+    click(handler, 6, 3);
     // col 3 → text col 0 → start of 'def' → offset 4.
     expect(moveToOffset).toHaveBeenCalledWith(4);
   });
@@ -133,14 +144,14 @@ describe('TextInputMouseController', () => {
     const handler = mountAndGetHandler();
     // row 6 → layoutRow = 6 - 1 - (-4) = 9; clickVisualRow = 9 - 9 = 0 ('abc');
     // col 4 → text col 1 → offset 1.
-    handler(makeEvent({ name: 'left-press', row: 6, col: 4 }));
+    click(handler, 6, 4);
     expect(moveToOffset).toHaveBeenCalledWith(1);
   });
 
   it('clamps a click in the prefix columns to the line start', () => {
     const handler = mountAndGetHandler();
     // col 1 < lines x (2) → clickVisualCol clamps to 0 → start of line → offset 0.
-    handler(makeEvent({ name: 'left-press', row: 6, col: 1 }));
+    click(handler, 6, 1);
     expect(moveToOffset).toHaveBeenCalledWith(0);
   });
 
@@ -158,5 +169,64 @@ describe('TextInputMouseController', () => {
     handler(makeEvent({ name: 'left-release', row: 6, col: 4 }));
     handler(makeEvent({ name: 'scroll-down', row: 6, col: 4 }));
     expect(moveToOffset).not.toHaveBeenCalled();
+  });
+
+  it('does not jump the cursor after dragging away and back', () => {
+    const handler = mountAndGetHandler();
+    handler(makeEvent({ name: 'left-press', row: 6, col: 4 }));
+    handler(makeEvent({ name: 'move', row: 7, col: 5 }));
+    handler(makeEvent({ name: 'move', row: 6, col: 4 }));
+    handler(makeEvent({ name: 'left-release', row: 6, col: 4 }));
+    expect(moveToOffset).not.toHaveBeenCalled();
+  });
+
+  it('does not jump on a release at another cell without a move event', () => {
+    const handler = mountAndGetHandler();
+    handler(makeEvent({ name: 'left-press', row: 6, col: 4 }));
+    handler(makeEvent({ name: 'left-release', row: 7, col: 5 }));
+    expect(moveToOffset).not.toHaveBeenCalled();
+  });
+
+  it('drops a pending click if the buffer changes before release', () => {
+    const buffer = makeBuffer();
+    const handler = mountAndGetHandler(buffer);
+    handler(makeEvent({ name: 'left-press', row: 6, col: 4 }));
+    buffer.lines = ['changed'];
+    handler(makeEvent({ name: 'left-release', row: 6, col: 4 }));
+    expect(moveToOffset).not.toHaveBeenCalled();
+  });
+
+  it('preserves CJK and logical newlines while copying soft-wrapped input', () => {
+    const buffer = {
+      ...makeBuffer(),
+      lines: ['ab中文cd', 'next'],
+      allVisualLines: ['ab中', '文cd', 'next'],
+      visualToLogicalMap: [
+        [0, 0],
+        [0, 3],
+        [1, 0],
+      ] as Array<[number, number]>,
+    };
+    mountAndGetHandler(buffer, 3);
+    const props = vi.mocked(TextSelectionController).mock.calls.at(-1)![0];
+    expect(props.getSelectionText?.({ sx: 2, sy: 5, ex: 5, ey: 6 })).toBe(
+      'ab中文cd',
+    );
+    expect(props.getSelectionText?.({ sx: 4, sy: 5, ex: 5, ey: 7 })).toBe(
+      '中文cd\nnext',
+    );
+    expect(props.getSelectionText?.({ sx: 4, sy: 5, ex: 4, ey: 5 })).toBe('中');
+  });
+
+  it('does not make an empty input placeholder selectable', () => {
+    mountAndGetHandler({
+      ...makeBuffer(),
+      lines: [''],
+      allVisualLines: [''],
+      visualToLogicalMap: [[0, 0]],
+    });
+    expect(
+      vi.mocked(TextSelectionController).mock.calls.at(-1)![0].isActive,
+    ).toBe(false);
   });
 });

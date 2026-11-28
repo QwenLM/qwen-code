@@ -198,9 +198,118 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('hello');
   });
+
+  it.each([false, true])(
+    'switches input/history selection without clearing the new owner (reversed=%s)',
+    (reversed) => {
+      frame = makeTwoLineFrame('hello', 'input');
+      const historyQuery = { current: null as SelectionQuery | null };
+      const inputQuery = { current: null as SelectionQuery | null };
+      render(
+        <>
+          <TextSelectionController
+            isActive
+            getViewportRect={() => ({ x: 0, y: 0, width: 5, height: 1 })}
+            getScrollState={() => scrollState}
+            hitTestScrollbar={() => false}
+            selectionQueryRef={historyQuery}
+          />
+          <TextSelectionController
+            isActive
+            getViewportRect={() => ({ x: 0, y: 1, width: 5, height: 1 })}
+            getScrollState={() => scrollState}
+            hitTestScrollbar={() => false}
+            selectionQueryRef={inputQuery}
+          />
+        </>,
+      );
+      const handlers = vi
+        .mocked(useMouseEvents)
+        .mock.calls.map((call) => call[0]);
+      if (reversed) handlers.reverse();
+      const drag = (row: number) => {
+        for (const event of [
+          makeEvent('left-press', 1, row),
+          makeEvent('move', 5, row),
+          makeEvent('left-release', 5, row),
+        ]) {
+          for (const handler of handlers) handler(event);
+        }
+      };
+      drag(2);
+      drag(1);
+      drag(2);
+      expect(setSelection).toHaveBeenLastCalledWith({
+        sx: 0,
+        sy: 1,
+        ex: 4,
+        ey: 1,
+        bounds: { x: 0, y: 1, width: 5, height: 1 },
+      });
+      expect(copyToClipboard).toHaveBeenNthCalledWith(1, 'input');
+      expect(copyToClipboard).toHaveBeenNthCalledWith(2, 'hello');
+      expect(copyToClipboard).toHaveBeenNthCalledWith(3, 'input');
+      expect(historyQuery.current?.getRange()).toBeNull();
+      expect(inputQuery.current?.getRange()?.sy).toBe(1);
+      expect(inputQuery.current?.getBounds()).toEqual({
+        x: 0,
+        y: 1,
+        width: 5,
+        height: 1,
+      });
+    },
+  );
+
+  it.each(['outside press', 'unmount', 'frame invalidation'])(
+    'does not let an old controller clear its successor on %s',
+    async (action) => {
+      frame = makeTwoLineFrame('hello', 'input');
+      const history = render(
+        <TextSelectionController
+          isActive
+          getViewportRect={() => ({ x: 0, y: 0, width: 5, height: 1 })}
+          getScrollState={() => scrollState}
+          hitTestScrollbar={() => false}
+        />,
+      );
+      const historyHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+      const historyListener = listener!;
+      selectHello(historyHandler);
+      render(
+        <TextSelectionController
+          isActive
+          getViewportRect={() => ({ x: 0, y: 1, width: 5, height: 1 })}
+          getScrollState={() => scrollState}
+          hitTestScrollbar={() => false}
+        />,
+      );
+      const inputHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+      inputHandler(makeEvent('left-press', 1, 2));
+      inputHandler(makeEvent('move', 5, 2));
+      inputHandler(makeEvent('left-release', 5, 2));
+      expect(setSelection).toHaveBeenLastCalledWith({
+        sx: 0,
+        sy: 1,
+        ex: 4,
+        ey: 1,
+        bounds: { x: 0, y: 1, width: 5, height: 1 },
+      });
+      setSelection.mockClear();
+      if (action === 'unmount') {
+        history.unmount();
+      } else if (action === 'frame invalidation') {
+        historyListener(makeTwoLineFrame('hullo', 'input'));
+        await flushMicrotasks();
+      } else {
+        historyHandler(makeEvent('left-press', 1, 2));
+      }
+      expect(setSelection).not.toHaveBeenCalled();
+    },
+  );
 
   it('includes the release cell when no move event is emitted', () => {
     const handler = mount();
@@ -212,6 +321,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('hello');
   });
@@ -231,6 +341,7 @@ describe('TextSelectionController', () => {
       sy: 1,
       ex: 5,
       ey: 1,
+      bounds: additionalSelectableRects[0],
     });
     expect(copyToClipboard).toHaveBeenCalledWith('status');
   });
@@ -250,6 +361,7 @@ describe('TextSelectionController', () => {
       sy: 1,
       ex: 2,
       ey: 1,
+      bounds: additionalSelectableRects[0],
     });
     expect(copyToClipboard).toHaveBeenCalledWith('sta');
   });
@@ -304,6 +416,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 2,
       ey: 0,
+      bounds: viewportRect,
     });
     handler(makeEvent('move', 10)); // drag to "baz"
     handler(makeEvent('left-release', 10));
@@ -314,6 +427,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 10,
       ey: 0,
+      bounds: viewportRect,
     });
     // The press-time copy survives so a repaint before release cannot lose
     // the word; the release overwrites it with the grown range.
@@ -341,6 +455,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 5,
       ey: 1,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
   });
@@ -364,6 +479,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 6,
       ey: 1,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('foo bar\nbaz qux');
   });
@@ -384,6 +500,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 0,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('a');
     expect(copyToClipboard).toHaveBeenCalledTimes(2);
@@ -423,6 +540,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 0,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('x');
   });
@@ -458,6 +576,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 6,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('history');
   });
@@ -502,6 +621,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 1,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld');
   });
@@ -521,6 +641,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 10,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
   });
@@ -541,6 +662,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 10,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
   });
@@ -564,6 +686,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 5,
       ey: 1,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
   });
@@ -587,6 +710,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 2,
       ey: 1,
+      bounds: viewportRect,
     });
     // Covered rows keep written trailing spaces (getSelectedText contract);
     // only the final row ends at the line span's trimmed last content column.
@@ -609,6 +733,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 3,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('foo ');
   });
@@ -632,6 +757,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 10,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('foo bar baz');
   });
@@ -648,6 +774,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 3,
       ey: 0,
+      bounds: viewportRect,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('中b');
   });
@@ -701,6 +828,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+      bounds: viewportRect,
     });
 
     cleanup();
@@ -796,6 +924,7 @@ describe('TextSelectionController', () => {
       sy: 1,
       ex: 4,
       ey: 1,
+      bounds: additionalSelectableRects[0],
     });
   });
 
@@ -821,6 +950,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+      bounds: viewportRect,
     });
   });
 
@@ -855,6 +985,7 @@ describe('TextSelectionController', () => {
       sy: 0,
       ex: 4,
       ey: 0,
+      bounds: viewportRect,
     });
     setSelection.mockClear();
 

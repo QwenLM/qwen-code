@@ -14,7 +14,7 @@ import {
   getExtensionDisplayName,
   getExtensionDescription,
 } from '@qwen-code/qwen-code-core/extension/i18n.js';
-import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
+import { useDialogSize } from '../../../contexts/DialogSizeContext.js';
 import { t, getCurrentLanguage } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
 
@@ -31,7 +31,7 @@ export const ExtensionListStep = ({
 }: ExtensionListStepProps) => {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const { columns: termWidth } = useTerminalSize();
+  const { columns: termWidth } = useDialogSize();
 
   // Calculate max widths for each column for alignment
   const { maxNameWidth, maxStatusWidth } = useMemo(() => {

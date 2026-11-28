@@ -15,7 +15,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from 'react';
-import { type DOMElement, measureElement } from 'ink';
+import { type DOMElement, useBoxMetrics } from 'ink';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
@@ -97,8 +97,6 @@ import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
-  getStickyTodoMaxVisibleItemsForMode,
-  getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
@@ -155,7 +153,6 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
-import { useModBand } from './hooks/use-mod-band.js';
 import { modBandInput } from './utils/mod-band-tree.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import { rewindSession } from './utils/session-rewind.js';
@@ -255,7 +252,6 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from './contexts/BackgroundTaskViewContext.js';
-import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../nonInteractive/chat-recording-failure.js';
 import { buildPermissionSuggestions } from '../nonInteractive/permission-suggestions.js';
@@ -1027,11 +1023,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const [expandedToolBatchIds, setExpandedToolBatchIds] = useState<
     ReadonlySet<string>
   >(() => new Set<string>());
-  const expandToolBatch = useCallback((batchId: string) => {
+  const toggleToolBatch = useCallback((batchId: string) => {
     setExpandedToolBatchIds((prev) => {
-      if (prev.has(batchId)) return prev;
       const next = new Set(prev);
-      next.add(batchId);
+      if (next.has(batchId)) {
+        next.delete(batchId);
+      } else {
+        next.add(batchId);
+      }
       return next;
     });
   }, []);
@@ -1568,11 +1567,14 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [historyManager.addItem]);
 
   // Derive widths for InputPrompt using shared helper
+  const [inputPrefixWidth, setInputPrefixWidth] = useState(2);
   const { inputWidth, suggestionsWidth } = useMemo(() => {
-    const { inputWidth, suggestionsWidth } =
-      calculatePromptWidths(terminalWidth);
+    const { inputWidth, suggestionsWidth } = calculatePromptWidths(
+      terminalWidth,
+      inputPrefixWidth,
+    );
     return { inputWidth, suggestionsWidth };
-  }, [terminalWidth]);
+  }, [terminalWidth, inputPrefixWidth]);
   // Uniform width for bordered box components: accounts for margins and caps at 100
   const mainAreaWidth = Math.min(terminalWidth - 4, 100);
   const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
@@ -2757,11 +2759,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
-  const {
-    dialogOpen: bgTasksDialogOpen,
-    entries: bgTaskEntries,
-    livePanelFocused: bgLivePanelFocused,
-  } = useBackgroundTaskViewState();
+  const { dialogOpen: bgTasksDialogOpen, entries: bgTaskEntries } =
+    useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
@@ -4462,28 +4461,8 @@ export const AppContainer = (props: AppContainerProps) => {
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
 
-  const shouldShowStickyTodos =
-    stickyTodos !== null &&
-    !dialogsVisible &&
-    !isFeedbackDialogOpen &&
-    streamingState === StreamingState.Responding;
-  const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
-    terminalHeight,
-    useTerminalBuffer,
-  );
-  const stickyTodosLayoutKey = shouldShowStickyTodos
-    ? getStickyTodosLayoutKey(
-        stickyTodos,
-        stickyTodoWidth,
-        stickyTodoMaxVisibleItems,
-      )
-    : 'hidden';
-  const [controlsHeight, setControlsHeight] = useState(0);
+  const { height: controlsHeight } = useBoxMetrics(mainControlsRef);
 
-  // The Mods' band above the prompt: its input, and its tree, whose height
-  // the controls measurement below takes in.
-  const modBand = useModBand(config);
   const isModWorking = streamingState !== StreamingState.Idle;
   useEffect(() => {
     getInteractiveModSession(config)?.setRenderInput(
@@ -4502,56 +4481,6 @@ export const AppContainer = (props: AppContainerProps) => {
     useTerminalBuffer,
     isFeedbackDialogOpen,
     isModWorking,
-  ]);
-
-  // Re-measure the footer whenever the LiveAgentPanel's height can change
-  // (agents launching / finishing / focus), so `controlsHeight` — and thus
-  // `availableTerminalHeight` — never goes stale below the composer. See
-  // getLiveAgentPanelLayoutKey for the full rationale (#5798).
-  const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
-    bgTaskEntries,
-    bgLivePanelFocused,
-  );
-
-  useLayoutEffect(() => {
-    if (!mainControlsRef.current) {
-      setControlsHeight((previousHeight) =>
-        previousHeight === 0 ? previousHeight : 0,
-      );
-      return;
-    }
-
-    const fullFooterMeasurement = measureElement(mainControlsRef.current);
-    setControlsHeight((previousHeight) =>
-      previousHeight === fullFooterMeasurement.height
-        ? previousHeight
-        : fullFooterMeasurement.height,
-    );
-  }, [
-    buffer,
-    terminalWidth,
-    terminalHeight,
-    btwItem,
-    dialogsVisible,
-    stickyTodosLayoutKey,
-    liveAgentPanelLayoutKey,
-    // Composer and update notification height also shift with these; without
-    // them the footer isn't re-measured during a streaming turn and the VP
-    // viewport bottom clips.
-    // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
-    streamingState,
-    updateInfo,
-    agentViewState.activeView,
-    // The agent tab footer grows with its own status row / queued messages /
-    // input text, none of which the deps above track; AgentComposer syncs
-    // this key to AgentViewContext whenever they change so the footer is
-    // re-measured and the transcript viewport does not stay stale-high
-    // (#9507). Mirrors the LiveAgentPanel layout key (#5798).
-    agentViewState.agentComposerLayoutKey,
-    embeddedShellFocused,
-    messageQueue.length,
-    isInputActive,
-    modBand,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -5768,6 +5697,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
+      setInputPrefixWidth,
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
@@ -5937,9 +5867,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const toolDetailsExpandedValue = useMemo(
     () => ({
       expandedBatchIds: expandedToolBatchIds,
-      expandBatch: expandToolBatch,
+      toggleBatch: toggleToolBatch,
     }),
-    [expandedToolBatchIds, expandToolBatch],
+    [expandedToolBatchIds, toggleToolBatch],
   );
 
   return (

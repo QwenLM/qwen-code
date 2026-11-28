@@ -112,16 +112,22 @@ index be49354..14215f0 100644
  /**
 diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
 new file mode 100644
-index 0000000..c294036
+index 0000000..54d64fd
 --- /dev/null
 +++ b/node_modules/ink/build/frame-controller.d.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,42 @@
 +/// <reference types="node" />
 +export type ScreenSelection = {
 +    sx: number;
 +    sy: number;
 +    ex: number;
 +    ey: number;
++    bounds?: {
++        x: number;
++        y: number;
++        width: number;
++        height: number;
++    };
 +};
 +export type FrameCell = {
 +    type: 'char';
@@ -154,10 +160,10 @@ index 0000000..c294036
 +export declare const getFrameController: (stdout: NodeJS.WriteStream) => FrameController | undefined;
 diff --git a/node_modules/ink/build/frame-controller.js b/node_modules/ink/build/frame-controller.js
 new file mode 100644
-index 0000000..745a4ba
+index 0000000..d9a7f0a
 --- /dev/null
 +++ b/node_modules/ink/build/frame-controller.js
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +import instances from './instances.js';
 +const sameSelection = (a, b) => {
 +    if (a === b) {
@@ -166,7 +172,9 @@ index 0000000..745a4ba
 +    if (!a || !b) {
 +        return false;
 +    }
-+    return a.sx === b.sx && a.sy === b.sy && a.ex === b.ex && a.ey === b.ey;
++    return a.sx === b.sx && a.sy === b.sy && a.ex === b.ex && a.ey === b.ey &&
++        a.bounds?.x === b.bounds?.x && a.bounds?.y === b.bounds?.y &&
++        a.bounds?.width === b.bounds?.width && a.bounds?.height === b.bounds?.height;
 +};
 +// Creates the bidirectional bridge between the application and the renderer:
 +// the app reads the latest composited frame (getFrame) and pushes a selection
@@ -375,10 +383,10 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..1beca9b 100644
+index ef659f3..f455704 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
-@@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
+@@ -17,6 +17,7 @@
  import logUpdate from './log-update.js';
  import { bsu, esu, shouldSynchronize } from './write-synchronized.js';
  import instances from './instances.js';
@@ -386,7 +394,52 @@ index ef659f3..1beca9b 100644
  import App from './components/App.js';
  import { accessibilityContext as AccessibilityContext } from './components/AccessibilityContext.js';
  import { resolveFlags, } from './kitty-keyboard.js';
-@@ -160,6 +161,7 @@ export default class Ink {
+@@ -124,6 +125,44 @@
+     else if (typeof throttledValue.cancel === 'function') {
+         throttledValue.cancel();
+     }
++};
++const createRenderScheduler = (render, interval) => {
++    let lastRender = -Infinity;
++    let timer;
++    let pending = false;
++    const invoke = () => {
++        if (timer !== undefined) {
++            clearTimeout(timer);
++        }
++        timer = undefined;
++        pending = false;
++        lastRender = performance.now();
++        render();
++    };
++    const schedule = () => {
++        pending = true;
++        const remaining = interval - (performance.now() - lastRender);
++        if (remaining <= 0) {
++            invoke();
++        }
++        else if (timer === undefined) {
++            timer = setTimeout(invoke, Math.ceil(remaining));
++        }
++    };
++    schedule.flush = () => {
++        if (pending) {
++            invoke();
++        }
++    };
++    schedule.cancel = () => {
++        if (timer !== undefined) {
++            clearTimeout(timer);
++        }
++        timer = undefined;
++        pending = false;
++        lastRender = -Infinity;
++    };
++    return schedule;
+ };
+ export default class Ink {
+     /**
+@@ -160,6 +199,7 @@
      kittyProtocolEnabled = false;
      cancelKittyDetection;
      nextRenderCommit;
@@ -394,7 +447,19 @@ index ef659f3..1beca9b 100644
      constructor(options) {
          autoBind(this);
          this.options = options;
-@@ -196,6 +198,12 @@ export default class Ink {
+@@ -185,10 +225,7 @@
+             this.throttledOnRender = undefined;
+         }
+         else {
+-            const throttled = throttle(this.onRender, renderThrottleMs, {
+-                leading: true,
+-                trailing: true,
+-            });
++            const throttled = createRenderScheduler(this.onRender, renderThrottleMs);
+             this.rootNode.onRender = () => {
+                 this.hasPendingThrottledRender = true;
+                 throttled();
+@@ -196,6 +233,12 @@
              this.throttledOnRender = throttled;
          }
          this.rootNode.onImmediateRender = this.onRender;
@@ -407,7 +472,7 @@ index ef659f3..1beca9b 100644
          this.rootNode.onStaticChange = this.handleStaticChange;
          this.log = logUpdate.create(options.stdout, {
              incremental: options.incrementalRendering,
-@@ -317,7 +325,16 @@ export default class Ink {
+@@ -317,7 +360,16 @@
              this.nextRenderCommit = undefined;
          }
          const startTime = performance.now();
@@ -425,7 +490,7 @@ index ef659f3..1beca9b 100644
          this.options.onRender?.({ renderTime: performance.now() - startTime });
          // If <Static> output isn't empty, it means new children have been added to it
          const hasStaticOutput = staticOutput && staticOutput !== '\n';
-@@ -642,6 +659,7 @@ export default class Ink {
+@@ -642,6 +694,7 @@
          this.alternateScreen = this.resolveAlternateScreenOption(enabled, this.interactive);
          if (this.alternateScreen) {
              this.writeBestEffort(this.options.stdout, ansiEscapes.enterAlternativeScreen);
@@ -433,7 +498,7 @@ index ef659f3..1beca9b 100644
              this.writeBestEffort(this.options.stdout, hideCursorEscape);
          }
      }
-@@ -688,6 +706,7 @@ export default class Ink {
+@@ -688,6 +741,7 @@
          return this.nextRenderCommit.promise;
      }
      renderInteractiveFrame(output, outputHeight, staticOutput) {
@@ -441,7 +506,7 @@ index ef659f3..1beca9b 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
-@@ -707,7 +726,7 @@ export default class Ink {
+@@ -707,7 +761,7 @@
              if (sync) {
                  this.options.stdout.write(bsu);
              }
@@ -450,6 +515,13 @@ index ef659f3..1beca9b 100644
              this.lastOutput = output;
              this.lastOutputToRender = outputToRender;
              this.lastOutputHeight = outputHeight;
+@@ -809,4 +863,4 @@
+         this.kittyProtocolEnabled = true;
+     }
+ }
+-//# sourceMappingURL=ink.js.map
+\ No newline at end of file
++//# sourceMappingURL=ink.js.map
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
 index cdb5fc4..cd10dc2 100644
 --- a/node_modules/ink/build/log-update.js
@@ -747,19 +819,24 @@ index 0f4523f..a3ef634 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..bfd3d08 100644
+index c763b77..945fec8 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
-@@ -1,6 +1,26 @@
+@@ -1,6 +1,31 @@
  import sliceAnsi from 'slice-ansi';
  import stringWidth from 'string-width';
  import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
-+// Background applied to selected cells. Appended after a cell's existing styles
-+// so the foreground is preserved and this background wins at the terminal.
++// Replace existing backgrounds when selecting: duplicate background styles
++// prevent styledCharsToString from restoring the surface color at the edge.
 +const SELECTION_BG = { code: '\x1b[48;5;240m', endCode: '\x1b[49m' };
 +// Linear reading-order selection: whole rows between the first and last, partial
 +// on the first/last row. Coordinates are screen cells in the composited frame.
 +const isCellSelected = (x, y, sel) => {
++    if (sel.bounds &&
++        (x < sel.bounds.x || x >= sel.bounds.x + sel.bounds.width ||
++            y < sel.bounds.y || y >= sel.bounds.y + sel.bounds.height)) {
++        return false;
++    }
 +    if (y < sel.sy || y > sel.ey) {
 +        return false;
 +    }
@@ -777,7 +854,7 @@ index c763b77..bfd3d08 100644
  class OutputCaches {
      widths = new Map();
      blockWidths = new Map();
-@@ -45,7 +65,7 @@ export default class Output {
+@@ -45,7 +70,7 @@ export default class Output {
          this.height = height;
      }
      write(x, y, text, options) {
@@ -786,7 +863,7 @@ index c763b77..bfd3d08 100644
          if (!text) {
              return;
          }
-@@ -55,6 +75,8 @@ export default class Output {
+@@ -55,6 +80,8 @@ export default class Output {
              y,
              text,
              transformers,
@@ -795,7 +872,7 @@ index c763b77..bfd3d08 100644
          });
      }
      clip(clip) {
-@@ -68,7 +90,7 @@ export default class Output {
+@@ -68,7 +95,7 @@ export default class Output {
              type: 'unclip',
          });
      }
@@ -804,7 +881,7 @@ index c763b77..bfd3d08 100644
          // Initialize output array with a specific set of rows, so that margin/padding at the bottom is preserved
          const output = [];
          for (let y = 0; y < this.height; y++) {
-@@ -79,10 +101,13 @@ export default class Output {
+@@ -79,10 +106,13 @@ export default class Output {
                      value: ' ',
                      fullWidth: false,
                      styles: [],
@@ -818,7 +895,7 @@ index c763b77..bfd3d08 100644
          const clips = [];
          for (const operation of this.operations) {
              if (operation.type === 'clip') {
-@@ -92,9 +117,10 @@ export default class Output {
+@@ -92,9 +122,10 @@ export default class Output {
                  clips.pop();
              }
              if (operation.type === 'write') {
@@ -830,15 +907,40 @@ index c763b77..bfd3d08 100644
                  const clip = clips.at(-1);
                  if (clip) {
                      const clipHorizontally = typeof clip?.x1 === 'number' && typeof clip?.x2 === 'number';
-@@ -129,6 +155,7 @@ export default class Output {
-                         const height = lines.length;
-                         const to = y + height > clip.y2 ? clip.y2 - y : height;
-                         lines = lines.slice(from, to);
-+                        firstLineIndex = from;
-                         if (y < clip.y1) {
-                             y = clip.y1;
+@@ -113,6 +144,16 @@ export default class Output {
+                             continue;
                          }
-@@ -144,8 +171,34 @@ export default class Output {
+                     }
++                    if (clipVertically) {
++                        const from = y < clip.y1 ? clip.y1 - y : 0;
++                        const height = lines.length;
++                        const to = y + height > clip.y2 ? clip.y2 - y : height;
++                        lines = lines.slice(from, to);
++                        firstLineIndex = from;
++                        if (y < clip.y1) {
++                            y = clip.y1;
++                        }
++                    }
+                     if (clipHorizontally) {
+                         lines = lines.map(line => {
+                             const from = x < clip.x1 ? clip.x1 - x : 0;
+@@ -124,15 +165,6 @@ export default class Output {
+                             x = clip.x1;
+                         }
+                     }
+-                    if (clipVertically) {
+-                        const from = y < clip.y1 ? clip.y1 - y : 0;
+-                        const height = lines.length;
+-                        const to = y + height > clip.y2 ? clip.y2 - y : height;
+-                        lines = lines.slice(from, to);
+-                        if (y < clip.y1) {
+-                            y = clip.y1;
+-                        }
+-                    }
+                 }
+                 let offsetY = 0;
+                 for (let [index, line] of lines.entries()) {
+@@ -144,8 +176,34 @@ export default class Output {
                      for (const transformer of transformers) {
                          line = transformer(line, index);
                      }
@@ -873,7 +975,7 @@ index c763b77..bfd3d08 100644
                      // Nothing to write (e.g. line was clipped away).
                      if (characters.length === 0) {
                          offsetY++;
-@@ -156,6 +209,8 @@ export default class Output {
+@@ -156,6 +214,8 @@ export default class Output {
                          value: ' ',
                          fullWidth: false,
                          styles: [],
@@ -882,7 +984,7 @@ index c763b77..bfd3d08 100644
                      };
                      // Wide characters (e.g. CJK) occupy two cells: a leading
                      // cell with the character and a trailing placeholder with
-@@ -169,7 +224,11 @@ export default class Output {
+@@ -169,7 +229,11 @@ export default class Output {
                          currentLine[offsetX - 1] = spaceCell;
                      }
                      for (const character of characters) {
@@ -895,7 +997,7 @@ index c763b77..bfd3d08 100644
                          // Determine printed width using string-width to align with measurement
                          const characterWidth = Math.max(1, this.caches.getStringWidth(character.value));
                          // For multi-column characters, clear following cells to avoid stray spaces/artifacts
-@@ -180,6 +239,8 @@ export default class Output {
+@@ -180,6 +244,8 @@ export default class Output {
                                      value: '',
                                      fullWidth: false,
                                      styles: character.styles,
@@ -904,7 +1006,7 @@ index c763b77..bfd3d08 100644
                                  };
                              }
                          }
-@@ -192,6 +253,30 @@ export default class Output {
+@@ -192,6 +258,33 @@ export default class Output {
                  }
              }
          }
@@ -923,10 +1025,13 @@ index c763b77..bfd3d08 100644
 +                        continue;
 +                    }
 +                    const cell = row[x];
-+                    if (cell) {
++                    if (cell?.selectable) {
 +                        row[x] = {
 +                            ...cell,
-+                            styles: [...(cell.styles ?? []), SELECTION_BG],
++                            styles: [
++                                ...(cell.styles ?? []).filter(style => style.endCode !== SELECTION_BG.endCode),
++                                SELECTION_BG,
++                            ],
 +                        };
 +                    }
 +                }
@@ -935,7 +1040,7 @@ index c763b77..bfd3d08 100644
          const generatedOutput = output
              .map(line => {
              // See https://github.com/vadimdemedes/ink/pull/564#issuecomment-1637022742
-@@ -202,6 +287,8 @@ export default class Output {
+@@ -202,6 +295,8 @@ export default class Output {
          return {
              output: generatedOutput,
              height: output.length,
@@ -1022,6 +1127,33 @@ index db5c807..3ac805a 100644
      }
  };
  export default renderBackground;
+diff --git a/node_modules/ink/build/render-border.js b/node_modules/ink/build/render-border.js
+index 504cd3b..bb497ec 100644
+--- a/node_modules/ink/build/render-border.js
++++ b/node_modules/ink/build/render-border.js
+@@ -65,18 +65,19 @@ const renderBorder = (x, y, node, output) => {
+         bottomBorder &&= stylePiece(bottomBorder, bottomBorderColor, bottomBorderBackgroundColor, dimBottomBorderColor);
+         const offsetY = showTopBorder ? 1 : 0;
+         if (topBorder) {
+-            output.write(x, y, topBorder, { transformers: [] });
++            output.write(x, y, topBorder, { transformers: [], selectable: false });
+         }
+         if (leftBorder) {
+-            output.write(x, y + offsetY, leftBorder, { transformers: [] });
++            output.write(x, y + offsetY, leftBorder, { transformers: [], selectable: false });
+         }
+         if (rightBorder) {
+             output.write(x + width - 1, y + offsetY, rightBorder, {
+                 transformers: [],
++                selectable: false,
+             });
+         }
+         if (bottomBorder) {
+-            output.write(x, y + height - 1, bottomBorder, { transformers: [] });
++            output.write(x, y + height - 1, bottomBorder, { transformers: [], selectable: false });
+         }
+     }
+ };
 diff --git a/node_modules/ink/build/render-node-to-output.d.ts b/node_modules/ink/build/render-node-to-output.d.ts
 index 127c620..6d5a005 100644
 --- a/node_modules/ink/build/render-node-to-output.d.ts

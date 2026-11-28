@@ -13,6 +13,7 @@ import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { RewindSelector } from './RewindSelector.js';
+import { DialogSizeProvider } from '../contexts/DialogSizeContext.js';
 
 vi.mock('../hooks/useKeypress.js');
 vi.mock('../hooks/useTerminalSize.js');
@@ -98,6 +99,24 @@ describe('RewindSelector', () => {
 
     pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
     expect(lastFrame()).toContain('› #2 second prompt');
+  });
+
+  it('PR17541 R1-3 uses a sixteen-row dialog for exactly five short turns', () => {
+    const { lastFrame } = render(
+      <DialogSizeProvider value={{ columns: 60, rows: 16 }}>
+        <RewindSelector
+          history={Array.from({ length: 10 }, (_, i) =>
+            userTurn(i + 1, `sizing-prompt-${i + 1}`, `prompt-${i + 1}`),
+          )}
+          onRewind={vi.fn()}
+          onCancel={vi.fn()}
+          fileCheckpointingEnabled={false}
+          fileHistoryService={fileHistoryService}
+        />
+      </DialogSizeProvider>,
+    );
+    expect((lastFrame()?.match(/sizing-prompt-/g) ?? []).length).toBe(5);
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
   });
 
   it('navigates the pick list with arrow keys and cancels with Escape', () => {

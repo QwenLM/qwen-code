@@ -19,6 +19,7 @@ import { theme } from '../../semantic-colors.js';
 
 interface AgentFooterProps {
   approvalMode: ApprovalMode | undefined;
+  showApprovalMode?: boolean;
   promptTokenCount: number;
   contextWindowSize: number | undefined;
   terminalWidth: number;
@@ -26,11 +27,12 @@ interface AgentFooterProps {
 
 export const AgentFooter: React.FC<AgentFooterProps> = ({
   approvalMode,
+  showApprovalMode = true,
   promptTokenCount,
   contextWindowSize,
   terminalWidth,
 }) => {
-  const showApproval = approvalMode !== undefined;
+  const showApproval = approvalMode !== undefined && showApprovalMode;
   const showContext = promptTokenCount > 0 && contextWindowSize !== undefined;
 
   if (!showApproval && !showContext) {

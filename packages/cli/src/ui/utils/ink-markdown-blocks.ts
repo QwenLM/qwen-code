@@ -54,12 +54,29 @@ export function* parseInkMarkdownBlocks(
   lines: readonly string[],
   renderVisualBlocks: boolean,
   isPending = false,
+  resume?: {
+    startIndex: number;
+    onStableBoundary(index: number): void;
+  },
 ): Generator<InkMarkdownBlock> {
   let fence: Fence | undefined;
   let codeDelimiter = '';
   let table: Table | undefined;
 
-  for (const [index, line] of lines.entries()) {
+  const startIndex = resume?.startIndex ?? 0;
+  for (let index = startIndex; index < lines.length; index++) {
+    const line = lines[index]!;
+    // A completed blank line outside a fence or table can be resumed with
+    // fresh parser state, even when more content arrives later.
+    if (
+      resume &&
+      index > startIndex &&
+      lines[index - 1]!.trim().length === 0 &&
+      !fence &&
+      !table
+    ) {
+      resume.onStableBoundary(index);
+    }
     const codeMatch = CODE_FENCE_RE.exec(line);
     const mathMatch = MATH_FENCE_RE.test(line);
     if (fence) {

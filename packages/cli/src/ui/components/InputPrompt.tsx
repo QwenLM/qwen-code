@@ -92,7 +92,12 @@ import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
-import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
+import {
+  getApprovalModeCycleHint,
+  getApprovalModeIndicatorColor,
+  getApprovalModeLabel,
+  getApprovalModePromptStyle,
+} from './approvalModeVisuals.js';
 import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import { usePromptVoiceInput } from '../hooks/use-prompt-voice-input.js';
 import { VoiceIndicator } from './VoiceIndicator.js';
@@ -219,6 +224,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const setInputPrefixWidth = uiActions.setInputPrefixWidth;
   const feedbackOpenRef = useRef(uiState.isFeedbackDialogOpen);
   useEffect(() => {
     feedbackOpenRef.current = uiState.isFeedbackDialogOpen;
@@ -2443,6 +2449,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         ? 2 // "* " = 2 chars
         : 2; // "> " = 2 chars
 
+  useEffect(() => {
+    setInputPrefixWidth?.(prefixWidth);
+    return () => setInputPrefixWidth?.(2);
+  }, [prefixWidth, setInputPrefixWidth]);
+
   return (
     <>
       {attachments.length > 0 && (
@@ -2477,6 +2488,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
+        bottomRightLabel={
+          isVpMode && !shellModeActive
+            ? `${getApprovalModeLabel(approvalMode)} ${getApprovalModeCycleHint()}`
+            : undefined
+        }
+        bottomRightLabelColor={getApprovalModeIndicatorColor(approvalMode)}
         isActive={!isEmbeddedShellFocused}
         renderLine={renderLineWithHighlighting}
         mouseEnabled={mouseInteractionsEnabled}

@@ -307,7 +307,12 @@ export function ContentMouseController(
           // Snapshot the selected text now rather than at execute time: the
           // frame can keep streaming while the menu is open, and re-deriving
           // a stale range against new cells would copy the wrong text.
-          const selectionText = getSelectedText(frame, range);
+          const selectionText = getSelectedText(
+            frame,
+            range,
+            propsRef.current.selectionQueryRef?.current?.getBounds() ??
+              undefined,
+          );
           if (selectionText) {
             items.push({
               id: 'copy-selection',

@@ -23,6 +23,7 @@ import { useStatusLine } from '../hooks/use-ink-status-line.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
 import { Spinner } from './RespondingSpinner.js';
@@ -58,6 +59,8 @@ interface FooterProps {
 
 export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
+  const approvalModeInInput =
+    useVirtualViewport(uiState.useTerminalBuffer) && uiState.isInputActive;
   const config = useConfig();
   const workflowMode = useWorkflowMode(config);
   const settings = useSettings();
@@ -150,14 +153,14 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   ) : uiState.streamingState === StreamingState.Responding ? (
     <Text color={theme.text.secondary}>
       {t('Enter to steer · Ctrl+Q to queue')}
-      {showAutoAcceptIndicator !== undefined && (
+      {showAutoAcceptIndicator !== undefined && !approvalModeInInput && (
         <>
           {' · '}
           <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
         </>
       )}
     </Text>
-  ) : showAutoAcceptIndicator !== undefined ? (
+  ) : showAutoAcceptIndicator !== undefined && !approvalModeInInput ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>

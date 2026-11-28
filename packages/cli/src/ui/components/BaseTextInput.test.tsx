@@ -18,6 +18,8 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
 import type { TextBuffer } from './shared/text-buffer.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
+import { TextInputMouseController } from './shared/TextInputMouseController.js';
 
 const mockSetCursorPosition = vi.hoisted(() => vi.fn());
 const mockUseBoxMetrics = vi.hoisted(() =>
@@ -43,6 +45,9 @@ vi.mock('ink', async (importOriginal) => {
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
+}));
+vi.mock('./shared/TextInputMouseController.js', () => ({
+  TextInputMouseController: vi.fn(() => null),
 }));
 
 const mockedUseKeypress = vi.mocked(useKeypress);
@@ -119,6 +124,33 @@ describe('BaseTextInput', () => {
     handler(makeKey({ name: 'm', meta: true, sequence: 'µ' }));
 
     expect(buffer.handleInput).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'enables the shared input mouse layer by default only in VP mode (VP=%s)',
+    (isVp) => {
+      render(
+        <VirtualViewportContext.Provider value={isVp}>
+          <BaseTextInput buffer={createBuffer()} onSubmit={vi.fn()} />
+        </VirtualViewportContext.Provider>,
+      );
+      expect(vi.mocked(TextInputMouseController).mock.calls.length > 0).toBe(
+        isVp,
+      );
+    },
+  );
+
+  it('preserves an explicit mouse-disabled override in VP mode', () => {
+    render(
+      <VirtualViewportContext.Provider value={true}>
+        <BaseTextInput
+          buffer={createBuffer()}
+          onSubmit={vi.fn()}
+          mouseEnabled={false}
+        />
+      </VirtualViewportContext.Provider>,
+    );
+    expect(TextInputMouseController).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -212,8 +244,8 @@ describe('BaseTextInput', () => {
   });
 
   it.each([
-    { columns: 11, label: 'session', expectedLabel: 'sessi…' },
-    { columns: 12, label: '会话标题', expectedLabel: '会话标…' },
+    { columns: 11, label: 'session', expectedLabel: 's…' },
+    { columns: 12, label: '会话标题', expectedLabel: '会…' },
     { columns: 20, label: 'session', expectedLabel: 'session' },
     { columns: 4, label: 'session', expectedLabel: '' },
   ])(
@@ -238,12 +270,68 @@ describe('BaseTextInput', () => {
         );
         const topBorderLine = lastFrame()?.split('\n')[0] ?? '';
 
-        expect(stringWidth(topBorderLine)).toBe(columns);
+        expect(stringWidth(topBorderLine)).toBeLessThanOrEqual(columns);
+        const borderWidth = columns >= 8 ? columns - 4 : columns;
+        expect(stringWidth(topBorderLine.trimStart())).toBe(borderWidth);
         if (expectedLabel) {
           expect(topBorderLine).toContain(` ${expectedLabel} `);
         } else {
-          expect(topBorderLine).toBe('─'.repeat(columns));
+          expect(topBorderLine.trimStart()).toBe('─'.repeat(borderWidth));
         }
+      } finally {
+        if (originalDescriptor) {
+          Object.defineProperty(process.stdout, 'columns', originalDescriptor);
+        } else {
+          Reflect.deleteProperty(process.stdout, 'columns');
+        }
+      }
+    },
+  );
+
+  it.each([
+    { columns: 11, label: 'permissions', expectedLabel: 'p…' },
+    { columns: 12, label: '询问权限', expectedLabel: '询…' },
+    { columns: 30, label: 'YOLO mode', expectedLabel: 'YOLO mode' },
+    { columns: 4, label: 'permissions', expectedLabel: '' },
+  ])(
+    'keeps both border labels within $columns columns without adding height',
+    ({ columns, label, expectedLabel }) => {
+      const originalDescriptor = Object.getOwnPropertyDescriptor(
+        process.stdout,
+        'columns',
+      );
+      Object.defineProperty(process.stdout, 'columns', {
+        configurable: true,
+        value: columns,
+      });
+      try {
+        const buffer = createBuffer();
+        const { lastFrame, rerender } = render(
+          <BaseTextInput
+            buffer={buffer}
+            onSubmit={vi.fn()}
+            topRightLabel="session"
+          />,
+        );
+        const before = (lastFrame() ?? '').split('\n');
+        rerender(
+          <BaseTextInput
+            buffer={buffer}
+            onSubmit={vi.fn()}
+            topRightLabel="session"
+            bottomRightLabel={label}
+            bottomRightLabelColor="red"
+          />,
+        );
+        const after = (lastFrame() ?? '').split('\n');
+        expect(after).toHaveLength(before.length);
+        expect(after[0]).toBe(before[0]);
+        const bottom = after.at(-1) ?? '';
+        expect(stringWidth(bottom.trimStart())).toBe(
+          columns >= 8 ? columns - 4 : columns,
+        );
+        expect(after.every((line) => stringWidth(line) <= columns)).toBe(true);
+        if (expectedLabel) expect(bottom).toContain(` ${expectedLabel} ──`);
       } finally {
         if (originalDescriptor) {
           Object.defineProperty(process.stdout, 'columns', originalDescriptor);

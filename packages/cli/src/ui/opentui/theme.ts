@@ -35,6 +35,7 @@ export interface Palette {
   borderFocused: string;
   borderDefault: string;
   hover: string;
+  surface?: string;
   /** Mode background; lets selection colors keep contrast on light themes. */
   bg?: string;
   selectionBg?: string;
@@ -229,6 +230,7 @@ export function applyThemeMode(
   // The dark surface has no `bg` (terminal transparency); Object.assign
   // never deletes keys, so a previous light `bg` must be cleared explicitly.
   C.bg = surface.bg;
+  C.surface = undefined;
   GRADIENT = DEFAULT_GRADIENT;
   setSyntax(buildSyntax(m));
 }
@@ -249,17 +251,20 @@ export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
   THEME_REVISION++;
   const light = definition.type === 'light';
   const surface = light ? LIGHT : DARK;
-  // Empty-string palette values mean "no color" in ink themes (the NoColor
-  // theme is all empty strings) and must stay unset like unresolvable ones.
+  // Missing and empty palette values stay unset like unresolvable colors.
   const palette = Object.fromEntries(
     Object.entries(definition.palette)
-      .map(([key, value]) => [key, value === '' ? undefined : toHex(value)])
+      .map(([key, value]) => [
+        key,
+        typeof value === 'string' && value !== '' ? toHex(value) : undefined,
+      ])
       .filter(([, hex]) => hex !== undefined),
   ) as Partial<Palette>;
   Object.assign(C, surface, palette);
   // The dark surface intentionally has no `bg` (keeps terminal transparency);
   // Object.assign never clears keys, so reset it explicitly.
   C.bg = surface.bg;
+  C.surface = palette.surface;
   // Same parseColor reason as the palette: resolve the stops to #rrggbb.
   // Fewer than two survivors means no ramp at all — ink renders the logo
   // uncolored in that case rather than painting a single stop.

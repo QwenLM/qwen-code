@@ -12,7 +12,7 @@ import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import type { RadioSelectItem } from './shared/RadioButtonSelect.js';
 import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useDialogSize } from '../contexts/DialogSizeContext.js';
 import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -118,15 +118,13 @@ export const SkillReviewDialog = ({
   const launchEditor = useLaunchEditor();
   const settings = useSettings();
   const config = useConfig();
-  const { columns } = useTerminalSize();
-  // The dialog does not span the full terminal: the layout caps the dialog
-  // container at min(terminalWidth − 4, 100) (mainAreaWidth in AppContainer;
-  // DiffDialog applies the same clamp). MaxSizedBox wraps the preview at this
-  // width, and its height cap counts the WRAPPED rows — so this must never
-  // exceed the dialog's actual inner text width (container − border 2 −
-  // paddingX 2 = container − 4), or Ink would re-wrap at render time and
-  // push rows past the cap. −6 keeps two columns of slack.
-  const previewWidth = Math.max(20, Math.min(columns - 4, 100) - 6);
+  const { columns, isDialog } = useDialogSize();
+  // A dialog context already supplies the container width. Only the fallback
+  // terminal width needs the outer clamp; both lose border and padding here.
+  const previewWidth = Math.max(
+    1,
+    (isDialog ? columns : Math.min(columns - 4, 100)) - 4,
+  );
 
   const current = snapshot[index];
   const stagedPath = current?.stagedManifestPath;

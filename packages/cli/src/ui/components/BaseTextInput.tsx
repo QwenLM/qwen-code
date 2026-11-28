@@ -31,9 +31,12 @@ import stringWidth from 'string-width';
 import { cpSlice, cpLen, truncateToWidth } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+import { getPromptHorizontalMargin } from '../utils/layoutUtils.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
+import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 
-const TOP_BORDER_LABEL_DECORATION_WIDTH = 4;
-const TOP_BORDER_MIN_LEADING_DASHES = 1;
+const BORDER_LABEL_DECORATION_WIDTH = 4;
+const BORDER_MIN_LEADING_DASHES = 1;
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -78,6 +81,9 @@ export interface BaseTextInputProps {
   borderColor?: string;
   /** Label rendered on the top border line (right-aligned). Plain string for width calculation. */
   topRightLabel?: string;
+  /** Label rendered on the bottom border line without adding an input row. */
+  bottomRightLabel?: string;
+  bottomRightLabelColor?: string;
   /** Whether keyboard handling is active. Defaults to true. */
   isActive?: boolean;
   /**
@@ -206,10 +212,16 @@ export const BaseTextInput = ({
   prefixWidth = 2,
   borderColor,
   topRightLabel,
+  bottomRightLabel,
+  bottomRightLabelColor,
   isActive = true,
   renderLine = defaultRenderLine,
-  mouseEnabled = false,
+  mouseEnabled: requestedMouseEnabled,
 }: BaseTextInputProps): ReactNode => {
+  const isVpMode = useVirtualViewport();
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const mouseEnabled =
+    requestedMouseEnabled ?? (isVpMode && mouseTrackingEnabled);
   // ── Keyboard handling ──
 
   const handleKey = useCallback(
@@ -346,24 +358,34 @@ export const BaseTextInput = ({
     <Text color={theme.text.accent}>{'> '}</Text>
   );
 
-  const columns = process.stdout.columns || 80;
-  // Build the top border line: ─────── label ──
-  // Reserve the label decoration and at least one leading dash.
+  const terminalWidth = process.stdout.columns || 80;
+  const horizontalMargin = getPromptHorizontalMargin(terminalWidth);
+  const columns = Math.max(4, terminalWidth - horizontalMargin * 2);
   const labelBudget =
-    columns - TOP_BORDER_LABEL_DECORATION_WIDTH - TOP_BORDER_MIN_LEADING_DASHES;
-  const renderedLabel = topRightLabel
-    ? truncateToWidth(topRightLabel, labelBudget)
-    : '';
-  const labelWidth = renderedLabel
-    ? stringWidth(renderedLabel) + TOP_BORDER_LABEL_DECORATION_WIDTH
-    : 0;
-  const dashCount = columns - labelWidth;
-  const topBorderLine = renderedLabel
-    ? `${'─'.repeat(dashCount)} ${renderedLabel} ${'─'.repeat(2)}`
-    : '─'.repeat(columns);
+    columns - BORDER_LABEL_DECORATION_WIDTH - BORDER_MIN_LEADING_DASHES;
+  const renderBorder = (label?: string, labelColor?: string) => {
+    const renderedLabel = label ? truncateToWidth(label, labelBudget) : '';
+    const labelWidth = renderedLabel
+      ? stringWidth(renderedLabel) + BORDER_LABEL_DECORATION_WIDTH
+      : 0;
+    return (
+      <Text color={resolvedBorderColor} wrap="truncate-end">
+        {'─'.repeat(columns - labelWidth)}
+        {renderedLabel && (
+          <>
+            {' '}
+            <Text color={labelColor} dimColor={labelColor !== undefined}>
+              {renderedLabel}
+            </Text>
+            {' ──'}
+          </>
+        )}
+      </Text>
+    );
+  };
 
   return (
-    <Box ref={boxRef} flexDirection="column">
+    <Box ref={boxRef} flexDirection="column" marginX={horizontalMargin}>
       {mouseEnabled && isActive && (
         <TextInputMouseController
           linesRef={linesRef}
@@ -371,13 +393,11 @@ export const BaseTextInput = ({
           visibleLineCount={linesToRender.length}
         />
       )}
-      <Text color={resolvedBorderColor} wrap="truncate-end">
-        {topBorderLine}
-      </Text>
+      {renderBorder(topRightLabel)}
       <Box
         borderStyle="single"
         borderTop={false}
-        borderBottom={true}
+        borderBottom={!bottomRightLabel}
         borderLeft={false}
         borderRight={false}
         borderColor={resolvedBorderColor}
@@ -418,6 +438,11 @@ export const BaseTextInput = ({
           )}
         </Box>
       </Box>
+      {bottomRightLabel &&
+        renderBorder(
+          bottomRightLabel,
+          bottomRightLabelColor ?? theme.text.secondary,
+        )}
     </Box>
   );
 };

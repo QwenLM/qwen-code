@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from 'ink-testing-library';
 import { Text } from 'ink';
@@ -18,6 +19,11 @@ import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
+import { ToolDetailsExpandedProvider } from '../contexts/ToolDetailsExpandedContext.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { withProviders } from '../../test-utils/render.js';
+import * as interactiveModSession from '../../services/interactive-mod-session.js';
+import type { ScrollActions } from '../contexts/ScrollContext.js';
 
 afterEach(cleanup);
 
@@ -29,6 +35,300 @@ const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+const processSummarySpy = vi.fn();
+vi.mock('./messages/ProcessSummary.js', () => ({
+  ProcessSummary: (props: { item: { id: number } }) => {
+    processSummarySpy(props);
+    return <Text>{`PROCESS:${props.item.id}`}</Text>;
+  },
+}));
+
+describe('virtual process projection', () => {
+  const history: UIState['history'] = [
+    {
+      id: 1,
+      type: 'gemini_thought',
+      thoughtGroupId: -1,
+      text: 'reasoning',
+      durationMs: 2000,
+    },
+    { id: 2, type: 'gemini', text: 'checking files' },
+    {
+      id: 3,
+      type: 'tool_group',
+      batchId: 'batch-3',
+      tools: [
+        {
+          callId: 'read-3',
+          name: 'ReadFile',
+          description: 'README.md',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'file contents',
+          confirmationDetails: undefined,
+        },
+      ],
+    },
+    { id: 4, type: 'gemini', text: 'final answer' },
+  ];
+  const display = (
+    expanded: boolean,
+    fullDetail = false,
+    expandedHeadIds = new Set<number>(),
+    items = history,
+    toolDetails = {
+      expandedBatchIds: new Set(expanded ? ['process:1'] : []),
+      toggleBatch: vi.fn(),
+    },
+    toggleThought = vi.fn(),
+  ) =>
+    render(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history: items, useTerminalBuffer: true })}
+          >
+            <ThoughtExpandedProvider
+              value={{
+                allExpanded: fullDetail,
+                expandedHeadIds,
+                toggle: toggleThought,
+              }}
+            >
+              <ToolDetailsExpandedProvider value={toolDetails}>
+                <MainContent />
+              </ToolDetailsExpandedProvider>
+            </ThoughtExpandedProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
+      </AppContext.Provider>,
+    );
+
+  it('hides only process members and keeps the final answer visible', () => {
+    historyItemDisplayPropsSpy.mockClear();
+    processSummarySpy.mockClear();
+    display(false);
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].item.members).toEqual(
+      history.slice(0, 3),
+    );
+    expect(
+      historyItemDisplayPropsSpy.mock.calls.map(([props]) => props.item.id),
+    ).toEqual([4]);
+  });
+
+  it('restores compact independent members without forcing full detail', () => {
+    historyItemDisplayPropsSpy.mockClear();
+    processSummarySpy.mockClear();
+    display(true);
+    const calls = historyItemDisplayPropsSpy.mock.calls.map(([props]) => props);
+    expect(calls.map((props) => props.item.id)).toEqual([1, 2, 3, 4]);
+    expect(calls.every((props) => props.fullDetail === false)).toBe(true);
+    expect(calls.slice(0, 3).every((props) => props.isProcessMember)).toBe(
+      true,
+    );
+    expect(calls[3].isProcessMember).toBe(false);
+    expect(calls[3].fullDetail).toBe(false);
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
+    const data = scrollableListPropsSpy.mock.calls.at(-1)?.[0].data;
+    expect(data[1].type).toBe('process');
+    expect(data.slice(2)).toEqual(history);
+    calls.forEach((props, index) => expect(props.item).toBe(history[index]));
+  });
+
+  it('keeps the parent summary when a child batch was expanded', () => {
+    processSummarySpy.mockClear();
+    display(false, false, new Set(), history, {
+      expandedBatchIds: new Set(['batch-3']),
+      toggleBatch: vi.fn(),
+    });
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
+    const data = scrollableListPropsSpy.mock.calls.at(-1)?.[0].data;
+    expect(data[1].type).toBe('process');
+    expect(data.slice(2)).toEqual(history);
+  });
+
+  it('collapses its own state and every expanded child only once', () => {
+    const toggleBatch = vi.fn();
+    const toggleThought = vi.fn();
+    const items: UIState['history'] = [
+      history[0],
+      {
+        id: 5,
+        type: 'gemini_thought_content',
+        thoughtGroupId: -1,
+        text: 'continued reasoning',
+      },
+      ...history.slice(1),
+    ];
+    display(
+      true,
+      false,
+      new Set([-1]),
+      items,
+      {
+        expandedBatchIds: new Set(['process:1', 'batch-3']),
+        toggleBatch,
+      },
+      toggleThought,
+    );
+    processSummarySpy.mock.calls.at(-1)?.[0].onToggle();
+    expect(toggleBatch.mock.calls).toEqual([['process:1'], ['batch-3']]);
+    expect(toggleThought.mock.calls).toEqual([[-1]]);
+  });
+
+  it('keeps source copy indexes on the original expanded process members', () => {
+    const diagram = '```mermaid\nflowchart LR\nA --> B\n```';
+    const items: UIState['history'] = [
+      history[0],
+      { id: 2, type: 'gemini', text: diagram },
+      history[2],
+      { id: 4, type: 'gemini_content', text: diagram },
+    ];
+    historyItemDisplayPropsSpy.mockClear();
+    display(true, false, new Set(), items);
+    const calls = historyItemDisplayPropsSpy.mock.calls.map(([props]) => props);
+    expect(calls[1].item).toBe(items[1]);
+    expect(calls[3].item).toBe(items[3]);
+    expect(
+      calls[1].sourceCopyIndexOffsets.codeBlockLanguageCounts.get('mermaid') ??
+        0,
+    ).toBe(0);
+    expect(
+      calls[3].sourceCopyIndexOffsets.codeBlockLanguageCounts.get('mermaid'),
+    ).toBe(1);
+  });
+
+  it('watches an expanded process thought only after its own row enters the viewport', async () => {
+    const [actualHistory, actualScroll] = await Promise.all([
+      vi.importActual<typeof import('./HistoryItemDisplay.js')>(
+        './HistoryItemDisplay.js',
+      ),
+      vi.importActual<typeof import('./shared/ScrollableList.js')>(
+        './shared/ScrollableList.js',
+      ),
+    ]);
+    const watchRow = vi.fn(() => vi.fn());
+    const session = vi
+      .spyOn(interactiveModSession, 'getInteractiveModSession')
+      .mockReturnValue({
+        starting: false,
+        ready: Promise.resolve(),
+        rowSession: 'process-session',
+        subscribeSession: () => () => {},
+        watchRow,
+        rowProps: () => undefined,
+      } as unknown as interactiveModSession.InteractiveModSession);
+    const scrollActionsRef: React.MutableRefObject<ScrollActions | null> = {
+      current: null,
+    };
+    const thought = {
+      ...history[0],
+      text: Array.from(
+        { length: 14 },
+        (_, index) => `PROCESS_THOUGHT_${index}`,
+      ).join('\n'),
+    };
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      historyItemDisplayPropsSpy.mockImplementation((props) =>
+        props.item.type === 'gemini_thought' ? (
+          <actualHistory.HistoryItemDisplay {...props} />
+        ) : (
+          <Text>{`HISTORY:${props.item.id}\nmore\nmore`}</Text>
+        ),
+      );
+      scrollableListPropsSpy.mockImplementation((props) => (
+        <actualScroll.ScrollableList {...props} />
+      ));
+      view = render(
+        withProviders(
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: false,
+              expandedHeadIds: new Set([-1]),
+              toggle: vi.fn(),
+            }}
+          >
+            <AppContext.Provider
+              value={{ version: '1.2.3', startupWarnings: [] }}
+            >
+              <UIActionsContext.Provider value={createUIActions()}>
+                <UIStateContext.Provider
+                  value={createUIState({
+                    history: [thought, ...history.slice(1)],
+                    historyManager: {
+                      sessionId: 'process-session',
+                    } as UIState['historyManager'],
+                    useTerminalBuffer: true,
+                    availableTerminalHeight: 5,
+                    showScrollbar: false,
+                  })}
+                >
+                  <ToolDetailsExpandedProvider
+                    value={{
+                      expandedBatchIds: new Set(['process:1']),
+                      toggleBatch: vi.fn(),
+                    }}
+                  >
+                    <MainContent scrollActionsRef={scrollActionsRef} />
+                  </ToolDetailsExpandedProvider>
+                </UIStateContext.Provider>
+              </UIActionsContext.Provider>
+            </AppContext.Provider>
+          </ThoughtExpandedProvider>,
+          { config: {} as Config },
+        ),
+      );
+      await act(async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      });
+      expect(view.lastFrame()).toContain('HISTORY:4');
+      expect(view.lastFrame()).not.toContain('PROCESS_THOUGHT_0');
+      expect(watchRow).not.toHaveBeenCalled();
+
+      await act(async () => {
+        scrollActionsRef.current?.scrollBy(-10_000);
+        scrollActionsRef.current?.scrollBy(4);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      });
+      expect(view.lastFrame()).toContain('PROCESS_THOUGHT_0');
+      expect(watchRow).toHaveBeenCalledExactlyOnceWith(
+        'process-session',
+        {
+          surface: 'terminal',
+          component: 'Thinking',
+          requestId: '1',
+          props: { text: thought.text },
+        },
+        expect.any(Function),
+      );
+    } finally {
+      view?.unmount();
+      session.mockRestore();
+      historyItemDisplayPropsSpy.mockReset();
+      scrollableListPropsSpy.mockReset();
+    }
+  });
+
+  it('bypasses grouping in global full detail', () => {
+    historyItemDisplayPropsSpy.mockClear();
+    processSummarySpy.mockClear();
+    display(false, true);
+    expect(processSummarySpy).not.toHaveBeenCalled();
+    expect(
+      historyItemDisplayPropsSpy.mock.calls.map(([props]) => props.item.id),
+    ).toEqual([1, 2, 3, 4]);
+  });
+
+  it('respects a manually expanded streaming thought group after it commits', () => {
+    historyItemDisplayPropsSpy.mockClear();
+    processSummarySpy.mockClear();
+    display(false, false, new Set([-1]));
+    expect(processSummarySpy.mock.calls.at(-1)?.[0].expanded).toBe(true);
+    expect(
+      historyItemDisplayPropsSpy.mock.calls.map(([props]) => props.item.id),
+    ).toEqual([1, 2, 3, 4]);
+  });
+});
 // Records every <Box> render's props so tests can assert layout props
 // (e.g. the pending-region maxHeight backstop) without coupling to ink's
 // Yoga internals.
@@ -63,10 +363,10 @@ vi.mock('./AppHeader.js', () => ({
 }));
 
 vi.mock('./HistoryItemDisplay.js', () => ({
-  HistoryItemDisplay: (props: { item: { id: number } }) => {
-    historyItemDisplayPropsSpy(props);
-    return <Text>{`HISTORY:${props.item.id}`}</Text>;
-  },
+  HistoryItemDisplay: (props: { item: { id: number } }) =>
+    historyItemDisplayPropsSpy(props) ?? (
+      <Text>{`HISTORY:${props.item.id}`}</Text>
+    ),
 }));
 
 // Context-aware mock — `useOverflowState()` returns undefined when the
@@ -116,17 +416,24 @@ vi.mock('./shared/ScrollableList.js', async () => {
     ...actual,
     ScrollableList: (props: {
       data: Array<{ id: number }>;
-      renderItem: (info: { item: { id: number }; index: number }) => unknown;
+      renderItem: (info: {
+        item: { id: number };
+        index: number;
+        isInViewport: boolean;
+      }) => unknown;
     }) => {
-      scrollableListPropsSpy(props);
+      const rendered = scrollableListPropsSpy(props);
+      if (rendered) return rendered;
       // Drive renderItem once per item so historyItemDisplayPropsSpy fires —
       // mirrors what the real VirtualizedList does for the visible window.
       return (
         <>
-          {props.data.map((item) => (
-            <Text key={item.id}>{`VP_ITEM:${item.id}`}</Text>
+          {props.data.map((item, index) => (
+            <Text key={`${index}-${item.id}`}>{`VP_ITEM:${item.id}`}</Text>
           ))}
-          {props.data.map((item, index) => props.renderItem({ item, index }))}
+          {props.data.map((item, index) =>
+            props.renderItem({ item, index, isInViewport: true }),
+          )}
         </>
       );
     },
@@ -1501,7 +1808,10 @@ describe('<MainContent />', () => {
       const firstRenderItem =
         scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
-        expect.objectContaining({ availableTerminalHeight: 12 }),
+        expect.objectContaining({
+          availableTerminalHeight: 12,
+          availableTerminalHeightLlm: 65536,
+        }),
       );
 
       rerender(
@@ -1529,7 +1839,10 @@ describe('<MainContent />', () => {
         scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
       expect(secondRenderItem).not.toBe(firstRenderItem);
       expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
-        expect.objectContaining({ availableTerminalHeight: undefined }),
+        expect.objectContaining({
+          availableTerminalHeight: undefined,
+          availableTerminalHeightLlm: undefined,
+        }),
       );
     });
   });

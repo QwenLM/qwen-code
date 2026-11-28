@@ -5,14 +5,18 @@
  */
 
 import React from 'react';
-import { Text, Box } from 'ink';
+import { Text, Box, useIsScreenReaderEnabled } from 'ink';
 import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
+import { themeManager } from '../themes/theme-manager.js';
+import type { Theme } from '../themes/theme.js';
+import { getLowlightInstance, type Lowlight } from './lowlightLoader.js';
 import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
+import type { CodeHighlightCache } from './CodeColorizer.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
-import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingsContext, useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
@@ -78,6 +82,23 @@ type OriginalCopyHint = (
   kind: SourceCopyKind,
   content: string[],
 ) => string | undefined;
+
+interface MarkdownPrefixState {
+  codeBlockIndex: number;
+  codeBlockLanguageCounts: Map<string, number>;
+  mathBlockIndex: number;
+  lastLineEmpty: boolean;
+}
+
+interface MarkdownPrefixCache extends MarkdownPrefixState {
+  contextKey: string;
+  activeTheme: Theme;
+  highlighter: Lowlight | null;
+  copyHint: OriginalCopyHint | undefined;
+  sourceLines: string[];
+  blocks: React.ReactNode[];
+  textLength: number;
+}
 
 export function countMarkdownSourceBlocks(
   text: string,
@@ -195,13 +216,19 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const showLineNumbers =
+    React.useContext(SettingsContext)?.merged.ui?.showLineNumbers ?? true;
   const copyHint = React.useMemo(() => {
     if (!showSourceCopyHints) return () => undefined;
     return sourceCopyText === undefined
       ? undefined
       : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets);
   }, [showSourceCopyHints, sourceCopyText, sourceCopyIndexOffsets]);
-  if (!text) return <></>;
+  const prefixCacheRef = React.useRef<MarkdownPrefixCache | null>(null);
+  if (!text) {
+    prefixCacheRef.current = null;
+    return <></>;
+  }
 
   const renderVisualBlocks = renderMode === 'render';
   // Some models stream long runs of trailing newlines after useful content.
@@ -415,13 +442,44 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     }
   }
 
-  const contentBlocks: React.ReactNode[] = [];
+  const activeTheme = themeManager.getActiveTheme();
+  const highlighter = getLowlightInstance();
+  const contextKey = JSON.stringify([
+    renderMode,
+    showLineNumbers,
+    contentWidth,
+    availableTerminalHeight,
+    textColor,
+    theme.text.secondary,
+    enforceHeightBudget,
+    showSourceCopyHints,
+    sourceCopyIndexOffsets?.mathBlockCount,
+    [...(sourceCopyIndexOffsets?.codeBlockLanguageCounts ?? [])],
+  ]);
+  const cachedPrefix = prefixCacheRef.current;
+  const prefix =
+    isPending &&
+    cachedPrefix?.contextKey === contextKey &&
+    cachedPrefix.activeTheme === activeTheme &&
+    cachedPrefix.highlighter === highlighter &&
+    cachedPrefix.copyHint === copyHint &&
+    cachedPrefix.textLength <= displayText.length &&
+    cachedPrefix.sourceLines.length <= lines.length &&
+    cachedPrefix.sourceLines.every((line, index) => line === lines[index])
+      ? cachedPrefix
+      : null;
+  let checkpoint:
+    | (MarkdownPrefixState & { lineCount: number; blockCount: number })
+    | undefined;
+  const contentBlocks: React.ReactNode[] = [...(prefix?.blocks ?? [])];
   const codeBlockLanguageCounts = new Map(
-    sourceCopyIndexOffsets?.codeBlockLanguageCounts,
+    prefix?.codeBlockLanguageCounts ??
+      sourceCopyIndexOffsets?.codeBlockLanguageCounts,
   );
-  let codeBlockIndex = 0;
-  let mathBlockIndex = sourceCopyIndexOffsets?.mathBlockCount ?? 0;
-  let lastLineEmpty = true;
+  let codeBlockIndex = prefix?.codeBlockIndex ?? 0;
+  let mathBlockIndex =
+    prefix?.mathBlockIndex ?? sourceCopyIndexOffsets?.mathBlockCount ?? 0;
+  let lastLineEmpty = prefix?.lastLineEmpty ?? true;
 
   function addContentBlock(block: React.ReactNode) {
     contentBlocks.push(block);
@@ -432,6 +490,22 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     lines,
     renderVisualBlocks,
     isPending,
+    isPending
+      ? {
+          startIndex: prefix?.sourceLines.length ?? 0,
+          onStableBoundary(lineCount) {
+            if (highlighter === null && codeBlockIndex !== 0) return;
+            checkpoint = {
+              lineCount,
+              blockCount: contentBlocks.length,
+              codeBlockIndex,
+              codeBlockLanguageCounts: new Map(codeBlockLanguageCounts),
+              mathBlockIndex,
+              lastLineEmpty,
+            };
+          },
+        }
+      : undefined,
   )) {
     const atEnd = block.index === lines.length;
     const key = `line-${block.index}`;
@@ -448,7 +522,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         codeBlockIndex += 1;
         addContentBlock(
           <RenderCodeBlock
-            key={atEnd ? 'line-eof' : key}
+            key={`${atEnd ? 'line-eof' : key}:${showLineNumbers}`}
             content={block.content}
             lang={lang}
             codeBlockIndex={codeBlockIndex}
@@ -572,6 +646,21 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     }
   }
 
+  prefixCacheRef.current = checkpoint
+    ? {
+        ...checkpoint,
+        contextKey,
+        activeTheme,
+        highlighter,
+        copyHint,
+        sourceLines: lines.slice(0, checkpoint.lineCount),
+        blocks: contentBlocks.slice(0, checkpoint.blockCount),
+        textLength: displayText.length,
+      }
+    : prefix
+      ? { ...prefix, textLength: displayText.length }
+      : null;
+
   // Safety-net clip: when the pending preview exceeds the rendered-height
   // budget, slice it to keep the live frame within the viewport. The clipping
   // still happens (prevents scroll-to-top lock), but we no longer show the
@@ -627,6 +716,9 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
+  const screenReader = useIsScreenReaderEnabled();
+  const backgroundColor = screenReader ? undefined : theme.background.code;
+  const highlightCache = React.useRef<CodeHighlightCache>({ lines: new Map() });
   // Below this many usable rows there is no room for a meaningful code
   // preview, so we fall back to the "... code is being written ..." notice.
   const MIN_PREVIEW_LINES = 1;
@@ -673,7 +765,11 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       if (MAX_CODE_LINES_WHEN_PENDING < MIN_PREVIEW_LINES) {
         // Not enough space to even show a truncated preview meaningfully
         return (
-          <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING}>
+          <Box
+            paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+            backgroundColor={backgroundColor}
+            width={contentWidth}
+          >
             <Text color={theme.text.secondary}>
               ... code is being written ...
             </Text>
@@ -686,10 +782,15 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         lang,
         availableTerminalHeight,
         contentWidth - CODE_BLOCK_PREFIX_PADDING,
-        { settings, startLineNumber },
+        { settings, startLineNumber, highlightCache: highlightCache.current },
       );
       return (
-        <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
+        <Box
+          paddingLeft={CODE_BLOCK_PREFIX_PADDING}
+          flexDirection="column"
+          backgroundColor={backgroundColor}
+          width={contentWidth}
+        >
           {colorizedTruncatedCode}
         </Box>
       );
@@ -701,7 +802,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     lang,
     availableTerminalHeight,
     contentWidth - CODE_BLOCK_PREFIX_PADDING,
-    { settings, startLineNumber },
+    { settings, startLineNumber, highlightCache: highlightCache.current },
   );
 
   return (
@@ -710,6 +811,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       flexDirection="column"
       width={contentWidth}
       flexShrink={0}
+      backgroundColor={backgroundColor}
     >
       {colorizedCode}
     </Box>

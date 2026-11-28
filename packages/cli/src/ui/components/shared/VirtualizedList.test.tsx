@@ -41,6 +41,34 @@ const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
 const estimatedItemHeight = () => 1;
 
 describe('<VirtualizedList />', () => {
+  it('keeps a one-row upward scroll when new history is appended', async () => {
+    let currentList: VirtualizedListRef<Item> | null = null;
+    const Wrapper = ({ count }: { count: number }) => (
+      <VirtualizedList<Item>
+        ref={(value) => {
+          currentList = value;
+        }}
+        data={makeItems(count)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+    const { rerender } = render(<Wrapper count={20} />);
+    rerender(<Wrapper count={20} />);
+    await act(async () => {});
+    expect(currentList!.getScrollState().scrollTop).toBe(15);
+    await act(async () => currentList!.scrollBy(-1));
+    expect(currentList!.getScrollState().scrollTop).toBe(14);
+    rerender(<Wrapper count={21} />);
+    await act(async () => {});
+    expect(currentList!.getScrollState().scrollTop).toBe(14);
+  });
+
   it('renders nothing visible when data is empty', () => {
     const { lastFrame } = render(
       <VirtualizedList<Item>

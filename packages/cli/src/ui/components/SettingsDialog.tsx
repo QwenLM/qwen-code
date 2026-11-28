@@ -655,7 +655,7 @@ export function SettingsDialog({
 
   // Use the calculated maxVisibleItems or fall back to the original maxItemsToShow
   const effectiveMaxItemsToShow = availableTerminalHeight
-    ? Math.min(maxVisibleItems, items.length)
+    ? Math.min(maxItemsToShow, maxVisibleItems, items.length)
     : maxItemsToShow;
 
   // Scroll logic for settings

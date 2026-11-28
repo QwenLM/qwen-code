@@ -57,6 +57,7 @@ import {
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
 import { ScrollContext } from '../contexts/ScrollContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import {
   clearPromptStash,
   savePromptStash,
@@ -437,6 +438,38 @@ describe('InputPrompt', () => {
       placeholder: '  Type your message or @path/to/file',
     };
   });
+
+  it.each([false, true])(
+    'R3-2 reports search prefix width and restores it (shell=%s)',
+    async (shellModeActive) => {
+      const setInputPrefixWidth = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        submitFeedback: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance: vi.fn(),
+        setInputPrefixWidth,
+      } as unknown as ReturnType<typeof useUIActions>);
+      const view = renderWithProviders(
+        <InputPrompt {...props} shellModeActive={shellModeActive} />,
+      );
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2),
+      );
+      act(() => view.stdin.write('\u0012'));
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(6),
+      );
+      expect(view.lastFrame()).toContain('(r:)');
+      act(() => view.stdin.write('\u001b'));
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2),
+      );
+      view.unmount();
+      expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2);
+    },
+  );
 
   it('stashes non-empty input on Ctrl+S', async () => {
     props.buffer.setText('draft prompt');
@@ -5945,6 +5978,47 @@ describe('InputPrompt', () => {
       expect(frame).not.toContain('←');
       unmount();
     });
+  });
+
+  describe('approval mode bottom border', () => {
+    it.each([
+      [ApprovalMode.DEFAULT, 'Ask permissions'],
+      [ApprovalMode.PLAN, 'plan mode'],
+      [ApprovalMode.AUTO_EDIT, 'auto-accept edits'],
+      [ApprovalMode.AUTO, 'Auto mode'],
+      [ApprovalMode.YOLO, 'YOLO mode'],
+    ])('puts %s on the bottom border in VP mode', async (mode, label) => {
+      props.approvalMode = mode;
+      const { lastFrame, unmount } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <InputPrompt {...props} />
+        </VirtualViewportContext.Provider>,
+      );
+      await wait();
+      const lines = clean(lastFrame()).split('\n');
+      const cycleHint =
+        process.platform === 'win32'
+          ? '(tab to cycle)'
+          : '(shift + tab to cycle)';
+      expect(lines.at(-1)).toContain(` ${label} ${cycleHint} ──`);
+      expect(lines[0]).not.toContain(label);
+      unmount();
+    });
+
+    it.each([false, true])(
+      'keeps the border mode out of native scrollback and shell input (shell=%s)',
+      async (shellMode) => {
+        props.shellModeActive = shellMode;
+        const { lastFrame, unmount } = renderWithProviders(
+          <VirtualViewportContext.Provider value={shellMode}>
+            <InputPrompt {...props} />
+          </VirtualViewportContext.Provider>,
+        );
+        await wait();
+        expect(lastFrame()).not.toContain('Ask permissions');
+        unmount();
+      },
+    );
   });
 
   describe('snapshots', () => {

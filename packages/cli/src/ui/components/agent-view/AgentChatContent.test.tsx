@@ -66,6 +66,7 @@ type HistoryItemDisplayProps = {
   id: number;
   isPending?: boolean;
   fullDetail?: boolean;
+  isFocused?: boolean;
 };
 /** Props of every HistoryItemDisplay render recorded so far. */
 const historyItemDisplayCalls = (): HistoryItemDisplayProps[] =>
@@ -77,12 +78,14 @@ vi.mock('../HistoryItemDisplay.js', () => ({
     item,
     isPending,
     fullDetail,
+    isFocused,
   }: {
     item: { id: number; type: string; text?: string };
     isPending?: boolean;
     fullDetail?: boolean;
+    isFocused?: boolean;
   }) => {
-    historyItemDisplaySpy({ id: item.id, isPending, fullDetail });
+    historyItemDisplaySpy({ id: item.id, isPending, fullDetail, isFocused });
     return (
       <Text>
         {item.type === 'tool_group'
@@ -485,6 +488,28 @@ describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
     const calls = historyItemDisplayCalls();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.every((c) => c.fullDetail === false)).toBe(true);
+  });
+
+  it('VP mode: a main dialog pauses both committed rows and pending teammate controls', async () => {
+    const messages: AgentMessage[] = [
+      ...makeMessages(20),
+      {
+        role: 'tool_call',
+        content: '',
+        timestamp: Date.now(),
+        metadata: { callId: 'call-1', toolName: 'run_shell_command' },
+      },
+    ];
+    renderContent(createUIState({ dialogsVisible: true }), makeCore(messages));
+    await settle();
+    const calls = historyItemDisplayCalls();
+    expect(calls.some((call) => call.isPending)).toBe(true);
+    expect(calls.some((call) => !call.isPending)).toBe(true);
+    expect(calls.every((call) => call.isFocused === false)).toBe(true);
+    expect(latestScrollableListProps().hasFocus).toBe(false);
+    expect(contentMouseControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: false }),
+    );
   });
 
   it('VP mode: mounts ContentMouseController so link clicks and the right-click menu survive SGR capture', async () => {

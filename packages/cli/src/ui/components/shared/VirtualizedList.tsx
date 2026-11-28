@@ -442,10 +442,13 @@ function VirtualizedList<T>(
       prevTotalHeight.current <= prevContainerHeight.current;
     const wasScrolledToBottomPixels =
       prevScrollTop.current >=
-      prevTotalHeight.current - prevContainerHeight.current - 1;
+      prevTotalHeight.current - prevContainerHeight.current;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
-    if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
+    if (
+      wasAtBottom &&
+      actualScrollTop >= totalHeight - scrollableContainerHeight
+    ) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
       }

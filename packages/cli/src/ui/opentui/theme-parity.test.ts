@@ -84,20 +84,28 @@ describe('getBuiltInOpenTuiThemes', () => {
 });
 
 describe('palette parity (semantic tokens → opentui palette)', () => {
+  it.each([
+    ['Qwen Dark', '#92929b'],
+    ['Qwen Light', '#71717a'],
+  ])(
+    'PR17541 R1-15 keeps %s symbols on its own readable dim palette',
+    (name, color) => {
+      expect(getOpenTuiTheme(name)!.palette.symbol).toBe(color);
+    },
+  );
+
   it('maps Qwen Dark through its semantic tokens with the hljs default text', () => {
     const definition = getOpenTuiTheme('Qwen Dark');
     expect(definition).toBeDefined();
-    // Semantic text.primary is empty for this theme and ink then emits no
-    // foreground at all; the fallback is this port's own, because both its
-    // plain-text colour and the markdown syntax `default` token read this key.
-    expect(definition!.palette.text).toBe('#bfbdb6');
-    expect(definition!.palette.dim).toBe('#6C7086');
+    expect(definition!.palette.text).toBe('#e1e1e1');
+    expect(definition!.palette.dim).toBe('#92929b');
     expect(definition!.palette.accent).toBe('#CBA6F7');
     expect(definition!.palette.green).toBe('#A6E3A1');
     expect(definition!.palette.red).toBe('#F38BA8');
     expect(definition!.palette.yellow).toBe('#F9E2AF');
     expect(definition!.palette.purple).toBe('#89B4FA');
-    expect(definition!.palette.hover).toBe('#1E1E2E');
+    expect(definition!.palette.hover).toBe('#141414');
+    expect(definition!.palette.surface).toBe('#242424');
   });
 
   it('maps Dracula from its own color set', () => {
@@ -145,13 +153,9 @@ describe('gradient parity (ui.gradient → wordmark ramp)', () => {
   });
 
   it('inherits the semantic ramp for themes that share a semantic set', () => {
-    // Qwen Dark declares its own gold GradientColors, but it is constructed
-    // with darkSemanticColors, whose `ui.gradient` is the dark base ramp — so
-    // that is what ink's Header paints, and what the port must paint too.
     expect(getOpenTuiTheme('Qwen Dark')!.gradient).toEqual([
-      '#4796E4',
-      '#847ACE',
-      '#C3677F',
+      '#a594e8',
+      '#c4b5fd',
     ]);
     expect(getOpenTuiTheme('ANSI')!.gradient).toEqual([
       '#4796E4',
@@ -176,10 +180,10 @@ describe('syntax style parity (hljs map → opentui tokens)', () => {
   it('uses each theme’s own resolved hljs colors', () => {
     // Ink resolves hljs colors through `resolveColor`, which lowercases hex.
     const qwen = getOpenTuiTheme('Qwen Dark')!.syntaxStyles;
-    expect(qwen['keyword']).toEqual({ fg: '#ffd700' });
+    expect(qwen['keyword']).toEqual({ fg: '#e5c07b' });
     expect(qwen['string']).toEqual({ fg: '#aad94c' });
-    expect(qwen['comment']).toEqual({ fg: '#646a71' });
-    expect(qwen['variable']).toEqual({ fg: '#bfbdb6' });
+    expect(qwen['comment']).toEqual({ fg: '#787880' });
+    expect(qwen['variable']).toEqual({ fg: '#e1e1e1' });
     expect(qwen['type']).toEqual({ fg: '#39bae6' });
 
     const dracula = getOpenTuiTheme('Dracula')!.syntaxStyles;

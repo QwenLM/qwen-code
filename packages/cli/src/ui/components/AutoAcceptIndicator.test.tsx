@@ -11,6 +11,17 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('<AutoAcceptIndicator />', () => {
+  it('keeps the cycle shortcut beside the mode in the footer fallback', () => {
+    const { lastFrame } = render(
+      <AutoAcceptIndicator approvalMode={ApprovalMode.YOLO} />,
+    );
+    expect(lastFrame()).toBe(
+      process.platform === 'win32'
+        ? 'YOLO mode (tab to cycle)'
+        : 'YOLO mode (shift + tab to cycle)',
+    );
+  });
+
   it('renders DEFAULT mode with pause badge and Ask permissions text', () => {
     const { lastFrame } = render(
       <AutoAcceptIndicator approvalMode={ApprovalMode.DEFAULT} />,
