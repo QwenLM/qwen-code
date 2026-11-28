@@ -85,7 +85,9 @@ fi
 echo "::warning::no published release confirms the tiered sandbox boundary; building the CLI from the trusted base checkout."
 install_attempt=1
 while :; do
-  if corepack pnpm install --frozen-lockfile --reporter=append-only; then
+  # QWEN_SKIP_PREPARE stops scripts/prepare.js from running build+bundle on
+  # the install line; the explicit build+bundle below is the only one (R4-1).
+  if QWEN_SKIP_PREPARE=1 corepack pnpm install --frozen-lockfile --reporter=append-only; then
     break
   fi
   if [ "$install_attempt" -ge 2 ]; then

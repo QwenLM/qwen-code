@@ -498,6 +498,8 @@ describe('external content-allowlist downgrade (operator opt-in)', () => {
       'LICENSE.md',
       'DOCS/GUIDE.MD',
       'Readme.md',
+      'LICENSE',
+      'license',
     ]) {
       expect(isReviewContentAllowlistedPath(p)).toBe(true);
     }
@@ -627,6 +629,37 @@ describe('external content-allowlist downgrade (operator opt-in)', () => {
     expect(res.executionClass).toBe('hardware-isolated');
     expect(res.escalationReasons).toContain('operator-force-hardware');
     expect(res.downgradeReasons).toBeUndefined();
+  });
+
+  it('a CI container-outage cause is recorded distinctly from an operator switch (R1-6)', () => {
+    const outage = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      {
+        QWEN_REVIEW_FORCE_HARDWARE: '1',
+        QWEN_REVIEW_FORCE_HARDWARE_CAUSE: 'container-unavailable',
+      },
+      noFileSource,
+    );
+    expect(outage.executionClass).toBe('hardware-isolated');
+    expect(outage.escalationReasons).toContain('container-tier-unavailable');
+    expect(outage.escalationReasons).not.toContain('operator-force-hardware');
+    const operator = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      { QWEN_REVIEW_FORCE_HARDWARE: '1' },
+      noFileSource,
+    );
+    expect(operator.escalationReasons).toContain('operator-force-hardware');
+    const fileSourcedCause = classifyReviewTrust(
+      externalDocs([{ path: 'docs/guide.md' }]),
+      {
+        QWEN_REVIEW_FORCE_HARDWARE: '1',
+        QWEN_REVIEW_FORCE_HARDWARE_CAUSE: 'container-unavailable',
+      },
+      (k) => k === 'QWEN_REVIEW_FORCE_HARDWARE_CAUSE',
+    );
+    expect(fileSourcedCause.escalationReasons).toContain(
+      'operator-force-hardware',
+    );
   });
 
   it('does not change collaborator or local classification', () => {

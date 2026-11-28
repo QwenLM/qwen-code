@@ -54,7 +54,7 @@ import {
   sandboxPolicy,
   sandboxVerdict,
 } from './sandboxed-exec.js';
-import { trustInputFromPlan } from './sandbox-trust.js';
+import { trustInputFromPlan, classifyReviewTrust } from './sandbox-trust.js';
 
 describe('sandboxPolicy', () => {
   it('lets the environment outrank the setting, and defaults to off', () => {
@@ -1392,10 +1392,10 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
     expect(repoSourced.downgradeReasons).toBeUndefined();
   });
 
-  it('the capability-gate fixture plan reads through the real plan reader to the refusal the probe asserts (R4-1)', () => {
-    // Same shape as .github/scripts/ensure-tiered-review-cli.sh's fixture plan,
-    // so a future required plan field cannot silently drift the probe away
-    // from the real trustInputFromPlan / describeExecutionBoundary code.
+  it('the capability-gate fixture plan reads through the real plan reader and its CONTENT drives the class (R4-1 / N1)', () => {
+    // Same shape as .github/scripts/ensure-tiered-review-cli.sh's fixture plan.
+    // The assertions must fail if the parsed plan drifts (missing path, missing
+    // authorAssociation), not merely when the injected env/verdict changes.
     const plan = {
       pr: 0,
       head: 'probe',
@@ -1413,6 +1413,18 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
     try {
       const trustContext = trustInputFromPlan(planPath);
       expect(trustContext).toBeDefined();
+      // Pin the parsed shape, not just "defined".
+      expect(trustContext?.isCrossRepository).toBe(false);
+      expect(trustContext?.authorAssociation).toBe('MEMBER');
+      expect(trustContext?.changedFiles?.map((f) => f.path)).toEqual([
+        'src/a.ts',
+      ]);
+      expect(trustContext?.partialFileList).not.toBe(true);
+      // Without the force switch the plan CONTENT must classify as a trusted
+      // collaborator; a drifted plan (unknown association) would not.
+      const unforced = classifyReviewTrust(trustContext, {}, () => false);
+      expect(unforced.prTrust).toBe('collaborator');
+      expect(unforced.executionClass).toBe('trusted-shared-kernel');
       const boundary = describeExecutionBoundary({
         policy: 'tiered',
         verdict: { kind: 'refused', reason: 'no hardware backend' },
@@ -1424,8 +1436,91 @@ describe('tiered sandbox, container hardening, and verifiable reap', () => {
       expect(boundary.executionClass).toBe('hardware-isolated');
       expect(boundary.backend).toBe('refused');
       expect(boundary.escalationReasons).toContain('operator-force-hardware');
+      // Negative cells: an unreadable plan or one missing authorAssociation
+      // must NOT classify as a trusted collaborator even without force.
+      const missing = trustInputFromPlan(join(dir, 'does-not-exist.json'));
+      expect(classifyReviewTrust(missing, {}, () => false).executionClass).toBe(
+        'hardware-isolated',
+      );
+      const { authorAssociation: _drop, ...noAssoc } = plan;
+      const noAssocPath = join(dir, 'plan-no-assoc.json');
+      writeFileSync(noAssocPath, JSON.stringify(noAssoc));
+      const noAssocCtx = trustInputFromPlan(noAssocPath);
+      expect(noAssocCtx?.authorAssociation).toBeUndefined();
+      expect(
+        classifyReviewTrust(noAssocCtx, {}, () => false).executionClass,
+      ).toBe('hardware-isolated');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a real external docs-only plan file plus the opt-in downgrades end to end (R2-5)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-downgrade-plan-'));
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        pr: 7,
+        head: 'h',
+        base: 'b',
+        mergeBase: 'b',
+        isCrossRepository: true,
+        authorAssociation: 'NONE',
+        diffStat: { files: 1, added: 1, deleted: 0 },
+        files: [
+          { path: 'docs/guide.md', added: 1, deleted: 0, mode: '100644' },
+        ],
+        worktree: join(dir, '.qwen', 'tmp', 'review-pr-7'),
+      }),
+    );
+    try {
+      const trustContext = trustInputFromPlan(planPath);
+      const boundary = describeExecutionBoundary({
+        policy: 'tiered',
+        backend: 'container',
+        trustContext,
+        env: { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+        fileSourced: () => false,
+      });
+      expect(boundary.prTrust).toBe('external');
+      expect(boundary.executionClass).toBe('trusted-shared-kernel');
+      expect(boundary.downgradeReasons).toEqual(['external-content-allowlist']);
+      const off = describeExecutionBoundary({
+        policy: 'tiered',
+        verdict: { kind: 'refused', reason: 'no hardware backend' },
+        trustContext,
+        env: {},
+        fileSourced: () => false,
+      });
+      expect(off.executionClass).toBe('hardware-isolated');
+      expect(off.downgradeReasons).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a downgraded refusal names the downgrade cause in its suffix (R2-6)', () => {
+    const trustContext = {
+      isLocal: false,
+      isCrossRepository: true,
+      authorAssociation: 'NONE',
+      changedFiles: [{ path: 'docs/guide.md' }],
+    };
+    const verdict = sandboxVerdict(
+      'tiered',
+      { QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER: '1' },
+      () => null,
+      trustContext,
+      undefined,
+      () => false,
+    );
+    // With the opt-in the class is trusted-shared-kernel; without a container
+    // runtime the verdict refuses and the suffix must name the downgrade.
+    expect(verdict.kind).toBe('refused');
+    if (verdict.kind === 'refused') {
+      expect(verdict.reason).toContain('external-content-allowlist');
+      expect(verdict.reason).toContain('trusted-shared-kernel');
     }
   });
 

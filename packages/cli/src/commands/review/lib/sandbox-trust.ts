@@ -166,6 +166,7 @@ const CONTENT_ALLOWLIST_ROOT_FILES = new Set([
   'changelog.md',
   'contributing.md',
   'license.md',
+  'license',
 ]);
 
 /**
@@ -185,8 +186,10 @@ export function isReviewContentAllowlistedPath(rawPath: string): boolean {
 
 /**
  * Operator opt-in (default off) permitting the external content-allowlist
- * downgrade. File-sourced values from repository `.env` files are ignored so
- * a reviewed repo cannot grant itself the shared-kernel tier.
+ * downgrade. File-sourced values — repository `.env` AND home-level
+ * `~/.qwen/.env` — are ignored, so neither a reviewed repo nor a home dotfile
+ * can silently grant the shared-kernel tier; operators must use the shell
+ * environment or user settings.
  */
 export function externalContentContainerRequested(
   env: NodeJS.ProcessEnv = process.env,
@@ -278,7 +281,17 @@ export function classifyReviewTrust(
   }
 
   if (forceHardware) {
-    escalationReasons.push('operator-force-hardware');
+    // A routine CI container outage is forced hardware isolation too, but it
+    // is not an operator decision; the cause key keeps the boundary honest
+    // (R1-6). File-sourced causes are ignored like the switch itself.
+    const cause = fileSourced('QWEN_REVIEW_FORCE_HARDWARE_CAUSE')
+      ? undefined
+      : env['QWEN_REVIEW_FORCE_HARDWARE_CAUSE']?.trim().toLowerCase();
+    escalationReasons.push(
+      cause === 'container-unavailable'
+        ? 'container-tier-unavailable'
+        : 'operator-force-hardware',
+    );
   }
   if (prTrust === 'external') {
     escalationReasons.push(

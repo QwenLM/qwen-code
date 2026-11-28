@@ -3165,6 +3165,11 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     expect(review.env[forceHardwareEnvName]).toBe(
       '${{ steps.review_sandbox.outputs.force_hardware }}',
     );
+    // R1-6: the outage cause is step-output bound so the boundary can tell a
+    // routine container outage from an operator decision.
+    expect(review.env.QWEN_REVIEW_FORCE_HARDWARE_CAUSE).toBe(
+      '${{ steps.review_sandbox.outputs.force_hardware_cause }}',
+    );
     // R3-3: CI pins the operator content-allowlist opt-in OFF so a stale
     // runner/service env cannot silently grant external PRs the container tier.
     expect(review.env.QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER).toBe('');
@@ -3264,6 +3269,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     expect(r.outputs.policy).toBe('tiered');
     expect(r.outputs.container_ready).toBeUndefined();
     expect(r.outputs.force_hardware).toBe('');
+    expect(r.outputs.force_hardware_cause).toBe('');
     expect(r.outputs.image).toMatch(
       /^ghcr\.io\/qwenlm\/qwen-code@sha256:[0-9a-f]{64}$/,
     );
@@ -3285,6 +3291,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
     expect(r.outputs.policy).toBe('tiered');
     expect(r.outputs.container_ready).toBeUndefined();
     expect(r.outputs.force_hardware).toBe('1');
+    expect(r.outputs.force_hardware_cause).toBe('container-unavailable');
     expect(r.outputs.image).toBeUndefined();
     expect(r.stdout).toContain('::warning::');
     expect(r.stdout).not.toContain('run unsandboxed');
@@ -3302,6 +3309,7 @@ describe('review execution sandbox opt-in (#9556 / tiered Phase 2-A)', () => {
       expect(r.outputs.policy).toBe('tiered');
       expect(r.outputs.container_ready).toBeUndefined();
       expect(r.outputs.force_hardware).toBe('1');
+      expect(r.outputs.force_hardware_cause).toBe('container-unavailable');
       expect(r.outputs.image).toBeUndefined();
       expect(r.stdout).toContain('::warning::');
       expect(r.summary).toContain('force_hardware: 1');
@@ -3599,6 +3607,11 @@ describe('review CLI capability gate (production cutover blocker)', () => {
     const r = runGate({ cliBehavior: 'old', buildOk: true });
     expect(r.status).toBe(0);
     expect(r.calls).toContain('corepack pnpm install --frozen-lockfile');
+    // R4-1: the install line must skip prepare's build+bundle (env prefix is
+    // not part of corepack's argv, so pin it in the script text).
+    expect(gateScript).toContain(
+      'QWEN_SKIP_PREPARE=1 corepack pnpm install --frozen-lockfile',
+    );
     expect(r.calls).toContain('npm run build');
     expect(r.calls).toContain('npm run bundle');
     expect(r.githubPath.trim()).toBe(join(r.workspace, '.qwen-review-cli-bin'));

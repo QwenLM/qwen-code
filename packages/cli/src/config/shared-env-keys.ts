@@ -134,6 +134,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_REVIEW_PROVIDER_VM_ENDPOINT',
   'QWEN_REVIEW_FCSANDBOX_TEMPLATE',
   'QWEN_REVIEW_ALLOW_EXTERNAL_CONTENT_CONTAINER',
+  'QWEN_REVIEW_FORCE_HARDWARE_CAUSE',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

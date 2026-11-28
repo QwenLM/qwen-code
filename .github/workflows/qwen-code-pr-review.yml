@@ -1191,6 +1191,7 @@ jobs:
           policy='tiered'
           container_ready='false'
           force_hardware='1'
+          force_hardware_cause='container-unavailable'
           # A daemon round trip, not presence on PATH: a client with no
           # reachable daemon is the shape that then refuses every reviewed
           # command deep inside the prebuild (cli lib/sandboxed-exec.ts).
@@ -1202,6 +1203,7 @@ jobs:
           else
             container_ready='true'
             force_hardware=''
+            force_hardware_cause=''
           fi
           # Fail closed for fork heads on the persistent pool (comment/
           # dispatch shapes the runs-on routing cannot see): without container
@@ -1209,7 +1211,7 @@ jobs:
           # neither CI credentials nor the shared host are exposed to PR-driven
           # shell probes.
           if [ "$container_ready" != 'true' ] && [ "${RUNNER_ENVIRONMENT:-}" = 'self-hosted' ] && [ "${HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
-            echo "::error::fork PR review refused: the container sandbox is unavailable (container_ready='$container_ready', policy='$policy') on this runner, and an uncontained review would expose CI credentials to PR-controlled install/build scripts (the agent's own shell probes included). Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true to review on the hosted lane."
+            echo "::error::fork PR review refused: container sandbox unavailable (container_ready='$container_ready', policy='$policy') on this shared pool. tiered refuses PR install/build/test without hardware isolation, but the agent's own shell probes run host-side here and the prebuild workspace is uncontained. Re-run with MAINTAINER_ECS_RUNNER_DISABLED=true for the hosted lane."
             {
               echo "### Review sandbox"
               echo "runtime: ${SANDBOX_COMMAND}"
@@ -1226,17 +1228,15 @@ jobs:
             echo "container_ready: $container_ready"
             echo "force_hardware: ${force_hardware:-0}"
             echo "policy: $policy"
-            echo "note: under tiered, trust classification still escalates external/fork and high-risk PRs to hardware-isolated; without a microVM bridge those phases refuse even when container_ready=true."
+            echo "note: tiered still escalates external/fork and high-risk PRs to hardware-isolated; without a microVM bridge those phases refuse even when container_ready=true."
           } >> "$GITHUB_STEP_SUMMARY"
           {
             echo "policy=$policy"
             echo "force_hardware=$force_hardware"
+            echo "force_hardware_cause=$force_hardware_cause"
           } >> "$GITHUB_OUTPUT"
 
-      # Behaviour-probed CLI capability gate (see script header + design §3.7).
-      # Runs after the preflight so a review the preflight refuses never pays
-      # the gate's worst case; the script refuses explicitly rather than
-      # letting an unsupported CLI silently map `tiered` to `off`.
+      # Behaviour-probed CLI capability gate; see script header + design §3.7.
       - name: 'Ensure tiered-capable review CLI'
         if: "steps.context.outputs.should_run == 'true'"
         timeout-minutes: 20
@@ -1357,6 +1357,7 @@ jobs:
           # container readiness failed (preventing fallback to an unpinned tag),
           # empty when a digest-pinned container image was resolved.
           QWEN_REVIEW_FORCE_HARDWARE: '${{ steps.review_sandbox.outputs.force_hardware }}'
+          QWEN_REVIEW_FORCE_HARDWARE_CAUSE: '${{ steps.review_sandbox.outputs.force_hardware_cause }}'
           # Pin the operator content-allowlist opt-in OFF in CI (R3-3): a stale
           # runner/service environment must not silently grant external PRs the
           # shared-kernel tier. Operators enable it via their own shell/user
