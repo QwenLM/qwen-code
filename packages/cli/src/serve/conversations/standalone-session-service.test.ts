@@ -223,6 +223,11 @@ function createHarness(exportChannel?: string): Harness {
     provenance: 'live-conversation',
     trusted: true,
     removable: false,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge: bridge as unknown as AcpSessionBridge,
     workspaceService: { getWorkspaceProvidersStatus },
   } as unknown as WorkspaceRuntime;

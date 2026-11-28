@@ -1536,7 +1536,7 @@ export function createServeApp(
             return resolveRuntimeWorktreeRootSetting(primaryRuntime);
           }
           return resolveWorkspaceWorktreeRootSetting(boundWorkspace, {
-            environment: process.env,
+            environment: daemonEnv,
             workspaceTrusted: isPrimaryWorkspaceTrusted(),
           });
         },
@@ -1572,7 +1572,7 @@ export function createServeApp(
             return tryReadRuntimeWorktreeRoot(primaryRuntime)?.normalized;
           }
           const raw = resolveWorkspaceWorktreeRootSetting(boundWorkspace, {
-            environment: process.env,
+            environment: daemonEnv,
             workspaceTrusted: isPrimaryWorkspaceTrusted(),
           });
           return raw.startsWith('\0') ? undefined : raw;

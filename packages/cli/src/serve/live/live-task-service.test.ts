@@ -284,15 +284,27 @@ function makeHarness() {
     workspaceCwd: '/conversations',
     sessionRuntimeBaseDir: '/runtime/conversations',
     provenance: 'live-conversation',
+    trusted: true,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
   const projectBridge = { ...bridge } as AcpSessionBridge;
   const projectRuntime = {
     workspaceId: 'project-1',
     workspaceCwd: '/project',
     sessionRuntimeBaseDir: '/runtime/project',
+    trusted: true,
+    env: {
+      mode: 'parent-process',
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
     bridge: projectBridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
   const registry = {
     list: () => [projectRuntime],
     listAll: () => [runtime, projectRuntime],

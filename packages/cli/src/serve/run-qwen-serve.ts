@@ -7339,7 +7339,7 @@ async function runQwenServeImpl(
         getWorktreeRoot: () =>
           loadOptionalWorkspaceWorktreeRoot(
             workspaceInput.cwd,
-            secondaryEnv.effectiveEnv ?? process.env,
+            secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
             secondaryTrusted,
           ),
       });
@@ -7363,7 +7363,7 @@ async function runQwenServeImpl(
         resolveWorktreeRoot: () =>
           loadOptionalWorkspaceWorktreeRoot(
             workspaceInput.cwd,
-            secondaryEnv.effectiveEnv ?? process.env,
+            secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
             secondaryTrusted,
           ),
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
@@ -7470,7 +7470,7 @@ async function runQwenServeImpl(
                 getWorktreeRoot: () =>
                   loadOptionalWorkspaceWorktreeRoot(
                     workspaceInput.cwd,
-                    secondaryEnv.effectiveEnv ?? process.env,
+                    secondaryEnv.effectiveEnv ?? runtimeEffectiveEnv,
                     secondaryTrusted,
                   ),
               }),
@@ -8370,7 +8370,7 @@ async function runQwenServeImpl(
         getWorktreeRoot: () =>
           loadOptionalWorkspaceWorktreeRoot(
             cwd,
-            wsEnv.effectiveEnv ?? process.env,
+            wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
             trusted,
           ),
         boundWorkspace: cwd,
@@ -8422,7 +8422,7 @@ async function runQwenServeImpl(
           resolveWorktreeRoot: () =>
             loadOptionalWorkspaceWorktreeRoot(
               cwd,
-              wsEnv.effectiveEnv ?? process.env,
+              wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
               trusted,
             ),
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
@@ -8546,7 +8546,7 @@ async function runQwenServeImpl(
                   getWorktreeRoot: () =>
                     loadOptionalWorkspaceWorktreeRoot(
                       cwd,
-                      wsEnv.effectiveEnv ?? process.env,
+                      wsEnv.effectiveEnv ?? runtimeEffectiveEnv,
                       trusted,
                     ),
                 }),

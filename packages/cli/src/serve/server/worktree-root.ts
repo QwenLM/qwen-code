@@ -89,11 +89,7 @@ export function readRuntimeWorktreeRoot(
     env?: WorkspaceRuntime['env'];
   },
 ): ParsedWorktreeRoot {
-  const environment =
-    runtime.env?.effectiveEnv ??
-    (runtime.env === undefined || runtime.env.mode === 'parent-process'
-      ? process.env
-      : undefined);
+  const environment = runtime.env?.effectiveEnv;
   if (!environment) {
     throw new InvalidWorktreeRootError(
       'workspace runtime environment is unavailable',
