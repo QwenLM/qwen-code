@@ -514,13 +514,20 @@ describe('WebFetchTool', () => {
           mockGenerateContent.mockRejectedValue(new Error('API error'));
         else mockGenerateContent.mockResolvedValue({ text: summary });
         const result = await run('https://example.com/large');
-        expect(result.persistedOutputFiles).toHaveLength(1);
-        const originalArtifact = result.persistedOutputFiles![0]!;
+        const originalArtifact = (result.llmContent as string).match(
+          /Full extracted text saved to: (.*)\. Page in/,
+        )?.[1];
+        expect(originalArtifact).toBeDefined();
         if (processingFailure) {
+          expect(result.persistedOutputFiles).toEqual([originalArtifact]);
           expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+        } else {
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.llmContent).toContain(summary.trim());
+          expect(fs.readFileSync(originalArtifact!, 'utf8')).toBe(body);
         }
         const [finalized] = await finalizeToolResponses(
-          { ...mockConfig, getToolOutputBatchBudget: () => 500 } as Config,
+          { ...mockConfig, getToolOutputBatchBudget: () => 2_000 } as Config,
           [
             {
               callId: 'web',
@@ -535,19 +542,95 @@ describe('WebFetchTool', () => {
           ],
         );
         const artifact = finalized.persistedOutputFiles![0]!;
-        expect(artifact).toBe(originalArtifact);
         const saved = fs.readFileSync(artifact, 'utf8');
-        expect(saved).toBe(body);
-        if (!processingFailure)
-          expect(result.llmContent).toContain(summary.trim());
         const output = finalized.responseParts[0].functionResponse!.response![
           'output'
         ] as string;
+        if (processingFailure) {
+          expect(artifact).toBe(originalArtifact);
+          expect(saved).toBe(body);
+        } else {
+          expect(artifact).not.toBe(originalArtifact);
+          expect(saved).toBe(result.llmContent);
+          expect(saved).toContain(summary.trim());
+          expect(saved).not.toBe(body);
+          expect(output).toContain(
+            `Full extracted text saved to: ${originalArtifact}. Page in`,
+          );
+        }
         expect(isPersistedOutputStub(output)).toBe(true);
         expect(output).toContain(artifact);
-        expect(output.length).toBeLessThanOrEqual(500);
+        expect(output.length).toBeLessThanOrEqual(2_000);
       },
     );
+
+    it('keeps a spilled success recoverable when the finalizer cannot write', async () => {
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'summary '.repeat(1000) });
+      const result = await run('https://example.com/large');
+      const originalArtifact = (result.llmContent as string).match(
+        /Full extracted text saved to: (.*)\. Page in/,
+      )?.[1];
+      expect(originalArtifact).toBeDefined();
+
+      const [finalized] = await finalizeToolResponses(
+        {
+          ...mockConfig,
+          getToolOutputBatchBudget: () => 2_000,
+          getToolResultBytesWritten: () => Number.MAX_SAFE_INTEGER,
+        } as Config,
+        [
+          {
+            callId: 'web',
+            toolName: 'web_fetch',
+            responseParts: convertToFunctionResponse(
+              'web_fetch',
+              'web',
+              result.llmContent,
+              result,
+            ),
+          },
+        ],
+      );
+
+      const output = finalized.responseParts[0].functionResponse!.response![
+        'output'
+      ] as string;
+      expect(output).toContain(
+        `Persisted tool-output artifact: ${originalArtifact}`,
+      );
+      expect(isPersistedOutputStub(output)).toBe(true);
+    });
+
+    it('keeps a spilled success recoverable when its metadata header exceeds 4 KB', async () => {
+      const longUrl = `https://example.com/large?${'x'.repeat(5_000)}`;
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+      const result = await run(longUrl);
+
+      expect(result.llmContent).toContain('Full extracted text saved to:');
+      expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+    });
+
+    it('recognizes a spilled success when the URL contains a blank line', async () => {
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+      const result = await run('https://example.com/large\n\nignored');
+
+      expect(result.llmContent).toContain('Full extracted text saved to:');
+      expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+    });
 
     it('keeps default result budgets without shrinking side-query input', async () => {
       stubFetch({
@@ -1268,6 +1351,7 @@ describe('WebFetchTool', () => {
         body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
         finalUrl: 'https://docs.python.org/3/library/json.md',
       });
+      mockGenerateContent.mockResolvedValue({ text: 'summary '.repeat(1_000) });
 
       const result = await run(
         'https://docs.python.org/3/library/json.md',
@@ -1276,7 +1360,29 @@ describe('WebFetchTool', () => {
       );
 
       expect(mockGenerateContent).toHaveBeenCalled();
-      expect(result.llmContent).toContain('Summary');
+      expect(result.llmContent).toContain('summary');
+      expect(result.persistedOutputFiles).toBeUndefined();
+
+      const [finalized] = await finalizeToolResponses(
+        {
+          ...configWithBrokenSpill,
+          getToolOutputBatchBudget: () => 500,
+        } as Config,
+        [
+          {
+            callId: 'web',
+            toolName: 'web_fetch',
+            responseParts: convertToFunctionResponse(
+              'web_fetch',
+              'web',
+              result.llmContent,
+              result,
+            ),
+          },
+        ],
+      );
+      const artifact = finalized.persistedOutputFiles![0]!;
+      expect(fs.readFileSync(artifact, 'utf8')).toBe(result.llmContent);
     });
   });
 

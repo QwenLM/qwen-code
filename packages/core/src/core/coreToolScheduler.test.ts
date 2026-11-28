@@ -1349,6 +1349,7 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
+    toolResultBytesWritten?: number;
     getLlmClient?: () => unknown;
     getPlanFilePath?: () => string;
     truncateToolOutputThreshold?: number;
@@ -1439,7 +1440,7 @@ describe('CoreToolScheduler', () => {
             getProjectTempDir: () => '/tmp',
             getToolResultsDir: () => '/tmp/tool-results',
           },
-          getToolResultBytesWritten: () => 0,
+          getToolResultBytesWritten: () => options.toolResultBytesWritten ?? 0,
           trackToolResultBytes: vi.fn(),
           getTruncateToolOutputThreshold: () =>
             options.truncateToolOutputThreshold ??
@@ -4361,6 +4362,30 @@ describe('CoreToolScheduler', () => {
     ).toBeLessThanOrEqual(10_000);
     expect(outputs.join('\n')).toContain('/tmp/first.output');
     expect(outputs.join('\n')).toContain('/tmp/second.output');
+  });
+
+  it('keeps the producer artifact when the finalizer cannot write', async () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const {
+      calls: [call],
+    } = await runLoneTool(
+      toolReturning('web_fetch', {
+        llmContent: `Full extracted text saved to: ${artifact}\nURL: https://example.com\n\n${'summary '.repeat(1000)}`,
+        returnDisplay: 'summary',
+        fallbackPersistedOutputFiles: [artifact],
+      }),
+      'web',
+      'p',
+      {
+        toolOutputBatchBudget: 2000,
+        toolResultBytesWritten: Number.MAX_SAFE_INTEGER,
+        waitForCompletion: true,
+      },
+    );
+
+    expect(responseText(call)).toContain(
+      `Persisted tool-output artifact: ${artifact}`,
+    );
   });
 
   it('offloads timeout error detail while preserving failure metadata', async () => {

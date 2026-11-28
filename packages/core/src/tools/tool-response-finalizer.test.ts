@@ -13,11 +13,15 @@ import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
   isBudgetShrinkablePart,
+  minimumFunctionResponseContent,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
-import { persistAndTruncateToolResult } from './truncation.js';
+import {
+  PERSISTED_OUTPUT_ARTIFACT_PREFIX,
+  persistAndTruncateToolResult,
+} from './truncation.js';
 import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -976,6 +980,102 @@ describe('tool response finalization', () => {
     ).toBe(entries);
     expect(enforceFunctionResponseBudget(entries, 220)).toBe(entries);
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('protects a fallback-only recovery pointer from a small send budget', () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'send',
+      `Full extracted text saved to: ${artifact}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [artifact] },
+    );
+    const entries = [entry('send', parts)];
+    const minimum =
+      `${PERSISTED_OUTPUT_ARTIFACT_PREFIX}: ${artifact}`.length + 3;
+
+    expect(enforceFunctionResponseBudget(entries, 58)).toBe(entries);
+    expect(minimumFunctionResponseContent(parts).budgetedChars).toBe(minimum);
+  });
+
+  it('protects a fallback-only recovery pointer from a small batch budget', async () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'send',
+      `Full extracted text saved to: ${artifact}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [artifact] },
+    );
+    const entries = [entry('send', parts)];
+    persist.mockResolvedValue({
+      content: 'persistence refused',
+      bytesWritten: 0,
+    });
+
+    expect(await finalizeToolResponses(config(58), entries)).toBe(entries);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('keeps the producer pointer when the finalizer pointer cannot fit', async () => {
+    const producer = '/tmp/web_fetch.output';
+    const finalizer = '/tmp/tool-results/web_fetch.txt';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'web-fetch',
+      `Full extracted text saved to: ${producer}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [producer] },
+    );
+    persist.mockResolvedValue({
+      content: 'persisted',
+      outputFile: finalizer,
+      bytesWritten: 1000,
+    });
+
+    const budget =
+      `${PERSISTED_OUTPUT_ARTIFACT_PREFIX}: ${producer}`.length + 3;
+    const result = await finalizeToolResponses(
+      config(200_000),
+      [entry('web-fetch', parts)],
+      undefined,
+      false,
+      false,
+      budget,
+      false,
+    );
+
+    const output = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+    expect(output).toContain(producer);
+    expect(output).not.toContain(finalizer);
+    expect(result[0].persistedOutputFiles).toEqual([finalizer]);
+  });
+
+  it('names the producer fallback artifact when a decided-empty entry list is truncated', async () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'send',
+      `Full extracted text saved to: ${artifact}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [artifact] },
+    );
+    const entries = [entry('send', parts, [])];
+
+    const result = await finalizeToolResponses(
+      config(200_000),
+      entries,
+      undefined,
+      false,
+      false,
+      100,
+      false,
+    );
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(result[0].persistedOutputFiles).toEqual([]);
+    expect(JSON.stringify(result[0].responseParts[0])).toContain(
+      `Persisted tool-output artifact: ${artifact}`,
+    );
   });
 
   it('keeps a real preview when the persisted pointer cannot fit the allocation', async () => {

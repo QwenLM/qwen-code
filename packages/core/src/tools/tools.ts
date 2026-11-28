@@ -624,6 +624,9 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Reusable producer artifact to reference only if finalization cannot write. */
+  fallbackPersistedOutputFiles?: string[];
+
   /** Producer-owned reason and recovery handle, preserved as one unit. */
   recoveryText?: string;
 

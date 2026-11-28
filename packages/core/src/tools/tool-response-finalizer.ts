@@ -139,11 +139,13 @@ function recoveryHeader(files: string[] | undefined): string {
 
 function minimumRecoveryBudget(slot: TextSlot): number {
   const text = slot.recovery?.text;
-  return (
-    recoveryHeader(slot.recovery?.persistedOutputFiles).length +
-    (text ? text.length + 2 : 0) +
-    3
-  );
+  // Same first-non-empty ordering as replaceTextSlots, so the budget holds
+  // out the header the replacement will actually derive.
+  const files = slot.recovery?.persistedOutputFiles?.length
+    ? slot.recovery.persistedOutputFiles
+    : (slot.recovery?.fallbackPersistedOutputFiles ??
+      slot.recovery?.persistedOutputFiles);
+  return recoveryHeader(files).length + (text ? text.length + 2 : 0) + 3;
 }
 
 function isBudgetExemptOutputName(name: string | undefined): boolean {
@@ -314,7 +316,17 @@ function fitText(
 
   const preserved = recovery?.text ?? '';
   const preservedSize = preserved ? preserved.length + 2 : 0;
-  const pointer = recoveryHeader(persistedOutputFiles);
+  const primaryPointer = recoveryHeader(persistedOutputFiles);
+  const fallbackFiles = recovery?.fallbackPersistedOutputFiles;
+  const fallbackPointer = fallbackFiles?.length
+    ? recoveryHeader(fallbackFiles)
+    : undefined;
+  const pointer =
+    fallbackPointer &&
+    primaryPointer.length + preservedSize + 3 > maxChars &&
+    fallbackPointer.length + preservedSize + 3 <= maxChars
+      ? fallbackPointer
+      : primaryPointer;
   // A pointer too long to deliver in full is dropped rather than sent as a
   // partial path, so the preview is budgeted against the notice that is sent.
   const header =
@@ -379,11 +391,19 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    const files =
-      entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
+    // The header prefers the first non-empty list: a decided-empty [] (a
+    // refused write) must not shadow the producer's fallback artifact. The
+    // [] itself stays the write decision — previousFiles below reads it.
+    const files = slot.recovery?.persistedOutputFiles?.length
+      ? slot.recovery.persistedOutputFiles
+      : entry.persistedOutputFiles?.length
+        ? entry.persistedOutputFiles
+        : (slot.recovery?.fallbackPersistedOutputFiles ??
+          slot.recovery?.persistedOutputFiles ??
+          entry.persistedOutputFiles);
     const recovery = { ...slot.recovery, persistedOutputFiles: files };
-    // The header path is the entry's persisted artifact — data this module
-    // wrote, never a string recovered from model-visible text.
+    // Paths come from producer metadata or this module's write, never from a
+    // string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
@@ -429,7 +449,9 @@ export function minimumFunctionResponseContent(parts: Part[]): {
   const entries = [{ callId: '', toolName: '', responseParts: parts }];
   const slots = collectTextSlots(entries, false);
   const allocations = slots.map((slot) =>
-    slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length
+    slot.recovery?.text ||
+    slot.recovery?.persistedOutputFiles?.length ||
+    slot.recovery?.fallbackPersistedOutputFiles?.length
       ? Math.min(slot.text.length, minimumRecoveryBudget(slot))
       : 0,
   );
@@ -463,7 +485,9 @@ export function enforceFunctionResponseBudget(
     slots.some(
       (slot, index) =>
         slot.text.length > allocations[index] &&
-        (slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length) &&
+        (slot.recovery?.text ||
+          slot.recovery?.persistedOutputFiles?.length ||
+          slot.recovery?.fallbackPersistedOutputFiles?.length) &&
         allocations[index] < minimumRecoveryBudget(slot),
     )
   )
@@ -567,7 +591,8 @@ export async function finalizeToolResponses(
         // persist an artifact and then send a contentless notice.
         (budgetOverride !== undefined ||
           slot.recovery?.text ||
-          slot.recovery?.persistedOutputFiles?.length) &&
+          slot.recovery?.persistedOutputFiles?.length ||
+          slot.recovery?.fallbackPersistedOutputFiles?.length) &&
         allocations[index] < minimumRecoveryBudget(slot),
     )
   ) {
