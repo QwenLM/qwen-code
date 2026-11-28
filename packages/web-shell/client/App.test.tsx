@@ -104,6 +104,7 @@ import type {
   WebShellAssistantFeedbackOptions,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
+import { getTranslator } from './i18n';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
@@ -117,6 +118,8 @@ import { HotkeySetter } from './live/HotkeySetter';
 import { TOUCH_COMPOSER_QUERY } from './hooks/useIsTouchComposer';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import type { ComposerIntegrations } from './components/composer/composer-integrations';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -372,6 +375,7 @@ type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
+  composerIntegrations?: ComposerIntegrations;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -4817,6 +4821,130 @@ describe('task activity key', () => {
     ).toContain('report.html');
   });
 
+  it('keeps a pressed close affordance for a restored zero-artifact artifacts tab', async () => {
+    // App-layer witness for the artifactsTabActive join: with an empty live
+    // list the count term is 0, so only (rightPanelOpen && artifactsTabActive)
+    // keeps the entry visible. The restore arm reopens the persisted tab while
+    // artifacts is still [] (cold load, or artifacts since deleted); the entry
+    // is then the header's only close affordance. Mutating artifactsTabActive
+    // to false or a wrong id prefix reddens this case.
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      const entry = container.querySelector('[data-web-shell-artifacts-entry]');
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-pressed')).toBe('true');
+    });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+    // One click closes the panel. With the count still 0 and the panel closed,
+    // the entry's render condition no longer holds, so it hides entirely rather
+    // than lingering as a pressed-false zero entry.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+        ?.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an unrelated restored tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[role="tab"][title="Stored review"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
+  it('does not show the artifacts entry for an inactive artifacts tab at zero artifacts', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'review:stored',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+            { id: 'review:stored', kind: 'review', title: 'Stored review' },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[role="tab"][title="Stored review"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[role="tab"][title="Artifacts"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+  });
+
   it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
@@ -4986,6 +5114,7 @@ describe('task activity key', () => {
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
+    const t = getTranslator('en');
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -5043,18 +5172,37 @@ describe('task activity key', () => {
       ),
     ).toBeNull();
 
-    // The artifacts tab serializes into the persisted right-panel state.
+    // The artifacts tab serializes into the persisted right-panel state with
+    // the exact shape parsePersistedArtifactPanelTab accepts: a string id and
+    // title (the common gate) plus kind and sessionId. A kind-only assertion
+    // would stay green for a serialize arm that dropped id/title, yet the tab
+    // would vanish on every reload; pin the fields the restore arm reads.
     await vi.waitFor(async () => {
       await flush();
       const rawState = JSON.parse(
         window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
           '{}',
-      ) as Record<string, { tabs?: Array<{ kind?: string }> }>;
-      expect(
-        Object.values(rawState).some((entry) =>
-          entry.tabs?.some((tab) => tab.kind === 'artifacts'),
-        ),
-      ).toBe(true);
+      ) as Record<
+        string,
+        {
+          activeTabId?: string;
+          tabs?: Array<{
+            id?: string;
+            kind?: string;
+            title?: string;
+            sessionId?: string;
+          }>;
+        }
+      >;
+      const entry = Object.values(rawState).find((candidate) =>
+        candidate.tabs?.some((tab) => tab.kind === 'artifacts'),
+      );
+      const tab = entry?.tabs?.find((item) => item.kind === 'artifacts');
+      expect(tab).toBeDefined();
+      expect(tab!.id).toBe('artifacts:session-1');
+      expect(tab!.title).toBe(t('environment.artifacts'));
+      expect(tab!.sessionId).toBe('session-1');
+      expect(entry!.activeTabId).toBe('artifacts:session-1');
     });
 
     // A second click toggles the right panel closed.
@@ -13066,6 +13214,78 @@ describe('artifact panel fullscreen', () => {
     expect(drawerAside!.contains(document.activeElement)).toBe(true);
   });
 
+  it('returns focus to the artifacts entry when the floating drawer closes', async () => {
+    // openArtifactsListPanel records the focused trigger so the drawer's
+    // onCloseAutoFocus can return focus to it. Deleting that call leaves every
+    // suite green but drops focus to BODY on close; this pins the restore.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-artifacts-entry]',
+    );
+    expect(entry).not.toBeNull();
+    entry!.focus();
+    expect(document.activeElement).toBe(entry);
+
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+    expect(entry).not.toBe(document.activeElement);
+
+    // Close with the drawer's own toggle (the header entry is overlaid).
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-portal-root] aside button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).toBeNull();
+    expect(document.activeElement).toBe(entry);
+  });
+
   it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
     // Docked fullscreen -> narrow (the drawer takes over) -> widen -> shrink
     // via a non-toggle exit: the suppression flag must survive the interlude,
@@ -20465,6 +20685,54 @@ describe('App session callbacks', () => {
   );
 
   it.each([
+    { scenario: 'switch is refused', switchStarted: true, completion: false },
+    {
+      scenario: 'switch is aborted and never starts',
+      switchStarted: false,
+      completion: false,
+    },
+    { scenario: 'switch completes', switchStarted: true, completion: true },
+  ])(
+    'surfaces branch source warnings when the $scenario',
+    async ({ switchStarted, completion }) => {
+      const switchCompletion = deferred<boolean>();
+      mockSessionActions.branchSession.mockResolvedValue({
+        sessionId: 'branch-1',
+        displayName: 'Historical branch',
+        switchStarted,
+        ...(switchStarted ? { switchCompleted: switchCompletion.promise } : {}),
+        sourceWarnings: ['Session sources could not be copied.'],
+      });
+      const onToast = vi.fn();
+      renderApp({ onToast });
+      await flush();
+
+      const request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      switchCompletion.resolve(completion);
+      await act(async () => {
+        await request;
+      });
+
+      expect(onToast).toHaveBeenCalledWith(
+        'warning',
+        'Session sources could not be copied.',
+      );
+      const switched = [
+        expect.objectContaining({
+          type: 'status',
+          text: expect.stringContaining('Historical branch') as string,
+        }),
+      ];
+      if (completion) {
+        expect(mockStore.dispatch).toHaveBeenCalledWith(switched);
+      } else {
+        expect(mockStore.dispatch).not.toHaveBeenCalledWith(switched);
+      }
+    },
+  );
+
+  it.each([
     [
       'worktree is unsupported',
       () =>
@@ -20854,6 +21122,9 @@ describe('App session callbacks', () => {
       user: 0,
       workspace: 0,
     });
+    expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
+      DAEMON_COMPOSER_INTEGRATIONS,
+    );
   });
 
   it('keeps primary Voice model reads and writes on legacy routes', async () => {
