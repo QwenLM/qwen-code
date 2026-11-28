@@ -18,7 +18,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildManagedLoopSkill } from './managed-loop-skill.js';
+import {
+  buildManagedLoopSkill,
+  MANAGED_LOOP_PROFILES,
+} from './managed-loop-skill.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, 'SKILL.md'), 'utf8');
@@ -37,12 +40,13 @@ if (!descLine) throw new Error('SKILL.md frontmatter has no description');
 const description = descLine.slice('description:'.length).trim();
 
 const contractsDir = join(here, '../../../managed-runtime/contracts');
-const targets = [
-  ['union', 'managed-loop-skill-union.json'],
-  ['cron', 'managed-loop-skill-cron.json'],
-  ['wakeup', 'managed-loop-skill-wakeup.json'],
-] as const;
-for (const [profile, file] of targets) {
+// Derive the targets from the declared profile set so the producer cannot
+// drift from MANAGED_LOOP_PROFILES: an added profile is generated here, and a
+// removed one stops being written (the parity set assertion catches a sidecar
+// left on disk). The filename convention is read by ASSETS in the parity test
+// and by ManagedLoopSkill.java on the Java classpath.
+for (const profile of MANAGED_LOOP_PROFILES) {
+  const file = `managed-loop-skill-${profile}.json`;
   const skill = buildManagedLoopSkill(profile, body, description);
   const out = JSON.stringify(skill, null, 2) + '\n';
   writeFileSync(join(contractsDir, file), out);

@@ -5,14 +5,18 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildManagedLoopSkill,
+  assertSentinelsExpanded,
+  MANAGED_LOOP_PROFILES,
   type ManagedLoopProfile,
 } from './managed-loop-skill.js';
 import { parseSkillContent } from '../../skill-load.js';
+import { compileCron } from '../../../managed-runtime/managed-automation-slots.js';
+import { parseCron } from '../../../utils/cronParser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsDir = join(here, '../../../managed-runtime/contracts');
@@ -52,6 +56,67 @@ function asset(profile: ManagedLoopProfile): {
   return JSON.parse(readFileSync(join(contractsDir, ASSETS[profile]), 'utf8'));
 }
 
+/** The profiles that declare the fixed-interval creator, derived from the
+ * shipped bodies rather than a hand-kept pair: the Nd caveat and substitution
+ * reach exactly the bodies that teach CronCreate, so a profile added or removed
+ * upstream cannot leave these pins iterating a stale list. */
+const FIXED_INTERVAL_PROFILES = MANAGED_LOOP_PROFILES.filter((profile) =>
+  asset(profile).body.includes('CronCreate'),
+);
+
+/** Scrape forProfile()'s routing chain and resolve it the way Java does.
+ * Each branch contributes its profile constants paired with the key it
+ * assigns (a branch may serve several profiles, so the mapping is
+ * many-to-one). forProfile is an if / else-if chain: the FIRST matching
+ * branch wins and a later branch naming the same profile is dead code, so
+ * Object.fromEntries would certify a mapping Java never produces. Kept a
+ * top-level pure declaration so a synthetic chain can witness the resolution
+ * rather than only a local mutation of the real Java file. */
+function resolveJavaRouting(javaCode: string): Map<string, string> {
+  const code = javaCode
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  const routing = [
+    ...code.matchAll(
+      /((?:WorkspaceToolProfiles\.\w+\.equals\(profile\)[\s|)]*)+)\{\s*key = "(\w+)";/g,
+    ),
+  ].flatMap((match) =>
+    [...match[1]!.matchAll(/WorkspaceToolProfiles\.(\w+)\.equals/g)].map(
+      (profile) => [profile[1]!, match[2]!] as const,
+    ),
+  );
+  const routed = new Map<string, string>();
+  for (const [profile, key] of routing) {
+    if (!routed.has(profile)) routed.set(profile, key);
+  }
+  return routed;
+}
+
+/** The profile constants whose own Javadoc declares a /loop creator. Java
+ * carries no machine-readable creator declaration — the fact lives only in
+ * the doc comment above each constant — so that prose is the only available
+ * oracle, and this is a drift guard rather than a mechanism pin. Both of its
+ * failure directions are measured, not assumed: a docs-only reword that
+ * drops the keywords reddens this suite although routing is unchanged, and
+ * an unrouted loop-bearing constant whose doc lacks them stays green. A
+ * creator-less profile stays unconstrained. Comments are deliberately NOT
+ * stripped here: they are the signal. The shape-independent routing
+ * assertion in #17673 is the durable fix. */
+function loopBearingProfiles(javaCode: string): string[] {
+  return [
+    ...javaCode.matchAll(
+      // The doc body is tempered so it cannot run past its own `*/`: a lazy
+      // `[\s\S]*?` expanded across an intervening comment and attached the
+      // PREVIOUS declaration's loop doc to a creator-less constant. The gap
+      // admits line comments, which Java allows between a doc and its
+      // declaration, but no other comment form.
+      /(?:\/\*\*((?:[^*]|\*(?!\/))*)\*\/(?:\s|\/\/[^\n]*)*)?public static final String (\w+)\s*=/g,
+    ),
+  ]
+    .filter((match) => /loop|cron/i.test(match[1] ?? ''))
+    .map((match) => match[2]!);
+}
+
 /** The loop.md section of a body, up to the next top-level heading. */
 function loopMdSection(body: string): string {
   const start = body.indexOf('## loop.md task-file mode');
@@ -63,7 +128,7 @@ function loopMdSection(body: string): string {
 describe('managed loop skill parity', () => {
   const { body, description } = bundled();
 
-  it.each(['union', 'cron', 'wakeup'] as const)(
+  it.each(MANAGED_LOOP_PROFILES)(
     'the committed %s sidecar equals the generator output byte-for-byte',
     (profile) => {
       // Regenerate after editing SKILL.md:
@@ -113,7 +178,7 @@ describe('managed loop skill parity', () => {
   });
 
   it('no body claims the workspace project loop.md file', () => {
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       const b = asset(profile).body;
       expect(b).not.toContain('`.qwen/loop.md` (project)');
       expect(b).not.toContain('project wins');
@@ -185,7 +250,7 @@ describe('managed loop skill parity', () => {
   });
 
   it('no body says midnight local (Managed defaults to UTC)', () => {
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(asset(profile).body).not.toContain('midnight local');
     }
     expect(asset('cron').body).toContain('midnight UTC');
@@ -222,7 +287,7 @@ describe('managed loop skill parity', () => {
 
   it('rejects an unclassified bundled section instead of silently dropping it', () => {
     const withNewSection = `${body}\n## What to do on failure\n\nNew guidance.\n`;
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, withNewSection, description),
       ).toThrow(/Unclassified bundled loop section: What to do on failure/);
@@ -235,20 +300,26 @@ describe('managed loop skill parity', () => {
       '# /loop — run a prompt repeatedly\n\n<<loop.md-dynamic>>',
     );
     expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
-      /non-expanding sentinel/,
+      /cron fires expand none: <<loop\.md-dynamic>>/,
     );
   });
 
-  it('rejects a non-expanding sentinel in every profile, including wakeup', () => {
+  it('rejects an unlisted sentinel in every profile, including wakeup', () => {
     const mutated = body.replace(
       '# /loop — run a prompt repeatedly',
       '# /loop — run a prompt repeatedly\n\n<<autonomous-loop>>',
     );
     expect(mutated).not.toBe(body);
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
+      // Each profile is rejected for its own reason: cron expands nothing,
+      // the others require allow-list membership.
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
-      ).toThrow(/non-expanding sentinel/);
+      ).toThrow(
+        profile === 'cron'
+          ? /cron fires expand none: <<autonomous-loop>>/
+          : /outside the expanding allow-list: <<autonomous-loop>>/,
+      );
     }
   });
 
@@ -280,7 +351,7 @@ describe('managed loop skill parity', () => {
       '5. **Stop keyword**: a new rule.\n\nExamples:',
     );
     expect(mutated).not.toBe(body);
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
       ).toThrow(
@@ -311,5 +382,378 @@ describe('managed loop skill parity', () => {
     expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
       /short-reminder marker/,
     );
+  });
+
+  it('the bundled Parsing section keeps the full rule inventory', () => {
+    // The drift guard checks source→body coverage, so a rule DELETED from the
+    // bundled source is invisible to it (fewer rules to carry). Pin the rule
+    // inventory itself so deleting a rule reddens here instead of silently
+    // shrinking the contract.
+    const start = body.indexOf('## Parsing');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = body.slice(start);
+    const next = rest.indexOf('\n## ', 1);
+    const section = next < 0 ? rest : rest.slice(0, next);
+    const rules = [...section.matchAll(/^\d+\. \*\*([^*]+)\*\*/gm)].map(
+      (match) => match[1],
+    );
+    expect(rules).toEqual([
+      'Empty input',
+      'Leading interval token',
+      'Trailing "every" clause',
+      'Prompt-only input',
+    ]);
+  });
+
+  it('each profile shell keeps its own Parsing rule inventory', () => {
+    // The bundled inventory above cannot see the managed-only rules the cron
+    // and wakeup shells write themselves: deleting the cron shell's "No
+    // interval" rule, or renaming wakeup's "Interval requested", would
+    // regenerate green. Pin each shell's rule names. The Record is keyed by
+    // ManagedLoopProfile, so a new profile cannot skip this pin.
+    const expected: Record<ManagedLoopProfile, readonly string[]> = {
+      union: [
+        'Empty input',
+        'Leading interval token',
+        'Trailing "every" clause',
+        'Prompt-only input',
+      ],
+      cron: [
+        'Leading interval token',
+        'Trailing "every" clause',
+        'No interval',
+      ],
+      wakeup: [
+        'Empty input',
+        'Interval requested',
+        'Interval with no prompt',
+        'Prompt-only input',
+      ],
+    };
+    for (const profile of MANAGED_LOOP_PROFILES) {
+      const text = asset(profile).body;
+      const start = text.indexOf('## Parsing');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const rest = text.slice(start);
+      const next = rest.indexOf('\n## ', 1);
+      const section = next < 0 ? rest : rest.slice(0, next);
+      const rules = [...section.matchAll(/^\d+\. \*\*([^*]+)\*\*/gm)].map(
+        (match) => match[1],
+      );
+      expect({ profile, rules }).toEqual({
+        profile,
+        rules: [...expected[profile]],
+      });
+    }
+  });
+
+  it('the committed sidecar set equals the declared profile set', () => {
+    // The producer derives its targets from MANAGED_LOOP_PROFILES; this pins
+    // the other direction — a profile removed without deleting its sidecar
+    // (still copied to the Java classpath and served) reddens here. The
+    // bundled-body reference is not a profile and is excluded.
+    const committed = readdirSync(contractsDir)
+      .filter(
+        (name) =>
+          name.startsWith('managed-loop-skill-') &&
+          name.endsWith('.json') &&
+          name !== 'managed-loop-skill-bundled-body.json',
+      )
+      .sort();
+    const declared = MANAGED_LOOP_PROFILES.map(
+      (profile) => `managed-loop-skill-${profile}.json`,
+    ).sort();
+    expect(committed).toEqual(declared);
+  });
+
+  it('the Java sidecar map and routing serve exactly the declared profile set', () => {
+    // Two hand-kept Java sites decide whether a profile gets a /loop skill,
+    // and neither is bound to the TypeScript tuple: sidecars() only SUPPLIES
+    // bodies, while forProfile()'s routing chain decides which workspace
+    // profile reaches one. Pin the supply key set AND the profile→key mapping
+    // — a target set alone cannot see two profiles swapping bodies, which
+    // would hand a workspace the wrong creators. The provenance-only
+    // "bundled" key is allowed in sidecars() (it backs the bundled-import
+    // comparison, not a tool profile); a creator-less profile routes to null
+    // and never assigns a key, so it is absent from the mapping.
+    const javaSource = readFileSync(
+      join(
+        here,
+        '../../../../../managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedLoopSkill.java',
+      ),
+      'utf8',
+    );
+    // Scrape code, not prose: a comment that happens to spell an assignment
+    // must not redden this suite. The file carries no string literal
+    // containing a comment marker, so the two comment forms strip cleanly.
+    const javaCode = javaSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    const javaKeys = [...javaCode.matchAll(/"(\w+)",\s*readSidecar\(/g)]
+      .map((match) => match[1])
+      .filter((key) => key !== 'bundled')
+      .sort();
+    expect(javaKeys).toEqual([...MANAGED_LOOP_PROFILES].sort());
+    const routed = resolveJavaRouting(javaCode);
+    expect(Object.fromEntries(routed)).toEqual({
+      SHELL_V4: 'union',
+      FILES_V4: 'cron',
+      INTERNAL_TEAM_LEAD_V2: 'cron',
+      SHELL_V3: 'wakeup',
+    });
+    expect([...new Set(routed.values())].sort()).toEqual(
+      [...MANAGED_LOOP_PROFILES].sort(),
+    );
+    // The mapping alone cannot see a loop-bearing profile that the chain never
+    // mentions: it would simply be absent, like a creator-less one. Classify
+    // every declared constant by its own Javadoc and require the loop-bearing
+    // ones to be exactly the routed ones.
+    const profilesSource = readFileSync(
+      join(
+        here,
+        '../../../../../managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/workspace/WorkspaceToolProfiles.java',
+      ),
+      'utf8',
+    );
+    expect(loopBearingProfiles(profilesSource).sort()).toEqual(
+      [...routed.keys()].sort(),
+    );
+  });
+
+  it('the loop-bearing classification reads the doc above each constant, witnessed synthetically', () => {
+    const declarations = [
+      'public static final String FILES = "hosted-workspace-files/1";',
+      '/** Fixed-interval /loop: `files/3` plus the cron trio. */',
+      'public static final String FILES_V4 = "hosted-workspace-files/4";',
+      '/** #15076: `files/3` adds `todo_write`. */',
+      'public static final String FILES_V3 = "hosted-workspace-files/3";',
+      '/** Self-paced /loop revision: plus loop_wakeup. */',
+      'public static final String SHELL_V3 = "hosted-workspace-shell/3";',
+    ].join('\n');
+    expect(loopBearingProfiles(declarations).sort()).toEqual([
+      'FILES_V4',
+      'SHELL_V3',
+    ]);
+    // A constant with no doc at all is creator-less, not loop-bearing.
+    expect(
+      loopBearingProfiles('public static final String MCP = "x/1";'),
+    ).toEqual([]);
+    // The doc capture must not run past its own terminator. Each of these
+    // misclassified before the body was tempered: the first two attached the
+    // PREVIOUS loop doc to a creator-less constant, the third dropped a
+    // loop-bearing constant whose doc is separated by a line comment.
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Self-paced /loop revision. */',
+          '/** #15076: adds `todo_write`, no creator. */',
+          'public static final String B = "b/1";',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Fixed-interval /loop: plus cron. */',
+          '/* not a doc */',
+          'public static final String B = "b/1";',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Fixed-interval /loop: plus cron. */',
+          '// rollout note',
+          'public static final String A = "a/1";',
+        ].join('\n'),
+      ),
+    ).toEqual(['A']);
+  });
+
+  it('the routing resolution is first-match and comment-blind, witnessed on a synthetic chain', () => {
+    // A committed witness for the resolution itself: the real Java file has no
+    // duplicate branch, so only a synthetic chain can exercise the dead-branch
+    // direction without mutating production source.
+    const chain = [
+      'if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {',
+      '    key = "union";',
+      '} else if (WorkspaceToolProfiles.FILES_V4.equals(profile)',
+      '        || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD_V2.equals(profile)) {',
+      '    key = "cron";',
+      '} else if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) {',
+      '    key = "wakeup";',
+      '} else if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {',
+      '    key = "cron";',
+      '} else {',
+      '    return null;',
+      '}',
+    ].join('\n');
+    const expected = {
+      SHELL_V4: 'union',
+      FILES_V4: 'cron',
+      INTERNAL_TEAM_LEAD_V2: 'cron',
+      SHELL_V3: 'wakeup',
+    };
+    // The trailing duplicate names an already-matched profile: first-match
+    // keeps union, where last-wins would hand SHELL_V4 the cron body.
+    expect(Object.fromEntries(resolveJavaRouting(chain))).toEqual(expected);
+    // A comment spelling a WHOLE branch is what witnesses the stripping: a
+    // bare `// key = "cron";` has no profile condition, so the branch regex
+    // never matches it whether or not comments are removed, and such a variant
+    // proves nothing. These prepend a complete branch that would win
+    // first-match if it were scraped, so dropping either comment form reddens.
+    expect(
+      Object.fromEntries(
+        resolveJavaRouting(
+          `// if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) { key = "cron"; }\n${chain}`,
+        ),
+      ),
+    ).toEqual(expected);
+    expect(
+      Object.fromEntries(
+        resolveJavaRouting(
+          `/* if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) { key = "union"; } */\n${chain}`,
+        ),
+      ),
+    ).toEqual(expected);
+  });
+
+  it('the Nd month-boundary caveat matches the Managed slot compiler', () => {
+    // The caveat flows verbatim from SKILL.md (no substitution), so deleting
+    // or rewording it would otherwise regenerate green. Its arithmetic is
+    // DERIVED from compileCron — the TypeScript twin of the Java CronSlots
+    // scanner that actually fires a Managed schedule — instead of restated as
+    // prose, so a wrong bound or a wrong example gap reddens even when the pin
+    // text is updated to match it. The N ≤ 31 off-by-one survived two review
+    // rounds precisely because nothing computed the bound. utils/cronParser
+    // serves the local CLI scheduler, not this one: a Managed slot-semantics
+    // change would leave that parser (and a pin derived from it) untouched.
+    const daySet = (step: number): ReadonlySet<number> =>
+      compileCron(`0 0 */${step} * *`).dayOfMonth;
+    // The day-of-month field is [1, 31] and a step past 31 collects day 1
+    // alone, so scanning 1..31 covers every distinct day set.
+    let maxStep = 1;
+    for (let step = 1; step <= 31; step += 1) {
+      if (daySet(step).size > 1) maxStep = step;
+    }
+    const exampleDays = [...daySet(2)];
+    const lastFire = (monthLength: number): number =>
+      Math.max(...exampleDays.filter((day) => day <= monthLength));
+    // The boundary gap runs from the month's last fire to the next month's
+    // day 1, which the step always collects.
+    const boundaryGap = (monthLength: number): number =>
+      monthLength - lastFire(monthLength) + 1;
+    const ordinal = (day: number): string => {
+      const teen = day % 100 >= 11 && day % 100 <= 13;
+      return `${day}${teen ? 'th' : (['th', 'st', 'nd', 'rd'][day % 10] ?? 'th')}`;
+    };
+    // The caveat also reaches the local CLI scheduler, whose CronCreate
+    // validates with utils/cronParser. Bind the two evaluators: they expand
+    // */N identically today, and a divergence must redden here rather than
+    // leave one scheduler teaching a cadence the other does not honour.
+    for (let step = 1; step <= 31; step += 1) {
+      expect([...parseCron(`0 0 */${step} * *`).dayOfMonth].sort()).toEqual(
+        [...daySet(step)].sort(),
+      );
+    }
+    for (const profile of FIXED_INTERVAL_PROFILES) {
+      const text = asset(profile).body;
+      expect(text).toContain('day-of-month step, not a rolling N-day cadence');
+      expect(text).toContain('at most N days');
+      expect(text).toContain(`Keep N ≤ ${maxStep}`);
+      // Each worked example is asserted as ONE clause, so a gap cannot be
+      // swapped between the two month lengths: separate presence checks
+      // would both still pass while the pairing taught the wrong arithmetic.
+      expect(text).toContain(
+        `in a 30-day month \`*/2\` fires on the ${ordinal(lastFire(30))} then the 1st — a ${boundaryGap(30)}-day gap`,
+      );
+      expect(text).toContain(
+        `in a 31-day month on the ${ordinal(lastFire(31))} then the 1st — a ${boundaryGap(31)}-day gap`,
+      );
+    }
+  });
+
+  it('the managed Nd table cell keeps the corrected substitution', () => {
+    // The managed-side half of the Nd fix is the sub() that rewrites the
+    // table row; reverting its replacement string and regenerating would
+    // otherwise teach "every N days" again with every gate green. Pin the
+    // substituted cell and forbid the pre-fix wording.
+    // The derivation itself is pinned: a body that stopped teaching CronCreate
+    // would silently shrink the set and leave these pins iterating fewer
+    // profiles, so the expected membership is asserted, not assumed.
+    expect([...FIXED_INTERVAL_PROFILES].sort()).toEqual(['cron', 'union']);
+    for (const profile of FIXED_INTERVAL_PROFILES) {
+      const text = asset(profile).body;
+      expect(text).toContain('midnight UTC on days 1, 1+N, … of each month');
+      // The carried-over timezone clause is model-facing content in its own
+      // right: it is the only text telling the model that UTC midnight is not
+      // the user's local midnight, and no other assertion reads it.
+      expect(text).toContain(
+        "(pass the user's IANA `timezone` for local midnight)",
+      );
+      expect(text).not.toContain('every N days');
+    }
+    // The bundled source row is pinned directly too. sub() is fail-closed on
+    // its exact text, so a reworded row already reddens the parity build — but
+    // a coordinated edit of the row AND sub()'s source string would agree and
+    // slip through, so the source semantics are asserted here as well.
+    expect(body).toContain('midnight local on days 1, 1+N, … of each month');
+    expect(body).not.toContain('every N days');
+  });
+
+  it('the sentinel guard is an allow-list, so a new sentinel ships red', () => {
+    // Only the two wakeup-expanded -dynamic forms may appear in a union or
+    // wakeup body; cron may carry none. A deny-list of known non-expanding
+    // forms would let a newly added sentinel slip through.
+    expect(() =>
+      assertSentinelsExpanded(
+        'uses <<loop.md-dynamic>> and <<autonomous-loop-dynamic>>',
+        'union',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSentinelsExpanded('uses <<loop.md-dynamic>>', 'wakeup'),
+    ).not.toThrow();
+    expect(() =>
+      assertSentinelsExpanded('no sentinels here', 'cron'),
+    ).not.toThrow();
+    // An unknown sentinel is reported as unlisted, not as "non-expanding":
+    // the allow-list establishes membership, and nothing here checks whether
+    // an unknown token expands somewhere else.
+    expect(() =>
+      assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'union'),
+    ).toThrow(/outside the expanding allow-list: <<brand-new-sentinel>>/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'wakeup'),
+    ).toThrow(/outside the expanding allow-list/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<loop.md>>', 'union'),
+    ).toThrow(/outside the expanding allow-list: <<loop\.md>>/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<loop.md-dynamic>>', 'cron'),
+    ).toThrow(/cron fires expand none: <<loop\.md-dynamic>>/);
+  });
+
+  it('the sentinel guard runs on the assembled body at its call site', () => {
+    // The isolated-helper test above would still pass if a later edit inlined
+    // a deny-list back into buildManagedLoopSkill and left the export unused.
+    // Inject a brand-new sentinel into the Input section (carried verbatim
+    // into every profile body) and require the real build to reject it, so the
+    // call site itself is load-bearing.
+    const mutated = body.replace(
+      '## Input',
+      '## Input\n\nArm <<brand-new-sentinel>>.',
+    );
+    expect(mutated).not.toBe(body);
+    for (const profile of MANAGED_LOOP_PROFILES) {
+      expect(() =>
+        buildManagedLoopSkill(profile, mutated, description),
+      ).toThrow(
+        profile === 'cron'
+          ? /cron fires expand none: <<brand-new-sentinel>>/
+          : /outside the expanding allow-list: <<brand-new-sentinel>>/,
+      );
+    }
   });
 });

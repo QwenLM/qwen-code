@@ -27,7 +27,7 @@ export { SUPPORTED_LANGUAGES, getLanguageNameFromLocale };
 
 // State
 let currentLanguage: SupportedLanguage = 'en';
-let translations: Record<string, string | string[]> = {};
+let translations: TranslationDict = {};
 
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
@@ -258,8 +258,13 @@ export function setLanguage(lang: SupportedLanguage | 'auto'): void {
 export async function setLanguageAsync(
   lang: SupportedLanguage | 'auto',
 ): Promise<void> {
-  currentLanguage = resolveLanguage(lang);
-  translations = await loadTranslationsAsync(currentLanguage);
+  const resolved = resolveLanguage(lang);
+  const loaded = await loadTranslationsAsync(resolved);
+  // Assigned together: a reader that sees the new language while `t()` still
+  // returns the old strings would reseed its dedupe state against the wrong
+  // dictionary and replay everything once the swap lands.
+  currentLanguage = resolved;
+  translations = loaded;
 }
 
 export function getCurrentLanguage(): SupportedLanguage {
@@ -271,7 +276,9 @@ export function t(key: string, params?: Record<string, string>): string {
   if (Array.isArray(translation)) {
     return key;
   }
-  return interpolate(translation, params);
+  const template =
+    typeof translation === 'function' ? translation(params ?? {}) : translation;
+  return interpolate(template, params);
 }
 
 /**

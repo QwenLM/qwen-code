@@ -22,32 +22,35 @@ const {
   workspaceByCwd: vi.fn(),
 }));
 
-vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useWorkspaceActions: () => ({
-    readFileBytes,
-    stat,
-  }),
-  useWorkspace: () => ({
-    actions: { readFileBytes, stat },
-    client: { workspaceByCwd },
-    capabilities: {
-      workspaceCwd: '/primary',
-      workspaces: [
-        {
-          id: 'primary-id',
-          cwd: '/primary',
-          primary: true,
-          trusted: true,
-        },
-        {
-          id: 'secondary-id',
-          cwd: '/secondary',
-          primary: false,
-          trusted: true,
-        },
-      ],
-    },
-  }),
+const workspaceRuntimeMock = vi.hoisted(() => ({
+  enabled: true,
+}));
+
+vi.mock('../../utils/workspace-context.js', () => ({
+  useOptionalWorkspaceRuntime: () =>
+    workspaceRuntimeMock.enabled
+      ? {
+          actions: { readFileBytes, stat },
+          client: { workspaceByCwd },
+          capabilities: {
+            workspaceCwd: '/primary',
+            workspaces: [
+              {
+                id: 'primary-id',
+                cwd: '/primary',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'secondary-id',
+                cwd: '/secondary',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          },
+        }
+      : undefined,
 }));
 
 const { TurnOutputs } = await import('./TurnOutputs');
@@ -1526,5 +1529,47 @@ describe('host artifact visibility', () => {
     expect(container.textContent).toContain('report-2.txt');
     expect(artifacts).toEqual(originalArtifacts);
     act(() => root.unmount());
+  });
+
+  it('renders artifacts safely when no WorkspaceRuntimeContext provider is mounted', () => {
+    workspaceRuntimeMock.enabled = false;
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-managed"
+              workspaceCwd="/managed"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'managed-art',
+                  title: 'managed-report.md',
+                  kind: 'document',
+                  storage: 'workspace',
+                  workspacePath: 'docs/managed-report.md',
+                  status: 'available',
+                  source: 'tool',
+                  retention: 'restorable',
+                  clientRetained: false,
+                  createdAt: '2026-11-28T00:00:00.000Z',
+                  updatedAt: '2026-11-28T00:00:00.000Z',
+                },
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>,
+        ),
+      );
+      expect(container.textContent).toContain('managed-report.md');
+    } finally {
+      workspaceRuntimeMock.enabled = true;
+      act(() => root.unmount());
+    }
   });
 });

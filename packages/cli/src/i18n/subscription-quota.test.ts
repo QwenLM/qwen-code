@@ -82,4 +82,28 @@ describe('subscription quota i18n', () => {
       ).toBe(fallback);
     },
   );
+
+  it.each([
+    [1, 0, '1 день и 0 часов'],
+    [2, 3, '2 дня и 3 часа'],
+    [5, 11, '5 дней и 11 часов'],
+    [11, 14, '11 дней и 14 часов'],
+    [21, 21, '21 день и 21 час'],
+    [22, 22, '22 дня и 22 часа'],
+  ])(
+    'inflects a Russian reset in %i days and %i hours',
+    async (days, hours, time) => {
+      await initializeI18n('ru');
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+      expect(
+        formatSubscriptionQuotaDisplay(
+          {
+            type: 'subscription_quota',
+            resetAt: now / 1000 + (days * 24 + hours) * 3600,
+          },
+          t,
+        ),
+      ).toContain(`через ${time}.`);
+    },
+  );
 });

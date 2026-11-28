@@ -14,7 +14,7 @@ import {
   LocalFilesPanel,
   getLocalFilesDotClass,
   getLocalFilesTooltip,
-} from './LocalFilesControl';
+} from './LocalFilesPanel';
 import { requestToast } from './ToastHost';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';

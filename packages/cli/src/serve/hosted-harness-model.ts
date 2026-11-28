@@ -451,7 +451,7 @@ export async function runHostedHarnessTextTurn(input: {
   modelSelection?: HostedModelSelection;
   modelConfig?: HostedModelConfigReader;
   memory?: Pick<HostedMemorySession, 'recall'>;
-  recallUserInput?: boolean;
+  userPrompt?: boolean;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -857,11 +857,13 @@ async function runPreparedHostedHarnessTextTurn(
           queued.fields,
           queued.signal,
         );
-      const submit = await fire(
-        HookEventName.UserPromptSubmit,
-        input.promptId,
-        { prompt: input.prompt, submitted_prompt: input.prompt },
-      );
+      const submit =
+        input.userPrompt === false
+          ? undefined
+          : await fire(HookEventName.UserPromptSubmit, input.promptId, {
+              prompt: input.prompt,
+              submitted_prompt: input.prompt,
+            });
       if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
         throw new Error('Hook blocked the model request.');
       const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
@@ -883,7 +885,7 @@ async function runPreparedHostedHarnessTextTurn(
     }
     if (
       input.memory &&
-      input.recallUserInput &&
+      input.userPrompt &&
       !input.resumeFromToolResults &&
       !input.resumeModel
     ) {
@@ -1625,7 +1627,7 @@ async function runPreparedHostedHarnessTextTurn(
           stop_hook_active: stopHookActive,
           last_assistant_message: text,
         });
-        if (stopped?.isBlockingDecision() || stopped?.shouldStopExecution()) {
+        if (stopped?.isBlockingDecision()) {
           stopHookActive = true;
           request = [
             { text: stopped.getEffectiveReason() || 'Continue working.' },

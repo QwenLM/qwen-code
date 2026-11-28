@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
@@ -26,6 +26,7 @@ import { ModStore } from '@qwen-code/qwen-code-core/mods/store.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   ENGINE_NODE,
+  invalidRenderText,
   type ModBandInput,
   type ModRenderElement,
   type ModRenderInput,
@@ -76,7 +77,17 @@ import { registerCleanup } from '../utils/cleanup.js';
 import { flushOutput } from '../utils/flush-output.js';
 import { projectJsonStringToByteBudget } from '../utils/json-string-byte-projection.js';
 import { completeModModel, modModelUsage } from './mod-model.js';
-import { ModRows } from './mod-rows.js';
+import {
+  ModRows,
+  type ModRowAuthorization,
+  type ModRowInput,
+} from './mod-rows.js';
+import {
+  displayTranslationTarget,
+  drawsTranslatedRows,
+  translateDisplayText,
+  type DisplayTranslationTarget,
+} from './display-translation-mod.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 
 const logger = createDebugLogger('MODS');
@@ -115,13 +126,16 @@ export interface ModTerminalHost {
 }
 
 /**
- * An ACP session: it has no surface of its own, reports each log line itself
- * and raises neither prompts nor tool middleware. Its stdout carries the
- * protocol, so nothing is printed.
+ * An ACP session: it reports each log line itself and raises neither prompts
+ * nor tool middleware. Its stdout carries the protocol, so nothing is printed.
+ * Its surface is `desktop` where its client draws the rows `sites` names, and
+ * none otherwise.
  */
 export interface ModAcpHost {
-  surface: null;
+  surface: 'desktop' | null;
   log(entry: ModLog, plugin: string, sessionId: string): void;
+  /** The row sites the client draws, read once at load. */
+  sites?(): readonly ModRenderSite[];
 }
 
 type ModOutput =
@@ -143,6 +157,12 @@ export interface ModTurn {
    */
   complete(ending?: 'aborted' | 'error'): Promise<void>;
 }
+
+/** A remote client's row, as `askRow` answers it. */
+export type ModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 interface RunningTurn {
   id: string;
@@ -255,14 +275,14 @@ export class ModSession implements ICommandLoader {
   };
   // Who hears the Mods adopt another session.
   private readonly sessionListeners = new Set<() => void>();
-  // The transcript rows the Mods draw, one render at a time in the queue.
+  // Only installed hooks join the dispatch queue. Translation waits outside it.
   private readonly rows = new ModRows(
     (task) => {
-      this.toolQueue = this.toolQueue
-        .then(task)
-        .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
+      void task().catch((error) =>
+        logger.debug(`Mod ui.render: ${String(error)}`),
+      );
     },
-    (input) => this.renderRow(input),
+    (input, wanted) => this.renderRow(input, wanted),
   );
   private unregisterCleanup: () => void;
 
@@ -270,6 +290,11 @@ export class ModSession implements ICommandLoader {
     private readonly config: Config,
     private readonly output: ModOutput,
     private readonly optionScopes: readonly unknown[] = [],
+    // Installed Mods and display translation have separate opt-ins.
+    private readonly sources: {
+      extensions: boolean;
+      translation?: DisplayTranslationTarget;
+    } = { extensions: true },
   ) {
     this.sessionId = config.getSessionId();
     allowTelemetryListener(1);
@@ -286,12 +311,21 @@ export class ModSession implements ICommandLoader {
     settings: LoadedSettings,
     output: ModOutput,
   ): ModSession | undefined {
-    return settings.merged.experimental?.mods
-      ? new ModSession(config, output, [
-          settings.systemDefaults.settings.pluginConfigs,
-          settings.user.settings.pluginConfigs,
-          settings.system.settings.pluginConfigs,
-        ])
+    const extensions = settings.merged.experimental?.mods === true;
+    // Only a host that draws rows has rows to translate.
+    const translation =
+      'surface' in output ? displayTranslationTarget(settings) : undefined;
+    return extensions || translation
+      ? new ModSession(
+          config,
+          output,
+          [
+            settings.systemDefaults.settings.pluginConfigs,
+            settings.user.settings.pluginConfigs,
+            settings.system.settings.pluginConfigs,
+          ],
+          { extensions, translation },
+        )
       : undefined;
   }
 
@@ -304,7 +338,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private get acp(): boolean {
-    return this.host?.surface === null;
+    return this.host !== undefined && this.host.surface !== 'terminal';
   }
 
   private chatTokens(): number {
@@ -314,11 +348,10 @@ export class ModSession implements ICommandLoader {
       : 0;
   }
 
-  private allowed(): boolean {
+  private permitsMods(): boolean {
     return (
       this.config.isInteractive() === Boolean(this.terminal) &&
       this.config.getExperimentalZedIntegration() === this.acp &&
-      this.config.isTrustedFolder() &&
       !this.config.getDisableAllHooks() &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode() &&
@@ -330,9 +363,18 @@ export class ModSession implements ICommandLoader {
     );
   }
 
+  // Workspace trust gates installed Mods, which run third-party code.
+  private allowed(): boolean {
+    return this.permitsMods() && this.config.isTrustedFolder();
+  }
+
   async initialize(signal: AbortSignal): Promise<void> {
     if (this.closing) throw new Error('Mod session is closed.');
-    if (!this.allowed()) {
+    if (
+      !this.permitsMods() ||
+      ((this.mods.length > 0 || !this.sources.translation) &&
+        !this.config.isTrustedFolder())
+    ) {
       if (this.mods.length) {
         await this.close();
         throw new Error('Mods are no longer permitted in this session.');
@@ -346,7 +388,8 @@ export class ModSession implements ICommandLoader {
   }
 
   private async load(signal: AbortSignal): Promise<void> {
-    const sites = (this.sites = this.terminal?.sites?.() ?? []);
+    const sites = (this.sites = this.host?.sites?.() ?? []);
+    if (!this.sources.extensions || !this.config.isTrustedFolder()) return;
     try {
       const candidates = [];
       for (const extension of this.config
@@ -464,7 +507,7 @@ export class ModSession implements ICommandLoader {
           },
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
-          this.terminal?.surface ?? null,
+          this.host?.surface ?? null,
           this.config.getCliVersion() || 'unknown',
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
@@ -511,6 +554,7 @@ export class ModSession implements ICommandLoader {
       this.runtime!.getCommands(mod.id).map(
         (command): SlashCommand => ({
           name: command.name,
+          ...(command.aliases?.length && { altNames: command.aliases }),
           description: this.terminal
             ? sanitizeTerminalLine(command.description)
             : command.description,
@@ -519,7 +563,12 @@ export class ModSession implements ICommandLoader {
           extensionName: this.terminal
             ? sanitizeTerminalLine(mod.name)
             : mod.name,
-          supportedModes: [this.terminal ? 'interactive' : 'non_interactive'],
+          // A headless run knows a terminal-only command and refuses it.
+          supportedModes: [
+            this.terminal || command.isTerminalOnly
+              ? 'interactive'
+              : 'non_interactive',
+          ],
           argumentHint:
             this.terminal && command.argumentHint !== undefined
               ? sanitizeTerminalLine(command.argumentHint)
@@ -753,6 +802,24 @@ export class ModSession implements ICommandLoader {
     return () => this.sessionListeners.delete(listener);
   };
 
+  private rowTranslationTarget(
+    component: ModRenderSite,
+  ): DisplayTranslationTarget | undefined {
+    return this.sources.translation && drawsTranslatedRows([component])
+      ? this.sources.translation
+      : undefined;
+  }
+
+  canTranslateRow(component: ModRenderSite): boolean {
+    return (
+      this.sites.includes(component) &&
+      this.rowTranslationTarget(component) !== undefined &&
+      !this.closing &&
+      this.sessionId === this.config.getSessionId() &&
+      this.permitsMods()
+    );
+  }
+
   /**
    * Shows a transcript row the Mods may draw, calling `listener` when what it
    * draws changes. Returns the release, or undefined where no hook hears the
@@ -767,11 +834,62 @@ export class ModSession implements ICommandLoader {
       this.closing ||
       sessionId !== this.sessionId ||
       !this.sites.includes(input.component) ||
-      !this.runtime?.renderHooksFor(input.component).length ||
+      (!this.runtime?.renderHooksFor(input.component).length &&
+        !this.rowTranslationTarget(input.component)) ||
       Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2
     )
       return undefined;
     return this.rows.watch(input, listener);
+  }
+
+  /**
+   * Asks once for a row a remote client draws: `unhooked` where no hook hears
+   * its site, `unanswered` when the ask ended first, and otherwise the props
+   * its hooks rewrote, if they did. Answers are reused when both the props and
+   * the host's authorization to translate them match.
+   */
+  async askRow(
+    component: ModRenderSite,
+    props: ModRenderInput['props'],
+    signal: AbortSignal,
+    authorization?: ModRowAuthorization,
+  ): Promise<ModRowAnswer> {
+    const surface = this.host?.surface;
+    const hasHooks = this.runtime?.renderHooksFor(component).length;
+    const target = this.rowTranslationTarget(component);
+    if (
+      surface !== 'desktop' ||
+      !this.sites.includes(component) ||
+      (!hasHooks && !target)
+    )
+      return { status: 'unhooked' };
+    if (this.closing) return { status: 'unanswered' };
+    const translationAuthorization =
+      target && authorization?.isCurrent() ? authorization : false;
+    if (!hasHooks && !translationAuthorization) return { status: 'unanswered' };
+    const input = {
+      surface,
+      component,
+      requestId: createHash('sha256')
+        .update(stableJson({ component, props }))
+        .digest('hex')
+        .slice(0, 32),
+      props,
+    } as ModRenderInput;
+    // Too large to hand the hooks whole: drawn as it is.
+    if (Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2)
+      return { status: 'answered' };
+    const answer = await this.rows.ask(
+      { ...input, translationAuthorization },
+      signal,
+    );
+    if (translationAuthorization && !translationAuthorization.isCurrent())
+      return { status: 'unanswered' };
+    return !answer
+      ? { status: 'unanswered' }
+      : answer.props
+        ? { status: 'answered', props: { ...answer.props } }
+        : { status: 'answered' };
   }
 
   /** The props a row draws with once its hooks answered, if they rewrote it. */
@@ -798,37 +916,82 @@ export class ModSession implements ICommandLoader {
     }
   }
 
-  // A row's answer: the props its hooks rewrote, or none to draw its own.
   private async renderRow(
-    input: ModRenderInput,
-  ): Promise<ModRenderInput['props'] | undefined> {
+    { translationAuthorization, ...input }: ModRowInput,
+    wanted: () => boolean,
+  ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
     const generation = this.toolGeneration.signal;
-    if (
-      !runtime ||
-      this.closing ||
-      generation.aborted ||
-      this.sessionId !== this.config.getSessionId() ||
-      !this.allowed() ||
-      !this.active()
-    )
-      return undefined;
-    const signal = AbortSignal.any([
-      this.lifetime.signal,
-      generation,
-      // Provider I/O pauses the runtime's dispatch clock.
-      AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
-    ]);
-    try {
-      const { props, notes } = await runtime.render(input, signal);
-      signal.throwIfAborted();
-      for (const note of notes) logger.debug(note);
-      return !props || stableJson(props) === stableJson(input.props)
-        ? undefined
-        : props;
-    } finally {
-      this.flushLogs();
+    const canRender = () =>
+      !this.closing &&
+      !generation.aborted &&
+      this.sessionId === this.config.getSessionId() &&
+      this.permitsMods();
+    const startRender = () =>
+      AbortSignal.any([
+        this.lifetime.signal,
+        generation,
+        // Provider I/O pauses the runtime's dispatch clock.
+        AbortSignal.timeout(ROW_RENDER_TIMEOUT_MS),
+      ]);
+    let signal: AbortSignal | undefined;
+    let props = input.props;
+    if (runtime?.renderHooksFor(input.component).length) {
+      const render = this.toolQueue.then(async () => {
+        if (
+          !wanted() ||
+          !canRender() ||
+          !this.config.isTrustedFolder() ||
+          !this.active()
+        )
+          return null;
+        const rowSignal = (signal = startRender());
+        try {
+          const reply = await runtime.render(input, rowSignal);
+          rowSignal.throwIfAborted();
+          for (const note of reply.notes) logger.debug(note);
+          return reply.props ?? input.props;
+        } finally {
+          this.flushLogs();
+        }
+      });
+      this.toolQueue = render.catch(() => {});
+      const rendered = await render;
+      if (!rendered) return null;
+      props = rendered;
     }
+    if (!canRender()) return null;
+    const target =
+      translationAuthorization !== false &&
+      this.rowTranslationTarget(input.component);
+    if (target && 'text' in props) {
+      const canTranslate = () =>
+        canRender() &&
+        (!translationAuthorization || translationAuthorization.isCurrent());
+      if (!wanted() || !canTranslate()) return null;
+      const rowSignal = (signal ??= startRender());
+      const text = await translateDisplayText(
+        props.text,
+        target,
+        (request, modelSignal) =>
+          runOutsideAgentContext(() =>
+            completeModModel(
+              this.config,
+              request,
+              canTranslate() ? modelSignal : AbortSignal.abort(),
+              canTranslate,
+            ),
+          ),
+        translationAuthorization
+          ? AbortSignal.any([rowSignal, translationAuthorization.signal])
+          : rowSignal,
+        input.surface,
+      );
+      if (!canTranslate()) return null;
+      if (text !== undefined && !invalidRenderText(text))
+        props = { ...props, text };
+    }
+    return stableJson(props) === stableJson(input.props) ? undefined : props;
   }
 
   toolCall(onRepeat: () => void): ModToolCall | undefined {

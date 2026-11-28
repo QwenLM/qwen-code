@@ -5,6 +5,10 @@
  */
 
 import {
+  parseManagedDeliveryEntry,
+  type ManagedDeliveryEntry,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import {
   parseManagedRuntimeProviderResult,
   type ManagedWorkspaceContextFile,
 } from './managed-runtime-provider-protocol.js';
@@ -86,6 +90,21 @@ export class HostedWorkspaceBrokerRejection extends Error {
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
+}
+
+export class HostedWorkspaceBrokerTransportError extends Error {
+  constructor(cause: TypeError | DOMException) {
+    super(`Runtime Broker execution poll failed: ${cause.message}`, { cause });
+  }
+}
+
+function isBrokerTransportFailure(
+  cause: unknown,
+): cause is TypeError | DOMException {
+  return (
+    cause instanceof TypeError ||
+    (cause instanceof DOMException && cause.name === 'TimeoutError')
+  );
 }
 
 export function isHostedFileHistoryRefusal(
@@ -213,6 +232,7 @@ export class HostedWorkspaceBroker {
   }
   private capabilityResolution?: Promise<void>;
   provisionerKind?: string;
+  mcpParkable = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -402,6 +422,7 @@ export class HostedWorkspaceBroker {
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');
     this.readRuntime(response);
+    this.mcpParkable = response['mcpParkable'] === true;
     this.leaseAcquired = true;
   }
 
@@ -455,13 +476,24 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async registerPublisher(publisher: {
-    url: string;
-    token: string;
-  }): Promise<string> {
+  /** Phase 3b: set by the latest registerPublisher when the worker signals
+   * it owns the background capture and Monitor policy. */
+  observationOwned = false;
+  observedRuns: Readonly<Record<string, number>> = {};
+
+  async registerPublisher(
+    publisher: {
+      url: string;
+      token: string;
+    },
+    writerGeneration?: number,
+  ): Promise<string> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:publisher`,
-      { publisher },
+      {
+        publisher,
+        ...(writerGeneration !== undefined ? { writerGeneration } : {}),
+      },
     );
     const generation = response['bindingGeneration'];
     if (
@@ -472,7 +504,81 @@ export class HostedWorkspaceBroker {
     ) {
       throw new Error('Runtime did not install the original Shell publisher.');
     }
+    this.observationOwned = response['observation'] === true;
+    const rawRuns = response['observedRuns'];
+    if (rawRuns && typeof rawRuns === 'object' && !Array.isArray(rawRuns)) {
+      const parsed: Record<string, number> = {};
+      for (const [id, seq] of Object.entries(
+        rawRuns as Record<string, unknown>,
+      )) {
+        const value = Number(seq);
+        if (Number.isSafeInteger(value) && value >= 0) {
+          parsed[id] = value;
+        }
+      }
+      this.observedRuns = parsed;
+    } else {
+      this.observedRuns = {};
+    }
     return generation;
+  }
+
+  async detachPublisher(
+    writerGeneration: number,
+    appliedThrough?: Readonly<Record<string, number>>,
+  ): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/publisher/detach`,
+      {
+        writerGeneration,
+        ...(appliedThrough ? { appliedThrough } : {}),
+      },
+    );
+    if (response['detached'] !== true) {
+      throw new Error('Runtime did not detach the Shell publisher.');
+    }
+  }
+
+  async listStagedDeliveries(writer: {
+    readonly writerId: string;
+    readonly writerGeneration: number;
+  }): Promise<ManagedDeliveryEntry[]> {
+    const response = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/list`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+      },
+      true,
+      16 * 1024 * 1024,
+    );
+    const entries = response['entries'];
+    if (!Array.isArray(entries)) {
+      throw new Error('Runtime Broker staged deliveries response is invalid.');
+    }
+    return entries.map(parseManagedDeliveryEntry);
+  }
+
+  async acknowledgeStagedDeliveries(
+    writer: {
+      readonly writerId: string;
+      readonly writerGeneration: number;
+    },
+    executionCallId: string,
+    throughSeq: number,
+  ): Promise<void> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/acknowledge`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+        executionCallId,
+        throughSeq,
+      },
+    );
+    if (response['acknowledged'] !== true) {
+      throw new Error('Runtime Broker did not acknowledge staged deliveries.');
+    }
   }
 
   async prepare(
@@ -662,7 +768,7 @@ export class HostedWorkspaceBroker {
         cancellationSent = true;
         response = await this.request(`${path}:cancel`, {});
       }
-      response ??= await this.request(path);
+      response ??= await this.pollExecution(path);
       if (response['executionCallId'] !== id)
         throw new Error('Tool v3 execution identity changed.');
       const status = object(response['status']);
@@ -749,13 +855,13 @@ export class HostedWorkspaceBroker {
           cancellationSent = true;
           response = await this.request(`${path}:cancel`, {});
         }
-        response ??= await this.request(
+        response ??= await this.pollExecution(
           waitForUnknown ? `${path}?reconcile=true` : path,
         );
       } catch (cause) {
         const transportFailed =
-          cause instanceof TypeError ||
-          (cause instanceof DOMException && cause.name === 'TimeoutError');
+          cause instanceof HostedWorkspaceBrokerTransportError ||
+          isBrokerTransportFailure(cause);
         if (cancelling && transportFailed) cancellationSent = false;
         const stillUnknown =
           cause instanceof HostedWorkspaceBrokerRejection &&
@@ -770,7 +876,7 @@ export class HostedWorkspaceBroker {
           // again.
           reconciledUnknown = true;
           try {
-            response = await this.request(`${path}?reconcile=true`);
+            response = await this.pollExecution(`${path}?reconcile=true`);
           } catch (asked) {
             if (
               asked instanceof HostedWorkspaceBrokerRejection &&
@@ -1268,6 +1374,16 @@ export class HostedWorkspaceBroker {
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     return this.request(path, body, true);
+  }
+
+  private async pollExecution(path: string): Promise<Record<string, unknown>> {
+    try {
+      return await this.request(path);
+    } catch (cause) {
+      if (isBrokerTransportFailure(cause))
+        throw new HostedWorkspaceBrokerTransportError(cause);
+      throw cause;
+    }
   }
 
   private async request(

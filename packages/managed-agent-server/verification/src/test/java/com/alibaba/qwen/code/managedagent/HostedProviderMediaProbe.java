@@ -2,11 +2,11 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -38,7 +38,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final String tenant;
     private final List<Map<String, Object>> sessions;
     private final EmbeddedRuntimeBroker original;
-    private final Supplier<EmbeddedRuntimeBroker> restart;
+    private final Supplier<ServletWebServerApplicationContext> restart;
     private volatile Object provisioner;
     private final HttpClient upstream = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
     private final HttpClient forwarded;
@@ -52,10 +52,12 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private volatile EmbeddedRuntimeBroker restarted;
+    private volatile ServletWebServerApplicationContext restartedSpring;
     private volatile int dropped;
 
     HostedProviderMediaProbe(JdbcTemplate jdbc, String tenant, List<Map<String, Object>> sessions,
-            EmbeddedRuntimeBroker broker, HttpServer server, Supplier<EmbeddedRuntimeBroker> restart) {
+            EmbeddedRuntimeBroker broker, HttpServer server,
+            Supplier<ServletWebServerApplicationContext> restart) {
         this.jdbc = jdbc;
         this.tenant = tenant;
         this.sessions = sessions;
@@ -204,9 +206,11 @@ final class HostedProviderMediaProbe implements AutoCloseable {
                 }
                 assertThat(process.isAlive()).as("original media worker stopped").isFalse();
             }
-            restarted = restart.get();
+            restartedSpring = restart.get();
+            restarted = restartedSpring.getBean(EmbeddedRuntimeBroker.class);
             provisioner = injectReadProbe(restarted);
-            return Map.of("brokerUrl", restarted.getBaseUri().toString());
+            return Map.of("brokerUrl", "http://127.0.0.1:"
+                    + restartedSpring.getWebServer().getPort());
         }
         var row = execution(session);
         String runtimeId = row.get("runtime_session_id").toString();
@@ -241,19 +245,18 @@ final class HostedProviderMediaProbe implements AutoCloseable {
             }
         }
         String storageId = "storage-" + sessions.indexOf(session);
-        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
-                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+        String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage"
+                + " WHERE tenant_id = ? AND storage_id = ?", String.class,
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, session_state,"
-                + " execution_storage_key, is_rewind_pending FROM ma_runtime_session"
+                + " execution_storage_id, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, harness, runtimeId);
         boolean released = phase.equals("released") || phase.equals("restarted");
         assertThat(member.get("binding_id")).as("original runtime binding").isEqualTo(row.get("binding_id"));
         assertThat(member.get("runtime_generation")).as("original runtime generation").isEqualTo(row.get("runtime_generation"));
-        assertThat(member.get("execution_storage_key")).as("physical execution membership")
+        assertThat(member.get("execution_storage_id")).as("physical execution membership")
                 .isEqualTo(released ? null : physical);
         assertThat(member.get("is_rewind_pending")).as("shared execution membership").isEqualTo(false);
         assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
@@ -296,8 +299,8 @@ final class HostedProviderMediaProbe implements AutoCloseable {
     @Override
     public void close() throws Exception {
         executor.shutdownNow();
-        if (restarted != null) {
-            restarted.close();
+        if (restartedSpring != null) {
+            restartedSpring.close();
         }
         forwarded.shutdownNow();
         upstream.shutdownNow();

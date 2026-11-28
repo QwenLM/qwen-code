@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { Message } from '../adapters/types';
 import { getTranslator } from '../i18n';
+import { DAEMON_STATUS_CARD_RENDERERS } from './messages/daemon-status-cards';
+import type { DaemonStatusCardRenderers } from './messages/daemon-status-cards-context';
 
 interface Observation {
   props: Record<string, unknown> & { messages: Message[] };
@@ -13,6 +15,7 @@ interface Observation {
   renderMode: string;
   documentExpanded: boolean;
   compactMode: boolean;
+  daemonStatusCards: DaemonStatusCardRenderers;
   customization: Record<string, unknown>;
 }
 
@@ -56,6 +59,9 @@ vi.mock('./MessageList', async () => {
   const { useTranscriptDocumentExpanded } = await import(
     '../transcriptRenderMode'
   );
+  const { useDaemonStatusCards } = await import(
+    './messages/daemon-status-cards-context'
+  );
   return {
     MessageList: (props: Record<string, unknown> & { messages: Message[] }) => {
       if (observed.shouldThrow) throw new Error('message-list boom');
@@ -67,6 +73,7 @@ vi.mock('./MessageList', async () => {
         renderMode: useTranscriptRenderMode(),
         documentExpanded: useTranscriptDocumentExpanded(),
         compactMode: React.useContext(CompactModeContext),
+        daemonStatusCards: useDaemonStatusCards(),
         customization: customization as Record<string, unknown>,
       });
       return React.createElement('div', { 'data-testid': 'message-list' });
@@ -139,10 +146,13 @@ describe('WebShellTranscript contract', () => {
         language="zh-CN"
         workspaceCwd="/workspace"
         virtualScrollThreshold={25}
+        overscan={0}
       />,
     );
 
-    const { props } = latestObservation();
+    const { props, customization, daemonStatusCards } = latestObservation();
+    expect(daemonStatusCards).toBe(DAEMON_STATUS_CARD_RENDERERS);
+    expect(customization.overscan).toBe(0);
     expect(props.messages).toMatchObject([
       { id: 'user', role: 'user', content: 'hello' },
       {

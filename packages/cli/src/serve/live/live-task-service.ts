@@ -596,7 +596,12 @@ export class LiveTaskService {
                 group: 'all',
                 ...(cursor ? { cursor } : {}),
               },
-              { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
+              {
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                ...(runtime.trusted === false
+                  ? { allowSidecarWrite: false }
+                  : {}),
+              },
             );
       for (const session of result.sessions) {
         const pinned = session.isPinned === true;
@@ -1267,7 +1272,10 @@ export class LiveTaskService {
             size: 100,
             ...(cursor ? { cursor } : {}),
           },
-          { runtimeBaseDir: runtime.sessionRuntimeBaseDir },
+          {
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+            ...(runtime.trusted === false ? { allowSidecarWrite: false } : {}),
+          },
         );
         found = listed.sessions.find((item) => item.sessionId === threadId);
         cursor = listed.nextCursor;

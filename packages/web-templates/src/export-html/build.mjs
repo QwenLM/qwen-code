@@ -12,9 +12,6 @@ const srcDir = join(assetsDir, 'src');
 const assetsDistDir = join(assetsDir, 'dist');
 const generatedDir = join(assetsDir, '..', 'generated');
 await mkdir(generatedDir, { recursive: true });
-await rm(assetsDistDir, { recursive: true, force: true });
-await mkdir(assetsDistDir, { recursive: true });
-await rm(join(generatedDir, 'exportHtmlTemplate.ts'), { force: true });
 
 const documentTemplateModulePath = join(
   generatedDir,
@@ -71,7 +68,28 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
+// The baseline includes reader metadata and attachment-reference checks.
+// A clean build of the CI merge tree at 71161df9, including current upstream
+// Web Shell inputs, measures 2,154,340 injected JS bytes. Branch-only builds
+// must not replace this measured shared-tree baseline with an older estimate.
+// The expansion-preserving normalization adds 42 bytes to that merged build.
+// The schema-version narrowing capture adds a further 8 bytes.
+// Including the merged ChatSurface inputs, local builds and the CI merge tree
+// both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
+// Main CI then measured 2,156,327 on a0dced748e (run 45741862667), 2,156,357
+// after #18437, 2,156,880 after #18009 and 2,157,683 after #18140 (build job
+// 139890640548 on run 45814470900), which crossed the old 2,157,286 ceiling.
+// #18140 adds nine sidebar and workspace-hooks keys to the EN and ZH-CN
+// catalogs; the export entry inlines the whole table (see above), so none of
+// that PR's component code reaches the document entry and the forbidden-input
+// guard still passes. Independent same-toolchain A/B builds measured the
+// scheduled-task branch transcript renderer at 2,160,446 bytes locally;
+// merging the overload-indicator slice (#18054) adds the EN/ZH-CN overload
+// catalog entries (+483 bytes), bringing the merged tree to 2,160,929 bytes
+// (component CSS 1,911,270 bytes). Retain the house warning and hard-ceiling
+// margins of 713 and 1,713 bytes (2,161,642 / 2,162,642).
+const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_160_929;
+const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -111,6 +129,18 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
 // measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
 // d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
 // that measurement and the ceiling 1,203 above it.
+// The document runtime measured 2,138,044 bytes on head 2ef7af8e69, 44 above
+// the previous 2,138,000 ceiling. SessionGoalMarker is NOT reachable from the
+// document entry (it is imported only by WebShellSidebar) and the RU catalog
+// is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
+// contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
+// to this bundle. This PR's deliberate budget raise was folded into main's
+// larger `/send` ceilings below when merging, so the CURRENT caps apply: the
+// warning sits 7,056 above that measurement and the ceiling 8,056 above it.
+// Those two figures price THIS feature against the caps, not the remaining
+// headroom: after merging main the same tree measures 2,145,649 locally,
+// already over the warning and 451 below the ceiling. Size new copy against
+// that 451, and re-measure in CI before trusting it.
 // The `/send` command, its composer chip and session tab copy (ten keys
 // across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
 // 039ed577fb without and with the change. Recording the exchange in the
@@ -126,7 +156,76 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
 // against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
 // and the forbidden-input guard passes. Leave 713 bytes to the warning and
 // 1,713 to the ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_146_100;
+// The Goal sidebar marker (#17515) and the background-task composer chips
+// (#17398) then grew the transcript dictionary past that ceiling: the Lint &
+// Static / Build lane on main d83fa2154e measures 2,146,529 JS bytes (CSS
+// 2,423,645, separate), 429 over the old 2,146,100 cap, which reddened every
+// PR's build. The bundle pulls web-shell's whole i18n table, so these legitimate
+// first-party strings land here; the third-party input mix is unchanged and the
+// forbidden-input guard passes. Re-track the lane measurement: leave 671 bytes
+// to the warning and 1,671 to the ceiling. (A local build against the worktree's
+// own node_modules measures lower — 2,138,797 — but the lane's absolute number
+// is what these constants track.)
+//
+// The restart recovery inbox (#17677: panel copy and state strings across
+// three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
+// combined with the Generic Webhook copy the merged 9de5d9a311 tree measures
+// 2,147,405, 1,295 above the previous 2,146,100 ceiling. Main 3d75b8ee60
+// measures 2,147,740; adding the mid-batch failure notice brings the current
+// tree to 2,148,000. Merging the latest main and its transcript-reachable
+// additions raises the measurement to 2,148,696, so the warning sits 104
+// above that figure and the ceiling 904 above it. Workspace-lock scoping,
+// capped-result retry guidance, and stale-callback invalidation then add 220
+// bytes, bringing that tree to 2,148,976. This merge's artifact-library stub
+// registration adds 46 bytes, for 2,149,022 measured bytes. The warning sits
+// 713 above that measurement, while the existing ceiling retains 1,713 bytes.
+//
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no document bytes. Its
+// upstream branch measured 2,148,522 JS bytes with the copy inlined and
+// 2,146,575 with the stub (CSS 2,423,645, separate), 46 above the 2,146,529
+// lane measurement #17746 re-tracked. The forbidden-input guard passes and
+// the third-party input mix is unchanged. The merged branch's ceiling follows
+// the recovery-inbox measurements above, rather than lowering that branch's
+// budget or reserving space for interactive-only copy.
+//
+// Main 73bdaa349c's declared workflow phases add 660 bytes. This tree
+// measures 2,149,682 bytes of renderer JS and 2,425,151 bytes of separate
+// CSS; the third-party input mix is unchanged and the forbidden-input guard
+// passes. The warning and ceiling retain 713- and 1,713-byte margins.
+// The merged catalog-loading tree measures 2,149,263 JS bytes, down 419,
+// with 2,425,802 bytes of separate CSS and the same third-party input mix.
+// The warning and ceiling keep 713 and 1,713 bytes above that measurement.
+//
+// A frozen-install build of a clean detached worktree at main 82a0f3031f71
+// measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
+// previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+//
+// The ChatSurface chat column (#17952) then grows the transcript dictionary
+// past that ceiling: the Build lane measures 2,151,214 bytes on main
+// 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
+// (run 44963775498), +633, with CSS unchanged at 2,427,365; the three
+// subsequent main runs measure the same 2,151,847. The cause is six chat.*
+// keys in the two catalogs the document entry inlines (EN and ZH-CN; zh-TW
+// and RU are transcript-stubbed), the CHAT_MESSAGE_KEYS parity export, and
+// the transcript-reachable pendingPermissionRevision helper. The ChatSurface
+// component graph is not wired into any column and useDaemonChatController
+// has no importer, so no component code reaches the document entry; the
+// forbidden-input guard passes and the third-party input mix is unchanged.
+// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
+//
+// A normal build at the measured size below is not warned; only further
+// growth is warned. The identity placeholder can change byte length when it
+// is replaced, so the budget measures the actual injected asset below,
+// including the metadata checks: 2,155,023 bytes with ChatSurface merged.
+// The latest measured merged tree re-tracks this ceiling to 2,162,642,
+// which is 1,713 bytes above its 2,160,929-byte measurement, and stays coupled
+// to the warning threshold instead of becoming an independent literal.
+const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -300,6 +399,22 @@ const rendererDelegateIntegrity =
   process.env.QWEN_EXPORT_RENDERER_INTEGRITY?.trim() || undefined;
 const rendererDelegateCssIntegrity =
   process.env.QWEN_EXPORT_RENDERER_CSS_INTEGRITY?.trim() || undefined;
+const rendererDelegateSchemaOverride =
+  process.env.QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION?.trim() || undefined;
+if (rendererDelegateSchemaOverride && !rendererDelegateIdentity) {
+  throw new Error(
+    'QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION requires QWEN_EXPORT_RENDERER_IDENTITY.',
+  );
+}
+const exportTranscriptDocumentMaxSchemaVersion = rendererDelegateIdentity
+  ? Number(rendererDelegateSchemaOverride ?? 1)
+  : 2;
+if (![1, 2].includes(exportTranscriptDocumentMaxSchemaVersion)) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION must be 1 or 2; got ${rendererDelegateSchemaOverride}. ` +
+      'It must describe the delegated renderer actually pinned by the identity and SRI hashes.',
+  );
+}
 if (Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateIntegrity)) {
   throw new Error(
     'QWEN_EXPORT_RENDERER_IDENTITY and QWEN_EXPORT_RENDERER_INTEGRITY must be set together: ' +
@@ -343,6 +458,10 @@ if (
     `QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateCssIntegrity}.`,
   );
 }
+
+await rm(assetsDistDir, { recursive: true, force: true });
+await mkdir(assetsDistDir, { recursive: true });
+await rm(join(generatedDir, 'exportHtmlTemplate.ts'), { force: true });
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
@@ -453,8 +572,21 @@ if (forbiddenInputs.length > 0) {
   );
 }
 
-const documentRendererJsBytes = Buffer.byteLength(documentJsBundle.text);
 const transcriptCssBytes = Buffer.byteLength(extractedTranscriptCss.css);
+const rendererBuildId = createHash('sha256')
+  .update(documentJsBundle.contents)
+  .digest('hex')
+  .slice(0, 16);
+const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
+if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
+  throw new Error('Document renderer build identity placeholder is missing.');
+}
+// Delegation changes generated documents, not the identity of this asset.
+const documentJs = documentJsBundle.text.replaceAll(
+  rendererVersionPlaceholder,
+  localRendererVersion,
+);
+const documentRendererJsBytes = Buffer.byteLength(documentJs);
 console.log(
   `Document export renderer JS is ${documentRendererJsBytes} bytes; ` +
     `component CSS moved to export-transcript-document.css is ${transcriptCssBytes} bytes`,
@@ -472,19 +604,6 @@ if (documentRendererJsBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
     `Document export renderer JS exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
   );
 }
-const rendererBuildId = createHash('sha256')
-  .update(documentJsBundle.contents)
-  .digest('hex')
-  .slice(0, 16);
-const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
-if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
-  throw new Error('Document renderer build identity placeholder is missing.');
-}
-// Delegation changes generated documents, not the identity of this asset.
-const documentJs = documentJsBundle.text.replaceAll(
-  rendererVersionPlaceholder,
-  localRendererVersion,
-);
 const exportTranscriptRendererVersion =
   rendererDelegateIdentity ?? localRendererVersion;
 const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.js`;
@@ -544,6 +663,7 @@ const documentTemplateModule = `/**
 
 export const DOCUMENT_HTML_TEMPLATE = ${JSON.stringify(documentHtmlOutput)};
 export const EXPORT_TRANSCRIPT_RENDERER_VERSION = ${JSON.stringify(exportTranscriptRendererVersion)};
+export const EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2 = ${exportTranscriptDocumentMaxSchemaVersion};
 export const EXPORT_TRANSCRIPT_RENDERER_LIMITS = Object.freeze({
   maxBlocks: ${exportTranscriptMaxBlocks},
   maxEnvelopeBytes: ${exportTranscriptMaxEnvelopeBytes},

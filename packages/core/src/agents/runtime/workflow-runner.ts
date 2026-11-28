@@ -160,9 +160,10 @@ export type WorkflowRunSettlement =
 /**
  * Whether this host can take a model-requested background run: one that
  * returns before it settles and reports back through the conversation.
- * The interactive TUI and ACP sessions (Web Shell, IDE clients) each feed
- * the run's completion into the session's notification queue; a headless
- * run has nothing to deliver it to, so it stays in the foreground.
+ * The interactive TUI, ACP sessions (Web Shell, IDE clients) and headless
+ * runs each feed the run's completion into their notification queue; a
+ * headless run waits for it before it exits. The tool still refuses a host
+ * that registered no completion callback.
  *
  * The Qwen Session Agent adapter only reads the original prompt, so
  * it cannot deliver a detached workflow's completion.
@@ -180,7 +181,6 @@ export type WorkflowRunSettlement =
 export function hostSupportsBackgroundWorkflows(
   config: Pick<
     Config,
-    | 'isInteractive'
     | 'getExperimentalZedIntegration'
     | 'isSessionAgentSession'
     | 'isWorkflowsEnabled'
@@ -197,7 +197,7 @@ export function hostSupportsBackgroundWorkflows(
       !isBackgroundWorkflowBlocked()
     );
   }
-  return config.isInteractive?.() === true;
+  return true;
 }
 
 export class WorkflowRunHandle {
@@ -590,7 +590,9 @@ export class WorkflowRunner {
         parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
-        meta: null,
+        // Parsed by the pre-launch gate, so clients can show the declared
+        // phases before the script reaches them.
+        meta: scriptMeta,
         status: 'running',
         startTime: Date.now(),
         outputFile: '',

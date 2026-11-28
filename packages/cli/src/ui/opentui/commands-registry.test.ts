@@ -343,7 +343,7 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
       ['permissions', ['dialog']],
       ['compress', ['message', 'stream_messages']],
       ['context', ['message']],
-      ['memory', ['dialog']],
+      ['memory', ['dialog', 'message']],
       ['resume', ['dialog', 'message']],
       ['rewind', ['dialog']],
       ['fork', ['message']],

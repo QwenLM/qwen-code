@@ -1,10 +1,10 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,9 +14,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.LongSupplier;
 
@@ -28,25 +32,35 @@ public final class SessionResourceCollectionCollector {
     private static final Logger LOG = LoggerFactory.getLogger(SessionResourceCollectionCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
     private static final long LEDGER_SCAN_NANOS = Duration.ofMinutes(1).toNanos();
+    private static final int SCAN_ROWS = 32;
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     private static final int PAGE_ROWS = 100;
     private static final long PAGE_BYTES = 32L * 1024 * 1024;
+    // No USE INDEX hint: the (tenant_id, session_id, resource_id) unique key
+    // uk_ma_resource_id serves the equality prefix, the resource_id range and
+    // the ORDER BY without a filesort, and MySQL chooses it naturally now that
+    // the duplicate idx_ma_resource_scope_page is gone. H2 cannot name a unique
+    // constraint's index in a hint, so a hint here would break the H2 lane.
     private static final String RESOURCE_PAGE =
-            "SELECT resource_key, byte_length, CASE WHEN state IN ('PUBLISHED', 'REFERENCED') AND"
+            "SELECT resource_id, byte_length, CASE WHEN state IN ('PUBLISHED', 'REFERENCED') AND"
                 + " storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL"
                 + " AND object_version_id IS NULL AND encryption_key_id IS NULL AND"
-                + " deletion_operation_key IS NULL AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
-                + " WHERE f.resource_key = ma_resource.resource_key) THEN 1 ELSE 0 END AS"
-                + " collectible FROM ma_resource USE INDEX (idx_ma_resource_scope_page) WHERE"
-                + " session_scope_key = ? AND resource_key > ? ORDER BY resource_key LIMIT "
+                + " deletion_operation_ref IS NULL AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
+                + " WHERE f.resource_id = ma_resource.resource_id AND f.tenant_id = ma_resource.tenant_id"
+                + " AND f.session_id = ma_resource.session_id) THEN 1 ELSE 0 END AS"
+                + " collectible FROM ma_resource WHERE"
+                + " tenant_id = ? AND session_id = ? AND resource_id > ? ORDER BY resource_id LIMIT "
                     + (PAGE_ROWS + 1);
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ManagedProjectionResourceCollector projections;
     private final ManagedAgentSettings properties;
     private final LongSupplier clock;
+    private final boolean mysqlOnly;
     private final String owner = UUID.randomUUID().toString();
     private long lastLedgerScanNanos;
+    private long ledgerScanId;
+    private long ledgerScanRoundEnd;
 
     public SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedAgentSettings properties) {
@@ -55,6 +69,16 @@ public final class SessionResourceCollectionCollector {
 
     SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedAgentSettings properties, LongSupplier clock) {
+        this(jdbc, manager, properties, clock, false);
+    }
+
+    public static SessionResourceCollectionCollector mysqlOnly(JdbcTemplate jdbc,
+            PlatformTransactionManager manager, ManagedAgentSettings properties) {
+        return new SessionResourceCollectionCollector(jdbc, manager, properties, System::nanoTime, true);
+    }
+
+    private SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            ManagedAgentSettings properties, LongSupplier clock, boolean mysqlOnly) {
         Duration grace = properties.getToolPublication().getDeletionGrace();
         if (grace == null || grace.isNegative()) {
             throw new IllegalStateException("Tool output deletion grace must be nonnegative");
@@ -65,9 +89,10 @@ public final class SessionResourceCollectionCollector {
         // The page-time recovery re-check fences a registration through InnoDB gap locks, which
         // exist
         // only under REPEATABLE READ; pin it rather than inherit the server default.
-        this.transactions.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.properties = properties;
         this.clock = clock;
+        this.mysqlOnly = mysqlOnly;
     }
 
     @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
@@ -80,12 +105,11 @@ public final class SessionResourceCollectionCollector {
     }
 
     public synchronized boolean runOnce() {
-        if (!properties.getToolPublication().isGcEnabled()) {
+        if (!mysqlOnly && !properties.getToolPublication().isGcEnabled()) {
             return false;
         }
-        boolean projectionChanged = projections.runOnce();
-        // History-wide due scans run at a coarse cadence; claim-time re-evaluation is
-        // authoritative.
+        boolean projectionChanged = !mysqlOnly && projections.runOnce();
+        // Bounded reconciliation pages run at a coarse cadence; claim-time re-evaluation is authoritative.
         // The cadence reads a monotonic clock: a wall-clock step back (NTP, VM resume) would
         // otherwise keep the difference negative and silently stall ledger creation for the step.
         long scanNow = clock.getAsLong();
@@ -98,6 +122,21 @@ public final class SessionResourceCollectionCollector {
             return projectionChanged;
         }
         return collect(claim) || projectionChanged;
+    }
+
+    public synchronized void wake(String tenant, String session) {
+        // An unsolicited or stale message must not create a Session or tenant guard during lock acquisition.
+        String key = operationKey(tenant, session);
+        boolean pending = !jdbc.query("SELECT operation_ref FROM ma_operation"
+                        + " WHERE operation_ref = ? AND operation_kind = 'SESSION_RESOURCE_GC'"
+                        + " AND tenant_id = ? AND session_id = ? AND state <> 'SUCCEEDED'",
+                (row, index) -> row.getString(1), key, tenant, session).isEmpty();
+        if (pending) {
+            Claim claim = claim(tenant, session);
+            if (claim != null) {
+                collect(claim);
+            }
+        }
     }
 
     // Package-private so a test can interleave a recovery registration in the claim→page gap.
@@ -120,163 +159,80 @@ public final class SessionResourceCollectionCollector {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    private static String operationId(String scope) {
-        return "session-resources-" + scope;
+    private static String operationId(String session) {
+        return "session-resources-" + session;
     }
 
-    private static String operationKey(String scope) {
-        return ManagedSchemaKeys.operationKey(OperationKind.SESSION_RESOURCE_GC, scope, scope, operationId(scope));
+    private static String operationKey(String tenant, String session) {
+        return ManagedIdentityRefs.operationRef(OperationKind.SESSION_RESOURCE_GC.name(), tenant,
+                "SESSION", session, session, operationId(session));
     }
 
-    private static JsonNode progress(java.util.Map<String, Object> row) {
+    private static JsonNode progress(Map<String, Object> row) {
         Object value = row.get("result_json");
         return value == null ? JSON.createObjectNode() : JdbcManagedToolResultStore.parse((String) value);
     }
 
     private void ensureLedgers() {
-        long due = ToolPublicationRetentionStore.now(jdbc)
-                - properties.getToolPublication().getDeletionGrace().toMillis();
-        var rows =
-                jdbc.query(
-                        "SELECT s.tenant_id, s.session_id, s.session_scope_key FROM ma_session s"
-                            + " WHERE s.retired_at <= ? AND NOT EXISTS"
-                            + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind ="
-                            + " 'SESSION_RESOURCE_GC' AND o.scope_key = s.session_scope_key AND"
-                            + " o.target_key = s.session_scope_key LIMIT 1) ORDER BY s.retired_at"
-                            + " LIMIT 32",
-                        (row, index) -> ManagedSchemaRows.read(row),
-                        due);
-        long current = ToolPublicationRetentionStore.now(jdbc);
-        for (var row : rows) {
-            transactions.executeWithoutResult(
-                    status -> {
-                        ToolPublicationRetentionStore.lockGenericSession(
-                                jdbc,
-                                (String) row.get("tenant_id"),
-                                (String) row.get("session_id"));
-                        String tenant = (String) row.get("tenant_id");
-                        String session = (String) row.get("session_id");
-                        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-                        String request =
-                                JSON.createObjectNode()
-                                        .put("version", 1)
-                                        .put("sessionId", session)
-                                        .toString();
-                        jdbc.update(
-                                "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_id, operation_kind, tenant_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
-                                operationKey(scope),
-                                scope,
-                                scope,
-                                operationId(scope),
-                                tenant,
-                                session,
-                                scope,
-                                ManagedSchemaKeys.key(request),
-                                request,
-                                current,
-                                current);
-                    });
+        if (ledgerScanId == 0) {
+            Long roundEnd = jdbc.queryForObject("SELECT MAX(id) FROM ma_session", Long.class);
+            ledgerScanRoundEnd = roundEnd == null ? 0 : roundEnd;
         }
+        long current = ToolPublicationRetentionStore.now(jdbc);
+        long due = current - properties.getToolPublication().getDeletionGrace().toMillis();
+        // Keep every source id in the page so existing ledgers and live Sessions also advance it.
+        var page = jdbc.query(
+                "SELECT s.*, CASE WHEN s.retired_at <= ? AND NOT EXISTS"
+                    + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind = 'SESSION_RESOURCE_GC'"
+                    + " AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id"
+                    + " LIMIT 1) THEN 1 ELSE 0 END AS needs_ledger FROM"
+                    + " (SELECT id, tenant_id, session_id, retired_at"
+                    + " FROM ma_session WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") s ORDER BY s.id",
+                (row, index) -> ManagedSchemaRows.read(row), due, ledgerScanId, ledgerScanRoundEnd);
+        for (var row : page) {
+            if (!ToolPublicationRetentionStore.flag(row, "needs_ledger")) {
+                continue;
+            }
+            transactions.executeWithoutResult(status -> {
+                String tenant = (String) row.get("tenant_id");
+                String session = (String) row.get("session_id");
+                ToolPublicationRetentionStore.lockGenericSession(jdbc, tenant, session);
+                enqueue(jdbc, tenant, session, current);
+            });
+        }
+        long lastId = page.isEmpty() ? 0 : ToolPublicationRetentionStore.number(page.getLast(), "id");
+        ledgerScanId = page.size() < SCAN_ROWS || lastId >= ledgerScanRoundEnd ? 0 : lastId;
+    }
+
+    // Caller owns the transaction and Session locks, including on retirement replay.
+    static void enqueue(JdbcTemplate jdbc, String tenant, String session, long current) {
+        String request = JSON.createObjectNode().put("version", 1).put("sessionId", session).toString();
+        jdbc.update(
+                "INSERT IGNORE INTO ma_operation (operation_ref, scope_kind, scope_id, operation_id, operation_kind, tenant_id, session_id, target_kind, target_id, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, 'SESSION', ?, ?, 'SESSION_RESOURCE_GC', ?, ?, 'SESSION', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
+                operationKey(tenant, session), session, operationId(session), tenant, session, session,
+                ManagedSchemaKeys.key(request), request, current, current);
+    }
+
+    static void enqueueCollections(JdbcTemplate jdbc, String tenant, String session, long time) {
+        enqueue(jdbc, tenant, session, time);
+        var captures = jdbc.query(
+                "SELECT scope_ref, publication_id, tenant_id, workspace_id, session_id"
+                    + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?"
+                    + " AND retention_state = 'RETIRING' ORDER BY publication_id",
+                (row, index) -> ManagedSchemaRows.read(row), tenant, session);
+        ToolPublicationCollector.enqueue(jdbc, captures, time);
     }
 
     Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query(
-                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                "SELECT tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                        + " AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ?"
+                        + " AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?)"
+                        + " ORDER BY available_at, operation_ref LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
-            Claim claim =
-                    JdbcManagedSessionStore.skipContended(
-                            transactions,
-                            status -> {
-                                String tenant = (String) candidate.get("tenant_id");
-                                String session = (String) candidate.get("session_id");
-                                String scope = (String) candidate.get("scope_key");
-                                JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                        jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-                                var head =
-                                        ToolPublicationRetentionStore.lockSessionHead(
-                                                jdbc, tenant, session);
-                                var row =
-                                        jdbc.query(
-                                                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
-                                                        (result, index) ->
-                                                                ManagedSchemaRows.read(result),
-                                                        operationKey(scope))
-                                                .getFirst();
-                                long now = ToolPublicationRetentionStore.now(jdbc);
-                                if ("SUCCEEDED".equals(row.get("state"))
-                                        || ToolPublicationRetentionStore.number(row, "available_at")
-                                                > now) {
-                                    return null;
-                                }
-                                Number until = (Number) row.get("claim_until_epoch");
-                                if (row.get("claim_owner") != null
-                                        && !owner.equals(row.get("claim_owner"))
-                                        && until != null
-                                        && until.longValue() > now) {
-                                    return null;
-                                }
-                                String blocker = blocker(tenant, session, now, head);
-                                JsonNode body = progress(row);
-                                if (blocker != null) {
-                                    long next = now + CLAIM_MILLIS;
-                                    if ("recovery_protected".equals(blocker)) {
-                                        next = now + PROTECTED_RECHECK_MILLIS;
-                                    } else if ("grace_period".equals(blocker)) {
-                                        long retiredAt =
-                                                jdbc.queryForObject(
-                                                        "SELECT retired_at FROM ma_session WHERE"
-                                                            + " tenant_id = ? AND session_id = ?",
-                                                        Long.class,
-                                                        tenant,
-                                                        session);
-                                        next =
-                                                Math.addExact(
-                                                        retiredAt,
-                                                        properties
-                                                                .getToolPublication()
-                                                                .getDeletionGrace()
-                                                                .toMillis());
-                                    } else if ("reader_active".equals(blocker)) {
-                                        // A graceful close deletes the row without moving the
-                                        // scheduled instant; the claim interval bounds that path.
-                                        next = Math.min(next, ToolPublicationRetentionStore
-                                                .earliestReadLeaseExpiry(jdbc, tenant, session));
-                                    }
-                                    if (!blocker.equals(row.get("failure_code"))) {
-                                        LOG.info(
-                                                "Stream capture collection held scope={}"
-                                                        + " blocker={}",
-                                                scope,
-                                                blocker);
-                                    }
-                                    jdbc.update(
-                                            "UPDATE ma_operation SET failure_code = ?, available_at = ?, gmt_modified = ? WHERE operation_key = ?",
-                                            blocker,
-                                            next,
-                                            now,
-                                            operationKey(scope));
-                                    return null;
-                                }
-                                long generation =
-                                        ToolPublicationRetentionStore.number(
-                                                        row, "claim_generation")
-                                                + 1;
-                                jdbc.update(
-                                        "UPDATE ma_operation SET claim_generation = ?, claim_owner = ?, claim_until = ?, failure_code = NULL, state = 'LEASED', gmt_modified = ? WHERE operation_key = ?",
-                                        generation,
-                                        owner,
-                                        now + CLAIM_MILLIS,
-                                        now,
-                                        operationKey(scope));
-                                return new Claim(
-                                        scope,
-                                        tenant,
-                                        session,
-                                        generation,
-                                        body.path("cursor").asText(""));
-                            });
+            Claim claim = claim((String) candidate.get("tenant_id"), (String) candidate.get("session_id"));
             if (claim != null) {
                 return claim;
             }
@@ -284,14 +240,69 @@ public final class SessionResourceCollectionCollector {
         return null;
     }
 
-    private String blocker(String tenant, String session, long now, java.util.Map<String, Object> head) {
+    Claim claim(String tenant, String session) {
+        String key = operationKey(tenant, session);
+        return JdbcManagedSessionStore.skipContended(transactions, status -> {
+            JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
+                    jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+            var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
+            var rows = jdbc.query(
+                    "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch"
+                            + " FROM ma_operation WHERE operation_ref = ? AND operation_kind = 'SESSION_RESOURCE_GC'"
+                            + " AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                    (result, index) -> ManagedSchemaRows.read(result), key, tenant, session);
+            if (rows.isEmpty()) {
+                return null;
+            }
+            var row = rows.getFirst();
+            long now = ToolPublicationRetentionStore.now(jdbc);
+            long available = ToolPublicationRetentionStore.number(row, "available_at");
+            if ("SUCCEEDED".equals(row.get("state")) || available < 0 || available > now) {
+                return null;
+            }
+            Number until = (Number) row.get("claim_until_epoch");
+            if (row.get("claim_owner") != null && !owner.equals(row.get("claim_owner"))
+                    && until != null && until.longValue() > now) {
+                return null;
+            }
+            String blocker = blocker(tenant, session, now, head);
+            if (blocker != null) {
+                long next = nextCheck(tenant, session, now, blocker);
+                if (!blocker.equals(row.get("failure_code"))) {
+                    LOG.info("Session resource collection held tenant={} session={} blocker={}", tenant, session, blocker);
+                }
+                jdbc.update("UPDATE ma_operation SET failure_code = ?, available_at = ?, gmt_modified = ? WHERE operation_ref = ?",
+                        blocker, next, now, key);
+                return null;
+            }
+            long generation = ToolPublicationRetentionStore.number(row, "claim_generation") + 1;
+            jdbc.update("UPDATE ma_operation SET claim_generation = ?, claim_owner = ?, claim_until = ?,"
+                            + " failure_code = NULL, state = 'LEASED', gmt_modified = ? WHERE operation_ref = ?",
+                    generation, owner, now + CLAIM_MILLIS, now, key);
+            return new Claim(session, tenant, session, generation, progress(row).path("cursor").asText(""));
+        });
+    }
+
+    private long nextCheck(String tenant, String session, long now, String blocker) {
+        return switch (blocker) {
+            case "recovery_protected", "external_storage_present" -> now + PROTECTED_RECHECK_MILLIS;
+            case "grace_period" -> Math.addExact(jdbc.queryForObject(
+                    "SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session),
+                    properties.getToolPublication().getDeletionGrace().toMillis());
+            case "reader_active" -> Math.min(now + CLAIM_MILLIS,
+                    ToolPublicationRetentionStore.earliestReadLeaseExpiry(jdbc, tenant, session));
+            default -> now + CLAIM_MILLIS;
+        };
+    }
+
+    private String blocker(String tenant, String session, long now, Map<String, Object> head) {
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
-                                + " AND session_key = ? AND retired_at IS NOT NULL",
+                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_id = ?"
+                                + " AND session_id = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                        ToolPublicationRetentionStore.hash(tenant),
-                        ToolPublicationRetentionStore.hash(session));
+                        tenant,
+                        session);
         if (roots.isEmpty()) {
             return "session_not_retired";
         }
@@ -307,31 +318,34 @@ public final class SessionResourceCollectionCollector {
         if (head != null && !"DELETED".equals(head.get("state"))) {
             return "session_head_live";
         }
+        if (mysqlOnly && hasExternalStorage(tenant, session)) {
+            return "external_storage_present";
+        }
         long leases =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_read_lease"
-                                + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?",
+                                + " WHERE tenant_id = ? AND session_id = ? AND expires_at > ?",
                         Long.class,
-                        ToolPublicationRetentionStore.hash(tenant),
-                        ToolPublicationRetentionStore.hash(session),
+                        tenant,
+                        session,
                         now);
         if (leases > 0) {
             return "reader_active";
         }
         if (!jdbc.query(
-                        "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
+                        "SELECT operation_ref FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND"
                                 + " operation_kind = 'OBJECT_PUT' AND state <> 'RETURNED' LIMIT 1",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), tenant, session).isEmpty()) {
             return "put_unresolved";
         }
         // The relay's classifications are all terminal (its discovery page and claim exclude
         // them): an `unknown` walk is never rewritten, so holding for it would hold forever. A
         // close still owed rides its own CHILD_SESSION_CLOSE row and reads no parent resource.
         if (!jdbc.query(
-                        "SELECT operation_key FROM ma_operation WHERE session_scope_key = ? AND"
+                        "SELECT operation_ref FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND"
                             + " operation_kind = 'CHILD_SESSION_START' AND state NOT IN ('done',"
                             + " 'orphaned', 'unknown') LIMIT 1",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+                (row, index) -> row.getString(1), tenant, session).isEmpty()) {
             return "child_start_unresolved";
         }
         // A recovery capture or verification reads a retired Session's bytes through
@@ -340,10 +354,21 @@ public final class SessionResourceCollectionCollector {
         return recoveryInFlight(tenant, session, false) ? "recovery_active" : null;
     }
 
+    private boolean hasExternalStorage(String tenant, String session) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                        + " AND (storage_kind <> 'MYSQL_INLINE' OR object_key IS NOT NULL"
+                        + " OR object_version_id IS NOT NULL OR encryption_key_id IS NOT NULL"
+                        + " OR capture_object_key IS NOT NULL OR publication_id IS NOT NULL))"
+                        + " OR EXISTS (SELECT 1 FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?)"
+                        + " OR EXISTS (SELECT 1 FROM ma_journal_pack WHERE tenant_id = ? AND session_id = ?)",
+                Boolean.class, tenant, session, tenant, session, tenant, session));
+    }
+
     private boolean recoveryInFlight(String tenant, String session, boolean locking) {
         return !jdbc.query(
-                        "SELECT w.operation_key FROM ma_operation_work w JOIN ma_operation o ON"
-                            + " o.operation_key = w.operation_key WHERE w.tenant_id = ? AND"
+                        "SELECT w.operation_ref FROM ma_operation_work w JOIN ma_operation o ON"
+                            + " o.operation_ref = w.operation_ref WHERE w.tenant_id = ? AND"
                             + " w.session_id = ? AND w.work_kind = 'SESSION' AND o.operation_kind ="
                             + " 'WORKSPACE_RECOVERY' AND o.state IN ('CAPTURING', 'VERIFYING')"
                             + " LIMIT 1" + (locking ? " FOR UPDATE" : ""),
@@ -357,9 +382,9 @@ public final class SessionResourceCollectionCollector {
         var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, claim.tenant(), claim.session());
         var row =
                 jdbc.query(
-                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
+                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_ref = ? AND operation_kind = 'SESSION_RESOURCE_GC' FOR UPDATE",
                                 (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                                operationKey(claim.scope()))
+                                operationKey(claim.tenant(), claim.scope()))
                         .getFirst();
         long now = ToolPublicationRetentionStore.now(jdbc);
         if ("SUCCEEDED".equals(row.get("state"))
@@ -379,15 +404,16 @@ public final class SessionResourceCollectionCollector {
             return false;
         }
         if (ManagedSessionRetirementStore.deleteOwnerBatch(jdbc, claim.tenant(), claim.session(), PAGE_ROWS)
-                || deleteArtifactBatch(claim.scope())) {
+                || deleteArtifactBatch(claim.tenant(), claim.session())) {
             jdbc.update(
-                    "UPDATE ma_operation SET phase = 'RELEASING_OWNERS', claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
-                    now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
+                    "UPDATE ma_operation SET phase = 'RELEASING_OWNERS', claim_until = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_generation = ?",
+                    now + CLAIM_MILLIS, now, operationKey(claim.tenant(), claim.scope()), claim.generation());
             return true;
         }
-        var rows = jdbc.query(RESOURCE_PAGE, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), claim.scope(), claim.cursor());
+        var rows = jdbc.query(RESOURCE_PAGE, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), claim.tenant(),
+                claim.session(), claim.cursor());
         long bytes = 0;
-        var ids = new java.util.ArrayList<String>(PAGE_ROWS);
+        var ids = new ArrayList<String>(PAGE_ROWS);
         String cursor = claim.cursor();
         boolean more = rows.size() > PAGE_ROWS;
         for (var candidate : rows.subList(0, Math.min(rows.size(), PAGE_ROWS))) {
@@ -401,7 +427,7 @@ public final class SessionResourceCollectionCollector {
                 more = true;
                 break;
             }
-            String resource = (String) candidate.get("resource_key");
+            String resource = (String) candidate.get("resource_id");
             if (collectible) {
                 ids.add(resource);
                 bytes += length;
@@ -410,20 +436,21 @@ public final class SessionResourceCollectionCollector {
         }
         long freed = 0;
         if (!ids.isEmpty()) {
-            var args = new java.util.ArrayList<Object>(ids.size() + 1);
-            args.add(claim.scope());
+            var args = new ArrayList<Object>(ids.size() + 2);
+            args.add(claim.tenant());
+            args.add(claim.session());
             args.addAll(ids);
-            String in = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
+            String in = String.join(", ", Collections.nCopies(ids.size(), "?"));
             // Retirement fences new references; only this operation can collect these SQL bodies.
             jdbc.update(
                     "UPDATE ma_resource SET state = 'COLLECTED', inline_bytes = NULL,"
-                        + " retention_until = NULL WHERE session_scope_key = ? AND inline_bytes IS"
-                        + " NOT NULL AND resource_key IN ("
+                        + " retention_until = NULL WHERE tenant_id = ? AND session_id = ? AND inline_bytes IS"
+                        + " NOT NULL AND resource_id IN ("
                             + in + ")",
                     args.toArray());
             freed = jdbc.queryForObject(
                             "SELECT COALESCE(SUM(byte_length), 0) FROM ma_resource WHERE"
-                                + " session_scope_key = ? AND state = 'COLLECTED' AND resource_key"
+                                + " tenant_id = ? AND session_id = ? AND state = 'COLLECTED' AND resource_id"
                                 + " IN ("
                                     + in + ")",
                     Long.class, args.toArray());
@@ -433,36 +460,44 @@ public final class SessionResourceCollectionCollector {
                 .put("collectedBytes", total).toString();
         if (more) {
             jdbc.update(
-                    "UPDATE ma_operation SET result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
-                    result, now + CLAIM_MILLIS, now, operationKey(claim.scope()), claim.generation());
+                    "UPDATE ma_operation SET result_json = ?, claim_until = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_generation = ?",
+                    result, now + CLAIM_MILLIS, now, operationKey(claim.tenant(), claim.scope()), claim.generation());
+        } else if (ManagedSessionRetirementStore.hasJournalPacks(jdbc, claim.tenant(), claim.session())) {
+            jdbc.update("UPDATE ma_operation SET result_json = ?, state = 'PENDING', phase = 'WAITING_JOURNAL_PACKS',"
+                            + " claim_owner = NULL, claim_until = NULL, available_at = ?, failure_code = NULL, gmt_modified = ?"
+                            + " WHERE operation_ref = ? AND claim_generation = ?",
+                    result, now + CLAIM_MILLIS, now, operationKey(claim.tenant(), claim.scope()), claim.generation());
         } else {
             jdbc.update(
                     "UPDATE ma_operation SET result_json = ?, state = 'SUCCEEDED', completed_at = ?, claim_owner = NULL, claim_until = NULL, available_at = "
                             + ManagedSchemaTime.NEVER_DUE_MILLIS
-                            + ", failure_code = NULL, gmt_modified = ? WHERE operation_key = ? AND claim_generation = ?",
-                    result, now, now, operationKey(claim.scope()), claim.generation());
-            ManagedSessionRetirementStore.markCollectionCompleted(jdbc, claim.tenant(), claim.session(), operationKey(claim.scope()));
+                            + ", failure_code = NULL, gmt_modified = ? WHERE operation_ref = ? AND claim_generation = ?",
+                    result, now, now, operationKey(claim.tenant(), claim.scope()), claim.generation());
+            ManagedSessionRetirementStore.markCollectionCompleted(jdbc, claim.tenant(), claim.session(),
+                    operationKey(claim.tenant(), claim.scope()));
             jdbc.update(
-                    "DELETE FROM ma_read_lease WHERE tenant_key = ? AND session_key = ? AND"
+                    "DELETE FROM ma_read_lease WHERE tenant_id = ? AND session_id = ? AND"
                             + " expires_at <= ?",
-                    ToolPublicationRetentionStore.hash(claim.tenant()), ToolPublicationRetentionStore.hash(claim.session()), now);
+                    claim.tenant(), claim.session(), now);
             LOG.info("Stream capture collection completed scope={} bytes={}", claim.scope(), total);
         }
         return true;
     }
 
-    private boolean deleteArtifactBatch(String scope) {
-        var artifacts = jdbc.query("SELECT artifact_id FROM ma_artifact WHERE scope_key = ?"
+    private boolean deleteArtifactBatch(String tenant, String session) {
+        String scope = JdbcManagedToolResultStore.scope(tenant, session);
+        var artifacts = jdbc.query("SELECT artifact_id FROM ma_artifact WHERE scope_ref = ?"
                         + " ORDER BY creation_sequence, artifact_id LIMIT ? FOR UPDATE",
                 (row, index) -> row.getString(1), scope, PAGE_ROWS);
         for (String artifact : artifacts) {
             jdbc.update(
-                    "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
-                            + " 'ARTIFACT' AND owner_key = ?",
-                    scope,
-                    ManagedSchemaKeys.key(scope, artifact));
+                    "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
+                            + " 'ARTIFACT' AND owner_ref = ?",
+                    tenant,
+                    session,
+                    ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenant, session, artifact));
             jdbc.update(
-                    "DELETE FROM ma_artifact WHERE scope_key = ? AND artifact_id = ?",
+                    "DELETE FROM ma_artifact WHERE scope_ref = ? AND artifact_id = ?",
                     scope,
                     artifact);
         }
@@ -477,11 +512,11 @@ public final class SessionResourceCollectionCollector {
                     jdbc.update(
                             "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL,"
                                 + " available_at = ?, failure_code = 'collection_retry', state ="
-                                + " 'PENDING' WHERE operation_key = ? AND operation_kind ="
+                                + " 'PENDING' WHERE operation_ref = ? AND operation_kind ="
                                 + " 'SESSION_RESOURCE_GC' AND claim_owner = ? AND claim_generation"
                                 + " = ?",
                             ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS,
-                            operationKey(claim.scope()),
+                            operationKey(claim.tenant(), claim.scope()),
                             owner,
                             claim.generation());
                 });

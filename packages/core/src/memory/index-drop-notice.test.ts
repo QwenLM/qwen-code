@@ -526,7 +526,7 @@ describe('real-file scan-cap omission diagnostics', () => {
   }
 
   it.each(['project', 'user', 'team'] as const)(
-    'retains the same %s subset and reports files omitted before index building',
+    'keeps the newest %s topics within budget and reports scan omissions',
     async (scope) => {
       const { root, dir } = await createStore(scope);
       const index =
@@ -535,12 +535,22 @@ describe('real-file scan-cap omission diagnostics', () => {
           : scope === 'user'
             ? await rebuildUserAutoMemoryIndex()
             : (await rebuildTeamAutoMemoryIndex(projectRoot))!;
-      const expected = Array.from({ length: 200 }, (_, offset) => {
-        const i = scope === 'team' ? offset : 204 - offset;
-        const name = String(i).padStart(3, '0');
-        return `- [Topic-${name}](project/n${name}.md) — Fact-${i}`;
-      });
+      const expected = Array.from(
+        { length: scope === 'project' ? 198 : 200 },
+        (_, offset) => {
+          const i = scope === 'team' ? offset : 204 - offset;
+          const name = String(i).padStart(3, '0');
+          return `- [Topic-${name}](project/n${name}.md) — Fact-${i}`;
+        },
+      );
       expect(entries(index)).toEqual(expected);
+      if (scope === 'project') {
+        expect(index.split('\n')).toHaveLength(200);
+        expect(index.length).toBeLessThanOrEqual(25_000);
+        expect(index).toContain(
+          'Dropped 2 of 200 entries: "Topic-006", "Topic-005".',
+        );
+      }
       expect(index).toContain('Dropped 5 of 205 topic files:');
       expect(index).toContain(
         scope === 'team'

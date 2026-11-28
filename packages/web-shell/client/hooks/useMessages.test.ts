@@ -4,7 +4,9 @@ import { act, createElement, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createDaemonTranscriptStore,
   DaemonHttpError,
+  normalizeDaemonEvent,
   type DaemonStatusTranscriptBlock,
   type DaemonTranscriptBlock,
   type DaemonTranscriptBlockChangeSummary,
@@ -151,14 +153,14 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       loopText(
         {
           loopType: 'turn_tool_call_cap',
-          loopReason: 'stuck_repetition',
+          loopReason: 'explicit_cap',
           toolCallCount: 101,
           toolCallLimit: 100,
         },
         'zh-CN',
       ),
     ).toBe(
-      '工具调用超过 100 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+      '本轮工具调用达到了 model.maxToolCallsPerTurn 设定的上限（100 次），因此系统停止了本轮操作。会话并未结束，你可以在设置中调高上限，或发送新的指令继续。',
     );
     expect(
       loopText({
@@ -166,9 +168,6 @@ describe('transcriptBlocksToLocalizedMessages', () => {
         loopReason: 'provider_duplicate_id',
       }),
     ).toContain('The model service sent a tool call that had already run');
-    expect(loopText({ loopType: 'invalid_tool_params_stagnation' })).toContain(
-      'kept sending invalid arguments to the same tool',
-    );
   });
 
   it('keeps the generic loop text when the cause is missing or unknown', () => {
@@ -183,6 +182,53 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     expect(loopText({ loopType: 'consecutive_identical_tool_calls' })).toBe(
       generic,
     );
+    // Causes an older session recorded before those detectors were removed.
+    for (const loop of [
+      {
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'backstop',
+        toolCallLimit: 1000,
+      },
+      {
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'stuck_repetition',
+        toolCallLimit: 100,
+      },
+      { loopType: 'global_tool_call_duplicate', loopReason: 'repeated_call' },
+      { loopType: 'invalid_tool_params_stagnation' },
+      { loopType: 'repeated_tool_execution_failure' },
+    ]) {
+      expect(loopText(loop)).toBe(generic);
+    }
+  });
+
+  it('shows generic text for a live backstop from an older daemon', () => {
+    const loop = {
+      loopType: 'turn_tool_call_cap',
+      loopReason: 'backstop',
+      toolCallCount: 1001,
+      toolCallLimit: 1000,
+    };
+    const store = createDaemonTranscriptStore();
+    store.dispatch(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId: 'session-1',
+          message: 'Tool-call loop protection stopped this turn.',
+          errorKind: 'loop_detected',
+          ...loop,
+        },
+      }),
+    );
+
+    const { blocks } = store.getSnapshot();
+    const t = getTranslator('en');
+    expect(blocks).toMatchObject([{ kind: 'error', loop }]);
+    expect(transcriptBlocksToLocalizedMessages(blocks, t)).toMatchObject([
+      { content: t('error.loopDetected') },
+    ]);
   });
 
   it.each(['assistant', 'thought'] as const)(
@@ -419,6 +465,70 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('does not append a top-level reply to a streaming orphaned subagent row', () => {
+    const t = (key: string) => key;
+    const store = createDaemonTranscriptStore();
+    store.dispatch({
+      type: 'assistant.text.delta',
+      text: 'Subagent output',
+      parentToolCallId: 'missing-call',
+    });
+    store.dispatch({ type: 'assistant.text.delta', text: ' ' });
+    const { blocks } = store.getSnapshot();
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    expect(messages).toMatchObject([{ content: 'Subagent output' }]);
+
+    store.dispatch({ type: 'assistant.text.delta', text: 'Model reply' });
+    const nextBlocks = store.getSnapshot().blocks;
+    expect(
+      projectStreamingTailMessages({ blocks, messages, t }, nextBlocks, t),
+    ).toBeUndefined();
+    expect(transcriptBlocksToLocalizedMessages(nextBlocks, t)).toMatchObject([
+      { content: 'Subagent output', parentToolCallId: 'missing-call' },
+      { content: ' Model reply' },
+    ]);
+  });
+
+  it.each(['assistant', 'thought'] as const)(
+    'updates streaming %s before trailing Mod logs and preserves row identities',
+    (kind) => {
+      const t = (key: string) => key;
+      const store = createDaemonTranscriptStore();
+      const type = `${kind}.text.delta` as const;
+      store.appendLocalUserMessage('prompt');
+      store.dispatch({ type, text: 'one' });
+      for (const text of ['started', 'finished']) {
+        store.dispatch(
+          normalizeDaemonEvent({
+            v: 1,
+            type: 'mod_log',
+            data: { sessionId: 'session', plugin: 'translator', text },
+          }),
+        );
+      }
+      const { blocks } = store.getSnapshot();
+      const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+      const blockChangeSummary = store.getBlockChangeSummary?.();
+
+      store.dispatch({ type, text: ' two' });
+      const nextBlocks = store.getSnapshot().blocks;
+      const projected = projectStreamingTailMessages(
+        { blocks, messages, t, blockChangeSummary },
+        nextBlocks,
+        t,
+        store.getBlockChangeSummary?.(),
+      );
+
+      expect(projected).toEqual(
+        transcriptBlocksToLocalizedMessages(nextBlocks, t),
+      );
+      expect(projected?.[1]).toMatchObject({ content: 'one two' });
+      for (const index of [0, 2, 3]) {
+        expect(projected?.[index]).toBe(messages[index]);
+      }
+    },
+  );
 
   it('projects an insight marker that spans the appended-text boundary', async () => {
     const container = document.createElement('div');

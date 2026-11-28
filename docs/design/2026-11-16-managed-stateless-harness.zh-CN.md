@@ -2,7 +2,9 @@
 
 [English](2026-11-16-managed-stateless-harness.md) | [简体中文](2026-11-16-managed-stateless-harness.zh-CN.md)
 
-状态：提案，尚未实现或接受。第一阶段（空闲 Session 挂起）的范围和交付门槛见下文；恢复前置条件、故障测试和测量通过之前，不能启用。第二到第四阶段只定义边界和接口，各自实现前另写设计。[#17521](https://github.com/QwenLM/qwen-code/pull/17521) 是 Java 前置工作的起点，不能证明该前置条件已经完成。现状声明已对照 `main` 上 `326818aa28` 的代码核对。
+状态：第一阶段（空闲 Session 挂起）正在 [#17690](https://github.com/QwenLM/qwen-code/pull/17690) 中实现；下文的恢复前置条件、故障测试和测量通过之前，不能启用。第二到第四阶段只定义边界和接口，各自实现前另写设计。两份补篇承载本文只设门槛的第一阶段细节：[恢复视图](2026-11-18-managed-suspension-recovery-view.zh-CN.md)，以及回答待解决问题 8 的[有界恢复](2026-11-18-managed-suspension-bounded-recovery.zh-CN.md)。
+
+本文写成之后，Java 前置工作已部分落地：[#17521](https://github.com/QwenLM/qwen-code/pull/17521)（仅准入操作的 404 恢复、按引用身份的 attachment/marker 原子更新、池重新选择）、[#17680](https://github.com/QwenLM/qwen-code/pull/17680)（无 epoch 重提分支中驱动 continuation-ready 停靠）、[#17681](https://github.com/QwenLM/qwen-code/pull/17681)（SDK 心跳失效通知、`hosted_session_open_busy` / `hosted_session_teardown_blocked` 分类，以及等待老化上限，现名 `WAIT_CHURN_BUDGET_FACTOR`）。剩余项列在"控制面改动"一节。现状声明已对照 `main` 上 `326818aa28` 的代码核对，本次更新的段落另对照 `78f8bfb1dc` 复核。
 
 ## 与空闲 parking 提案的关系
 
@@ -48,7 +50,7 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 
 现有的 detach / delete 处理逻辑（`packages/cli/src/serve/hosted-harness-session.ts` 中的 `close`）是按"结束一次 attach"来写的：
 
-- 停掉所有存活的后台 Shell 和 Monitor 观察循环，并结算为 `stop_requested`；
+- 停掉所有存活的后台 Shell 和 Monitor 观察循环，并结算为 `stop_requested`；Session 被阻塞、held drain 失败或无法证明时结算为 `runtime_lost`；
 - 在日志关闭前，不经模型，把所有待处理的 monitor、channel、automation、子任务、session message 和 loop 输入都结算为 **cancelled**；
 - 释放 Runtime 租约，drain 被持有的 Runtime 工作，并重试 hosted cleanup debt；
 - 关闭 Hook 和 MCP（detach 时为非终态关闭：drain Runtime 连接，但保留 owner 可重新获取）；
@@ -59,9 +61,9 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 ### 已经能容忍"Harness 放手一个 Session"的部分
 
 - **从无人持有的写者恢复。** `WakeRecovery` 每两秒扫描一次，每轮最多处理 8 个候选，并调用 `recoverForWake` 做被动 load。它识别已 seal 的写者和已过期的活跃租约；崩溃可能留下后者。其 SQL 筛选仅覆盖符合条件、journal 未压缩的活跃 public Session。延时输入处理专门保留未来的 loop 输入及其 wake 提示。它不保证及时：一次 claim 把该 Session 的下一次尝试推迟 30 秒，每次尝试最多证明 32 个 journal transaction；缓存的证明如果跳过了未来的 loop 输入，该输入到期后要从第一个 transaction 重新证明。因此在有 201 个 transaction 的 journal 上，wake 至少比输入到期晚三分钟。它是崩溃兜底，不是适用于所有 Session 或所有 `notBefore` 的通用持久调度器。
-- **重新 attach 失效的引用。** #17521 提出了 404 重试，但当前修订尚不能满足本文要求的恢复契约：普通 load 可能被常驻 Session 拒绝，恢复标记和池 placement 也需要遵循“重新打开”一节的规则。
+- **重新 attach 失效的引用。** #17521 已落地仅准入操作的 404 重试、按引用身份的 attachment/marker 原子规则与池重新选择；#17680 补上了无 epoch 重提分支的 continuation 驱动。普通 load 仍可能被常驻 Session 拒绝，因此"重新打开"一节的规则仍是契约。
 - **closing 是暂时性的。** `hosted_session_closing` 被归为暂时性错误（`HarnessConflictCodes`）；公开路由把它表现为可重试的 503，session message、child result 和 lifecycle 路径也已经把它当作可重试处理。
-- **placement 接管。** 写者已 seal 或租约已过期、且 activation 已释放时，placement 可以迁到另一个池成员；写者仍存活时会以 `harness_owner_still_live` 拒绝。
+- **placement 接管。** store 只在两条路径上允许接管：placement 已 `RELEASED` 且存在释放回执、head 已 seal；或者写者租约已过期且 activation 已知并已释放、吊销或过期。单纯 seal 不会缩短 `writer_lease_until`，所以第一阶段挂起（保留 placement、不写回执）之后，Session 只有在租约自然过期后才可被接管，最长为 60 秒默认值。在此之前请求以 `harness_owner_still_live` 被拒，而池 ownership 等待码已把它归为等待。
 - **drain 释放。** `packages/cli/src/serve/hosted-harness-session.ts` 中的 `releaseIdleOwner` 已经能在不取消输入的前提下释放 Session，但只用于正在 drain 的池实例：实例仍在接收工作时它直接返回。只要任一忙碌检查成立（其中一部分是实例级的），或者某个待处理输入不是 wake 输入、或已被 wake 尝试过，它就拒绝释放。之后它停止续约、释放 activation，并通过 Store 回执释放 placement（`quiesceOwnership`、`prepareOwnershipRelease`、`releaseOwnership`）；释放失败时 Session 保持 attach，并用同一个 operation id 和 commit proof 重试。最后关闭 wake 调度器、事件流、本地 Store client 和 client-files 注册，并移除 Session。它不关闭 Hook 或 MCP owner，也不释放 Runtime 租约。
 
 ## 目标与非目标
@@ -70,7 +72,7 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 
 - 释放符合条件的空闲 Session 的 Session 级资源，不取消输入，也不丢失历史。
 - 下一次请求、wake 输入或 lifecycle 操作到来时，重新打开已干净挂起的 Session。挂起失败应表现为需要恢复的工作，不能静默重新打开结果未知的写者。
-- 不新增受支持的配置项，也不做能力协商；Harness 和控制面一起发布、一起升级。唯一的覆盖手段是下文所述仅供测试使用的空闲时长。
+- ~~不新增受支持的配置项，也不做能力协商~~；Harness 和控制面一起发布、一起升级。唯一的覆盖手段是下文所述仅供测试使用的空闲时长。（这是第一阶段的原始约束；[挂起 placement 释放补充设计](2026-11-26-managed-suspension-placement-release.zh-CN.md)为混版安全新增了 writer-grant 能力位，但仍不新增配置项。）
 - 定义目标架构（一个在请求之间不持有任何 Session 的 Harness），以及通往它的各个步骤的边界。
 
 第一阶段的非目标：
@@ -78,7 +80,7 @@ Managed Agent 尚未发布首个正式版本，其 schema 策略也体现了这�
 - 重新设计 journal 恢复。第一阶段在启用挂起前测量当前成本；成本门槛不通过时，先做针对性的 load 改进。第二阶段消除 MCP/Hook 重连部分，不会消除所有随历史增长的恢复成本。
 - 把 wake 调度器、审批等待或观察循环移出 Harness。第一阶段中需要这些的 Session 保持常驻。
 - 在没有证据表明现有协议无法满足故障验收门槛时，照搬早先提案的 Store park 事务或修改写租约协议。
-- 释放被挂起 Session 的 placement。
+- ~~释放被挂起 Session 的 placement~~（已由[挂起 placement 释放补充设计](2026-11-26-managed-suspension-placement-release.zh-CN.md)取代；pull 调度仍另行设计）。
 
 ## 目标架构
 
@@ -115,7 +117,7 @@ journal 和 Session Store 仍是唯一的权威。正在运行的 Turn 仍然只
 定时器到点时，只有以下条件全部满足，Harness 才挂起该 Session；否则重新计时一个完整周期。
 
 - 没有活跃的 Turn，也没有等待 continue 或 cancel 驱动的已恢复 Turn。
-- 没有打开的 Turn 事件流（控制面只在一个 Turn 执行期间打开事件流）。
+- 没有打开的 Harness 事件流——该 Session 的流集合为空。这既覆盖 Turn 自己的流，也覆盖任何只读观察者，teardown 会把它们都切断。
 - 没有待处理的输入，包括 `notBefore` 在未来的 loop 输入。常驻的 wake 调度器会在这类输入到期时投递；SQL wake 恢复在长 journal 上会投递得很晚（见“现状”）。第三阶段把 wake 调度移到控制面后，这类 Session 才能挂起。
 - 没有待处理或恢复中的 MCP / Hook 操作，没有正在安装或刷新的 MCP 配置，没有进行中的 session message 操作，没有正在进行的上下文压缩。
 - 没有存活的后台 Shell 或 Monitor 观察循环。
@@ -196,42 +198,44 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 - **准入操作。** prompt、审批/问题回答、channel、automation、message 和 child 准入操作，在所用引用返回精确的 `404 hosted_session_not_found` 后重试一次。边界是准入操作，不是整个操作族：取消和 committed-stop 操作保留已有恢复语义。符合条件的非 Turn 准入使用被动重新 attach；Turn 路径重新进入 `recoverManagedRuntime` 和协调器的恢复处理，包括 `pendingRecovery`、`bindRecoveredHarness` 与事件水位。叶子 connector 不能丢弃返回的恢复快照后直接重发 prompt。保留租户、Workspace 和各操作自己的授权；给所有新工作 load 设置 passive 不能替代这些检查。
 - **引用和标记的归属。** 发布、移除和标记更新，在每个 attachment key 上用一个原子步骤完成，并核对被修改的引用。该规则适用于每条 connector 路径，不只是新增的 404 handler。不要在 map 的 `compute` 中执行网络 I/O。旧引用迟到的 404 或心跳通知，不能影响新引用及其标记。`mcpManagementAttachments` 同样按引用身份处理；不能退回另一张缓存表中已知过期的条目。
 - **其他操作与心跳失效。** cancel、rename、Harness stream、上下文压缩读取、MCP/client-files 管理、extension 和 runtime-skill 读取，不纳入统一的 404 重试。SDK 在心跳移除引用时通知 connector，由 connector 使用同一原子规则处理。心跳正常周期运行时，过期失败的持续时间受该通知约束；禁用心跳则没有这个上界。保留带错误码的拒绝，不把驱逐后的不可加载 resolver 转成一个本地异常。lifecycle settlement 保留“缺失不能证明完成”的规则。
-- **wake 输入。** 挂起的 Session 没有待处理输入，因此 wake 针对的是挂起之后才准入的输入。wake fence 证明没有活跃写者时，`activateForWake` 按条件移除过期引用及标记，再执行恢复 load；不能擦掉并发发布的活跃 attachment。transport 通知丢失时，SQL wake 恢复只在其支持的 Session 范围内兜底，延迟见“现状”。不能根据内存中的空闲判定直接清除 wake 提示。
-- **lifecycle 与状态。** close/delete 使用已有 authority 和恢复路径，等待挂起闸门时不消耗 lifecycle 重试预算。恢复/状态响应不能因为缓存条目缺失就报告成功，也不能把缺失直接当成需要运维处理的失败：应确定持久 writer/activation 状态并遵守恢复视图契约。不新增回执的设计必须在启用挂起前证明这一状态行为。
-- **池选择与错误。** 即使第一阶段成功挂起后保留 placement，重试也必须重新经过允许获取归属的 `HarnessPoolConnector.select`，取得新的 `PoolCall`。保留 `hosted_session_closing`、`hosted_session_open_busy` 和 placement 等待的暂时性语义（受“冷打开准入控制”一节的等待上限约束），不用原始 404 覆盖它们。`hosted_session_teardown_blocked` 是拒绝，不是等待。generation 变化、结果未知和终态恢复失败保留各自的分类。
+- **wake 输入。** 挂起的 Session 没有待处理输入，因此 wake 通常针对挂起之后才准入的输入。但并非必然：transport activator 只校验通知的 sequence 已提交且没有活跃写者，所以在 resident 已消费该输入并挂起之后才送达的通知，仍会把 Session 加载一次。这类重载要测量，不能假定不存在。wake fence 证明没有活跃写者时，`activateForWake` 只移除它当次观察到的那个引用及其标记，再执行恢复 load；并发发布的更新 attachment 会保留，该动词随即报告已 attach。MCP 管理缓存持有自己的引用，按同一按 key 身份规则移除。transport 通知丢失时，SQL wake 恢复只在其支持的 Session 范围内兜底，延迟见"现状"。不能根据内存中的空闲判定直接清除 wake 提示。
+- **lifecycle 与状态。** close/delete 使用已有 authority 和恢复路径，等待挂起闸门时不消耗 lifecycle 重试预算。恢复/状态响应不能因为缓存条目缺失就报告成功，也不能把缺失直接当成需要运维处理的失败：应确定持久 writer/activation 状态并遵守[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)。仅"已 seal"不构成该证明——被拒绝的 load 也会同样关掉写者——而且该视图会投影到每一次普通 Session 读取上，不只是运维接口。
+- **池选择与错误。** 即使第一阶段成功挂起后保留 placement，重试也必须重新经过允许获取归属的 `HarnessPoolConnector.select`，取得新的 `PoolCall`。保留 `hosted_session_closing`、`hosted_session_open_busy` 和 placement 等待的暂时性语义（受"冷打开准入控制"一节的等待上限约束），不用原始 404 覆盖它们。`hosted_session_teardown_blocked` 是拒绝，不是等待。generation 变化、结果未知和终态恢复失败保留各自的分类。
+- **409 不只有一种含义。** `create()`、`channelAttachment()`、`automationAttachment()` 只有在错误码表明 Session 已在那里（`hosted_session_already_attached`、`managed_session_already_exists`）时才可回退到被动 load。其余每个 409 都保留自己的错误码并上抛给调用方：在 closing 闸门、冷打开名额已满或 teardown 楔住之后再 load 一次，等于为一个等待多花一次准入；而在 `hosted_session_open_busy` 之后 load，加载的是被拒 create 从未写过的 journal。
 
 ### 冷打开准入控制
 
 挂起会把一部分稳态工作变成冷打开的突发。例如一个 automation 计划同时为大量已挂起的 Session 触发，或者某个池成员重启。每次冷打开都要恢复 journal 并重新安装 MCP 配置，其连接和 discovery 各自最多等待 25 秒。
 
 - Harness 限制单个实例的并发冷打开数，候选常量为 8。超出限制的打开请求以新错误码 `409 hosted_session_open_busy` 拒绝。
-- 这个限制作用于所有冷打开，包括 Harness 重启后的批量重新加载，同时也会把这类批量加载拉平。
-- 控制面需要在 `HarnessConflictCodes` 中把 `hosted_session_open_busy` 归为暂时性错误；在 `HarnessCoordinator` 中把它归为推迟 Turn 但不消耗其准入预算的错误码，与现有的池 ownership 等待码同类。这个归类是前置条件：没有它，一阵集中的拒绝就会耗尽排队 Turn 的准入预算，导致它们失败。
-- 免于扣减预算的等待仍需要上限。目前池 ownership 等待只要仍是当前失败就一直免扣；只有 generation 等待会失效：在没有 journal 进展的情况下经过 `GENERATION_CHURN_BUDGET_FACTOR` 倍预算之后。任何调用方都可以通过打开自己挂起的 Session 占满某个实例的冷打开名额，因此 `hosted_session_open_busy` 和挂起闸门返回的 `hosted_session_closing` 需要同类上限。超过上限后，Turn 以其所处阶段的 unavailable 错误码失败。在这些错误码上等待的 relay 和 lifecycle 调用方同样要有上限。
+- 这个限制作用于所有冷打开，包括首次 create（即使没有 journal 要恢复，它也会安装 MCP 与 Hook owner），以及 Harness 重启后的批量重新加载，同时也会把这类批量加载拉平。被名额拒绝的 create 不发布任何资源，也不留下 unresolved-opening 债务。
+- 控制面已在 `HarnessConflictCodes` 中把 `hosted_session_open_busy` 归为暂时性错误；在 `HarnessCoordinator` 中把它归为推迟 Turn 但不消耗其准入预算的错误码，与现有的池 ownership 等待码同类（#17681）。没有它，一阵集中的拒绝就会耗尽排队 Turn 的准入预算，导致它们失败。
+- 免于扣减预算的等待仍需要上限，而这个上限对不同调用方含义不同。#17681 把该上限重命名为 `WAIT_CHURN_BUDGET_FACTOR`，并同时作用于 generation 等待与池等待：超过之后 **Turn** 以其所处阶段的 unavailable 错误码失败。**lifecycle** 操作则改为以拒绝自身的错误码发布 `recovery_blocked` 并继续被重驱，因为放弃会把它欠下的资源搁死。**relay 是剩余缺口**。#17681 豁免了 command-execute 与 child-stop 两个分支，#18149 的阶段 3 豁免了普通 session message 投递的每个步骤，其 closing 等待由 Harness 升级为 `hosted_session_teardown_blocked` 来设上限；child result 投递与 automation fire 仍把这些等待计入自己的尝试预算。由于 transport wake 与 SQL wake 恢复都只覆盖 public Session，被挂起的子 Session 完全依赖这些 relay，一次冷打开突发就可能把它的消息结算成 cancelled 或 unknown。补齐这个缺口是第一阶段前置条件，不是后续项。
 - 控制面现有的限制保持不变：transport wake 的加载线程池，以及 `WakeRecovery` 每轮 8 个候选。
 - Session Store 由所有池成员共享，单实例限制管不住 store 负载，也不会减少恢复总工作量。启用挂起之前，测量空闲 SQL、随历史大小变化的冷打开 SQL/延迟/CPU、MCP 重连成本、回收的内存，以及读取或迟到 wake 通知引起的重载频率。在多个池成员下比较常驻与挂起负载，记录负载模型和接受的延迟/store 预算；候选默认值不满足预算时，调整常量或降低加载成本。早先的每分钟 51–56 条 SQL 和 200-Turn 加载测量，是需要复现的基线，不是当前保证。
 
 ### 控制面改动
 
-以下改动都要先于 Harness 改动合入，或与它在同一个版本中发布（见"上线方式"）。
+以下改动都要先于 Harness 改动合入，或与它在同一个版本中发布（见"上线方式"）。已落地项已标注，其余仍是欠项。
 
-1. 按上述准入/恢复契约返工 #17521，使用会检查请求参数的 Harness mock，并增加真实双控制面接管测试。缓存引用失效和 Session 完全不在内存中，是两种不同情况。
-2. 将所有 attachment/marker 更新纳入按 key 的归属规则，并增加 SDK 心跳失效通知。这些可以拆成独立前置改动；#17521 本身不等于早先提案的整个 Java 阶段。
-3. 重试时重新选择池 placement；在 coordinator、relay 和 lifecycle 处理中保留 closing、open-busy 和 ownership 等待。不为这些等待扣减准入预算，但要按“冷打开准入控制”一节给它们设置等待上限；不在 `hosted_session_teardown_blocked` 上等待。
-4. 修复 wake 缓存失效处理，证明延时输入资格、持久提示和恢复/状态行为。
-5. 只有上述行为及测试落地后，才更新 coordinator 对永久常驻的假设。仅有 mock 重试测试通过，不能证明这些条件成立。
+1. **已落地（#17521、#17680）。** 上述准入/恢复契约：仅准入操作的 404 恢复、会检查请求参数的 Harness mock、恢复快照与水位处理（含无 epoch 重提分支）。缓存引用失效和 Session 完全不在内存中，是两种不同情况。真实双控制面接管测试仍是欠项。
+2. **已落地（#17521、#17681）。** 所有 attachment/marker 更新纳入按 key 的归属规则，以及 SDK 心跳失效通知。
+3. **部分落地（#17681）。** 重试时重新选择池 placement；coordinator 与 lifecycle 处理中保留 closing、open-busy 和 ownership 等待，按"冷打开准入控制"一节设置等待上限，且不在 `hosted_session_teardown_blocked` 上等待。普通 session message 投递自 #18149 阶段 3 起已获得豁免。**仍欠：** 对该节指出的 child result 投递与 automation fire 给予同样的豁免与上限。
+4. **部分落地（#17690）。** wake 缓存失效处理已改为在两张缓存中各只移除当次观察到的引用。**仍欠：** 证明延时输入资格与持久提示，以及在真实 MySQL 上验证[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)的恢复/状态行为。
+5. **已落地（#17690）。** `create()`、`channelAttachment()`、`automationAttachment()` 对非"已在那里"的每个 409 保留其自身错误码，不再重新 load。
+6. 只有上述行为及测试落地后，才更新 coordinator 对永久常驻的假设。仅有 mock 重试测试通过，不能证明这些条件成立。
 
 ### 交付顺序
 
-先落地 Java/SDK 前置改动，这些改动在没有挂起功能时也有用。随后实现 Harness 计时、准入闸门和 teardown 状态，配套确定性的竞争与故障测试。启用自主挂起前，执行真实进程/MySQL 恢复检查和当前版本成本测量。将这些工作保持为可独立审阅的改动；本设计文档 PR 不实现其中任何一项。第一阶段达到验收标准后，再推进第二到第四阶段。
+先落地 Java/SDK 前置改动，这些改动在没有挂起功能时也有用。随后实现 Harness 计时、准入闸门和 teardown 状态，配套确定性的竞争与故障测试。启用自主挂起前，执行真实进程/MySQL 恢复检查和当前版本成本测量。将这些工作保持为可独立审阅的改动；#17690 承载 Harness 切片与剩余的 connector 修复，测量与真实 MySQL 门禁仍是欠项。第一阶段达到验收标准后，再推进第二到第四阶段。
 
 ### 与 Harness 池的交互
 
-被挂起的 Session 保留 placement。如果它所在的池成员离开了池，下一个请求会接管 placement；placement store 允许这样做，因为写者已 seal 且 activation 已释放。一个之后再也没被访问的已挂起 Session，会让已离开成员的 `hasUnreleasedOwnership` 一直为真，池因此会一直保留该成员的连接器条目。这和现在成员崩溃后留下的状态相同；回收这类 placement 的机制列为待解决问题。
+被挂起的 Session 保留 placement。如果它所在的池成员离开了池，下一个请求会接管 placement——但要等写者租约过期之后，因为第一阶段不写释放回执，而 seal 不会缩短租约（见"现状"）。在此之前接管会遇到 `harness_owner_still_live` 并等待。一个之后再也没被访问的已挂起 Session，会让已离开成员的 `hasUnreleasedOwnership` 一直为真，池因此会一直保留该成员的连接器条目。这和现在成员崩溃后留下的状态相同；回收这类 placement 的机制列为待解决问题。
 
 ### 可观测性
 
-- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。
+- Harness：干净挂起次数、可回退放弃次数、闸门保持关闭的失败/结果未知 teardown 及其持续时间和原因、判定未通过次数、冷打开耗时（拆分为 store 恢复和 MCP 重新安装）、`hosted_session_open_busy` 拒绝次数。失败 teardown 不计为干净挂起。这些计数从进程启动起累计，在实例的 `/internal/hosted-harness/v1/metrics` 接口中以 `suspension` 字段返回。
 - 控制面：准入重新 attach、心跳失效、保留下来的恢复快照、池重新选择、清掉过期 attachment 的 wake 激活次数，以及达到上限的等待次数。
 
 ### 故障模式
@@ -270,7 +274,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 ## 第四阶段：审批停靠
 
-只定义边界。
+只定义边界。实现前设计见[审批停靠](2026-11-21-managed-action-parking.zh-CN.md)；它经 G3 第三步的审批续跑 driver 恢复 Turn，而不是下文所说的 Managed Runtime continue 路径。
 
 - **现状。** 等待工具审批的 Turn 一直在 Harness 中运行，由 `HostedApprovalWaiters` 挂住，尽管 checkpoint 已经记录了 `await_action` 阶段。
 - **目标。** Turn 停在 `await_action`，本次请求结束。审批结果通过现有的 Managed Runtime continue 路径在任意池成员上恢复这个 Turn。
@@ -315,5 +319,5 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 5. 每个池成员能否访问所有 Workspace 挂载；第二到第四阶段假设任意成员都能打开任意 Session。
 6. Turn 的 reload-stable Runtime owner 在 detach 时会继续运行、释放义务保留（#16579）；挂起期间能否也让它们继续运行，从而让这类 Session 也能挂起。
 7. 挂起配置了 MCP 的公开 Workspace Shell 档位的 Session，这类 Session 目前的普通 detach 需要 lifecycle 授权。
-8. 达到重试上限、结果仍未知的 teardown，是否必须在无运维介入下自动恢复。如果要求自动恢复，应使用现有 Store 证明有界的后继 generation 转移，或采用早先提案中必要的最小 fencing 改动。drain 路径基于回执、用同一个 operation id 和 commit proof 重试的释放，是一种候选形态。此项和恢复/状态证明都是第一阶段交付门槛，不能当作后续润色。
+8. **已由[有界恢复补篇](2026-11-18-managed-suspension-bounded-recovery.zh-CN.md)回答：** 达到重试上限、结果仍未知的 teardown，只要两条续约都已停止，并经过超过写者租约加 Store 请求超时的等待，即可自动恢复，不改 schema、不改 Store 协议。该候选常量启用前仍需测量，恢复/状态证明仍是第一阶段交付门槛。
 9. 冷打开限制是否需要按租户公平分配。等待上限会让饿死的 Turn 失败，但不能阻止一个租户的打开请求挤占另一个租户的名额。

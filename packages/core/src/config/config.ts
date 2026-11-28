@@ -21,6 +21,7 @@ import {
 } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
+import type { ModelPreferences } from '../models/model-preferences.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -29,6 +30,7 @@ import {
 } from '../core/reasoning-overrides.js';
 import { getBuiltinDeepSeekReasoning } from '../core/deepseek-reasoning.js';
 import { getRequestModel } from '../core/request-model.js';
+import { ModelAvailabilityService } from '../core/model-availability-service.js';
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
@@ -45,16 +47,13 @@ import type {
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import {
+  normalizeReasoningEffort,
   setGeneratorReasoningEffort,
   type ReasoningEffort,
 } from '../core/reasoning-effort.js';
+import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import {
-  DEFAULT_LOOP_PROTECTION,
-  isLoopProtectionMode,
-} from '../services/loop-protection.js';
-import type { LoopProtectionMode } from '../services/loop-protection.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
 import {
   getQualifiedVisionModelId,
@@ -221,7 +220,6 @@ import {
 } from '../agents/runtime/workflow-size.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
-import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
@@ -277,6 +275,7 @@ import {
   type StopFailureErrorType,
   type TodoItem,
   type TodoStatus,
+  type UserPromptSource,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import {
@@ -310,6 +309,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
+import { isSubpath } from '../utils/paths.js';
 import { type ToolName } from '../tools/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -433,9 +433,11 @@ import {
 import {
   getAutoMemoryRoot,
   getAutoMemoryIndexPath,
+  getMemoryBaseDir,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
+  type ProjectMemoryOwner,
 } from '../memory/paths.js';
 import {
   type AutoMemoryIndexRead,
@@ -502,6 +504,17 @@ const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 // lock, so the horizon only bounds how long a reader treats an activation
 // without a live lock as possibly current.
 const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
+
+function normalizeVisionBridgeTimeoutMs(
+  timeoutMs: number | undefined,
+): number | undefined {
+  return timeoutMs !== undefined &&
+    Number.isInteger(timeoutMs) &&
+    timeoutMs > 0 &&
+    timeoutMs <= 2_147_483_647
+    ? timeoutMs
+    : undefined;
+}
 
 /** The recorder's view of a Managed Session log. */
 function managedRecordWriter(
@@ -1462,6 +1475,8 @@ export interface ConfigParameters {
   unifiedAgentLoopEnabled?: boolean;
   /** Experimental: run the shared agent loop on the event bus. */
   eventBusAgentLoopEnabled?: boolean;
+  /** Experimental: track model health across requests for the fallback chain. */
+  modelAvailabilityTracking?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -1647,10 +1662,7 @@ export interface ConfigParameters {
   preventSystemSleep?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
-  skipLoopDetection?: boolean;
-  /** What a firing loop detector does; defaults to `warn`. */
-  loopProtection?: LoopProtectionMode;
-  /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
+  /** Per-turn tool-call cap; unset or <= 0 means no cap. */
   maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
@@ -1707,6 +1719,8 @@ export interface ConfigParameters {
   inputFile?: string;
   /** Model providers configuration grouped by provider id */
   modelProvidersConfig?: ModelProvidersConfig;
+  modelPreferences?: ModelPreferences;
+  modelPreferenceDefaultEffort?: string;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
   /** Agent and multi-agent collaboration settings */
@@ -1849,17 +1863,19 @@ export interface ConfigParameters {
   allowPrivateNetworkHooks?: boolean;
   /**
    * Callback for persisting a permission rule to settings.
-   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
-   * to project or user settings when the user clicks "Always Allow".
+   * Injected by the CLI layer to write allow/ask/deny rules for an approved
+   * tool call.
    *
    * @param scope - 'project' for workspace settings, 'user' for user settings.
    * @param ruleType - 'allow' | 'ask' | 'deny'.
    * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   * @param workspaceDir - The project root of the Config that owns the call.
    */
   onPersistPermissionRule?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
+    workspaceDir: string,
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
@@ -2088,13 +2104,13 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
-  const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
-  if (!Number.isInteger(resolved)) {
+  if (value == null) return 0;
+  if (!Number.isInteger(value)) {
     throw new FatalConfigError(
-      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(resolved)}`,
+      `Invalid maxToolCallsPerTurn: must be an integer, got ${String(value)}`,
     );
   }
-  return resolved;
+  return value;
 }
 
 /** Maximum number of fallback models allowed in the chain. */
@@ -2503,8 +2519,11 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
-  /** A sub-session this caller created earlier, to send the prompt to
-   * instead of creating one. It lives in `workspace`. */
+  /** The named workspace was selected under YOLO without one-time approval. */
+  requiresYolo?: true;
+  /** The authorization was automatic under AUTO and requires that mode still. */
+  requiresAutoMode?: true;
+  /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
 
@@ -2512,6 +2531,8 @@ export interface SubSessionWorkspaceBinding {
   workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
 }
 
 export type SubSessionWorkspaceResolver = (
@@ -2574,6 +2595,14 @@ export type ReasoningEffortOverride = {
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
 };
 
+interface ModelPreferenceDefaults {
+  key: string;
+  reasoning: ContentGeneratorConfig['reasoning'];
+  contextWindowSize: number | undefined;
+  reasoningSource: ContentGeneratorConfigSources['reasoning'];
+  contextWindowSource: ContentGeneratorConfigSources['contextWindowSize'];
+}
+
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
 function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
@@ -2602,6 +2631,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
+    | 'getProjectMemoryOwner'
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
@@ -2842,11 +2872,13 @@ export function deriveWorktreeConfig(
     options.customIgnoreFiles,
   );
   const workspaceContext = new WorkspaceContext(worktreePath);
+  const memoryOwner = base.getProjectMemoryOwner();
   const derived = deriveConfig(base, {
     getTargetDir: () => worktreePath,
     getCwd: () => worktreePath,
     getWorkingDir: () => worktreePath,
     getProjectRoot: () => worktreePath,
+    getProjectMemoryOwner: () => memoryOwner,
     getFileService: () => fileService,
     getWorkspaceContext: () => workspaceContext,
   });
@@ -3047,6 +3079,11 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
+  private readonly projectMemoryBaseDir: string;
+  private projectMemoryBinding?: {
+    owner: ProjectMemoryOwner;
+    worktreeRoot?: string;
+  };
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -3302,6 +3339,8 @@ export class Config {
   private readonly agentTeamEnabled: boolean = false;
   private readonly unifiedAgentLoopEnabled: boolean | undefined;
   private readonly eventBusAgentLoopEnabled: boolean | undefined;
+  private readonly modelAvailabilityTracking: boolean;
+  private modelAvailabilityService: ModelAvailabilityService | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3393,10 +3432,7 @@ export class Config {
   private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
-  private readonly skipLoopDetection: boolean;
-  private readonly loopProtection: LoopProtectionMode;
   private readonly maxToolCallsPerTurn: number;
-  private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -3408,11 +3444,7 @@ export class Config {
   private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
-  private readonly onPersistPermissionRuleCallback?: (
-    scope: 'project' | 'user',
-    ruleType: 'allow' | 'ask' | 'deny',
-    rule: string,
-  ) => Promise<void>;
+  private readonly onPersistPermissionRuleCallback: ConfigParameters['onPersistPermissionRule'];
   private initialized: boolean = false;
   private initializationPromise?: Promise<void>;
   private initializationSucceeded = false;
@@ -3470,9 +3502,16 @@ export class Config {
   private visionModel?: string;
   private compactionModel?: string;
   private reasoningSnapshot?: ReasoningSnapshot;
+  private modelPreferences?: ModelPreferences;
+  private readonly modelPreferenceDefaultEffort?: ReasoningEffort | 'none';
+  private modelPreferenceDefaults?: ModelPreferenceDefaults;
+  private modelPreferenceSessionEffort?: {
+    key: string;
+    effort: ReasoningEffort | undefined;
+  };
   private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
-  private readonly visionBridgeTimeoutMs: number | undefined;
+  private visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -3554,6 +3593,7 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.projectMemoryBaseDir = getMemoryBaseDir(this.sessionRuntimeBaseDir);
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
@@ -3775,6 +3815,7 @@ export class Config {
     // from "explicitly off" and block a later per-surface default flip.
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
     this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
+    this.modelAvailabilityTracking = params.modelAvailabilityTracking ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -3826,6 +3867,11 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
+    this.modelPreferences = params.modelPreferences;
+    this.modelPreferenceDefaultEffort =
+      params.modelPreferenceDefaultEffort === 'none'
+        ? 'none'
+        : normalizeReasoningEffort(params.modelPreferenceDefaultEffort);
     this.providerProtocolConfig = params.providerProtocolConfig;
     this.cliVersion = params.cliVersion;
 
@@ -3839,17 +3885,9 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
-    this.skipLoopDetection = params.skipLoopDetection ?? false;
-    // Embedders bypass the CLI's check; an unknown mode would act as `off`.
-    this.loopProtection = isLoopProtectionMode(params.loopProtection)
-      ? params.loopProtection
-      : DEFAULT_LOOP_PROTECTION;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
       params.maxToolCallsPerTurn,
     );
-    // Whether the user explicitly set the cap (vs. the resolved default). An
-    // explicit value is honored as a hard cap; the default is adaptive.
-    this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -4121,13 +4159,9 @@ export class Config {
     // schema still accepts via /config) would throw RangeError or silently
     // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
     // timer can't take and fall back to the built-in default.
-    this.visionBridgeTimeoutMs =
-      params.visionBridgeTimeoutMs !== undefined &&
-      Number.isInteger(params.visionBridgeTimeoutMs) &&
-      params.visionBridgeTimeoutMs > 0 &&
-      params.visionBridgeTimeoutMs <= 2_147_483_647
-        ? params.visionBridgeTimeoutMs
-        : undefined;
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(
+      params.visionBridgeTimeoutMs,
+    );
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -4511,6 +4545,7 @@ export class Config {
                       input['submitted_prompt'].trim().length > 0
                       ? input['submitted_prompt']
                       : undefined,
+                    input['source'] as UserPromptSource | undefined,
                   );
                   break;
                 case 'UserPromptExpansion':
@@ -5861,13 +5896,18 @@ export class Config {
         this.memoryCorpusRevision = corpusStatus?.revision ?? '';
         this.memoryRecallModeInitialized = true;
       }
+      const projectRoot = this.getProjectRoot();
+      const owner = this.getProjectMemoryOwner();
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
-          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readAutoMemoryIndexWithStats(projectRoot, owner).catch((error) => {
+            this.debugLogger.warn('Project memory index read failed', error);
+            return null;
+          }),
           readUserAutoMemoryIndexWithStats().catch(() => null),
         ]);
       this.recordAutoMemoryIndexRead(
-        getAutoMemoryIndexPath(this.getProjectRoot()),
+        getAutoMemoryIndexPath(projectRoot, owner),
         managedAutoMemoryIndexRead,
       );
       this.recordAutoMemoryIndexRead(
@@ -5883,7 +5923,7 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      const memoryDir = getAutoMemoryRoot(this.getProjectRoot());
+      const memoryDir = getAutoMemoryRoot(projectRoot, owner);
       const userSection = {
         memoryDir: getUserAutoMemoryRoot(),
         indexContent: userAutoMemoryIndex,
@@ -5906,6 +5946,7 @@ export class Config {
           managedAutoMemoryIndex,
           userSection,
           teamSection,
+          this.getModelContextWindowSize(),
         );
         this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
@@ -5941,11 +5982,16 @@ export class Config {
     });
   }
 
-  private buildMemoryContextWarning(memoryContent: string): string | undefined {
-    const contextWindowSize =
+  getModelContextWindowSize(): number {
+    return (
       this.getContentGeneratorConfig()?.contextWindowSize ??
       this.modelsConfig.getGenerationConfig().contextWindowSize ??
-      tokenLimit(this.getModel(), 'input');
+      tokenLimit(this.getModel(), 'input')
+    );
+  }
+
+  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+    const contextWindowSize = this.getModelContextWindowSize();
     if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
       return undefined;
     }
@@ -6261,7 +6307,8 @@ export class Config {
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
     }
-    // The global reasoning effort (settings.model.reasoningEffort, seeded into
+    // For callers without a model preference store, the global reasoning effort
+    // (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
     // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
@@ -6342,6 +6389,7 @@ export class Config {
       (priorReasoningSource?.kind === 'programmatic' &&
         priorReasoningSource.detail === 'reasoning selection');
     const preserveReasoningOff =
+      this.modelPreferences === undefined &&
       priorReasoning === false &&
       (requestModel !== newContentGeneratorConfig.model ||
         newContentGeneratorConfig.thinkingMandatory !== true) &&
@@ -6357,6 +6405,13 @@ export class Config {
       if (deepSeekRoute && priorReasoningSource)
         sources['reasoning'] = priorReasoningSource;
     }
+    const preferenceDefaults = this.captureModelPreferenceDefaults(
+      config,
+      sources,
+    );
+    if (preferenceDefaults) {
+      this.applyModelPreferences(config, sources, preferenceDefaults);
+    }
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
@@ -6365,12 +6420,14 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+    this.modelPreferenceDefaults = preferenceDefaults;
     // Auth flows call refreshAuth directly — no model-change notification
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
     // Re-apply the user's reasoning preference that the provider sync wiped.
     if (
+      this.modelPreferences === undefined &&
       priorReasoning === false &&
       newContentGeneratorConfig.reasoning === false
     ) {
@@ -6380,7 +6437,7 @@ export class Config {
           priorReasoningSource;
       }
     }
-    if (priorReasoningEffort) {
+    if (this.modelPreferences === undefined && priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
 
@@ -6727,9 +6784,11 @@ export class Config {
         `with every request, which is the cost a rule exists to avoid. Add ` +
         `\`paths:\` to it, or move the content into the extension's context file.`,
     );
-    const extra = memoryContextWarning
-      ? [...ruleWarnings, memoryContextWarning]
-      : ruleWarnings;
+    const extra = [
+      ...ruleWarnings,
+      ...(memoryContextWarning ? [memoryContextWarning] : []),
+      ...(this.getHookSystem()?.getConfigWarnings() ?? []),
+    ];
     return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
@@ -6891,6 +6950,15 @@ export class Config {
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
+    // The availability ledger and the background prompt-id registry belong to
+    // the outgoing conversation. A rewind/resume can reuse a prompt id (the
+    // transcript seeds the mint counter), so carrying either across the swap
+    // would let a stale mark skip a recovered fallback, or a reused notification
+    // id exclude a new foreground turn. Reset both unconditionally — even a
+    // same-id resume replaces the conversation (P2). Dropping the lazy service
+    // instance discards every mark and the last turn key.
+    this.modelAvailabilityService = undefined;
+    this.llmClient?.clearBackgroundInteractionPromptIds?.();
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -7242,6 +7310,120 @@ export class Config {
 
   getCurrentModelRegistryBaseUrl(): string | null | undefined {
     return this.modelsConfig.getCurrentRegistryBaseUrl();
+  }
+
+  getModelPreferenceKey(): string | undefined {
+    return this.modelPreferenceDefaults?.key;
+  }
+
+  getModelPreferenceContextLimit(): number {
+    return (
+      this.modelPreferenceDefaults?.contextWindowSize ??
+      tokenLimit(stripRuntimeSnapshotPrefix(this.getModel()), 'input')
+    );
+  }
+
+  setModelPreferences(
+    preferences: ModelPreferences,
+    changed?: 'reasoning' | 'contextWindow',
+  ): void {
+    if (this.modelPreferences === undefined) return;
+    this.modelPreferences = preferences;
+    if (!this.contentGeneratorConfig || !this.modelPreferenceDefaults) return;
+    if (changed === 'reasoning') this.modelPreferenceSessionEffort = undefined;
+    this.applyModelPreferences(
+      this.contentGeneratorConfig,
+      this.contentGeneratorConfigSources,
+      this.modelPreferenceDefaults,
+    );
+    this.notifyModelChangeListeners();
+  }
+
+  private captureModelPreferenceDefaults(
+    config: ContentGeneratorConfig,
+    sources: ContentGeneratorConfigSources,
+  ): ModelPreferenceDefaults | undefined {
+    if (
+      this.modelPreferences === undefined ||
+      !config.authType ||
+      !config.model
+    )
+      return undefined;
+    const registryEndpoint = this.getCurrentModelRegistryBaseUrl();
+    const endpointSource = sources['baseUrl']?.kind;
+    const endpoint =
+      endpointSource === 'cli' ||
+      endpointSource === 'env' ||
+      endpointSource === 'settings'
+        ? config.baseUrl
+        : (registryEndpoint ?? config.baseUrl);
+    const modelId = encodeURIComponent(
+      stripRuntimeSnapshotPrefix(config.model),
+    );
+    const suffix = endpoint
+      ? `#${createHash('sha256').update(endpoint).digest('hex')}`
+      : '';
+    return {
+      key: `${config.authType}/${modelId}${suffix}`,
+      reasoning: config.reasoning,
+      contextWindowSize: config.contextWindowSize,
+      reasoningSource: sources['reasoning'],
+      contextWindowSource: sources['contextWindowSize'],
+    };
+  }
+
+  private applyModelPreferences(
+    config: ContentGeneratorConfig,
+    sources: ContentGeneratorConfigSources,
+    defaults: ModelPreferenceDefaults,
+  ): void {
+    const preference = this.modelPreferences?.[defaults.key];
+    const contextWindow = preference?.contextWindow;
+    const contextLimit =
+      defaults.contextWindowSize ??
+      tokenLimit(stripRuntimeSnapshotPrefix(config.model), 'input');
+    config.contextWindowSize = defaults.contextWindowSize;
+    sources['contextWindowSize'] = defaults.contextWindowSource;
+    if (
+      contextWindow !== undefined &&
+      Number.isSafeInteger(contextWindow) &&
+      contextWindow > 0 &&
+      contextWindow <= contextLimit
+    ) {
+      config.contextWindowSize = contextWindow;
+      sources['contextWindowSize'] = {
+        kind: 'settings',
+        settingsPath: 'model.preferences',
+      };
+    }
+
+    config.reasoning = defaults.reasoning;
+    sources['reasoning'] = defaults.reasoningSource;
+    const sessionEffort = this.modelPreferenceSessionEffort;
+    const savedEffort = normalizeReasoningEffort(preference?.reasoning?.effort);
+    if (sessionEffort?.key === defaults.key) {
+      setGeneratorReasoningEffort(config, sessionEffort.effort);
+    } else if (savedEffort) {
+      if (setGeneratorReasoningEffort(config, savedEffort)) {
+        sources['reasoning'] = {
+          kind: 'settings',
+          settingsPath: 'model.preferences',
+        };
+      }
+    } else if (this.modelPreferenceDefaultEffort === 'none') {
+      if (
+        config.thinkingMandatory !== true &&
+        resolveReasoningForModel(this, config)?.canDisable !== false
+      ) {
+        config.reasoning = false;
+        sources['reasoning'] = {
+          kind: 'settings',
+          settingsPath: 'model.reasoningEffort',
+        };
+      }
+    } else if (this.modelPreferenceDefaultEffort) {
+      setGeneratorReasoningEffort(config, this.modelPreferenceDefaultEffort);
+    }
   }
 
   /**
@@ -7670,6 +7852,24 @@ export class Config {
   }
 
   /**
+   * Whether the model fallback chain should consult the per-session model
+   * health ledger (experimental, opt-in). When false the chain behaves exactly
+   * as it did before the ledger existed.
+   */
+  isModelAvailabilityTrackingEnabled(): boolean {
+    return this.modelAvailabilityTracking;
+  }
+
+  /**
+   * Session-scoped model health ledger, created lazily. Only consulted when
+   * `isModelAvailabilityTrackingEnabled()` is true.
+   */
+  getModelAvailabilityService(): ModelAvailabilityService {
+    this.modelAvailabilityService ??= new ModelAvailabilityService();
+    return this.modelAvailabilityService;
+  }
+
+  /**
    * Read the active reasoning-effort tier from the live content-generator
    * config. Returns undefined when thinking is disabled (`reasoning: false`) or
    * no tier is set (the model/provider default applies).
@@ -7770,8 +7970,18 @@ export class Config {
     if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
       applyEffort(runtimeCfg);
     }
-    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
-    applyEffort(this.modelsConfig?.getGenerationConfig());
+    if (this.modelPreferences === undefined) {
+      // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
+      applyEffort(this.modelsConfig?.getGenerationConfig());
+    } else if (
+      this.modelPreferenceDefaults &&
+      this.contentGeneratorConfig?.reasoning !== false
+    ) {
+      this.modelPreferenceSessionEffort = {
+        key: this.modelPreferenceDefaults.key,
+        effort,
+      };
+    }
   }
 
   /**
@@ -7907,6 +8117,14 @@ export class Config {
   }
 
   /**
+   * Update the vision bridge timeout at runtime (`/model --vision --timeout`).
+   * Values the constructor would reject fall back to the built-in default.
+   */
+  setVisionBridgeTimeoutMs(timeoutMs: number | undefined): void {
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(timeoutMs);
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -7938,12 +8156,12 @@ export class Config {
       return;
     }
 
-    // Reasoning effort is a global, model-independent preference (set via
-    // /effort). Capture it before the rebuild and re-apply after, so switching
-    // models never silently drops the user's chosen effort — neither the
-    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
-    // full refresh path (which rebuilds the config from scratch).
-    const priorReasoningEffort = this.getReasoningEffort();
+    // Callers without model preferences keep the legacy live effort across
+    // both the hot-update path and a full generator rebuild.
+    const priorReasoningEffort =
+      this.modelPreferences === undefined
+        ? this.getReasoningEffort()
+        : undefined;
 
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
@@ -7967,13 +8185,20 @@ export class Config {
             this.modelsConfig.isStrictModelProviderSelection(),
         },
       );
+      const preferenceDefaults = this.captureModelPreferenceDefaults(
+        config,
+        sources,
+      );
+      this.modelPreferenceDefaults = preferenceDefaults;
+      if (preferenceDefaults) {
+        this.applyModelPreferences(config, sources, preferenceDefaults);
+        this.contentGeneratorConfig.reasoning = config.reasoning;
+        this.contentGeneratorConfigSources['reasoning'] = sources['reasoning'];
+      }
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
-      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
-      // preference captured in `priorReasoningEffort` above and re-applied via
-      // setReasoningEffort() below. Do not add `reasoning` here — that would
-      // overwrite the live tier with the new model's default and make the
-      // restore a no-op.
+      // The reasoning update above is conditional so legacy callers retain
+      // their live tier when switching models.
       this.contentGeneratorConfig.reasoningRouteBaseUrl =
         config.reasoningRouteBaseUrl;
       this.contentGeneratorConfig.model = config.model;
@@ -8226,11 +8451,14 @@ export class Config {
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     return [
       `${this.sessionId}.jsonl`,
+      `${this.sessionId}.prompt-time.json`,
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
       `${this.sessionId}.title.json`,
+      `${this.sessionId}.branch.json`,
       `${this.sessionId}.artifacts.json`,
+      `${this.sessionId}.goal.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8402,6 +8630,10 @@ export class Config {
     }
 
     this.backgroundTaskRegistry.disposeResidentAgents();
+    const worktreeRoot = this.projectMemoryBinding?.worktreeRoot;
+    if (worktreeRoot && !isSubpath(worktreeRoot, expected)) {
+      this.projectMemoryBinding = undefined;
+    }
     this.targetDir = expected;
     this.cwd = expected;
     await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
@@ -8414,10 +8646,17 @@ export class Config {
     // later `gh pr create` in this session must still reach the bridge.
     const sessionPrBoundCallback =
       this.sessionService?.getSessionPrBoundCallback();
+    const sessionGoalChangedCallback =
+      this.sessionService?.getSessionGoalChangedCallback();
     this.sessionService = undefined;
     if (sessionPrBoundCallback) {
       this.getSessionService().setSessionPrBoundCallback(
         sessionPrBoundCallback,
+      );
+    }
+    if (sessionGoalChangedCallback) {
+      this.getSessionService().setSessionGoalChangedCallback(
+        sessionGoalChangedCallback,
       );
     }
     this.fileHistoryService = undefined;
@@ -8478,6 +8717,34 @@ export class Config {
 
   getProjectRoot(): string {
     return this.targetDir;
+  }
+
+  bindProjectMemoryToWorkspace(
+    memoryBaseDir = this.projectMemoryBaseDir,
+  ): void {
+    this.projectMemoryBinding = {
+      owner: { cwd: this.storage.getProjectRoot(), memoryBaseDir },
+    };
+  }
+
+  bindProjectMemoryToWorktree(root: string, owner: ProjectMemoryOwner): void {
+    this.projectMemoryBinding = { owner, worktreeRoot: root };
+  }
+
+  getProjectMemoryOwner(): ProjectMemoryOwner {
+    return (
+      this.projectMemoryBinding?.owner ?? {
+        cwd: this.getProjectRoot(),
+        memoryBaseDir: this.projectMemoryBaseDir,
+      }
+    );
+  }
+
+  getProjectAutoMemoryRoot(): string {
+    return getAutoMemoryRoot(
+      this.getProjectRoot(),
+      this.getProjectMemoryOwner(),
+    );
   }
 
   getCwd(): string {
@@ -9099,6 +9366,11 @@ export class Config {
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,
+            ...(extension.artifactGeneration !== undefined
+              ? {
+                  extensionArtifactRevision: `${extension.id}:${extension.artifactGeneration}`,
+                }
+              : {}),
           };
         },
       );
@@ -9850,8 +10122,9 @@ export class Config {
       return undefined;
     }
     const projectRoot = this.getProjectRoot();
+    const owner = this.getProjectMemoryOwner();
     const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
-    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot, owner);
     // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
     // prompt is built from scans, not these indexes, so a tier that cannot be
     // read or written (EACCES, a rejected root) must not block the
@@ -9861,10 +10134,11 @@ export class Config {
         ...getProjectMetadataMigrationRoots(
           projectRoot,
           this.isTrustedFolder(),
+          owner,
         ).map((root) =>
           root === configuredProjectRoot
-            ? rebuildManagedAutoMemoryIndex(projectRoot)
-            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+            ? rebuildManagedAutoMemoryIndex(projectRoot, owner)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project', owner),
         ),
         rebuildUserAutoMemoryIndex(),
         ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
@@ -9877,7 +10151,7 @@ export class Config {
       ),
     );
     const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
-      getAutoMemoryRoot(projectRoot),
+      configuredProjectRoot,
       getUserAutoMemoryRoot(),
       teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
     );
@@ -9926,6 +10200,7 @@ export class Config {
   private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
     return scanMemoryMetadataCorpusStatus({
       projectRoot: this.getProjectRoot(),
+      projectMemoryOwner: this.getProjectMemoryOwner(),
       teamMemoryEnabled: this.getTeamMemoryEnabled(),
       trustedProject: this.isTrustedFolder(),
     });
@@ -10055,16 +10330,18 @@ export class Config {
     this.setTeamContext(null);
   }
 
+  /** The worktree settings for consumers beyond symlink-only callers. */
+  getWorktreeSettings(): Readonly<WorktreeSettings> {
+    return this.worktreeSettings;
+  }
+
   /**
    * Convenience accessor for `worktree.symlinkDirectories` — returns an
    * empty array when the setting is unset, so callers can pass the
    * result directly into the GitWorktreeService loop without nullchecks.
-   *
-   * (No general `getWorktreeSettings()` getter yet — add one when a
-   * second field on `WorktreeSettings` justifies the broader API.)
    */
   getWorktreeSymlinkDirectories(): readonly string[] {
-    return this.worktreeSettings.symlinkDirectories ?? [];
+    return this.getWorktreeSettings().symlinkDirectories ?? [];
   }
 
   /**
@@ -12677,34 +12954,16 @@ export class Config {
     return this.accessibility.screenReader ?? false;
   }
 
-  getSkipLoopDetection(): boolean {
-    return this.skipLoopDetection;
-  }
-
-  getLoopProtection(): LoopProtectionMode {
-    return this.loopProtection;
-  }
-
   /**
-   * Effective per-turn tool-call cap. A configured value <= 0 disables the
-   * cap and is returned as Infinity so callers can compare unconditionally
-   * (mirrors getTruncateToolOutputThreshold).
+   * Effective per-turn tool-call cap. No cap (unset or a value <= 0) is
+   * returned as Infinity so callers can compare unconditionally (mirrors
+   * getTruncateToolOutputThreshold).
    */
   getMaxToolCallsPerTurn(): number {
     if (this.maxToolCallsPerTurn <= 0) {
       return Number.POSITIVE_INFINITY;
     }
     return this.maxToolCallsPerTurn;
-  }
-
-  /**
-   * Whether maxToolCallsPerTurn was explicitly configured (vs. the resolved
-   * default). An explicit value is treated as a hard cap (the released
-   * contract); the default is treated adaptively (see
-   * LoopDetectionService.checkTurnToolCallCap).
-   */
-  isMaxToolCallsPerTurnExplicit(): boolean {
-    return this.maxToolCallsPerTurnExplicit;
   }
 
   getSkipStartupContext(): boolean {
@@ -12988,7 +13247,14 @@ export class Config {
         .restore(records ?? [])
         .then(() => runtime);
     }
-    void this.goalRuntimeReady.catch(() => undefined);
+    // Restore itself writes nothing (the runtime's invariant); refresh the
+    // list-facing goal projection once it settles, so a session journaled
+    // before the sidecar existed gains its sidebar marker on this load.
+    void this.goalRuntimeReady
+      .then((restoredRuntime) => {
+        recorder.refreshGoalProjection(restoredRuntime.getSnapshot().goal);
+      })
+      .catch(() => undefined);
   }
 
   /**
@@ -13037,7 +13303,9 @@ export class Config {
     projection: SessionRestoreProjection | undefined,
   ): void {
     this.pendingSessionRestoreProjection = projection;
-    this.sessionRestoreRuntime = projection?.runtime;
+    this.sessionRestoreRuntime = projection
+      ? { ...projection.runtime, conversationStartTime: projection.startTime }
+      : undefined;
     this.restoredFileHistory = false;
   }
 
@@ -13523,7 +13791,11 @@ export class Config {
         rule: string,
       ) => Promise<void>)
     | undefined {
-    return this.onPersistPermissionRuleCallback;
+    const persist = this.onPersistPermissionRuleCallback;
+    return persist
+      ? (scope, ruleType, rule) =>
+          persist(scope, ruleType, rule, this.getProjectRoot())
+      : undefined;
   }
 
   // Check permission then register a lazy factory; its import runs on first use.

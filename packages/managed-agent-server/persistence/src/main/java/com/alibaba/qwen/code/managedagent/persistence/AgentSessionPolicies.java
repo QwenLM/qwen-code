@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExten
 import com.alibaba.qwen.code.managedagent.contracts.persistence.AgentDefinitionCompiler;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
@@ -16,11 +16,12 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +31,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,7 +50,7 @@ final class AgentSessionPolicies {
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
     private final AgentStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
+    private final WorktreeFiles worktreeFiles;
     private final HarnessRules harnessRules;
     private final JdbcManagedExtensionRecordStore configRecords;
     private final JdbcTemplate jdbc;
@@ -68,7 +70,7 @@ final class AgentSessionPolicies {
     AgentSessionPolicies(AgentEventJournal eventJournal,
             AgentSessionQueries sessionQueries,
             AgentStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            WorktreeFiles worktreeFiles,
             HarnessRules harnessRules,
             JdbcManagedExtensionRecordStore configRecords,
             JdbcTemplate jdbc,
@@ -125,8 +127,8 @@ final class AgentSessionPolicies {
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
-        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                Long.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId())) == 1;
+        return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
+                Long.class, binding.getTenantId(), binding.getStorageId()) == 1;
     }
 
     static void requireSshToolProfile(String profile) {
@@ -168,6 +170,12 @@ final class AgentSessionPolicies {
     // never resolves a definition again.
     AgentPin resolveAgentPin(String tenantId, String agentId,
             String requested, boolean workspaceBound) {
+        // The caller names the agent; the VARCHAR(64) column admits only a
+        // bounded, well-formed identity without trailing spaces, so a PAD SPACE
+        // fold can never resolve a stored definition under a different id.
+        if (agentId != null) {
+            BrokerValues.requireShortId(agentId, "agentId");
+        }
         if ("qwen-code".equals(agentId)) {
             if (requested != null && !requested.equals(agentRevision)) {
                 throw new ManagedAgentException(400,
@@ -189,27 +197,10 @@ final class AgentSessionPolicies {
                 AgentDefinitionCompiler.compile(revision.definitionJson(),
                         workspaceBound, approvalMode, definitionToolProfiles,
                         definitionModels);
-        Map<String, Object> content = storeRows.readMap(revision.definitionJson());
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
-                compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
-                AgentDefinitionExtensions.skills(content.get("skills"), true));
-    }
-
-    // Pre-admission capability read for default Skill discovery: resolves the
-    // same pin admission will use, without locking the Workspace. External
-    // storage never admits extension pins, so it answers null.
-    String creationToolProfile(String tenantId, String actorId,
-            String agentId, String requestedRevision, String workspaceId) {
-        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
-        if (!WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
-                && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile())) {
-            return pin.toolProfile();
-        }
-        ManagedWorkspaceRegistry.ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
-        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
+                compiled.toolProfile(), compiled.hookCatalogPresent(),
+                !compiled.mcpServers().isEmpty(), compiled.skills());
     }
 
     boolean hasMcpServers(SessionRecord session) {
@@ -222,7 +213,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -256,7 +247,7 @@ final class AgentSessionPolicies {
     }
 
     void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
                 || !WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
@@ -267,7 +258,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -310,7 +301,7 @@ final class AgentSessionPolicies {
     }
 
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
@@ -397,27 +388,28 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
         }
         if (!jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE record_kind='DOMAIN'"
-                + " AND session_scope_key=? AND tenant_id=? AND session_id=? AND domain='child_run'"
-                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId).isEmpty()) {
+                + " AND tenant_id=? AND session_id=? AND domain='child_run'"
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an unsettled child run.");
         }
         long now = storeRows.lifecycleDatabaseTime();
-        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
-                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
-                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE"
+                + " record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, tenantId, sessionId)) {
             Object expiresAt = storeRows.readMap(options).get("expiresAt");
             if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
             }
         }
-        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_key=? AND target_key=?"
+        if (!jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE scope_kind='SESSION' AND scope_id=? AND target_id=?"
                 + " AND operation_kind IN " + AgentStoreRows.SESSION_OPERATION_KINDS
                 + " AND (state IN ('PENDING', 'RUNNING', 'UNKNOWN') OR state='RECOVERY_BLOCKED' AND operation_kind <> 'TASK_CANCEL')"
-                + " LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId)).isEmpty()
+                + " LIMIT 1 FOR UPDATE",
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId))).isEmpty()
                 || !jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE namespace='SESSION_COMMAND'"
-                        + " AND tenant_key=? AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId), tenantId, sessionId).isEmpty()) {
+                        + " AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
+                        tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an active operation.");
         }
     }
@@ -474,11 +466,13 @@ final class AgentSessionPolicies {
             return true;
         }
         Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " ma_operation WHERE scope_key = ? AND"
-                        + " target_key = ? AND operation_kind IN"
+                        + " ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND"
+                        + " target_id = ? AND operation_kind IN"
                         + " ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE', 'CONTEXT_COMPRESSION') AND state IN"
                         + " ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED', 'UNKNOWN')",
-                Integer.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId));
+                Integer.class,
+                ManagedSchemaKeys.identity(sessionId),
+                ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)));
         return operations != null && operations > 0;
     }
 
@@ -490,11 +484,9 @@ final class AgentSessionPolicies {
         Integer commands =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_request_receipt WHERE namespace ="
-                            + " 'SESSION_COMMAND' AND tenant_key = ? AND tenant_id = ? AND"
+                            + " 'SESSION_COMMAND' AND tenant_id = ? AND"
                             + " session_id = ? AND state = 'PENDING'",
                         Integer.class,
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                                tenantId),
                         tenantId,
                         sessionId);
         // A recovery_blocked task cancel is parked, not open (H4f): its
@@ -503,17 +495,15 @@ final class AgentSessionPolicies {
         Integer operations =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM"
-                                + " ma_operation WHERE scope_key = ? AND operation_kind IN "
+                                + " ma_operation WHERE scope_kind = 'SESSION' AND scope_id = ? AND operation_kind IN "
                                 + AgentStoreRows.SESSION_OPERATION_KINDS
-                                + " AND target_key = ? AND (state IN ('PENDING', 'RUNNING',"
+                                + " AND target_id = ? AND (state IN ('PENDING', 'RUNNING',"
                                 + " 'UNKNOWN') OR state = 'RECOVERY_BLOCKED' AND operation_kind <>"
                                 + " 'TASK_CANCEL') AND operation_id <> ?",
                         Integer.class,
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                        AgentStoreRows.sessionOperationTarget(sessionId),
-                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                                .identity(
-                                        excludingOperationId == null ? "" : excludingOperationId));
+                        ManagedSchemaKeys.identity(sessionId),
+                        ManagedSchemaKeys.identity(AgentStoreRows.sessionOperationTarget(sessionId)),
+                        excludingOperationId == null ? "" : excludingOperationId);
         return (commands != null && commands > 0)
                 || (operations != null && operations > 0);
     }
@@ -521,7 +511,7 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -532,17 +522,17 @@ final class AgentSessionPolicies {
         if (!access.canRead()) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found");
         }
-        String scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+        String scope = ManagedSchemaKeys
                 .key("SET_MODEL", sessionId, actorId);
-        var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
-        var scopeKind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR;
+        var namespace = ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
+        var scopeKind = ManagedSchemaContract.ReceiptScope.ACTOR;
         ManagedReceipts.Receipt replay = ManagedReceipts.find(jdbc, namespace, tenantId,
                 scopeKind, scope, key, false);
         if (replay != null) {
             if (!digest.equals(replay.requestDigest())
                     || !sessionId.equals(replay.sessionId())
                     || !"SET_MODEL".equals(replay.operation())
-                    || !java.util.Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
+                    || !Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
                             replay.actorKey())) {
                 throw new ManagedAgentException(409, "idempotency_conflict",
                         "The idempotency key was reused with different content");
@@ -581,7 +571,7 @@ final class AgentSessionPolicies {
                 "COMPLETED", session.status(), true, now);
         jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?",
                 storeRows.writeJson(Map.of("modelId", modelId, "revision", revision)),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(
+                ManagedSchemaKeys.receiptKey(
                         namespace, tenantId, scopeKind, scope, key));
         ManagedModelDiagnosticProjection.clearLegacyModelContext(jdbc, tenantId, sessionId);
         ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
@@ -594,7 +584,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -610,10 +600,10 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(403, "session_operation_forbidden",
                     "Only the Session owner with OPERATOR access may change approval policy");
         }
-        String scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
+        String scope = ManagedSchemaKeys
                 .key("SET_APPROVAL", sessionId, actorId);
-        var namespace = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
-        var scopeKind = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR;
+        var namespace = ManagedSchemaContract.ReceiptNamespace.SESSION_COMMAND;
+        var scopeKind = ManagedSchemaContract.ReceiptScope.ACTOR;
         long now = clock.millis();
         // A locking read of a missing receipt can gap-lock unrelated Sessions.
         try {
@@ -629,7 +619,7 @@ final class AgentSessionPolicies {
             if (!digest.equals(replay.requestDigest())
                     || !sessionId.equals(replay.sessionId())
                     || !"SET_APPROVAL".equals(replay.operation())
-                    || !java.util.Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
+                    || !Arrays.equals(actorId.getBytes(StandardCharsets.UTF_8),
                             replay.actorKey())) {
                 throw new ManagedAgentException(409, "idempotency_conflict",
                         "The idempotency key was reused with different content");
@@ -662,15 +652,16 @@ final class AgentSessionPolicies {
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Plan mode is unavailable");
         }
+        boolean actionParked = AgentActionParking.certificateMatches(jdbc, tenantId, sessionId);
         if (requestedRules != null && requestedPlanMode == null) {
-            if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+            if (!actionParked && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
             }
             if (hasOpenOperation(tenantId, sessionId)) {
                 throw new ManagedAgentException(409, "session_context_busy", "The Session requires settlement");
             }
         }
-        requirePolicyChange(session, requestedPlanMode == null && (liveSupported || requestedRules != null));
+        requirePolicyChange(session, requestedPlanMode == null && (liveSupported || requestedRules != null), actionParked);
         long current = ((Number) currentPolicy.get("approval_revision")).longValue();
         if (current != expectedRevision || current >= 9_007_199_254_740_991L
                 || planMode && current >= 9_007_199_254_740_990L) {
@@ -683,6 +674,8 @@ final class AgentSessionPolicies {
         if (changed != 1) {
             throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
         }
+        AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
+        AgentActionParking.dueWakeParks(jdbc, tenantId, sessionId, now);
         ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision, "planMode", planMode));
         if (rules != null) {
@@ -690,7 +683,7 @@ final class AgentSessionPolicies {
         }
         jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?",
                 storeRows.writeJson(result),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.receiptKey(
+                ManagedSchemaKeys.receiptKey(
                         namespace, tenantId, scopeKind, scope, key));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.approval.changed",
                 result, false, null, now);
@@ -710,7 +703,7 @@ final class AgentSessionPolicies {
                 || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
-                || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
+                || hasMcpServers(session)
                 || creationSkills.initialSelection(tenantId, sessionId) != null
                 || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId))
@@ -720,13 +713,17 @@ final class AgentSessionPolicies {
     }
 
     void requirePolicyChange(SessionRecord session, boolean live) {
+        requirePolicyChange(session, live, false);
+    }
+
+    void requirePolicyChange(SessionRecord session, boolean live, boolean actionParked) {
         requirePublicChildImmutable(session);
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
-        if (!live && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
+        if (!live && !actionParked && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
         }
         if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
@@ -738,7 +735,9 @@ final class AgentSessionPolicies {
                         AgentStateStore.HARNESS_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
-                        + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
+                        + (actionParked ? " recovery_status <> 'READY'"
+                                : " (state <> 'ACTIVE' OR recovery_status <> 'READY')"),
+                        tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session requires settlement");
         }
     }
@@ -754,10 +753,9 @@ final class AgentSessionPolicies {
     boolean hasDecidableAction(SessionRecord session) {
         long now = storeRows.lifecycleDatabaseTime();
         for (String options : jdbc.queryForList(
-                        "SELECT options_json FROM ma_session_record WHERE session_scope_key = ? AND"
+                        "SELECT options_json FROM ma_session_record WHERE"
                             + " record_kind = 'ACTION' AND state = 'requested' AND tenant_id = ?"
                             + " AND session_id = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(session.tenantId(), session.sessionId()),
                 session.tenantId(), session.sessionId())) {
             try {
                 if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {
@@ -770,8 +768,7 @@ final class AgentSessionPolicies {
         return false;
     }
 
-    static void requireSessionStatus(String actual,
-            String expected) {
+    static void requireSessionStatus(String actual, String expected) {
         if (!expected.equals(actual)) {
             throw sessionStateConflict(actual);
         }

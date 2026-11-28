@@ -3,6 +3,7 @@ import type { DaemonGitCommitDetail } from '@qwen-code/sdk/daemon';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
+  isSafeSingleRef,
   prRepoFromUrl,
   prUnavailableCauseFromError,
 } from './change-overview';
@@ -23,17 +24,24 @@ function detail(
 }
 
 describe('commitFallbackRange', () => {
-  it('scopes to commits after the latest bound PR head', () => {
+  it('scopes to commits after the session start commit', () => {
     expect(commitFallbackRange('abc1234', 'origin/main')).toBe('abc1234..HEAD');
   });
 
-  it('falls back to the base branch when there is no bound PR', () => {
+  it('prefers the start commit over the base branch', () => {
+    expect(commitFallbackRange('abc1234', 'origin/main')).toBe('abc1234..HEAD');
+    expect(commitFallbackRange('abc1234', undefined)).toBe('abc1234..HEAD');
+  });
+
+  it('falls back to the base branch when no start commit is recorded', () => {
     expect(commitFallbackRange(undefined, 'origin/main')).toBe(
       'origin/main..HEAD',
     );
   });
 
-  it('returns undefined when neither a PR head nor a base branch is known', () => {
+  it('suppresses when neither a start commit nor a base branch is known', () => {
+    // No trustworthy boundary: the overview must not walk HEAD unscoped and
+    // re-list pre-session history as this session's loose work.
     expect(commitFallbackRange(undefined, undefined)).toBeUndefined();
   });
 
@@ -41,21 +49,20 @@ describe('commitFallbackRange', () => {
     // The daemon records baseBranch verbatim from the branch probe, whose
     // detached-HEAD value is the literal 'HEAD' (session.ts treats it as a
     // sentinel too). HEAD..HEAD is always empty and would silently render a
-    // committing session as having no loose commits; the designed
-    // recent-history walk must apply instead.
+    // committing session as having no loose commits; suppress instead.
     expect(commitFallbackRange(undefined, 'HEAD')).toBeUndefined();
   });
 
-  it('refuses a base branch the daemon range whitelist would drop', () => {
+  it('refuses a ref the daemon range whitelist would drop', () => {
     // git permits these refs, but isSafeLogRange rejects them; composing the
     // range would make the daemon run an unscoped git log instead. Return the
-    // null "skip the fallback" sentinel — distinct from the undefined
-    // no-baseline case, which still walks HEAD's recent history.
+    // null "refuse" sentinel for both the start commit and the base branch.
     expect(commitFallbackRange(undefined, 'feat@2026')).toBeNull();
     expect(commitFallbackRange(undefined, 'user#42')).toBeNull();
     expect(commitFallbackRange(undefined, '-leading')).toBeNull();
     expect(commitFallbackRange(undefined, '分支')).toBeNull();
-    // The PR-head and valid base forms must keep working.
+    expect(commitFallbackRange('feat@2026', undefined)).toBeNull();
+    // The valid start-commit and base forms must keep working.
     expect(commitFallbackRange('abc1234', undefined)).toBe('abc1234..HEAD');
     expect(commitFallbackRange(undefined, 'origin/main')).toBe(
       'origin/main..HEAD',
@@ -210,5 +217,45 @@ describe('buildCommitFallbackUnits binary rows', () => {
       path: 'logo.png',
       isBinary: true,
     });
+  });
+});
+
+// Parity with the daemon's authoritative single-ref whitelist
+// (core/utils/gitDiff.ts isSafeSingleRef, pinned by gitDiff.test.ts on these
+// same samples). web-shell cannot import core across the package boundary, so
+// both predicates are bound to this canonical table: a divergence in either
+// the client mirror or the daemon guard breaks its own suite. The client uses
+// this to gate the base-branch exclusion — a ref the daemon would reject must
+// not be composed into `--not`, and a safe ref must not be silently dropped.
+describe('isSafeSingleRef mirrors the daemon single-ref whitelist', () => {
+  it.each([
+    'main',
+    'origin/main',
+    'upstream/main',
+    'feat/x',
+    'feat-branch',
+    'feat_branch',
+    'v1.2.3',
+    'HEAD',
+    'HEAD~1',
+    'HEAD^',
+    'abc1234',
+    'a'.repeat(40),
+  ])('accepts the safe ref %s', (ref) => {
+    expect(isSafeSingleRef(ref)).toBe(true);
+  });
+
+  it.each([
+    '-n1', // leading '-' clause: git's short --max-count option
+    '--max-count=1', // leading '-' clause: a long option git would accept
+    '--upload-pack=evil', // leading '-' clause
+    '-leading', // leading '-' clause
+    'HEAD..HEAD~1', // '..' clause: a valid revision range
+    'a..b', // '..' clause
+    'feat@2026', // charset clause: '@' is legal in a git branch name
+    'HEAD;rm', // charset clause: shell metacharacter
+    '^HEAD', // leading '^' clause: --not XORs negation into inclusion
+  ])('rejects the unsafe ref %s', (ref) => {
+    expect(isSafeSingleRef(ref)).toBe(false);
   });
 });

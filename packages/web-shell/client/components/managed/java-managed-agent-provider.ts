@@ -93,6 +93,13 @@ async function settleActionResponse(
         `Managed Agent operation ${read.operationId} is not an approval answer`,
       );
     }
+    if (
+      (read.sessionId !== undefined && read.sessionId !== sessionId) ||
+      !read.operationId ||
+      read.operationId !== current.operationId
+    ) {
+      throw new Error('Managed Agent action response identity mismatch');
+    }
     current = read;
   }
   if (current.status !== 'pending' && current.status !== 'running') {
@@ -794,12 +801,29 @@ export function createJavaManagedAgentProvider(
           },
           command.signal,
         );
+        if (
+          (accepted.sessionId !== undefined &&
+            accepted.sessionId !== action.sessionId) ||
+          (accepted.type !== undefined &&
+            accepted.type !== 'action_response') ||
+          !accepted.operationId
+        ) {
+          throw new Error('Managed Agent action response identity mismatch');
+        }
+        command.onAccepted?.({
+          ...accepted,
+          sessionId: accepted.sessionId ?? action.sessionId,
+        });
         const result = await settleActionResponse(
           client,
           action.sessionId,
           accepted,
           command.signal,
         );
+        command.onSettlement?.({
+          ...result,
+          sessionId: result.sessionId ?? action.sessionId,
+        });
         // A cancelled or recovery-blocked operation did not apply the answer,
         // so the card must stay rather than hide as if it had. The failure
         // code rides the error so the hook can tell an ended Action (no
@@ -850,6 +874,13 @@ export function createJavaManagedAgentProvider(
           openStream: () => client.openArtifactStream(artifact, request.signal),
         });
       },
+    },
+    workspaceArtifacts: {
+      listArtifacts: (workspaceId, request) =>
+        client.listWorkspaceArtifacts(
+          { workspaceId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
     },
     ...(options.enableWorkspaceBinding
       ? {
@@ -914,6 +945,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
+                artifactLibrary:
+                  page.capabilities?.workspaceArtifactLibrary === true,
               };
             },
             async get(workspaceId, request) {

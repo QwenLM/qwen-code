@@ -5,6 +5,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { SystemMessage } from './SystemMessage';
+import { DaemonStatusCardsContext } from './daemon-status-cards-context';
 import {
   createContextUsageMessageData,
   serializeContextUsageMessage,
@@ -860,7 +861,7 @@ describe('SystemMessage — background notification i18n body', () => {
     window.addEventListener('qwen:open-session', handler);
     const container = render(
       <SystemMessage
-        content="Sub-session [🧵 abc12345](qwen-session://abc12345-full) completed."
+        content="Sub-session [abc12345](qwen-session://abc12345-full) completed."
         variant="info"
         source="background_notification"
         data={{ status: 'completed', kind: 'agent' }}
@@ -869,7 +870,7 @@ describe('SystemMessage — background notification i18n body', () => {
 
     const link = container.querySelector('a[role="button"]');
     expect(link).not.toBeNull();
-    expect(link?.textContent).toBe('🧵 abc12345');
+    expect(link?.textContent).toBe('abc12345');
     expect(container.textContent).not.toContain('](');
     act(() => {
       link?.dispatchEvent(
@@ -1202,5 +1203,33 @@ describe('SystemMessage — context usage instruction files', () => {
     expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
       'SPAN',
     );
+  });
+});
+
+describe('SystemMessage — DaemonStatusCardsContext boundary', () => {
+  it('renders injected MCP and Tasks status cards when provided and falls back cleanly when omitted', () => {
+    const withCards = render(
+      <DaemonStatusCardsContext.Provider
+        value={{
+          renderMcpStatus: (raw) =>
+            raw === 'mcp-sentinel' ? <div data-testid="mcp-card" /> : null,
+          renderTasksStatus: (raw) =>
+            raw === 'tasks-sentinel' ? <div data-testid="tasks-card" /> : null,
+        }}
+      >
+        <SystemMessage content="mcp-sentinel" variant="info" />
+        <SystemMessage content="tasks-sentinel" variant="info" />
+      </DaemonStatusCardsContext.Provider>,
+    );
+    expect(withCards.querySelector('[data-testid="mcp-card"]')).not.toBeNull();
+    expect(
+      withCards.querySelector('[data-testid="tasks-card"]'),
+    ).not.toBeNull();
+
+    const withoutCards = render(
+      <SystemMessage content="mcp-sentinel" variant="info" />,
+    );
+    expect(withoutCards.querySelector('[data-testid="mcp-card"]')).toBeNull();
+    expect(withoutCards.textContent).toContain('mcp-sentinel');
   });
 });

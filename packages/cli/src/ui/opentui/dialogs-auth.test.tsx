@@ -66,8 +66,15 @@ const mocks = vi.hoisted(() => {
           type === 'box' ? 'div' : 'span',
           {
             ...(key === undefined ? null : { key }),
+            ...((config as { id?: string }).id
+              ? { 'data-screen-reader-id': (config as { id?: string }).id }
+              : null),
             ...(bg === undefined ? null : { 'data-bg': bg }),
             ...(fg === undefined ? null : { 'data-fg': fg }),
+            ...((config as { id?: string }).id ===
+            'screen-reader-protected-input'
+              ? { 'data-screen-reader-protected': true }
+              : null),
             ...(flexShrink === undefined
               ? null
               : { 'data-flex-shrink': flexShrink }),
@@ -121,6 +128,7 @@ vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
 
 const core = vi.hoisted(() => ({
   applyProviderInstallPlan: vi.fn(),
+  discoverProviderModels: vi.fn(),
   logAuth: vi.fn(),
 }));
 
@@ -150,6 +158,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     applyProviderInstallPlan: core.applyProviderInstallPlan,
+    discoverProviderModels: core.discoverProviderModels,
     logAuth: core.logAuth,
   };
 });
@@ -265,6 +274,7 @@ async function pasteText(text: string): Promise<FakePasteEvent> {
 function createMockConfig(authType?: AuthType): Config {
   return {
     isBrowserLaunchSuppressed: () => false,
+    getScreenReader: () => false,
     getAuthType: vi.fn(() => authType),
     getContentGeneratorConfig: vi.fn(() => ({})),
     getModelsConfig: vi.fn(() => ({
@@ -318,8 +328,10 @@ function renderDialog(overrides?: {
   };
 }
 
-/** Drive main → Custom Provider → through the full seven-step wizard. */
-async function runCustomProviderFlow(): Promise<{
+async function runCustomProviderToModels(
+  protocol: AuthType = AuthType.USE_OPENAI,
+  responses = false,
+): Promise<{
   onClose: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
 }> {
@@ -329,16 +341,30 @@ async function runCustomProviderFlow(): Promise<{
   await press('down');
   await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
-  await press('return'); // protocol: OpenAI-compatible → API selection
-  await press('return'); // API: Chat Completions → baseUrl input
+  if (protocol !== AuthType.USE_OPENAI) await press('down');
+  if (protocol === AuthType.USE_GEMINI) await press('down');
+  await press('return');
+  if (protocol === AuthType.USE_OPENAI) {
+    if (responses) await press('down');
+    await press('return');
+  }
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
+  expect(
+    document.querySelector('[data-screen-reader-protected]'),
+  ).not.toBeNull();
   await typeText('sk-test');
   await press('return'); // apiKey → models
+  return { onClose, notify };
+}
+
+/** Drive main → Custom Provider → through the full seven-step wizard. */
+async function runCustomProviderFlow() {
+  const result = await runCustomProviderToModels();
   await typeText('model-1, model-2');
   await press('return'); // models → advancedConfig
   await press('return'); // advancedConfig: skip → review
-  return { onClose, notify };
+  return result;
 }
 
 /**
@@ -365,8 +391,191 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     mocks.state.pasteHandlers.length = 0;
     mocks.state.width = 100;
     core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.discoverProviderModels.mockReset().mockResolvedValue(null);
     core.logAuth.mockReset();
   });
+
+  it.each([
+    [AuthType.USE_OPENAI, false, 'openai'],
+    [AuthType.USE_OPENAI, true, 'openai-responses'],
+    [AuthType.USE_ANTHROPIC, false, 'anthropic'],
+  ] as const)(
+    'discovers custom %s (Responses: %s) and cancels stale results',
+    async (protocol, responses, expected) => {
+      let resolve!: (models: Array<{ id: string }>) => void;
+      core.discoverProviderModels.mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await runCustomProviderToModels(protocol, responses);
+      expect(screen.getByText('Loading models from provider…')).toBeTruthy();
+      expect(
+        screen.queryByText('Enter model IDs separated by commas.'),
+      ).toBeNull();
+      expect(core.discoverProviderModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocol: expected,
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-test',
+          maxRedirects: 0,
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      const signal = core.discoverProviderModels.mock.calls[0][0]
+        .signal as AbortSignal;
+      await pressEsc();
+      expect(signal.aborted).toBe(true);
+      await act(async () => {
+        resolve([{ id: 'late-model' }]);
+      });
+      expect(screen.getByText(/API Key$/)).toBeTruthy();
+      expect(screen.queryByText(/late-model/)).toBeNull();
+      expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it('searches discovered models, restores submitted selections and saves only confirmed IDs', async () => {
+    core.discoverProviderModels.mockResolvedValue([
+      { id: 'alpha' },
+      { id: 'beta' },
+    ]);
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    await runCustomProviderToModels();
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    await typeText('manual-id');
+    await press('tab');
+    await typeText('beta');
+    expect(screen.queryByText(/^alpha(\s|$)/)).toBeNull();
+    await press('down');
+    await press('space');
+    expect(
+      screen.getByText('Models · from the provider · 1 checked'),
+    ).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    await press('return');
+    await pressEsc();
+    expect(core.discoverProviderModels).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByText('Models · from the provider · 1 checked'),
+    ).toBeTruthy();
+    await press('tab');
+    await press('tab');
+    await press('down');
+    await press('space');
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    await press('return');
+    await press('return');
+    expect(screen.getByText(/Review$/)).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+    await press('return');
+    await vi.waitFor(() =>
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+    );
+    expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(['manual-id']);
+  });
+
+  it('discards unconfirmed discovery edits on back and keeps manual entry after failure', async () => {
+    core.discoverProviderModels
+      .mockResolvedValueOnce([{ id: 'discard-me' }])
+      .mockResolvedValueOnce(null);
+    const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+    await runCustomProviderToModels();
+    await typeText('unsaved-id');
+    await press('tab');
+    await press('tab');
+    await press('space');
+    await pressEsc();
+    await press('return');
+    expect(screen.queryByText(/unsaved-id/)).toBeNull();
+    expect(screen.queryByText(/discard-me/)).toBeNull();
+    expect(
+      screen.getByText('Could not list models. Enter model IDs manually.'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText('Enter model IDs separated by commas.'),
+    ).toBeTruthy();
+    await typeText('fallback-model');
+    await press('return');
+    await press('return');
+    await press('return');
+    await vi.waitFor(() =>
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+    );
+    expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(['fallback-model']);
+  });
+
+  it('clears model validation on edit without committing the discovery draft', async () => {
+    core.discoverProviderModels.mockResolvedValue([{ id: 'alpha' }]);
+    await runCustomProviderToModels();
+    await press('return');
+    expect(screen.getByText('Model IDs cannot be empty.')).toBeTruthy();
+    await typeText('unsaved-id');
+    expect(screen.queryByText('Model IDs cannot be empty.')).toBeNull();
+    await pressEsc();
+    await press('return');
+    expect(screen.queryByText(/unsaved-id/)).toBeNull();
+    expect(
+      screen.getByText('Models · from the provider · 0 checked'),
+    ).toBeTruthy();
+    expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+  });
+
+  it('keeps custom Gemini manual without discovery', async () => {
+    await runCustomProviderToModels(AuthType.USE_GEMINI);
+    expect(core.discoverProviderModels).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('Enter model IDs separated by commas.'),
+    ).toBeTruthy();
+  });
+
+  it.each([true, false])(
+    'preserves built-in preset defaults (discovered: %s)',
+    async (discovered) => {
+      const preset = coreRuntime.codingPlanProvider;
+      const known = preset.models![0]!;
+      core.discoverProviderModels.mockResolvedValue(
+        discovered ? [known, { id: 'new-remote' }] : null,
+      );
+      const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
+      renderDialog();
+      await press('down');
+      await press('down');
+      await press('return');
+      await press('return');
+      await press('return');
+      await typeText('sk-sp-test');
+      await press('return');
+      expect(core.discoverProviderModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          protocol: 'openai',
+          staticModels: preset.models,
+        }),
+      );
+      expect(core.discoverProviderModels.mock.calls[0][0]).not.toHaveProperty(
+        'maxRedirects',
+      );
+      expect(
+        screen.getByText(
+          discovered
+            ? 'Models · from the provider · 1 checked'
+            : /provider list unavailable, showing built-ins/,
+        ),
+      ).toBeTruthy();
+      expect(core.applyProviderInstallPlan).not.toHaveBeenCalled();
+      await press('return');
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledOnce(),
+      );
+      expect(build.mock.calls.at(-1)?.[1]?.modelIds).toEqual(
+        discovered ? [known.id] : preset.models!.map((model) => model.id),
+      );
+    },
+  );
 
   it('renders the main menu with the five top-level options', () => {
     renderDialog();
@@ -401,6 +610,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
     },
   );
+
+  it('keeps the sign-in waiting spinner on the live lane, not the scrollback', async () => {
+    const config = createMockConfig(AuthType.USE_OPENAI);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      model: 'test-model',
+      baseUrl: 'https://api.deepseek.com',
+    });
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    await press('return');
+    expect(
+      document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      )?.textContent,
+    ).toContain('Waiting for sign-in…');
+  });
 
   it('blocks Esc on the main view while unauthenticated', async () => {
     const { onClose } = renderDialog();
@@ -1167,6 +1398,28 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'abcdXef', cell: 'e' });
   });
 
+  it('marks an empty field as a placeholder lane and a filled one as a value lane', async () => {
+    await runToBaseUrlStep();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('https://api.example.com/v1');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
+  it('marks the empty context-window row as a placeholder lane', async () => {
+    await runToContextWindowRow();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('4096');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
   it('draws the model step’s custom-ID field with its own caret', async () => {
     await runToBaseUrlStep();
     await typeText('https://api.example.com/v1');
@@ -1677,6 +1930,66 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
   });
 
+  it('marks the real ASCII caret and Models custom/search focus without changing field values', async () => {
+    await runToModelsStep();
+    await typeText('abc');
+    await press('left');
+    const fields = () => [...document.querySelectorAll('[data-field-text]')];
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-0"]',
+      ),
+    ).not.toBeNull();
+    await press('tab');
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).not.toBeNull();
+    expect(fields()[0].textContent).toBe('abc');
+  });
+
+  it('marks the actual advanced toggle focus and boolean state', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('return'); // main: Custom Provider → protocol
+    await press('return'); // protocol → API selection
+    await press('return'); // API → base URL
+    await typeText('https://api.example.com/v1');
+    await press('return'); // base URL → API key
+    await typeText('sk-test');
+    await press('return'); // API key → models
+    await typeText('test-model');
+    await press('return'); // models → advanced config
+    expect(
+      screen.getByText(/Optional: configure advanced generation settings/),
+    ).toBeTruthy();
+    const focused = () =>
+      document.querySelector(
+        '[data-screen-reader-id^="screen-reader-auth-toggle-focused-"]',
+      )!;
+    expect(focused().textContent).toContain('Enable thinking');
+    const before = focused().getAttribute('data-screen-reader-id');
+    await press('space');
+    expect(focused().getAttribute('data-screen-reader-id')).not.toBe(before);
+    expect(focused().textContent).toContain('Enable thinking');
+    await press('down');
+    expect(focused().textContent).toContain('Enable modality');
+  });
+
   it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {
     await runToModelsStep();
     await typeText('my-model');
@@ -1953,6 +2266,35 @@ describe('real subscription entry', () => {
       act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
       expect(waiting.textContent).toContain(SPINNER_FRAMES[1]);
       await pressEsc();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the screen-reader waiting row byte-identical across spinner ticks', async () => {
+    vi.useFakeTimers();
+    const config = createMockConfig();
+    config.getScreenReader = () => true;
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    try {
+      await press('return');
+      const waiting = document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      );
+      expect(waiting?.textContent).toBe('Waiting for sign-in\u2026');
+      const first = waiting!.textContent;
+      for (let tick = 0; tick < 3; tick++) {
+        act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
+        expect(waiting!.textContent).toBe(first);
+      }
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       cleanup();

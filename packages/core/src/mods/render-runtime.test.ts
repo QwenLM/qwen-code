@@ -157,7 +157,7 @@ describe('ui.render through the real QuickJS worker', () => {
     });
   });
 
-  it('hands out a frozen table of the eleven terminal elements, two of them drawn', async () => {
+  it('hands out a frozen table of the twelve terminal elements, three of them drawn', async () => {
     const runtime = await create([
       mod(`on('ui.render', ($, e) => {
         const { Box, Button } = $.ui.resolve(e);
@@ -201,6 +201,7 @@ describe('ui.render through the real QuickJS worker', () => {
         'Link',
         'Code',
         'Markdown',
+        'Progress',
         'Client',
         'Raster',
         'Image',
@@ -475,6 +476,47 @@ describe('ui.render through the real QuickJS worker', () => {
       expect(drawn.tree).toEqual({ type: 'engine', ref: 0 });
       expect(drawn.props).toEqual({
         text: '译：The worker runs one dispatch at a time.',
+        isFirstOfReply: true,
+      });
+    });
+
+    it('rewrites a row a desktop host raises, handing out the desktop table', async () => {
+      const runtime = await ModRuntime.createGroup(
+        [
+          {
+            id: 'mod-0',
+            name: 'mod-0',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source:
+                mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+                let refused = '';
+                try { $.ui.resolve({ ...e, surface: 'mobile' }); } catch (error) { refused = String(error); }
+                return next({ ...e, props: { ...e.props, text: e.surface + ' '
+                  + Object.keys($.ui.resolve(e)).join(',') + ' ' + refused } });
+              });`),
+            },
+            options: {},
+          },
+        ],
+        '/workspace',
+        (log, plugin) => logs.push({ ...log, plugin }),
+        signal(),
+        undefined,
+        'desktop',
+        '1.0.0',
+        undefined,
+        undefined,
+        { sites: ['AssistantMessage'], invalidate: () => {} },
+      );
+      runtimes.push(runtime);
+      const drawn = await runtime.render(
+        { ...row(), surface: 'desktop' },
+        signal(),
+      );
+      expect(drawn.props).toEqual({
+        text: 'desktop Box,Text,Button,Input,Select,Svg,Link,Code,Markdown,Progress,Client,Shader TypeError: $.ui.resolve takes a ui.render event drawn on a surface this host draws',
         isFirstOfReply: true,
       });
     });

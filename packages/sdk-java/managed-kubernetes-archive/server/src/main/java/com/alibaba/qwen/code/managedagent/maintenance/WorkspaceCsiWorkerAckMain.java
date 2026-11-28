@@ -60,7 +60,6 @@ public final class WorkspaceCsiWorkerAckMain {
             var sessionStore = new JdbcManagedSessionStore(jdbc,
                     new JdbcManagedExtensionRecordStore(jdbc), null,
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
-                    com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                     null, null, null, null, null,
                     com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null, null);
             var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,

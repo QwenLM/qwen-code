@@ -18,6 +18,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -28,6 +29,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -44,7 +46,7 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -251,8 +253,10 @@ export function useResumeCommand(
             sessionData.conversation.messages,
             sessionId,
           ),
+          computeResumedUserTurnCount(sessionData.conversation.messages),
         );
         uiSwapped = true;
+        flushRunUsageOnSessionSwap(config, oldSessionId);
         config.getLlmClient()?.commitTelemetrySwap?.();
         await getInteractiveModSession(config)?.syncSession('resume');
         setSessionName?.(customTitle ?? null);

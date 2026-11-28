@@ -58,6 +58,14 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
+import {
+  moveSessionPromptTimeSidecar,
+  removeSessionPromptTimeSidecar,
+} from './session-prompt-time-sidecar.js';
 import { SessionWriterLostError } from './session-writer-lease.js';
 import {
   content,
@@ -66,6 +74,7 @@ import {
   modelText,
   userText,
 } from '../test-utils/model-fixtures.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   prepareUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue({
@@ -78,6 +87,15 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// The storage-boundary fence is exercised against disk in
+// session-archive-write-fence.test.ts, not this mocked filesystem.
+vi.mock('./session-archive-write-fence.js', () => ({
+  acquireSessionArchiveWriteLock: vi.fn(async () => ({
+    assertHeld: vi.fn(),
+    release: vi.fn(async () => {}),
+  })),
+  advanceSessionArchiveGeneration: vi.fn(),
+}));
 // The archive-transition move runs real filesystem locks this mocked-fs suite
 // cannot host; its semantics (rename, split-pair merge, lock coverage) are
 // pinned in session-pr-service.test.ts.
@@ -85,6 +103,26 @@ vi.mock('./session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./session-pr-service.js')>()),
   moveSessionPrSidecar: vi.fn().mockResolvedValue(undefined),
 }));
+// Same rationale: the goal move does real fs/promises I/O this mocked-fs
+// suite cannot host; its semantics are pinned in session-goal-sidecar.test.ts.
+vi.mock('./session-goal-sidecar.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-goal-sidecar.js')>()),
+  moveSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+  deleteSessionGoalSidecar: vi.fn(() => Promise.resolve()),
+}));
+vi.mock('./session-prompt-time-sidecar.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./session-prompt-time-sidecar.js')>();
+  return {
+    ...actual,
+    removeSessionPromptTimeSidecar: vi.fn((filePath: string) =>
+      actual.removeSessionPromptTimeSidecar(filePath),
+    ),
+    moveSessionPromptTimeSidecar: vi.fn((from: string, to: string) =>
+      actual.moveSessionPromptTimeSidecar(from, to),
+    ),
+  };
+});
 
 type Line = Record<string, unknown>;
 
@@ -258,6 +296,7 @@ describe('SessionService', () => {
   let statPromiseSpy: MockInstance<typeof fs.promises.stat>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
   let existsSyncSpy: MockInstance<typeof fs.existsSync>;
+  let lstatSyncSpy: MockInstance<typeof fs.lstatSync>;
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let renameSyncSpy: MockInstance<typeof fs.renameSync>;
   let rmSyncSpy: MockInstance<typeof fs.rmSync>;
@@ -283,6 +322,8 @@ describe('SessionService', () => {
     vi.mocked(commitUsageBeforeTranscriptDeletion)
       .mockReset()
       .mockReturnValue(true);
+    vi.mocked(removeSessionPromptTimeSidecar).mockClear();
+    vi.mocked(moveSessionPromptTimeSidecar).mockClear();
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -304,6 +345,7 @@ describe('SessionService', () => {
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
     existsSyncSpy = vi.spyOn(fs, 'existsSync');
+    lstatSyncSpy = vi.spyOn(fs, 'lstatSync');
     mkdirSyncSpy = vi.spyOn(fs, 'mkdirSync');
     renameSyncSpy = vi
       .spyOn(fs, 'renameSync')
@@ -512,10 +554,15 @@ describe('SessionService', () => {
     });
     return { service, warnings };
   };
-  const existsFor = (...suffixes: string[]) =>
-    existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
-      suffixes.some((suffix) => filePath.toString().endsWith(suffix)),
-    );
+  const existsFor = (...suffixes: string[]) => {
+    const matches = (filePath: fs.PathLike) =>
+      suffixes.some((suffix) => filePath.toString().endsWith(suffix));
+    existsSyncSpy.mockImplementation(matches);
+    lstatSyncSpy.mockImplementation(((filePath: fs.PathLike) =>
+      matches(filePath)
+        ? ({ isFile: () => true } as fs.Stats)
+        : undefined) as typeof fs.lstatSync);
+  };
   const inChats = (ext = '.jsonl') =>
     expect.stringContaining(`/chats/${sessionIdA}${ext}`);
   const inArchive = (ext = '.jsonl') =>
@@ -1621,7 +1668,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(9);
+      // One fence check per cleanup step: main's goal + artifact-summary +
+      // branch sidecars (11) plus prompt-time sidecar removal (1) → 12.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(12);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -1743,8 +1792,16 @@ describe('SessionService', () => {
         '.pr.json',
       ],
       [
+        'should remove goal sidecars in both states when removing a session',
+        '.goal.json',
+      ],
+      [
         'should remove prompt ledger sidecars in both archive states',
         '.ledger.jsonl',
+      ],
+      [
+        'should remove prompt-time sidecars in both archive states',
+        '.prompt-time.json',
       ],
     ])('%s', async (_title, ext) => {
       onlyIn('archived');
@@ -1752,8 +1809,34 @@ describe('SessionService', () => {
 
       expect(await removeA()).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive());
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats(ext));
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive(ext));
+      if (ext === '.prompt-time.json') {
+        expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+          inChats(ext),
+        );
+        expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+          inArchive(ext),
+        );
+      } else {
+        expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats(ext));
+        expect(unlinkSyncSpy).toHaveBeenCalledWith(inArchive(ext));
+      }
+    });
+
+    it('warns and finishes sibling cleanup when unlinking a worktree sidecar throws', async () => {
+      onlyIn('active');
+      existsFor(`${sessionIdA}.worktree.json`, `${sessionIdA}.pr.json`);
+      const { service, warnings } = withWarnings();
+      unlinkSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (filePath.toString().endsWith('.worktree.json')) {
+          throw errno('EISDIR: illegal operation on a directory', 'EISDIR');
+        }
+      });
+
+      expect(await service.removeSession(sessionIdA)).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats());
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(inChats('.pr.json'));
+      expect(warnings.join('\n')).toContain('worktree sidecar not removed');
+      expect(warnings.join('\n')).toContain('EISDIR');
     });
 
     it('should remove both JSONL files when active and archived copies conflict', async () => {
@@ -1871,13 +1954,19 @@ describe('SessionService', () => {
       existsFor(
         `${sessionIdA}.worktree.json`,
         `${sessionIdA}.pr.json`,
+        `${sessionIdA}.goal.json`,
         `${sessionIdA}.ledger.jsonl`,
       );
       const removeOrganizationSpy = spyOrganizationRemove().mockResolvedValue();
 
       await sessionService.cleanupRemovedSessionState(sessionIdA);
 
-      for (const sidecar of ['.worktree.json', '.pr.json', '.ledger.jsonl']) {
+      for (const sidecar of [
+        '.worktree.json',
+        '.pr.json',
+        '.goal.json',
+        '.ledger.jsonl',
+      ]) {
         expect(unlinkSyncSpy).toHaveBeenCalledWith(
           expect.stringContaining(`${sessionIdA}${sidecar}`),
         );
@@ -2017,6 +2106,78 @@ describe('SessionService', () => {
         ),
       ).toBe(true);
     },
+    movesGoalSidecar: async (kind: MoveKind) => {
+      const m = seeded(kind);
+
+      const result = await m.run();
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(moveSessionGoalSidecar).toHaveBeenCalledWith(
+        m.from('.goal.json'),
+        m.to('.goal.json'),
+      );
+    },
+    warnsOnGoalSidecarFailure: async (kind: MoveKind) => {
+      const m = seeded(kind);
+      vi.mocked(moveSessionGoalSidecar).mockRejectedValueOnce(
+        new Error('goal move failed'),
+      );
+      const { service, warnings } = withWarnings();
+
+      const result = await m.run(undefined, service);
+
+      expect(result.moved).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(
+        warnings.some((message) =>
+          message.includes('failed to move goal sidecar'),
+        ),
+      ).toBe(true);
+    },
+    reconcilesGoalSidecarOnConflict: async (kind: MoveKind) => {
+      const toArchive = kind === 'archive';
+      const keptGoal = toArchive
+        ? `/chats/archive/${sessionIdA}.goal.json`
+        : `/chats/${sessionIdA}.goal.json`;
+      const droppedGoal = toArchive
+        ? `/chats/${sessionIdA}.goal.json`
+        : `/chats/archive/${sessionIdA}.goal.json`;
+
+      // Kept projection present: the dropped lineage is deleted, never
+      // renamed over the survivor (which would show the deleted transcript's
+      // Goal).
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsFor(keptGoal);
+
+      const keptResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(keptResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+
+      // Kept projection absent: the dropped projection is discarded too, NOT
+      // adopted. Absence is a value here (the survivor's goal may be cleared),
+      // so adopting the dropped lineage would resurrect a goal the kept
+      // transcript no longer records — and an archived survivor never
+      // re-projects to repair it.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      vi.mocked(moveSessionGoalSidecar).mockClear();
+      vi.mocked(deleteSessionGoalSidecar).mockClear();
+      existsSyncSpy.mockReturnValue(false);
+
+      const absentResult = await mirror(kind).run({ resolveConflicts: true });
+
+      expect(absentResult.resolvedConflicts).toEqual([sessionIdA]);
+      expect(deleteSessionGoalSidecar).toHaveBeenCalledWith(
+        expect.stringContaining(droppedGoal),
+      );
+      expect(moveSessionGoalSidecar).not.toHaveBeenCalled();
+    },
     movesKnownLocation: async (kind: MoveKind) => {
       const m = seeded(kind);
 
@@ -2073,7 +2234,21 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
+      // The goal sidecar move added one fence check to the conflict path (5);
+      // this PR's separate branch-sidecar reconcile try adds one more → 6.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
+      // Conflict reconcile also drops the discarded lineage's prompt-time sidecar.
+      const droppedPromptTime =
+        kind === 'archive'
+          ? inChats('.prompt-time.json')
+          : inArchive('.prompt-time.json');
+      expect(removeSessionPromptTimeSidecar).toHaveBeenCalledWith(
+        droppedPromptTime,
+      );
+      expect(moveSessionPromptTimeSidecar).not.toHaveBeenCalledWith(
+        droppedPromptTime,
+        expect.anything(),
+      );
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -2219,6 +2394,15 @@ describe('SessionService', () => {
 
     it('should warn but still archive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('archive'));
+
+    it('should move the goal sidecar into the archive directory', () =>
+      mirrored.movesGoalSidecar('archive'));
+
+    it('should warn but still archive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('archive'));
+
+    it('should let the kept goal sidecar win on an archive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('archive'));
 
     const bothPrSidecarsExist = () => {
       archive.seed();
@@ -2422,6 +2606,15 @@ describe('SessionService', () => {
 
     it('should warn but still unarchive when the pr sidecar move fails', () =>
       mirrored.warnsOnPrSidecarFailure('unarchive'));
+
+    it('should move the goal sidecar back to the active directory', () =>
+      mirrored.movesGoalSidecar('unarchive'));
+
+    it('should warn but still unarchive when the goal sidecar move fails', () =>
+      mirrored.warnsOnGoalSidecarFailure('unarchive'));
+
+    it('should let the kept goal sidecar win on an unarchive conflict', () =>
+      mirrored.reconcilesGoalSidecarOnConflict('unarchive'));
 
     it('should unarchive known archived sessions', () =>
       mirrored.movesKnownLocation('unarchive'));
@@ -5593,5 +5786,115 @@ describe('SessionService', () => {
     it('readParentSessionId returns undefined for a nonexistent session', async () => {
       expect(await service.readParentSessionId(sessionId)).toBeUndefined();
     });
+  });
+
+  describe('removeSession dangling worktree sidecars', () => {
+    let service: SessionService;
+    let cwd: string;
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    const disk = useRealDisk(
+      'remove-dangling-worktree-',
+      (d) => ({ service, cwd, realTmpDir, realPath } = d),
+    );
+    const [sessionId] = realDiskIds;
+
+    it('unlinks dangling active and archived worktree sidecar symlinks when deleting a session', async () => {
+      disk.write(sessionId, [msgLine(sessionId, 'u1', null, 'user', 0, 'hi')]);
+      const activeSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'archived',
+      );
+      fs.mkdirSync(realPath.dirname(archivedSidecar), { recursive: true });
+      const missingTarget = realPath.join(realTmpDir, 'missing-target');
+      fs.symlinkSync(missingTarget, activeSidecar);
+      fs.symlinkSync(missingTarget, archivedSidecar);
+
+      expect(await service.removeSession(sessionId)).toBe(true);
+      expect(
+        fs.lstatSync(activeSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+      expect(
+        fs.lstatSync(archivedSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    });
+
+    it('keeps cleaning sibling sidecars when the archived sidecar parent raises ENOTDIR', async () => {
+      disk.write(sessionId, [msgLine(sessionId, 'u1', null, 'user', 0, 'hi')]);
+      const activeSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const activePrSidecar = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      const archivedDir = realPath.dirname(
+        service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+      );
+      fs.symlinkSync(
+        realPath.join(realTmpDir, 'missing-target'),
+        activeSidecar,
+      );
+      fs.writeFileSync(activePrSidecar, '{"prs":[]}\n');
+      // Place a regular file at `chats/archive` so lstat on archived sidecars
+      // raises ENOTDIR rather than ENOENT.
+      fs.writeFileSync(archivedDir, 'not-a-directory');
+
+      expect(await service.removeSession(sessionId)).toBe(true);
+      expect(
+        fs.lstatSync(activeSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+      expect(
+        fs.lstatSync(activePrSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'warns and finishes sibling cleanup when unlinking a dangling archived sidecar hits EACCES',
+      async () => {
+        disk.write(sessionId, [
+          msgLine(sessionId, 'u1', null, 'user', 0, 'hi'),
+        ]);
+        const { service: warnedService, warnings } = withWarnings(cwd);
+        const activePrSidecar = warnedService.getPrSessionPathForArchiveState(
+          sessionId,
+          'active',
+        );
+        const archivedSidecar =
+          warnedService.getWorktreeSessionPathForArchiveState(
+            sessionId,
+            'archived',
+          );
+        const archivedDir = realPath.dirname(archivedSidecar);
+        fs.mkdirSync(archivedDir, { recursive: true });
+        fs.symlinkSync(
+          realPath.join(realTmpDir, 'missing-target'),
+          archivedSidecar,
+        );
+        fs.writeFileSync(activePrSidecar, '{"prs":[]}\n');
+        // Searchable (lstat succeeds and sees the dangling symlink) but
+        // non-writable (unlinkSync raises EACCES).
+        fs.chmodSync(archivedDir, 0o555);
+
+        try {
+          expect(await warnedService.removeSession(sessionId)).toBe(true);
+          expect(
+            fs.lstatSync(archivedSidecar, { throwIfNoEntry: false }),
+          ).toBeDefined();
+          expect(
+            fs.lstatSync(activePrSidecar, { throwIfNoEntry: false }),
+          ).toBeUndefined();
+          expect(warnings.join('\n')).toContain('worktree sidecar not removed');
+          expect(warnings.join('\n')).toContain('EACCES');
+        } finally {
+          fs.chmodSync(archivedDir, 0o700);
+        }
+      },
+    );
   });
 });

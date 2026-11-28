@@ -431,6 +431,7 @@ async function registerModelInvocableCommands(
 export interface NonInteractiveSlashCommandSessionHooks {
   /** @see CommandContext['session']['startNewSession'] */
   startNewSession?: (sessionId: string) => void;
+  confirmAction?: CommandContext['confirmAction'];
 }
 
 export const handleSlashCommand = async (
@@ -701,6 +702,7 @@ export const handleSlashCommand = async (
       : uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
     promptCount: 1,
+    userPromptCount: 1,
   };
 
   const logger = new Logger(config?.getSessionId() || '', config?.storage);
@@ -716,7 +718,14 @@ export const handleSlashCommand = async (
     executionMode,
     ...(executionPolicy ? { executionPolicy } : {}),
     abortSignal:
-      commandToExecute.name === 'advisor' ? abortController.signal : undefined,
+      commandToExecute.name === 'advisor' ||
+      (commandToExecute.kind === CommandKind.BUILT_IN &&
+        commandToExecute.name === 'memory')
+        ? abortController.signal
+        : undefined,
+    ...(sessionHooks?.confirmAction
+      ? { confirmAction: sessionHooks.confirmAction }
+      : {}),
     services: {
       config,
       settings,

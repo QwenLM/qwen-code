@@ -23,6 +23,7 @@ public final class SubmitHarnessTurn {
     private final Long deadlineMillis;
     private final Map<String, Object> modelSelection;
     private final Map<String, Object> approvalSelection;
+    private final String ingestTurnId;
 
     private SubmitHarnessTurn(Builder builder) {
         if (builder.session == null) {
@@ -50,6 +51,7 @@ public final class SubmitHarnessTurn {
         this.deadlineMillis = builder.deadlineMillis;
         this.modelSelection = builder.modelSelection;
         this.approvalSelection = builder.approvalSelection;
+        this.ingestTurnId = builder.ingestTurnId;
     }
 
     public static Builder builder() {
@@ -140,6 +142,9 @@ public final class SubmitHarnessTurn {
         if (approvalSelection != null) {
             result.put("approvalSelection", approvalSelection);
         }
+        if (ingestTurnId != null) {
+            result.put("eventDelivery", Map.of("mode", "ingest", "turnId", ingestTurnId));
+        }
         return result;
     }
 
@@ -152,8 +157,18 @@ public final class SubmitHarnessTurn {
         private Long deadlineMillis;
         private Map<String, Object> modelSelection;
         private Map<String, Object> approvalSelection;
+        private String ingestTurnId;
 
         private Builder() {
+        }
+
+        /** Asks the Harness to push the admitted Turn's events to the Session Store. */
+        public Builder eventIngest(String turnId) {
+            if (turnId == null || turnId.isEmpty() || turnId.length() > 64) {
+                throw new IllegalArgumentException("Invalid Hosted event ingest Turn");
+            }
+            this.ingestTurnId = turnId;
+            return this;
         }
 
         public Builder session(HarnessSessionRef session) {

@@ -1,0 +1,13 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`terminal theme rendering > recolors a mounted memo subtree from OSC replies without losing input 1`] = `
+"Thinking
+Draft: keep my draft
+"
+`;
+
+exports[`terminal theme rendering > recolors a mounted memo subtree from OSC replies without losing input 3`] = `
+"Thinking
+Draft: keep my draft
+"
+`;
