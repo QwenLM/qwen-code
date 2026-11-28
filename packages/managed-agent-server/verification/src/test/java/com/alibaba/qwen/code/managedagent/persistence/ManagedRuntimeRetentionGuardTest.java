@@ -361,6 +361,16 @@ class ManagedRuntimeRetentionGuardTest {
         }
     }
 
+    /**
+     * Applies a per-dialect identity redefinition of ma_session_record on the
+     * contract's own schema, for a dialect test that must widen the column on
+     * the same tables it seeds. Must run after {@link #setup()}, which migrates
+     * the schema.
+     */
+    void configureSessionRecordIdentity(String ddl) {
+        jdbc.execute(ddl);
+    }
+
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
         backgroundEvidence();
@@ -390,10 +400,12 @@ class ManagedRuntimeRetentionGuardTest {
                                         "argsDigest",
                                         "digest")));
         try (var connection = source.getConnection()) {
+            // ma_session_record's composite key exceeds InnoDB's limit at 512,
+            // so MySQL applies the collation at its declared VARCHAR(64).
             String ddl =
                     connection.getMetaData().getDatabaseProductName().equals("H2")
                             ? "ALTER TABLE %s ALTER COLUMN %s VARCHAR_IGNORECASE(512)"
-                            : "ALTER TABLE %s MODIFY %s VARCHAR(512) CHARACTER SET utf8mb4 COLLATE"
+                            : "ALTER TABLE %s MODIFY %s VARCHAR(64) CHARACTER SET utf8mb4 COLLATE"
                                   + " utf8mb4_general_ci NOT NULL";
             jdbc.execute(String.format(ddl, "ma_tool_execution", "harness_session_id"));
             jdbc.execute(String.format(ddl, "ma_session_record", "session_id"));

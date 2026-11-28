@@ -472,4 +472,30 @@ describe('session context', () => {
       }),
     ).toBe(false);
   });
+
+  it('resolves standalone and empty-workspace session contexts safely', async () => {
+    const { daemonClientSessionContext } = await import('./session-context.js');
+    expect(
+      daemonClientSessionContext({
+        session: {
+          sessionId: 'sa-1',
+          workspaceCwd: '',
+          attached: false,
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+        },
+        workspaceCwd: '',
+      } as unknown as Parameters<typeof daemonClientSessionContext>[0]),
+    ).toEqual({ kind: 'standalone' });
+    expect(
+      daemonClientSessionContext({
+        session: {
+          sessionId: 'ws-empty',
+          workspaceCwd: '',
+          attached: false,
+        },
+        workspaceCwd: '',
+      } as unknown as Parameters<typeof daemonClientSessionContext>[0]),
+    ).toBeUndefined();
+  });
 });

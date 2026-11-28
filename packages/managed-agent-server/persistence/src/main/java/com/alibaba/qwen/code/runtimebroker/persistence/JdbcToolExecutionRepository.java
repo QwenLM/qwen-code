@@ -222,6 +222,10 @@ public final class JdbcToolExecutionRepository
                 if (!result.next()) {
                     return null;
                 }
+                String storedKey = result.getString("idempotency_key");
+                if (!key.equals(storedKey)) {
+                    throw new IllegalStateException("Tool idempotency hash collision");
+                }
                 ToolExecutionRecord record = mapExecution(result);
                 if (!key.equals(record.getIdempotencyKey())) {
                     throw new IllegalStateException(
@@ -851,6 +855,10 @@ public final class JdbcToolExecutionRepository
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return null;
+                }
+                String storedId = result.getString("execution_call_id");
+                if (!executionCallId.equals(storedId)) {
+                    throw new IllegalStateException("Tool execution-call hash collision");
                 }
                 ToolExecutionRecord record = mapExecution(result);
                 if (!executionCallId.equals(record.getExecutionCallId())) {

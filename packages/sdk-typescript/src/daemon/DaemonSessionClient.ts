@@ -103,9 +103,16 @@ export interface DaemonReplaySnapshot {
   lifecycleReplayIncomplete?: boolean;
 }
 
+/** Standalone session metadata supplied by a host without a local workspace. */
+export type StandaloneSessionMetadata = Omit<DaemonSession, 'workspaceCwd'> & {
+  sourceType: 'standalone';
+  context: { kind: 'standalone' };
+  workspaceCwd?: string;
+};
+
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
-  session: DaemonSession;
+  session: DaemonSession | StandaloneSessionMetadata;
   /** True when load/resume attached to a session with an in-flight prompt. */
   hasActivePrompt?: boolean;
   /** ACP state returned by load/resume; empty for create/attach clients. */
@@ -315,6 +322,8 @@ export class DaemonSessionClient {
   private hasAcceptedRestStream = false;
   private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
+  private eventStreamReady = false;
+  private eventStreamReadiness?: EventTarget;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
   private generatedUiReadGeneration = 0;
@@ -348,13 +357,15 @@ export class DaemonSessionClient {
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
-    this.session = { ...opts.session };
-    this.updateGeneratedUi(this.session.generatedUi);
-    const context = (opts.session as { context?: { kind?: unknown } }).context;
+    const workspaceCwd = opts.session.workspaceCwd ?? '';
     this.restoreStrategy =
-      opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
+      opts.session.sourceType === 'standalone' &&
+      'context' in opts.session &&
+      opts.session.context?.kind === 'standalone'
         ? { kind: 'standalone' }
-        : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
+        : { kind: 'workspace', workspaceCwd };
+    this.session = { ...opts.session, workspaceCwd };
+    this.updateGeneratedUi(this.session.generatedUi);
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.backgroundTurn = parseDaemonBackgroundTurn(
@@ -716,6 +727,39 @@ export class DaemonSessionClient {
 
   setLastEventId(lastEventId: number | undefined): void {
     this.lastSeenEventId = validateLastEventId(lastEventId);
+  }
+
+  /** Wait for an accepted live stream before a submission that has no admission cursor. */
+  async waitForEventStream(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.eventStreamReady) return;
+    const readiness = (this.eventStreamReadiness ??= new EventTarget());
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        readiness.removeEventListener('ready', onReady);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new DOMException(
+            'Timed out waiting for event stream',
+            'TimeoutError',
+          ),
+        );
+      }, 30_000);
+      readiness.addEventListener('ready', onReady, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   async prompt(
@@ -1634,6 +1678,7 @@ export class DaemonSessionClient {
       if (released) return;
       released = true;
       this.subscriptionActive = false;
+      this.eventStreamReady = false;
     };
     const acquire = () => {
       if (started) return;
@@ -1699,6 +1744,12 @@ export class DaemonSessionClient {
       const epoch =
         subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
+      const markReady = () => {
+        if (!this.eventStreamReady) {
+          this.eventStreamReady = true;
+          this.eventStreamReadiness?.dispatchEvent(new Event('ready'));
+        }
+      };
       const restSubscription = this.client.transport.type === 'rest';
       if (!restSubscription) {
         this.hasAcceptedRestStream = false;
@@ -1721,6 +1772,11 @@ export class DaemonSessionClient {
         onSseStreamAccepted: (streamId: string | undefined) => {
           this.hasAcceptedRestStream = true;
           this.lastAcceptedRestStreamId = streamId;
+          markReady();
+        },
+        onEventStreamReady: () => {
+          markReady();
+          subscribeOpts.onEventStreamReady?.();
         },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
@@ -1728,6 +1784,7 @@ export class DaemonSessionClient {
           callerOnEpoch?.(learned);
         },
       })) {
+        markReady();
         const hydratedEvent = await this.hydrateEvent(event, opts.signal);
         this._dispatchTurnEvent(hydratedEvent);
         yield hydratedEvent;
@@ -1744,7 +1801,8 @@ export class DaemonSessionClient {
     }
   }
 
-  private async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
+  /** Resolve attachment references in the replay supplied to a restored client. */
+  async hydrateReplaySnapshot(signal?: AbortSignal): Promise<void> {
     this.replaySnapshot.compactedReplay = await Promise.all(
       this.replaySnapshot.compactedReplay.map(
         async (event) => await this.hydrateEvent(event, signal),

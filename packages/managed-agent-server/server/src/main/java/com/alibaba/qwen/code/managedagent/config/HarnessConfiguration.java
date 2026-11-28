@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -47,7 +48,8 @@ public class HarnessConfiguration {
             JdbcManagedActionStore actions, JdbcManagedAgentDefinitionStore definitions,
             JdbcManagedSessionStore resources, JdbcSshWorkspaceStore ssh, JdbcHarnessPlacementStore placements,
             JdbcManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
-            JdbcManagedExtensionRecordStore extensionRecords) {
+            JdbcManagedExtensionRecordStore extensionRecords,
+            @Value("${qwen.managed-agent.harness-pull.enabled:false}") boolean workPull) {
         BrokerSecurity.checkHarnessTransport(properties, new ArrayList<>());
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {
@@ -68,13 +70,17 @@ public class HarnessConfiguration {
                 throw new IllegalStateException("Harness pool discovery must be static");
             }
             try {
-                return new SdkHarnessBoundary(new HarnessPoolConnector(properties, placements, discovery,
+                var pooled = new HarnessPoolConnector(properties, placements, discovery,
                         endpoint -> {
                             var connector = new QwenHostedHarnessConnector(properties, sessions, workspaceExecution,
                                     actions, definitions, resources, ssh);
                             connector.configureExtensionResources(extensionRecords, json);
                             return connector;
-                        }, skills));
+                        }, skills);
+                if (workPull) {
+                    pooled.enableWorkPull();
+                }
+                return new SdkHarnessBoundary(pooled);
             } catch (RuntimeException error) {
                 discovery.close();
                 throw error;

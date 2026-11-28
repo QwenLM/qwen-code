@@ -700,6 +700,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   // Internal relay MCP leg the Hosted Harness connects back to, behind the
   // relay credential, never a client capability.
   'INTERNAL_CLIENT_FILES_MCP',
+  // Internal work poll the Hosted Harness calls with its bearer token to
+  // claim released Sessions, never a client capability.
+  'HARNESS_WORK_POLL',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
