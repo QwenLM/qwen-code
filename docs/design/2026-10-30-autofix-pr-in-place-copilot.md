@@ -2,7 +2,9 @@
 
 [English](2026-10-30-autofix-pr-in-place-copilot.md) | [简体中文](2026-10-30-autofix-pr-in-place-copilot.zh-CN.md)
 
-Status: proposed and implemented in the same change. Date: 2026-10-30.
+Status: implemented (extended for scheduled rounds by
+[`2026-10-31-autofix-pr-in-place-scheduled-ask`](2026-10-31-autofix-pr-in-place-scheduled-ask.md)).
+Date: 2026-10-30.
 
 This design extends [`/autofix-pr`](2026-10-21-autofix-pr-command.md) with a
 second working mode. Section numbers below that cite "the command design"

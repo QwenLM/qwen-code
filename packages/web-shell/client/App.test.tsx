@@ -117,6 +117,8 @@ import { HotkeySetter } from './live/HotkeySetter';
 import { TOUCH_COMPOSER_QUERY } from './hooks/useIsTouchComposer';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import type { ComposerIntegrations } from './components/composer/composer-integrations';
+import { DAEMON_COMPOSER_INTEGRATIONS } from './components/composer/daemon-composer-integrations';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -372,6 +374,7 @@ type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
+  composerIntegrations?: ComposerIntegrations;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -20854,6 +20857,9 @@ describe('App session callbacks', () => {
       user: 0,
       workspace: 0,
     });
+    expect(testState.latestChatEditorProps?.composerIntegrations).toBe(
+      DAEMON_COMPOSER_INTEGRATIONS,
+    );
   });
 
   it('keeps primary Voice model reads and writes on legacy routes', async () => {

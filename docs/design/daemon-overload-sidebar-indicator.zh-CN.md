@@ -2,7 +2,7 @@
 
 [English](daemon-overload-sidebar-indicator.md) | [简体中文](daemon-overload-sidebar-indicator.zh-CN.md)
 
-状态：提案（proposed）
+状态：已实现（implemented，PR #18054，合入提交 `f13dc794b430`）
 
 ## 问题
 
