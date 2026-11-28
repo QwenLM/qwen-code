@@ -70,9 +70,14 @@ class SessionResourceCollectionMySqlIT extends SessionResourceCollectionCollecto
     @Test
     void rocketMqWakeupsAndPolling(@TempDir Path directory) throws Exception {
         String endpoints = System.getProperty("gc.mq.endpoints");
-        assumeTrue(endpoints != null, "Set gc.mq.endpoints, gc.mq.topic and gc.mq.group to run the MQ integration case");
+        if (!Boolean.getBoolean("gc.mq.required")) {
+            assumeTrue(endpoints != null, "Set gc.mq.endpoints, gc.mq.topic and gc.mq.group to run the MQ integration case");
+        }
         String topic = System.getProperty("gc.mq.topic");
         String group = System.getProperty("gc.mq.group");
+        assertThat(endpoints).as("gc.mq.endpoints").isNotBlank();
+        assertThat(topic).as("gc.mq.topic").isNotBlank();
+        assertThat(group).as("gc.mq.group").isNotBlank();
         jdbc.update("DELETE FROM ma_output_capture WHERE tenant_id = ?", tenant);
         seedGc("duplicate", 1);
         seedGc("lost", 1);

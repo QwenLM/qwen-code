@@ -29,6 +29,7 @@ const profile = pom
   .split('<id>event-transport-multi-node-gates</id>')[1]
   .split('</profile>')[0];
 const server = 'packages/managed-agent-server';
+const gcGateInclude = 'src/test/event-transport-multi-node-includes.txt';
 const properties = readFileSync(
   `${server}/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
@@ -69,12 +70,22 @@ describe('EventTransport multi-node gates CI', () => {
     );
   });
 
-  it('runs only the gate class, never the unit suite, and fails on no tests', () => {
+  it('runs the multi-node gate and the GC MQ method, and fails on no tests', () => {
     expect(profile).toContain(
-      '<include>**/EventTransportMultiNodeGate.java</include>',
+      `<includesFile>\${project.basedir}/${gcGateInclude}</includesFile>`,
     );
-    expect(profile.match(/<include>/g)).toHaveLength(1);
+    expect(
+      readFileSync(`${server}/verification/${gcGateInclude}`, 'utf8')
+        .trim()
+        .split('\n'),
+    ).toEqual([
+      'com.alibaba.qwen.code.managedagent.EventTransportMultiNodeGate',
+      'com.alibaba.qwen.code.managedagent.persistence.SessionResourceCollectionMySqlIT#rocketMqWakeupsAndPolling',
+    ]);
+    expect(profile).not.toContain('<includes>');
+    expect(profile).toContain('<gc.mq.required>true</gc.mq.required>');
     expect(profile).toContain('<failIfNoTests>true</failIfNoTests>');
+    expect(profile).toContain('<reuseForks>false</reuseForks>');
     expect(profile).toMatch(
       /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration>\s*<skipTests>true<\/skipTests>/,
     );
@@ -179,6 +190,26 @@ describe('EventTransport multi-node gates CI', () => {
       '-Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT}',
     );
     expect(run).not.toContain(scriptDefault('RMQ_PROXY_GRPC_PORT'));
+  });
+
+  it('uses a separate delay topic and ordinary group for Session resource GC', () => {
+    expect(job.env.RMQ_DELAY_TOPIC).toBe('qwen-session-resource-gc');
+    expect(job.env.RMQ_DELAY_TOPIC).not.toBe(scriptDefault('RMQ_TOPIC'));
+    expect(job.env.RMQ_DELAY_GROUP).toBe('qwen-session-resource-gc-workers');
+    expect(step('Start the RocketMQ LiteTopic cluster').run).toBe(
+      'scripts/rocketmq-lite-broker.sh start',
+    );
+    expect(script).toContain(
+      'updateTopic -c "${CLUSTER}" -t "${RMQ_DELAY_TOPIC}" -a +message.type=DELAY',
+    );
+    expect(script).toContain(
+      'updateSubGroup -c "${CLUSTER}" -g "${RMQ_DELAY_GROUP}" -o false',
+    );
+    expect(verify().run).toContain(
+      '-Dgc.mq.endpoints="127.0.0.1:${RMQ_PROXY_GRPC_PORT}"',
+    );
+    expect(verify().run).toContain('-Dgc.mq.topic="${RMQ_DELAY_TOPIC}"');
+    expect(verify().run).toContain('-Dgc.mq.group="${RMQ_DELAY_GROUP}"');
   });
 
   it('installs the libfaketime the clock-skew row preloads', () => {
