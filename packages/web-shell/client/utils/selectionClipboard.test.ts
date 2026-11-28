@@ -604,3 +604,223 @@ describe('review regressions', () => {
     expect(composedRanges).toHaveBeenCalledWith({ shadowRoots: [shadow] });
   });
 });
+
+describe('reply selection range at row edges', () => {
+  // A transcript row: the message content body (CSS-module class, as rendered
+  // by AssistantMessage) plus the row chrome (timestamp tip, marked
+  // data-selection-copy-chrome as rendered by MessageTimestamp) as a sibling.
+  // A triple-click selects the whole line but parks the outer boundary on
+  // the chrome, outside the body.
+  function rowFixture(chromeAfter: boolean) {
+    const row = document.createElement('div');
+    row.setAttribute('data-web-shell-message-row', '');
+    const body = document.createElement('div');
+    body.className = '_contentBody_9f2ab';
+    const line = document.createElement('p');
+    line.textContent = 'Selected line text';
+    body.append(line);
+    const tip = document.createElement('span');
+    tip.className = 'tip';
+    tip.setAttribute('data-selection-copy-chrome', '');
+    tip.textContent = '12:34';
+    row.append(chromeAfter ? body : tip);
+    row.append(chromeAfter ? tip : body);
+    document.body.append(row);
+    bodies.push(row);
+    return { row, body, line, tip };
+  }
+  // A user message row: its text sits under .chatBubble/.chatContent with
+  // data-web-shell-user-bubble — no contentBody class, so the clamp's only
+  // cross-message defence is the row-ownership guard.
+  function userRowFixture() {
+    const row = document.createElement('div');
+    row.setAttribute('data-web-shell-message-row', '');
+    const bubble = document.createElement('div');
+    bubble.className = 'chatBubble';
+    const content = document.createElement('div');
+    content.className = 'chatContent';
+    content.setAttribute('data-web-shell-user-bubble', '');
+    const q = document.createElement('span');
+    q.textContent = 'question text';
+    content.append(q);
+    bubble.append(content);
+    row.append(bubble);
+    document.body.append(row);
+    bodies.push(row);
+    return { row, text: q };
+  }
+  const fullBodyRange = (body: HTMLElement) => {
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    return range;
+  };
+
+  it('clamps a trailing boundary on the row chrome to the body edge', () => {
+    const { body, line, tip } = rowFixture(true);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 9);
+    range.setEnd(tip, 1);
+    window.getSelection()!.addRange(range);
+    const result = getReplySelectionRange(body);
+    expect(result).not.toBeNull();
+    expect(result!.toString()).toBe('line text');
+    // the preserved inner boundary survives the clamp
+    const preserved = document.createRange();
+    preserved.setStart(text, 9);
+    preserved.setEnd(text, 9);
+    expect(result!.compareBoundaryPoints(Range.START_TO_START, preserved)).toBe(
+      0,
+    );
+    expect(
+      result!.compareBoundaryPoints(Range.END_TO_END, fullBodyRange(body)),
+    ).toBe(0);
+    // the clamped range passes the menu gate on the copy path
+    expect(getSelectedReplyContent(body, result!)).toEqual({
+      text: 'line text',
+      markdown: 'line text',
+    });
+    // the live selection keeps its original boundaries
+    expect(window.getSelection()!.getRangeAt(0).endContainer).toBe(tip);
+  });
+
+  it('rejects a leading boundary on the row chrome (app chrome never precedes the body)', () => {
+    const { body, line, tip } = rowFixture(false);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(tip, 0);
+    range.setEnd(text, 8);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+
+  it('clamps a triple-click in an earlier paragraph to the end of the whole message', () => {
+    const { row, tip } = rowFixture(true);
+    const body = row.querySelector('._contentBody_9f2ab')!;
+    const first = body.querySelector('p')!;
+    first.textContent = 'First paragraph';
+    const second = document.createElement('p');
+    second.textContent = 'Second paragraph';
+    body.append(second);
+    const text = first.firstChild! as Text;
+    // triple-click in the first paragraph of a two-paragraph message: the
+    // trailing boundary parks on the row chrome, as observed live
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(tip, 1);
+    window.getSelection()!.addRange(range);
+    const result = getReplySelectionRange(body);
+    expect(result).not.toBeNull();
+    // the clamp runs to the end of the body, not to the end of the clicked
+    // paragraph — a single-<p> fixture cannot tell the two apart
+    expect(
+      result!.compareBoundaryPoints(Range.END_TO_END, fullBodyRange(body)),
+    ).toBe(0);
+    expect(getSelectedReplyContent(body, result!)).toEqual({
+      text: 'First paragraph\nSecond paragraph',
+      markdown: 'First paragraph\n\nSecond paragraph',
+    });
+  });
+
+  it('returns the live range unchanged when both boundaries are inside', () => {
+    const { body, line } = rowFixture(true);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 2);
+    range.setEnd(text, 9);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBe(range);
+  });
+
+  it('rejects a boundary inside another message body', () => {
+    const prev = rowFixture(true);
+    const first = rowFixture(true);
+    const next = rowFixture(true);
+    const prevText = prev.line.firstChild! as Text;
+    const firstText = first.line.firstChild! as Text;
+    const nextText = next.line.firstChild! as Text;
+    const trailing = document.createRange();
+    trailing.setStart(firstText, 0);
+    trailing.setEnd(nextText, 4);
+    window.getSelection()!.addRange(trailing);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const leading = document.createRange();
+    leading.setStart(prevText, 0);
+    leading.setEnd(firstText, 4);
+    window.getSelection()!.addRange(leading);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+  });
+
+  it('rejects a boundary inside a user-message row (no contentBody)', () => {
+    const userBefore = userRowFixture();
+    const first = rowFixture(true);
+    const userAfter = userRowFixture();
+    const firstText = first.line.firstChild! as Text;
+    const trailing = document.createRange();
+    trailing.setStart(firstText, 0);
+    const userAfterText = userAfter.text.firstChild! as Text;
+    trailing.setEnd(userAfterText, 4);
+    window.getSelection()!.addRange(trailing);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const leading = document.createRange();
+    leading.setStart(userBefore.text, 0);
+    leading.setEnd(firstText, 4);
+    window.getSelection()!.addRange(leading);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+  });
+
+  it('rejects a boundary in a content-bearing sibling of the body inside the same row', () => {
+    const { row, body, line } = rowFixture(true);
+    // steps/details block rendered after the body in the same row
+    // (AssistantMessage's AgentMessageDetails): content-bearing, no
+    // contentBody class, no chrome mark
+    const details = document.createElement('div');
+    const step = document.createElement('span');
+    step.textContent = 'Bash ran ok';
+    details.append(step);
+    row.append(details);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(step.firstChild! as Text, 4);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+
+  it('rejects a leading boundary in an unmarked author span of the same row', () => {
+    const { row, body, line } = rowFixture(false);
+    const author = document.createElement('span');
+    author.textContent = 'Orion';
+    row.insertBefore(author, row.firstChild);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(author, 0);
+    range.setEnd(text, 4);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+
+  it('rejects boundaries outside the body on the wrong side or collapsed', () => {
+    const { row, body, line, tip } = rowFixture(false);
+    const text = line.firstChild! as Text;
+    const wrongSide = document.createRange();
+    wrongSide.setStart(text, 0);
+    wrongSide.setEnd(tip, 1);
+    window.getSelection()!.addRange(wrongSide);
+    expect(getReplySelectionRange(body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const ancestor = document.createRange();
+    ancestor.setStart(text, 0);
+    ancestor.setEnd(row, 2);
+    window.getSelection()!.addRange(ancestor);
+    expect(getReplySelectionRange(body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const collapsed = document.createRange();
+    collapsed.selectNodeContents(line);
+    collapsed.collapse(true);
+    window.getSelection()!.addRange(collapsed);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+});

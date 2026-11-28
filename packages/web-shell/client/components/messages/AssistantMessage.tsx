@@ -271,6 +271,12 @@ export const AssistantMessage = memo(function AssistantMessage({
         <TooltipProvider delayDuration={300} disableHoverableContent>
           <div
             className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
+            // Declared row chrome for the selection clamp gate
+            // (selectionClipboard.getReplySelectionRange): rows rendered
+            // with footer actions are not wrapped by MessageTimestamp, so
+            // without this mark a triple-click boundary parked on the
+            // footer would fail the gate and suppress the copy menu.
+            data-selection-copy-chrome
           >
             {showFooterActions && (
               <>

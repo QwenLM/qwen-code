@@ -25,11 +25,57 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
       range.setEnd(composed.endContainer, composed.endOffset);
     }
   }
-  return !range.collapsed &&
-    body.contains(range.startContainer) &&
-    body.contains(range.endContainer)
-    ? range
-    : null;
+  if (range.collapsed) return null;
+  const startInside = body.contains(range.startContainer);
+  const endInside = body.contains(range.endContainer);
+  if (startInside && endInside) return range;
+  // A triple-click (or a drag that reaches the edge of a row) places the
+  // trailing boundary on the row chrome — outside the body, so the copy
+  // menu was suppressed even though the selection visibly covers the whole
+  // line. Clamp that boundary to the body edge on a clone; the live
+  // selection is never mutated. Clamping is only safe when the boundary
+  // sits after the body, on declared chrome of the body's own message row,
+  // and does not belong to another message's body — cross-message
+  // selections and content-bearing row siblings (steps/details, author
+  // line) stay rejected, and a body with no resolvable row or chrome mark
+  // keeps rejecting. In the app markup row chrome always trails the body
+  // (the timestamp tip renders after its children, the assistant footer
+  // after the content), so only the trailing boundary can land on chrome;
+  // a leading boundary outside the body stays rejected.
+  if (
+    startInside &&
+    !endInside &&
+    !otherMessageBody(range.endContainer) &&
+    sameRowChrome(body, range.endContainer) &&
+    (body.compareDocumentPosition(range.endContainer) &
+      Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0
+  ) {
+    const clamped = body.ownerDocument.createRange();
+    clamped.setStart(range.startContainer, range.startOffset);
+    clamped.setEnd(body, body.childNodes.length);
+    return clamped.collapsed ? null : clamped;
+  }
+  return null;
+}
+
+function otherMessageBody(node: Node): HTMLElement | null {
+  const element = node instanceof Element ? node : node.parentElement;
+  return element?.closest('div[class*=contentBody]') ?? null;
+}
+
+// Clamping only narrows a selection whose outer boundary is declared chrome
+// of the body's own message row (the timestamp hint: triple-click, drag to
+// the row edge). A boundary in a different row, or in a content-bearing
+// sibling of the body (steps/details, author line), belongs to content the
+// copy payload would silently drop — reject it. Without a resolvable row or
+// chrome mark the guard fails closed.
+function sameRowChrome(body: HTMLElement, node: Node): boolean {
+  const row = body.closest('[data-web-shell-message-row]');
+  if (!row) return false;
+  const element = node instanceof Element ? node : node.parentElement;
+  if (!element || !row.contains(element)) return false;
+  return element.closest('[data-selection-copy-chrome]') !== null;
 }
 
 function cloneSelected(node: Node, range: Range): Node | null {
