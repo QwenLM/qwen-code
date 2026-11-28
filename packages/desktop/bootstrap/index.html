@@ -282,12 +282,15 @@
       }
       #error {
         display: none;
+        max-height: 180px;
+        overflow: auto;
         margin-top: 16px;
         color: #ff9c91;
         font:
           12px/1.55 ui-monospace,
           monospace;
         white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
       @media (max-width: 640px) {
         main {
@@ -331,6 +334,9 @@
           </div>
         </div>
         <div class="actions">
+          <button id="download" class="primary" hidden>
+            Download Apple Silicon version
+          </button>
           <button id="choose" class="primary" hidden>
             Choose another workspace
           </button>

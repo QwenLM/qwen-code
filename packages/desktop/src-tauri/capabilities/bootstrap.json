@@ -11,6 +11,7 @@
     "allow-change-zoom",
     "allow-choose-workspace",
     "allow-install-update",
+    "allow-open-download-page",
     "allow-open-logs",
     "allow-restart-runtime"
   ]

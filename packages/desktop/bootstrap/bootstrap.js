@@ -7,6 +7,7 @@ const detail = document.querySelector('#detail');
 const pulse = document.querySelector('#pulse');
 const workspace = document.querySelector('#workspace');
 const error = document.querySelector('#error');
+const download = document.querySelector('#download');
 const choose = document.querySelector('#choose');
 const retry = document.querySelector('#retry');
 const logs = document.querySelector('#logs');
@@ -17,6 +18,9 @@ const macosTitlebar = document.querySelector('#macos-titlebar-drag-region');
 macosTitlebar.hidden = window.__QWEN_CODE_MACOS_TITLEBAR__ !== true;
 
 let currentWorkspace = '';
+let currentError = '';
+let currentErrorIsRuntime = true;
+let isRosetta = false;
 let snapshotOverrideStatus;
 let updateVersion;
 
@@ -25,17 +29,46 @@ function setWorkspace(path) {
   workspace.textContent = path || '';
 }
 
-function setStatus(kind, heading, message, failure = '') {
+function setStatus(
+  kind,
+  heading,
+  message,
+  failure = '',
+  { showDownload = false } = {},
+) {
   document.body.dataset.state = kind;
   title.textContent = heading;
   detail.textContent = message;
   pulse.className = `pulse ${kind === 'starting' ? '' : kind}`;
   error.style.display = failure ? 'block' : 'none';
   error.textContent = failure;
-  retry.hidden = kind !== 'error';
-  choose.hidden = kind === 'starting';
+  download.hidden = !showDownload;
+  retry.hidden = kind !== 'error' || showDownload;
+  choose.hidden = kind === 'starting' || showDownload;
   choose.disabled = kind === 'starting';
+  update.hidden = showDownload || !updateVersion;
   setWorkspace(kind === 'starting' ? '' : currentWorkspace);
+}
+
+function showRuntimeFailure(message, isRuntimeFailure = true) {
+  currentError = message;
+  currentErrorIsRuntime = isRuntimeFailure;
+  if (isRosetta && isRuntimeFailure) {
+    setStatus(
+      'error',
+      'Intel version installed on Apple Silicon',
+      'This Intel (x64) build of Qwen Code Desktop is running under Rosetta 2 and could not start. Download and install the Apple Silicon (arm64) version instead. The release page links the current installers; choose the Apple Silicon (arm64) one.',
+      message,
+      { showDownload: true },
+    );
+    return;
+  }
+  setStatus(
+    'error',
+    'Qwen Code could not start',
+    'Review the details, open the log, or choose another workspace.',
+    message,
+  );
 }
 
 async function chooseWorkspace() {
@@ -100,6 +133,22 @@ async function installUpdate() {
   }
 }
 
+async function openDownloadPage() {
+  if (!invoke) return;
+  try {
+    await invoke('open_download_page');
+  } catch (failure) {
+    const failureText = String(failure);
+    setStatus(
+      'error',
+      'Download page could not open',
+      'The release address is included in the details below.',
+      currentError ? `${currentError}\n\n${failureText}` : failureText,
+      { showDownload: isRosetta },
+    );
+  }
+}
+
 async function openLogs() {
   if (!invoke) return;
   try {
@@ -110,10 +159,12 @@ async function openLogs() {
       'Logs could not open',
       'Review the details or try again.',
       String(failure),
+      { showDownload: isRosetta },
     );
   }
 }
 
+download.addEventListener('click', openDownloadPage);
 choose.addEventListener('click', chooseWorkspace);
 retry.addEventListener('click', retryRuntime);
 logs.addEventListener('click', openLogs);
@@ -142,25 +193,28 @@ async function initialize() {
     }),
     listen('runtime-failed', ({ payload }) => {
       snapshotOverrideStatus = 'failed';
-      setStatus(
-        'error',
-        'Qwen Code could not start',
-        'Review the details, open the log, or choose another workspace.',
-        String(payload),
-      );
+      showRuntimeFailure(String(payload), true);
+    }),
+    listen('workspace-failed', ({ payload }) => {
+      snapshotOverrideStatus = 'failed';
+      showRuntimeFailure(String(payload), false);
     }),
     listen('update-available', ({ payload }) => {
       updateVersion = String(payload);
-      update.hidden = false;
+      update.hidden = download.hidden === false;
       update.textContent = `Install ${updateVersion}`;
     }),
   ]);
 
   const state = await invoke('bootstrap_state');
   version.textContent = `Desktop ${state.desktopVersion}`;
+  isRosetta = Boolean(state.isRosetta);
   currentWorkspace ||= String(state.workspace || '');
   if (snapshotOverrideStatus) {
-    if (snapshotOverrideStatus === 'failed') setWorkspace(currentWorkspace);
+    if (snapshotOverrideStatus === 'failed') {
+      if (isRosetta) showRuntimeFailure(currentError, currentErrorIsRuntime);
+      else setWorkspace(currentWorkspace);
+    }
     return;
   }
   if (state.status === 'starting') {
@@ -176,12 +230,7 @@ async function initialize() {
       'Connecting to the local Web Shell…',
     );
   } else if (state.error) {
-    setStatus(
-      'error',
-      'Qwen Code could not start',
-      'Review the details, open the log, or choose another workspace.',
-      state.error,
-    );
+    showRuntimeFailure(state.error, Boolean(state.errorIsRuntime));
   } else {
     setStatus(
       'idle',

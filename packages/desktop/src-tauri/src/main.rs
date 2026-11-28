@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewWindowBuilder};
 use tauri::{
-    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
-    WindowEvent,
+    AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -35,6 +34,8 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // packages/shared/src/config/storage.ts (PR 9085): ~/Documents/Qwen,
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
+const DESKTOP_DOWNLOAD_URL: &str =
+    "https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest";
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 // Managed deployments pin the app version and apply updates themselves; this
 // is their hard off-switch for the startup update check (#12575).
@@ -113,6 +114,8 @@ struct BootstrapState {
     status: &'static str,
     workspace: Option<String>,
     error: Option<String>,
+    is_rosetta: bool,
+    error_is_runtime: bool,
 }
 
 // The wire names are the strings ZOOM_HOTKEY_SCRIPT sends.
@@ -159,6 +162,8 @@ struct ApplicationState {
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
+    is_rosetta: bool,
+    error_is_runtime: AtomicBool,
 }
 
 fn main() {
@@ -173,6 +178,7 @@ fn main() {
             bootstrap_state,
             change_zoom,
             choose_workspace,
+            open_download_page,
             open_logs,
             restart_runtime,
             install_update,
@@ -281,54 +287,52 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         *lock(&state.origin) = None;
         let message = format!("Qwen Code stopped: {}", stopped.status);
         *lock(&state.last_error) = Some(message.clone());
+        state.error_is_runtime.store(true, Ordering::SeqCst);
         let _ = navigate_to_bootstrap(&runtime_exit_handle);
         let _ = runtime_exit_handle.emit("runtime-failed", message);
     });
     let (width, height) = default_window_size();
 
-    let window_builder = WebviewWindowBuilder::new(
-        &handle,
-        "main",
-        WebviewUrl::App("index.html".into()),
-    )
-        .title("Qwen Code")
-        .inner_size(width, height)
-        .min_inner_size(900.0, 600.0)
-        // The native handler swallows OS file drops before the page sees them;
-        // Web Shell owns drag-and-drop through HTML5 events.
-        .disable_drag_drop_handler()
-        .initialization_script(ZOOM_HOTKEY_SCRIPT)
-        .on_page_load(|webview, payload| {
-            // Re-apply on every document: the bootstrap page and the
-            // daemon-served Web Shell are separate loads of the same webview.
-            if !matches!(payload.event(), PageLoadEvent::Finished) {
-                return;
-            }
-            if let Some(state) = webview.try_state::<ApplicationState>() {
-                let _ = webview.set_zoom(state.settings.zoom().unwrap_or(DEFAULT_ZOOM));
-            }
-        })
-        .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
-        .on_new_window(|url, _features| {
-            if is_safe_external_url(&url) {
-                let _ = open::that_detached(url.as_str());
-            }
-            NewWindowResponse::Deny
-        })
-        .on_download(|webview, event| match event {
-            DownloadEvent::Requested { url, .. } => webview
-                .url()
-                .ok()
-                .and_then(|current| origin_of(&current).ok())
-                .is_some_and(|current_origin| {
-                    url.scheme() == "blob"
-                        && lock(&webview.app_handle().state::<ApplicationState>().origin)
-                            .as_ref()
-                            .is_some_and(|runtime_origin| current_origin == *runtime_origin)
-                }),
-            DownloadEvent::Finished { .. } => true,
-            _ => false,
-        });
+    let window_builder =
+        WebviewWindowBuilder::new(&handle, "main", WebviewUrl::App("index.html".into()))
+            .title("Qwen Code")
+            .inner_size(width, height)
+            .min_inner_size(900.0, 600.0)
+            // The native handler swallows OS file drops before the page sees them;
+            // Web Shell owns drag-and-drop through HTML5 events.
+            .disable_drag_drop_handler()
+            .initialization_script(ZOOM_HOTKEY_SCRIPT)
+            .on_page_load(|webview, payload| {
+                // Re-apply on every document: the bootstrap page and the
+                // daemon-served Web Shell are separate loads of the same webview.
+                if !matches!(payload.event(), PageLoadEvent::Finished) {
+                    return;
+                }
+                if let Some(state) = webview.try_state::<ApplicationState>() {
+                    let _ = webview.set_zoom(state.settings.zoom().unwrap_or(DEFAULT_ZOOM));
+                }
+            })
+            .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
+            .on_new_window(|url, _features| {
+                if is_safe_external_url(&url) {
+                    let _ = open::that_detached(url.as_str());
+                }
+                NewWindowResponse::Deny
+            })
+            .on_download(|webview, event| match event {
+                DownloadEvent::Requested { url, .. } => webview
+                    .url()
+                    .ok()
+                    .and_then(|current| origin_of(&current).ok())
+                    .is_some_and(|current_origin| {
+                        url.scheme() == "blob"
+                            && lock(&webview.app_handle().state::<ApplicationState>().origin)
+                                .as_ref()
+                                .is_some_and(|runtime_origin| current_origin == *runtime_origin)
+                    }),
+                DownloadEvent::Finished { .. } => true,
+                _ => false,
+            });
     #[cfg(target_os = "macos")]
     let window_builder = window_builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -351,6 +355,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
+        is_rosetta: is_running_under_rosetta(),
+        error_is_runtime: AtomicBool::new(true),
     });
 
     match initial_workspace(&handle) {
@@ -359,7 +365,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => {
             *lock(&handle.state::<ApplicationState>().last_error) = Some(error.clone());
-            let _ = handle.emit("runtime-failed", error);
+            handle
+                .state::<ApplicationState>()
+                .error_is_runtime
+                .store(false, Ordering::SeqCst);
+            let _ = handle.emit("workspace-failed", error);
         }
     }
     check_updates_silently(handle.clone());
@@ -390,6 +400,8 @@ fn bootstrap_state(
         },
         workspace: workspace.map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
+        is_rosetta: state.is_rosetta,
+        error_is_runtime: state.error_is_runtime.load(Ordering::SeqCst),
     })
 }
 
@@ -466,10 +478,17 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
 }
 
 #[tauri::command]
-fn open_logs(
-    webview: WebviewWindow,
-    state: State<'_, ApplicationState>,
-) -> Result<(), String> {
+fn open_download_page(webview: WebviewWindow) -> Result<(), String> {
+    require_bootstrap_origin(&webview)?;
+    open::that_detached(DESKTOP_DOWNLOAD_URL).map_err(|error| {
+        format!(
+            "Failed to open download page: {error}. Open {DESKTOP_DOWNLOAD_URL} in your browser."
+        )
+    })
+}
+
+#[tauri::command]
+fn open_logs(webview: WebviewWindow, state: State<'_, ApplicationState>) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
     if let Some(parent) = state.log_path.parent() {
         fs::create_dir_all(parent)
@@ -537,19 +556,19 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
         // of during setup.
         if create_if_missing {
             if let Err(error) = ensure_workspace_dir(&workspace) {
-                emit_runtime_failure(&app, generation, error);
+                emit_runtime_failure(&app, generation, error, true);
                 return;
             }
         }
         let canonical = match resolve_workspace(&workspace) {
             Ok(path) => path,
             Err(error) => {
-                emit_runtime_failure(&app, generation, error);
+                emit_runtime_failure(&app, generation, error, true);
                 return;
             }
         };
         if let Err(error) = state.settings.set_workspace(canonical.clone()) {
-            emit_runtime_failure(&app, generation, error);
+            emit_runtime_failure(&app, generation, error, true);
             return;
         }
         let registered = app.clone();
@@ -579,7 +598,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     Err(error) => {
                         runtime.stop();
                         clear_pending_runtime(&state, generation);
-                        emit_runtime_failure(&app, generation, error);
+                        emit_runtime_failure(&app, generation, error, false);
                         return;
                     }
                 };
@@ -591,6 +610,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                         &app,
                         generation,
                         "Desktop window is unavailable.".to_string(),
+                        false,
                     );
                     return;
                 };
@@ -601,6 +621,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                         &app,
                         generation,
                         format!("Failed to authenticate and load Web Shell: {error}"),
+                        false,
                     );
                     return;
                 }
@@ -624,13 +645,13 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
             }
             Err(error) => {
                 clear_pending_runtime(&state, generation);
-                emit_runtime_failure(&app, generation, error);
+                emit_runtime_failure(&app, generation, error, false);
             }
         }
     });
 }
 
-fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
+fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String, workspace_stage: bool) {
     let state = app.state::<ApplicationState>();
     if state.start_generation.load(Ordering::SeqCst) != generation {
         return;
@@ -641,8 +662,18 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
         .ok();
     *lock(&state.origin) = None;
     *lock(&state.last_error) = Some(error.clone());
+    state
+        .error_is_runtime
+        .store(!workspace_stage, Ordering::SeqCst);
     let _ = navigate_to_bootstrap(app);
-    let _ = app.emit("runtime-failed", error);
+    let _ = app.emit(
+        if workspace_stage {
+            "workspace-failed"
+        } else {
+            "runtime-failed"
+        },
+        error,
+    );
 }
 
 fn stop_runtime(app: &AppHandle) {
@@ -692,10 +723,7 @@ fn default_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
         .path()
         .home_dir()
         .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
-    Ok((
-        default_workspace_path(&home, override_dir.as_deref()),
-        true,
-    ))
+    Ok((default_workspace_path(&home, override_dir.as_deref()), true))
 }
 
 // An empty override is treated as unset so the ~/Documents/Qwen default wins,
@@ -908,6 +936,26 @@ fn is_safe_external_url(url: &Url) -> bool {
     matches!(url.scheme(), "https" | "http" | "mailto")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn is_running_under_rosetta() -> bool {
+    std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "sysctl.proc_translated"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| is_rosetta_sysctl_output(&output.stdout))
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn is_running_under_rosetta() -> bool {
+    false
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
+fn is_rosetta_sysctl_output(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout).trim() == "1"
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -917,15 +965,16 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_rosetta_sysctl_output,
+        is_safe_external_url, is_same_origin, origin_of, updates_disabled_value, BootstrapState,
+        BOOTSTRAP_URL, DESKTOP_DOWNLOAD_URL,
+    };
     #[cfg(target_os = "macos")]
     use super::{
         cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
         FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
-    };
-    use super::{
-        bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
-        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1152,9 +1201,7 @@ mod tests {
 
     #[test]
     fn allows_only_the_recorded_origin_once_it_is_set() {
-        let origin = Mutex::new(Some(
-            Url::parse("http://127.0.0.1:49152/").expect("origin"),
-        ));
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
         assert!(is_allowed_navigation(
             &Url::parse("http://127.0.0.1:49152/session/123").expect("same origin"),
             &origin,
@@ -1171,9 +1218,7 @@ mod tests {
 
     #[test]
     fn allows_bootstrap_even_after_origin_is_set() {
-        let origin = Mutex::new(Some(
-            Url::parse("http://127.0.0.1:49152/").expect("origin"),
-        ));
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
         assert!(is_allowed_navigation(
             &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
             &origin,
@@ -1226,5 +1271,38 @@ mod tests {
         assert!(!is_bootstrap_url(
             &Url::parse("about:srcdoc").expect("srcdoc")
         ));
+    }
+
+    #[test]
+    fn recognizes_rosetta_sysctl_translation_flag() {
+        assert!(is_rosetta_sysctl_output(b"1\n"));
+        assert!(is_rosetta_sysctl_output(b" 1 \r\n"));
+        assert!(!is_rosetta_sysctl_output(b"0\n"));
+        assert!(!is_rosetta_sysctl_output(b""));
+        assert!(!is_rosetta_sysctl_output(
+            b"sysctl: unknown oid 'sysctl.proc_translated'\n"
+        ));
+    }
+
+    #[test]
+    fn desktop_download_url_uses_https_release_page() {
+        let url = Url::parse(DESKTOP_DOWNLOAD_URL).expect("download URL");
+        assert_eq!(url.scheme(), "https");
+        assert!(is_safe_external_url(&url));
+    }
+
+    #[test]
+    fn bootstrap_state_serializes_flags_camel_case() {
+        let state = BootstrapState {
+            desktop_version: "0.0.0".to_string(),
+            status: "idle",
+            workspace: None,
+            error: Some("boom".to_string()),
+            is_rosetta: true,
+            error_is_runtime: false,
+        };
+        let json = serde_json::to_value(&state).expect("serialize bootstrap state");
+        assert_eq!(json["isRosetta"], true);
+        assert_eq!(json["errorIsRuntime"], false);
     }
 }
