@@ -140,9 +140,15 @@ bodies/<name>.md     # 动作引用的评论/review 正文
 
 1. 在写入任何内容之前解析并校验整个 draft 集（fail-closed 预检）：未知动作或
    字段拒绝整组；`marker` 必须在允许列表（`stage=1`、`stage=2`、`stage=3`、
-   `stage=1-pre`、`stage=1b`）；每条评论正文必须以精确的
-   `<!-- qwen-triage <marker> -->` 行开头（前缀由 publisher 强制，不信任
-   agent）；超过 GitHub 65,536 字符上限的正文拒绝而非截断（截断可能切掉 CI 区域
+   `stage=1-pre`、`stage=1b`）；每条发布出的评论正文都保证以精确的
+   `<!-- qwen-triage <marker> -->` 行开头（前缀由 publisher 负责——正文漏写时
+   自动前置补齐，匹配 marker 上无害的前导空行或空白自动规范化到首行，触发修复时
+   在 Actions 上输出 `::warning::` 注解、本地退化为普通 `note:`，空正文或
+   不匹配/畸形的顶部 `<!-- qwen-triage ... -->` 注释仍 fail-closed 拒绝；补齐
+   遗漏的 marker 属于渲染健壮性而非与同进程写入 `actions.jsonl` 的 agent 之间的
+   安全屏障，`qwen-triage-finalize.yml` 的安全边界仍是 bot 身份及将 triage 评论
+   与 `serve-ab` / `visuals` 等其他 bot 车道隔离）；超过
+   GitHub 65,536 字符上限的正文（含补齐前缀后）拒绝而非截断（截断可能切掉 CI 区域
    或 approve-on-green marker）；review event 仅限 `APPROVE` 与
    `REQUEST_CHANGES`；`APPROVE` 必须带 `commit_id`；body 路径必须解析为 draft
    目录内的常规文件；`actions.jsonl` 与 `bodies/` 本身必须分别是常规文件与
@@ -234,7 +240,8 @@ stream-json`。显式环境携带只读 `GH_TOKEN`、`BOT_LOGIN`、draft 目录�
 ## 契约保全
 
 - marker（`stage=N`、`qwen-triage-ci sha=…` 区域、`approve-on-green sha=…`、
-  lifecycle）字节不变；publisher 前缀校验后原样发布正文。
+  lifecycle）字节不变；publisher 在确保顶部 stage marker 精确后原样发布正文
+  （漏写时自动前置补齐，匹配 marker 上无害空白规范化，不匹配则拒绝）。
 - 所有写入仍落在 PAT 的 bot 身份下，`qwen-triage-finalize.yml` 的作者过滤、
   CI 区域替换、延迟批准原样工作。
 - `Finalize triage status comment` 留在 triage job（`always()`），消费 agent

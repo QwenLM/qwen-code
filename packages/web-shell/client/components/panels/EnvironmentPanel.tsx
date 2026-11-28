@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionAttachmentReference,
@@ -8,6 +8,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
+  CalendarClockIcon,
   ChevronRightIcon,
   CircleCheckIcon,
   CirclePauseIcon,
@@ -17,13 +18,28 @@ import {
   FolderClosedIcon,
   GitBranchIcon,
   LoaderCircleIcon,
+  PauseIcon,
+  PlayIcon,
+  RefreshCwIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   NetworkIcon,
+  Trash2Icon,
   WorkflowIcon,
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import { useSharedNow } from '../../hooks/useSharedNow';
+import {
+  scheduledTaskRuntimeKey as scheduledTaskKey,
+  type SessionDurableScheduledTask,
+  type SessionScheduledTask,
+  type SessionScopedScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
+import {
+  describeCron,
+  formatCountdown,
+} from '../dialogs/scheduledTasksSchedule';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
@@ -49,6 +65,11 @@ interface EnvironmentPanelProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
+  scheduledTasks?: readonly SessionScheduledTask[];
+  scheduledTaskBusyIds?: ReadonlySet<string>;
+  manualRunActive?: boolean;
+  focusScheduledTasksNonce?: number;
+  scheduledTasksOwnerSessionId?: string;
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
   attachmentsError?: string;
@@ -63,6 +84,16 @@ interface EnvironmentPanelProps {
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  onOpenScheduledTask?: (task: SessionScheduledTask) => void;
+  onToggleScheduledTask?: (task: SessionDurableScheduledTask) => void;
+  onRunScheduledTask?: (task: SessionDurableScheduledTask) => void;
+  onDeleteScheduledTask?: (
+    task: SessionDurableScheduledTask,
+  ) => Promise<boolean | void>;
+  onCancelSessionScheduledTask?: (
+    task: SessionScopedScheduledTask,
+  ) => Promise<boolean | void>;
+  onManageAllScheduledTasks?: () => void;
   /** Resolve an attachment to a displayable `data:` URL. */
   onReadImage?: (attachmentId: string) => Promise<string>;
   onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
@@ -78,7 +109,16 @@ export type EnvironmentAgentTask = DaemonSessionAgentTaskStatus & {
 };
 
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
+  [
+    'environment',
+    'sources',
+    'subagents',
+    'backgroundTasks',
+    'scheduledTasks',
+    'artifacts',
+  ];
+
+// Runtime task keys include both the scheduler scope and the wakeup/cron source.
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -168,6 +208,11 @@ export function EnvironmentPanel({
   gitStatus,
   tasks,
   agentTasks,
+  scheduledTasks,
+  scheduledTaskBusyIds,
+  manualRunActive = false,
+  focusScheduledTasksNonce,
+  scheduledTasksOwnerSessionId,
   attachments,
   attachmentsLoading = false,
   attachmentsError,
@@ -182,6 +227,12 @@ export function EnvironmentPanel({
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
+  onOpenScheduledTask,
+  onToggleScheduledTask,
+  onRunScheduledTask,
+  onDeleteScheduledTask,
+  onCancelSessionScheduledTask,
+  onManageAllScheduledTasks,
   onReadImage,
   onImagePreview,
   onAttachmentPreview,
@@ -202,10 +253,145 @@ export function EnvironmentPanel({
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [tasksExpanded, setTasksExpanded] = useState(true);
+  const [scheduledTasksExpanded, setScheduledTasksExpanded] = useState(true);
   const [artifactsExpanded, setArtifactsExpanded] = useState(true);
+  const scheduledSectionRef = useRef<HTMLElement | null>(null);
+  const scheduledSectionHeaderRef = useRef<HTMLButtonElement>(null);
+  const scheduledTaskOpenerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingScheduledTaskFocusRef = useRef<{
+    removedKey: string;
+    nextKey?: string;
+    request: number;
+    confirmed: boolean;
+  } | null>(null);
+  const scheduledTaskFocusRequestRef = useRef(0);
+  const [
+    confirmedScheduledTaskFocusRequest,
+    setConfirmedScheduledTaskFocusRequest,
+  ] = useState<number | null>(null);
+  const lastFocusScheduledTasksNonceRef = useRef(focusScheduledTasksNonce);
+  useEffect(() => {
+    pendingScheduledTaskFocusRef.current = null;
+    scheduledTaskOpenerRefs.current.clear();
+  }, [scheduledTasksOwnerSessionId, workspaceCwd]);
+  const hasVisibleScheduledCountdown =
+    !hidden &&
+    items.includes('scheduledTasks') &&
+    scheduledTasksExpanded &&
+    Boolean(
+      scheduledTasks?.some((task) => task.enabled && task.nextRunAt !== null),
+    );
+  const now = useSharedNow(hasVisibleScheduledCountdown);
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
+
+  useEffect(() => {
+    if (!focusScheduledTasksNonce) return;
+    if (focusScheduledTasksNonce === lastFocusScheduledTasksNonceRef.current) {
+      return;
+    }
+    lastFocusScheduledTasksNonceRef.current = focusScheduledTasksNonce;
+    setScheduledTasksExpanded(true);
+    const sectionEl = scheduledSectionRef.current;
+    if (sectionEl && typeof sectionEl.scrollIntoView === 'function') {
+      sectionEl.scrollIntoView({ block: 'nearest' });
+    }
+  }, [focusScheduledTasksNonce]);
+
+  const restoreScheduledTaskFocus = useCallback(
+    (request: number): void => {
+      const pending = pendingScheduledTaskFocusRef.current;
+      if (
+        !pending?.confirmed ||
+        pending.request !== request ||
+        scheduledTasks?.some(
+          (entry) => scheduledTaskKey(entry) === pending.removedKey,
+        )
+      ) {
+        return;
+      }
+      const nextOpener = pending.nextKey
+        ? scheduledTaskOpenerRefs.current.get(pending.nextKey)
+        : undefined;
+      pendingScheduledTaskFocusRef.current = null;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        active !== document.documentElement &&
+        !scheduledSectionRef.current?.contains(active)
+      ) {
+        return;
+      }
+      if (scheduledTasksExpanded && nextOpener) {
+        nextOpener.focus();
+      } else if (scheduledSectionHeaderRef.current) {
+        scheduledSectionHeaderRef.current.focus();
+      } else {
+        panelRef.current?.focus();
+      }
+    },
+    [scheduledTasks, scheduledTasksExpanded],
+  );
+
+  useEffect(() => {
+    const request = pendingScheduledTaskFocusRef.current?.request;
+    if (request !== undefined) restoreScheduledTaskFocus(request);
+  }, [confirmedScheduledTaskFocusRequest, restoreScheduledTaskFocus]);
+
+  const rememberScheduledTaskFocus = (entry: SessionScheduledTask): number => {
+    const removedKey = scheduledTaskKey(entry);
+    const removedIndex = scheduledTasks?.findIndex(
+      (candidate) => scheduledTaskKey(candidate) === removedKey,
+    );
+    const nextEntry =
+      removedIndex === undefined || removedIndex < 0
+        ? undefined
+        : scheduledTasks?.[removedIndex + 1];
+    const request = ++scheduledTaskFocusRequestRef.current;
+    pendingScheduledTaskFocusRef.current = {
+      removedKey,
+      nextKey: nextEntry ? scheduledTaskKey(nextEntry) : undefined,
+      request,
+      confirmed: false,
+    };
+    return request;
+  };
+
+  const trackScheduledTaskFocus = (
+    entry: SessionScheduledTask,
+    action: () => Promise<boolean | void> | boolean | void,
+  ): void => {
+    const request = rememberScheduledTaskFocus(entry);
+    const clearFailedIntent = () => {
+      if (pendingScheduledTaskFocusRef.current?.request === request) {
+        pendingScheduledTaskFocusRef.current = null;
+      }
+    };
+    try {
+      void Promise.resolve(action()).then((succeeded) => {
+        if (succeeded === false) {
+          clearFailedIntent();
+          return;
+        }
+        const pending = pendingScheduledTaskFocusRef.current;
+        // Void resolve-only handlers retain their established semantics;
+        // explicit false and rejected promises remain unconfirmed.
+        if (
+          (succeeded === true || succeeded === undefined) &&
+          pending?.request === request &&
+          !pending.confirmed
+        ) {
+          pending.confirmed = true;
+          setConfirmedScheduledTaskFocusRequest(request);
+          restoreScheduledTaskFocus(request);
+        }
+      }, clearFailedIntent);
+    } catch {
+      clearFailedIntent();
+    }
+  };
 
   useEffect(() => {
     if (hidden || !environmentExpanded || !gitWorkspaceCwd || !activeBranch) {
@@ -279,6 +465,7 @@ export function EnvironmentPanel({
       aria-label={t('environment.title')}
       data-testid="environment-panel"
       data-floating={floating}
+      tabIndex={-1}
       hidden={hidden}
     >
       {items.includes('environment') && (
@@ -490,6 +677,209 @@ export function EnvironmentPanel({
           )}
         </section>
       )}
+
+      {items.includes('scheduledTasks') &&
+        scheduledTasks &&
+        scheduledTasks.length > 0 && (
+          <section
+            ref={scheduledSectionRef}
+            className={styles.section}
+            data-testid="environment-scheduled-tasks-section"
+          >
+            <div
+              className={`${styles.sectionHeaderRow} ${styles.scheduledTaskHeaderRow}`}
+            >
+              <button
+                ref={scheduledSectionHeaderRef}
+                type="button"
+                className={styles.sectionHeader}
+                aria-expanded={scheduledTasksExpanded}
+                onClick={() =>
+                  setScheduledTasksExpanded((expanded) => !expanded)
+                }
+              >
+                <span>{t('environment.scheduledTasks')}</span>
+                {!scheduledTasksExpanded && <ChevronRightIcon />}
+              </button>
+              {onManageAllScheduledTasks && (
+                <button
+                  type="button"
+                  className={styles.sectionHeaderAction}
+                  onClick={onManageAllScheduledTasks}
+                >
+                  {t('environment.scheduledTasks.viewAll')}
+                </button>
+              )}
+            </div>
+            {scheduledTasksExpanded && (
+              <ul className={styles.scheduledList}>
+                {scheduledTasks.map((entry) => {
+                  const busy =
+                    scheduledTaskBusyIds?.has(scheduledTaskKey(entry)) === true;
+                  const scopeLabel =
+                    entry.scope === 'durable'
+                      ? t('environment.scheduledTasks.scopeDurable')
+                      : entry.source === 'wakeup'
+                        ? t('environment.scheduledTasks.scopeWakeup')
+                        : t('environment.scheduledTasks.scopeSession');
+                  const isWakeup =
+                    entry.scope === 'session' && entry.source === 'wakeup';
+                  const scheduleText = isWakeup
+                    ? t('scheduledTasks.runsOnce')
+                    : describeCron(entry.cronExpr, t);
+                  const countdown =
+                    entry.enabled && entry.nextRunAt !== null
+                      ? formatCountdown(entry.nextRunAt - now, t)
+                      : null;
+                  const metaText = [
+                    scheduleText,
+                    !entry.enabled
+                      ? t('environment.scheduledTasks.statusPaused')
+                      : countdown
+                        ? countdown === t('scheduledTasks.dueNow')
+                          ? countdown
+                          : t('environment.scheduledTasks.nextRun', {
+                              when: countdown,
+                            })
+                        : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+
+                  return (
+                    <li
+                      key={scheduledTaskKey(entry)}
+                      className={styles.scheduledItem}
+                      data-testid="environment-scheduled-task"
+                      data-scope={entry.scope}
+                      data-enabled={entry.enabled ? 'true' : 'false'}
+                    >
+                      <button
+                        ref={(node) => {
+                          const key = scheduledTaskKey(entry);
+                          if (node)
+                            scheduledTaskOpenerRefs.current.set(key, node);
+                          else scheduledTaskOpenerRefs.current.delete(key);
+                        }}
+                        type="button"
+                        className={styles.scheduledItemMain}
+                        onClick={() => onOpenScheduledTask?.(entry)}
+                        disabled={!onOpenScheduledTask}
+                      >
+                        <span className={styles.taskIcon} aria-hidden="true">
+                          {entry.scope === 'session' &&
+                          entry.source === 'wakeup' ? (
+                            <RefreshCwIcon />
+                          ) : (
+                            <CalendarClockIcon />
+                          )}
+                        </span>
+                        <span className={styles.scheduledItemBody}>
+                          <span className={styles.scheduledItemTitleRow}>
+                            <span
+                              className={styles.taskName}
+                              title={entry.title}
+                            >
+                              {entry.title}
+                            </span>
+                            <span className={styles.agentTag}>
+                              {scopeLabel}
+                            </span>
+                          </span>
+                          <span
+                            className={styles.scheduledItemMeta}
+                            title={isWakeup ? undefined : entry.cronExpr}
+                          >
+                            {metaText}
+                          </span>
+                        </span>
+                      </button>
+                      <div className={styles.scheduledItemActions}>
+                        {entry.scope === 'durable' ? (
+                          <>
+                            {onToggleScheduledTask && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={
+                                  entry.enabled
+                                    ? t('scheduledTasks.disable')
+                                    : t('scheduledTasks.enable')
+                                }
+                                title={
+                                  entry.enabled
+                                    ? t('scheduledTasks.disable')
+                                    : t('scheduledTasks.enable')
+                                }
+                                disabled={busy}
+                                onClick={() => onToggleScheduledTask(entry)}
+                              >
+                                {entry.enabled ? <PauseIcon /> : <PlayIcon />}
+                              </button>
+                            )}
+                            {onRunScheduledTask && entry.enabled && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={t('scheduledTasks.runNow')}
+                                title={t('scheduledTasks.runNow')}
+                                disabled={busy || manualRunActive}
+                                onClick={() => onRunScheduledTask(entry)}
+                              >
+                                <RefreshCwIcon />
+                              </button>
+                            )}
+                            {onDeleteScheduledTask && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={t('scheduledTasks.delete')}
+                                title={t('scheduledTasks.delete')}
+                                disabled={busy}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      t('scheduledTasks.deleteConfirm', {
+                                        name: entry.title,
+                                      }),
+                                    )
+                                  ) {
+                                    trackScheduledTaskFocus(entry, () =>
+                                      onDeleteScheduledTask(entry),
+                                    );
+                                  }
+                                }}
+                              >
+                                <Trash2Icon />
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          onCancelSessionScheduledTask && (
+                            <button
+                              type="button"
+                              className={styles.scheduledIconButton}
+                              aria-label={t('environment.scheduledTasks.stop')}
+                              title={t('environment.scheduledTasks.stop')}
+                              disabled={busy}
+                              onClick={() => {
+                                trackScheduledTaskFocus(entry, () =>
+                                  onCancelSessionScheduledTask(entry),
+                                );
+                              }}
+                            >
+                              <CircleStopIcon />
+                            </button>
+                          )
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
 
       {items.includes('artifacts') && (
         <section className={styles.section}>

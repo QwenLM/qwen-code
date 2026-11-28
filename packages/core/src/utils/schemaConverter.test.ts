@@ -9,6 +9,7 @@ import {
   convertSchema,
   relaxSchemaForFunctionCalling,
 } from './schemaConverter.js';
+import { SchemaValidator } from './schemaValidator.js';
 
 describe('convertSchema', () => {
   describe('mode: auto (default)', () => {
@@ -295,6 +296,135 @@ describe('convertSchema', () => {
 // `additionalProperties: false` — mutually exclusive optional tool fields
 // (Agent working_dir vs isolation) become impossible to satisfy.
 describe('relaxSchemaForFunctionCalling', () => {
+  describe('openUndeclaredObjects', () => {
+    const docsSchema = {
+      type: 'object',
+      properties: {
+        segment: { type: 'string' },
+        docs: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { category_id: { enum: ['a', 'b'] } },
+            required: ['category_id'],
+          },
+        },
+        unprocessed: { type: 'array', items: { type: 'object' } },
+        options: { type: 'object', properties: {} },
+        unevaluatedProperties: { type: 'string' },
+      },
+      required: ['segment', 'docs'],
+    };
+
+    it('makes omitted additionalProperties explicit on levels that declare properties', () => {
+      const relaxed = relaxSchemaForFunctionCalling(docsSchema, true, true) as {
+        additionalProperties?: unknown;
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(relaxed.additionalProperties).toBe(true);
+      const docItems = relaxed.properties['docs']!['items'] as Record<
+        string,
+        unknown
+      >;
+      expect(docItems['additionalProperties']).toBe(true);
+      expect(docItems['required']).toEqual(['category_id']);
+      // Objects without declared properties are already open on the wire.
+      expect(
+        relaxed.properties['unprocessed']!['items'] as Record<string, unknown>,
+      ).toEqual({ type: 'object' });
+      expect(relaxed.properties['options']).toEqual({ type: 'object' });
+    });
+
+    it('never opens a level whose source says false or carries its own value', () => {
+      const schema = {
+        type: 'object',
+        properties: {
+          strippedFalse: {
+            type: 'object',
+            properties: { x: { type: 'string' }, y: { type: 'string' } },
+            required: ['x'],
+            additionalProperties: false,
+          },
+          keptFalse: {
+            type: 'object',
+            properties: { z: { type: 'string' } },
+            required: ['z'],
+            additionalProperties: false,
+          },
+          typed: {
+            type: 'object',
+            properties: { w: { type: 'string' } },
+            additionalProperties: { type: 'number' },
+          },
+          unevaluated: {
+            type: 'object',
+            properties: { v: { type: 'string' } },
+            unevaluatedProperties: false,
+          },
+          additionalProperties: { type: 'boolean' },
+        },
+        required: ['keptFalse'],
+        additionalProperties: false,
+      };
+      const relaxed = relaxSchemaForFunctionCalling(schema, true, true) as {
+        additionalProperties?: unknown;
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(relaxed.additionalProperties).toBeUndefined();
+      expect(
+        relaxed.properties['strippedFalse']!['additionalProperties'],
+      ).toBeUndefined();
+      expect(relaxed.properties['keptFalse']!['additionalProperties']).toBe(
+        false,
+      );
+      expect(relaxed.properties['typed']!['additionalProperties']).toEqual({
+        type: 'number',
+      });
+      expect(
+        relaxed.properties['unevaluated']!['additionalProperties'],
+      ).toBeUndefined();
+      expect(relaxed.properties['additionalProperties']).toEqual({
+        type: 'boolean',
+      });
+    });
+
+    it('leaves the schema unchanged when the option is off', () => {
+      expect(
+        JSON.stringify(relaxSchemaForFunctionCalling(docsSchema, true)),
+      ).not.toContain('additionalProperties');
+    });
+
+    const itemSchema = { properties: { name: { type: 'string' } } };
+
+    it.each([
+      {
+        keyword: 'allOf',
+        composition: { allOf: [itemSchema], unevaluatedProperties: false },
+      },
+      {
+        keyword: '$ref',
+        composition: {
+          $defs: {
+            item: itemSchema,
+            closed: { $ref: '#/$defs/item', unevaluatedProperties: false },
+          },
+          $ref: '#/$defs/closed',
+        },
+      },
+    ])('preserves unevaluatedProperties across $keyword', ({ composition }) => {
+      const schema = { type: 'object', ...composition };
+      const wire = {
+        ...relaxSchemaForFunctionCalling(schema, true, true),
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+      };
+
+      expect(SchemaValidator.validate(wire, { name: 'apple' })).toBeNull();
+      expect(
+        SchemaValidator.validate(wire, { name: 'apple', color: 'red' }),
+      ).toContain('unevaluated properties');
+    });
+  });
+
   it('strips additionalProperties:false on levels with optional properties', () => {
     const agentLike = {
       $schema: 'http://json-schema.org/draft-07/schema#',

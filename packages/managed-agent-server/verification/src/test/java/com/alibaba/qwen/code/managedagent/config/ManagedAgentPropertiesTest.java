@@ -36,6 +36,20 @@ public class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void actionParkingRequiresWakeDispatchAtStartup() {
+        var environment = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("qwen.managed-agent.action-parking.enabled", "true");
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(environment);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wake-dispatch.enabled");
+
+        environment.setProperty("qwen.managed-agent.wake-dispatch.enabled", "true");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
     void generatedAccessorsKeepNestedBindingAndInternalStatePrivate() {
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -1162,6 +1176,17 @@ public class ManagedAgentPropertiesTest {
         nonLocal.getRuntimeBroker().setProvisioner("static");
         assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("local-process");
+
+        ManagedAgentProperties externalWorkspace = new ManagedAgentProperties();
+        externalWorkspace.getRuntimeBroker().setProvisioner("external-workspace");
+        externalWorkspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        externalWorkspace.getRuntimeBroker().setDurableLocalProcess(false);
+        externalWorkspace.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        externalWorkspace.getRuntimeBroker().setExternalProviderUrl("https://provider.example");
+        externalWorkspace.getRuntimeBroker().setExternalProviderToken("test-provider-token");
+        externalWorkspace.getRuntimeBroker().setWorkspaceId("workspace");
+        externalWorkspace.getRuntimeBroker().setWorkspaceCwd("/workspace");
+        assertThatCode(externalWorkspace::validateWorkspaceFiles).doesNotThrowAnyException();
     }
 
     @Test

@@ -31,6 +31,7 @@ import {
   readHistory,
   readRegularFile,
   readState,
+  requireState,
   stateDefect,
   writeState,
   assertOwnedBySession,
@@ -279,10 +280,26 @@ describe('stateDefect', () => {
       ['preparedAt', 3],
       ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],
       ['needsHuman', [{ sha: 'a', at: 'b' }]],
+      ['inPlace', 'yes'],
+      ['inPlaceWatch', 1],
     ] as const) {
       expect(stateDefect({ ...valid, [field]: value } as AutofixPrState)).toBe(
         field,
       );
+    }
+  });
+
+  it('requireState refuses a state file whose prNumber mismatches the requested PR', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-reqstate-'));
+    try {
+      const p = autofixPrPaths(dir, 7);
+      mkdirSync(dirname(p.statePath), { recursive: true });
+      writeState(p.statePath, { ...valid, prNumber: 99 });
+      expect(() => requireState(p.statePath, 7)).toThrow(
+        /records PR #99.*delete/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

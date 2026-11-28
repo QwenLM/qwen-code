@@ -1,0 +1,233 @@
+# .github/workflows/main-ci-failure-resolve.yml
+
+name: 'Resolve Main CI Failure Issues'
+
+# The reporter in main-ci-failure-issue.yml files one issue per failing
+# signature and reopens a closed one when that signature recurs, but nothing
+# ever retires the standing set: a lane that has been green for a week still
+# leaves its issues open, so triage works against a growing pile. This
+# workflow closes the issues a green main run actually covers, and the
+# reporter's reopen path brings one back if the failure returns.
+on:
+  workflow_run:
+    # Keep this list identical to main-ci-failure-issue.yml: an issue this
+    # workflow cannot see is an issue that never retires.
+    workflows:
+      - 'E2E Tests'
+      - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
+      - 'SDK Java'
+      - 'SDK Python'
+      - 'Qwen Code CI'
+      - 'Desktop Checks'
+      - 'tui-parity'
+    types: ['completed']
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  actions: 'read'
+  contents: 'read'
+  issues: 'write'
+  # The PR-gate arm reads commits/{sha}/pulls to confirm a green gate run
+  # belongs to the same PR and commit; without pull-requests read that lookup
+  # 403s and the arm never retires an issue.
+  pull-requests: 'read'
+
+jobs:
+  resolve:
+    name: 'Retire resolved failure issues'
+    # A green PR gate only retires an earlier red run of its own commit.
+    if: >-
+      ${{ github.repository == 'QwenLM/qwen-code' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      ((github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+      (github.event.workflow_run.event == 'schedule' &&
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow.name == 'SDK Java') ||
+      ((github.event.workflow_run.event == 'pull_request' ||
+      github.event.workflow_run.event == 'pull_request_review') &&
+      github.event.workflow.name == 'Managed Agent gate')) }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    concurrency:
+      group: 'main-ci-failure-issue-${{ github.event.workflow.id }}'
+      cancel-in-progress: false
+      queue: 'max'
+    steps:
+      - name: 'Close the issues this green run covers'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          CONFIGURED_BOT_LOGIN: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          REPO: '${{ github.repository }}'
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
+          RUN_ID: '${{ github.event.workflow_run.id }}'
+          RUN_STARTED_AT: '${{ github.event.workflow_run.run_started_at }}'
+          RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_EVENT: '${{ github.event.workflow_run.event }}'
+        run: |-
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf -- "${work}"' EXIT
+
+          # The token only needs to read this run and write issues; the
+          # reporting bot's PAT is optional in the reporter and is not used
+          # here. Every issue this job closes must have been reported after
+          # the run started, so the timestamp comparison below is load-bearing.
+          green_jobs="${work}/green-jobs.txt"
+          if ! gh api --paginate \
+            "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "success") | .name' \
+            > "${green_jobs}"; then
+            echo '::error::Could not read the green run jobs; closing nothing.'
+            exit 1
+          fi
+          if [[ ! -s "${green_jobs}" ]]; then
+            echo 'The green run recorded no successful jobs; closing nothing.'
+            exit 0
+          fi
+
+          open_issues="${work}/open-issues.json"
+          lookup_ok=false
+          for attempt in 1 2 3; do
+            if gh issue list --repo "${REPO}" --state open --limit 3000 \
+              --json number,title,author,updatedAt > "${open_issues}"; then
+              lookup_ok=true
+              break
+            fi
+            sleep "${attempt}"
+          done
+          if [[ "${lookup_ok}" != true ]]; then
+            echo '::error::Could not list open issues; closing nothing.'
+            exit 1
+          fi
+
+          # Title families mirror the reporter's own matching. The author gate
+          # accepts both identities the reporter can write with; a same-titled
+          # human tracking issue must never enter the close path.
+          candidates="${work}/candidates.txt"
+          if ! jq -r --arg family "Main CI failed: ${WORKFLOW_NAME}" \
+            --arg bot "${CONFIGURED_BOT_LOGIN}" \
+            --arg run_started "${RUN_STARTED_AT}" '
+              .[]
+              | select(.author.login == $bot or .author.login == "app/github-actions")
+              | select(
+                  (.title == $family)
+                  or (.title | startswith($family + " — "))
+                  or (.title | startswith($family + " on "))
+                )
+              | select(.updatedAt < $run_started)
+              | .number
+            ' "${open_issues}" > "${candidates}"; then
+            echo '::error::Could not filter the open issues; closing nothing.'
+            exit 1
+          fi
+
+          closed=0
+          while IFS= read -r number; do
+            [[ -n "${number}" ]] || continue
+            issue_json="${work}/issue-${number}.json"
+            if ! gh issue view "${number}" --repo "${REPO}" \
+              --json number,title,state,author,createdAt,updatedAt,body,comments \
+              > "${issue_json}"; then
+              echo "::warning::Could not re-read issue #${number}; leaving it open."
+              continue
+            fi
+            if ! jq -e --arg bot "${CONFIGURED_BOT_LOGIN}" \
+              --arg run_started "${RUN_STARTED_AT}" '
+                .state == "OPEN"
+                and (.author.login == $bot or .author.login == "app/github-actions")
+                and .updatedAt < $run_started
+              ' "${issue_json}" >/dev/null; then
+              continue
+            fi
+
+            # Only marker-stamped reporter records count; the latest one wins
+            # even when it lists no jobs, so a jobless recurrence pins it open.
+            latest_record="$(jq -r --arg bot "${CONFIGURED_BOT_LOGIN}" '
+              def reporter: . == $bot or . == "app/github-actions" or . == "github-actions[bot]";
+              def failureRecord:
+                (.body // "")
+                | contains("qwen-managed-agent-ci-failure:")
+                  or contains("qwen-main-ci-failure:")
+                  or contains("qwen-main-ci-failure-sig:");
+              ([{createdAt, body: (.body // "")}]
+                + [(.comments // [])[] | select(.author.login | reporter) | {createdAt, body: (.body // "")}])
+              | map(select(failureRecord))
+              | sort_by(.createdAt) | last | .body // ""
+            ' "${issue_json}")"
+            job_names="$(printf '%s\n' "${latest_record}" | awk '
+              /^- \[`[^`]+`\]/ {
+                line = $0
+                sub(/^- \[`/, "", line)
+                sub(/`\].*$/, "", line)
+                print line
+                next
+              }
+              /^  - `[^`]+`/ {
+                line = $0
+                sub(/^  - `/, "", line)
+                sub(/`.*$/, "", line)
+                print line
+              }
+            ')"
+            if [[ -z "${job_names}" ]]; then
+              echo "::warning::Could not identify the latest failure jobs in #${number}; leaving it open."
+              continue
+            fi
+
+            covered=true
+            while IFS= read -r job_name; do
+              [[ -n "${job_name}" ]] || continue
+              if ! grep -Fxq -- "${job_name}" "${green_jobs}"; then
+                covered=false
+                break
+              fi
+            done <<< "${job_names}"
+            if [[ "${covered}" != true ]]; then
+              continue
+            fi
+            # A PR gate is proof only at its own commit, for its own PR.
+            resolved_from_pr=false
+            if [[ "${RUN_EVENT}" == 'pull_request' ||
+              "${RUN_EVENT}" == 'pull_request_review' ]]; then
+              failure_sha="$(printf '%s\n' "${latest_record}" \
+                | grep -oE '· commit `[^`]+`' | head -1 \
+                | sed -e 's/^· commit `//' -e 's/`$//')"
+              if [[ -z "${failure_sha}" || "${RUN_HEAD_SHA}" != "${failure_sha}"* ]]; then
+                continue
+              fi
+              associated_pr="${work}/associated-pr-${number}.json"
+              if ! gh api "repos/${REPO}/commits/${RUN_HEAD_SHA}/pulls" \
+                --jq 'map(select(.base.ref == "main" and .head.sha == "'"${RUN_HEAD_SHA}"'")) | length == 1' \
+                > "${associated_pr}"; then
+                echo "::warning::Could not verify the PR behind #${number}; leaving it open."
+                continue
+              fi
+              if [[ "$(cat "${associated_pr}")" != true ]]; then
+                continue
+              fi
+              resolved_from_pr=true
+            fi
+            close_comment="Main green run ${RUN_URL} covered this report's failed jobs."
+            [[ "${resolved_from_pr}" != true ]] ||
+              close_comment="This PR's green run ${RUN_URL} at the same commit covered this report's failed jobs."
+            if gh issue close "${number}" --repo "${REPO}" \
+              --reason completed \
+              --comment "${close_comment} Closing; the reporter reopens this issue if the signature recurs."; then
+              closed=$((closed + 1))
+            else
+              echo "::warning::Could not close #${number}."
+            fi
+            if (( closed >= 50 )); then
+              echo "Closed ${closed} issues; stopping at the per-run cap."
+              break
+            fi
+          done < "${candidates}"
+          echo "Closed ${closed} resolved failure issue(s) for ${WORKFLOW_NAME}."

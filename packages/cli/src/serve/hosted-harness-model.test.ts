@@ -216,7 +216,7 @@ describe('Hosted Harness model boundary', () => {
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: true,
+      userPrompt: true,
       hooks: hooks.session,
       workspaceContext: { read: () => 'workspace instructions' },
     });
@@ -233,15 +233,20 @@ describe('Hosted Harness model boundary', () => {
     );
   });
 
-  it('does not recall personal memory without a new accepted user input', async () => {
+  it('skips prompt hooks and memory recall for automated input', async () => {
     config([{ type: LlmEventType.Finished }]);
     const recall = vi.fn();
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: false,
+      userPrompt: false,
+      hooks: hooks.session,
     });
     expect(recall).not.toHaveBeenCalled();
+    expect(hooks.fire.mock.calls.map(([event]) => event)).not.toContain(
+      HookEventName.UserPromptSubmit,
+    );
   });
 
   it.each(['tool-results', 'model'] as const)(
@@ -276,7 +281,7 @@ describe('Hosted Harness model boundary', () => {
         await runHostedHarnessTextTurn({
           ...input,
           memory: { recall },
-          recallUserInput: true,
+          userPrompt: true,
           ...(kind === 'model'
             ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
             : { resumeFromToolResults: responses }),
@@ -309,7 +314,7 @@ describe('Hosted Harness model boundary', () => {
     await runHostedHarnessTextTurn({
       ...input,
       memory: { recall },
-      recallUserInput: true,
+      userPrompt: true,
       userMessages: { claim, commit, commitAssistant: vi.fn() },
     });
     expect(recall.mock.calls.map(([id, text]) => [id, text])).toEqual([
@@ -2159,6 +2164,104 @@ describe('Hosted Harness model boundary', () => {
     expect(model.requests[0]).toEqual([{ text: input.prompt }]);
   });
 
+  // Stage 4 S5 pre-check (#18149): a resumed native batch must not reapply
+  // startup Hooks. Their rewrite reached only the live request; the resumed
+  // rounds see the Prompt the Harness committed, which is the accepted text.
+  it('resumes tool results without refiring startup Hooks or reapplying their rewrite', async () => {
+    const hooks = hostedHooks([
+      HookEventName.SessionStart,
+      HookEventName.UserPromptSubmit,
+    ]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'rewritten prompt',
+              additionalContext: 'submit context',
+            },
+          }
+        : event === HookEventName.SessionStart
+          ? {
+              hookSpecificOutput: {
+                hookEventName: event,
+                additionalContext: 'start context',
+              },
+            }
+          : undefined,
+    );
+    const live = config([{ type: LlmEventType.Finished }]);
+    await runHostedHarnessTextTurn({ ...input, hooks: hooks.session });
+    expect(live.requests[0]).toEqual([
+      { text: 'rewritten prompt\nstart context\nsubmit context' },
+    ]);
+
+    hooks.fire.mockClear();
+    const resumed = config([{ type: LlmEventType.Finished }]);
+    const envelope = {
+      parentUuid: null,
+      sessionId: input.sessionId,
+      timestamp: '2026-11-24T00:00:00.000Z',
+      cwd: input.cwd,
+      version: 'test',
+      daemonPromptId: input.promptId,
+    };
+    const response: Part = {
+      functionResponse: {
+        id: 'saved-call',
+        name: 'write_file',
+        response: { output: 'written' },
+      },
+    };
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      history: [
+        {
+          ...envelope,
+          uuid: 'prompt',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: input.prompt }] },
+        },
+        {
+          ...envelope,
+          uuid: 'call',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'saved-call',
+                  name: 'write_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        },
+      ],
+      resumeFromToolResults: [response],
+      toolTurn: {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: vi.fn().mockResolvedValue([]),
+      },
+    });
+    expect(
+      hooks.fire.mock.calls.filter(
+        ([event]) =>
+          event === HookEventName.SessionStart ||
+          event === HookEventName.UserPromptSubmit,
+      ),
+    ).toEqual([]);
+    expect(resumed.requests).toEqual([[response]]);
+    const restored = JSON.stringify(resumed.setHistory.mock.calls[0]![0]);
+    expect(restored).toContain(`"text":"${input.prompt}"`);
+    for (const text of ['rewritten prompt', 'start context', 'submit context'])
+      expect(restored).not.toContain(text);
+  });
+
   it('defers initialization InstructionsLoaded until authentication, preserving native fields', async () => {
     const model = config([{ type: LlmEventType.Finished }]);
     const hooks = hostedHooks([HookEventName.InstructionsLoaded]);
@@ -2775,7 +2878,7 @@ describe('Hosted Harness model boundary', () => {
     ).toEqual([false]);
   });
 
-  it.each(['decision', 'continue'] as const)(
+  it.each(['decision', 'stopReason'] as const)(
     'uses durable model attempt identities and restores a Stop %s block chain across a tool restart',
     async (kind) => {
       const hooks = hostedHooks();
@@ -2795,7 +2898,7 @@ describe('Hosted Harness model boundary', () => {
         event === HookEventName.Stop
           ? kind === 'decision'
             ? { decision: 'block', reason: 'continue' }
-            : { continue: false, stopReason: 'continue' }
+            : { decision: 'block', continue: false, stopReason: 'continue' }
           : undefined,
       );
       const first = config([]);
@@ -3053,7 +3156,7 @@ describe('Hosted Harness model boundary', () => {
   );
 });
 
-it.each(['decision', 'continue'] as const)(
+it.each(['decision', 'stopReason'] as const)(
   'consumes recovered tool results before Stop %s continuation without consuming them twice',
   async (kind) => {
     const model = config([{ type: LlmEventType.Finished }]);
@@ -3070,7 +3173,7 @@ it.each(['decision', 'continue'] as const)(
       if (++stops === 1)
         return kind === 'decision'
           ? { decision: 'block', reason: 'Continue' }
-          : { continue: false, stopReason: 'Continue' };
+          : { decision: 'block', continue: false, stopReason: 'Continue' };
       return undefined;
     });
     const toolTurn = {
@@ -3109,6 +3212,22 @@ it.each(['decision', 'continue'] as const)(
     ).toEqual([false, true]);
   },
 );
+
+it('ends the turn when a Stop hook returns continue: false without a block', async () => {
+  const model = config([{ type: LlmEventType.Finished }]);
+  const hooks = hostedHooks();
+  let stops = 0;
+  hooks.fire.mockImplementation(async (event) =>
+    event === HookEventName.Stop && ++stops === 1
+      ? { continue: false, stopReason: 'Build is red.' }
+      : undefined,
+  );
+  await runHostedHarnessTextTurn({ ...input, hooks: hooks.session });
+  expect(model.sendMessageStream).toHaveBeenCalledOnce();
+  expect(
+    hooks.fire.mock.calls.filter(([event]) => event === HookEventName.Stop),
+  ).toHaveLength(1);
+});
 
 describe('Hosted Harness resume and retraction', () => {
   beforeEach(() => vi.clearAllMocks());

@@ -17,6 +17,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { errors } from 'playwright';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   runActivityForm,
@@ -26,7 +27,10 @@ import {
 } from './cases.js';
 import {
   SHOW_TOOL,
+  setValue,
   startAcceptanceEnv,
+  text,
+  waitForStill,
   type AcceptanceEnv,
   type ReplayScript,
 } from './harness.js';
@@ -137,14 +141,50 @@ describe.runIf(enabled)('Generated UI acceptance replay (#14019)', () => {
     expect(statusMap([result])).toEqual(EXPECTED.comparator);
     expect(result.viewErrors).toBe(0);
   }, 900_000);
+
+  it('exports at the reference seat limit and rejects seats above it', async () => {
+    env = await startAcceptanceEnv({
+      mode: { kind: 'replay', script: comparatorReplay },
+    });
+    await env.startSession(COMPARATOR_PROMPT);
+    const { view } = await env.waitForCard(0);
+    await env.waitForIdle();
+    const seats = view.locator('#seats');
+    const exportButton = view.locator('#export');
+
+    await setValue(view, 'seats', '500');
+    await seats.blur();
+    await expect
+      .poll(() => text(view, 'selected'), { timeout: 5_000 })
+      .toContain('500 seats');
+    await exportButton.scrollIntoViewIfNeeded();
+    await waitForStill(exportButton);
+    const [file] = await Promise.all([
+      env.page.waitForEvent('download', { timeout: 5_000 }),
+      exportButton.click(),
+    ]);
+    expect(file.suggestedFilename()).toBe('plans.csv');
+
+    await setValue(view, 'seats', '501');
+    await seats.blur();
+    await expect
+      .poll(() => text(view, 'selected'), { timeout: 5_000 })
+      .toBe('Seats must be a whole number from 1 to 500.');
+    await waitForStill(exportButton);
+    await Promise.all([
+      expect(
+        env.page.waitForEvent('download', { timeout: 2_000 }),
+      ).rejects.toBeInstanceOf(errors.TimeoutError),
+      exportButton.click(),
+    ]);
+  }, 600_000);
 });
 
 /**
- * Baseline on main, 2026-11. `fail` entries are the gaps later stages close:
- * copy and export need host-mediated clipboard/download (stage 8), the
- * checklist needs persisted view state (stage 6), extension needs card
- * revisions (stage 8). The isolation row is `not-applicable` until
- * something persists.
+ * Baseline on main, 2026-11. The one `fail` entry is the gap a later stage
+ * closes: extension needs card revisions (stage 8). The checklist keeps its
+ * items through saved view state (stage 6), and the bill splitter's copy and
+ * the comparator's export go through the host (stage 8).
  */
 const EXPECTED: Record<string, Record<string, string>> = {
   bill: {
@@ -155,7 +195,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'bill.fair-rounding': 'pass',
     'bill.chart-updates': 'pass',
     'bill.rejects-invalid': 'pass',
-    'bill.copies-current': 'fail',
+    'bill.copies-current': 'pass',
     'bill.reset': 'pass',
     'bill.edits-start-no-turn': 'pass',
   },
@@ -167,9 +207,10 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'checklist.delete': 'pass',
     'checklist.repeated-undo': 'pass',
     'checklist.edit': 'pass',
-    'checklist.persists-after-reload': 'fail',
-    'checklist.persists-after-reopen': 'fail',
-    'checklist.isolated-across-sessions': 'not-applicable',
+    'checklist.persists-after-reload': 'pass',
+    'checklist.persists-after-reopen': 'pass',
+    'checklist.save-acknowledged': 'pass',
+    'checklist.isolated-across-sessions': 'pass',
   },
   form: {
     'form.called-tool': 'pass',
@@ -186,7 +227,7 @@ const EXPECTED: Record<string, Record<string, string>> = {
     'comparator.support-totals': 'pass',
     'comparator.keeps-choices': 'pass',
     'comparator.extends-existing-card': 'fail',
-    'comparator.exports-current-csv': 'fail',
+    'comparator.exports-current-csv': 'pass',
     'comparator.reset-via-follow-up': 'pass',
   },
 };

@@ -198,10 +198,10 @@ async function buildDaemonPreflightCells(
       run: () =>
         safeCheck('ripgrep', async () => {
           // Mirror runtime behavior: `Config.useBuiltinRipgrep` defaults to
-          // `true`, so `canUseRipgrep(true)` reports the *bundled* binary
-          // when no system `rg` is installed. Passing `false` here would
-          // tell users "ripgrep missing" while the runtime can still use
-          // the bundled one — a misleading warning.
+          // `true`, so `canUseRipgrep(true)` prefers PATH `rg` and still
+          // reports the bundled binary when no system `rg` is installed.
+          // Passing `false` here would tell users "ripgrep missing" while
+          // the runtime can still use the bundled one — a misleading warning.
           const ok = await canUseRipgrep(true);
           return ok
             ? { status: 'ok' as const }

@@ -30,11 +30,15 @@ public final class WorkspaceTerminalRelayService {
     /** The admitted, terminal-capable binding the relay connects to. */
     public RuntimeBindingRecord admit(String tenantId, String actorId,
             String sessionId) {
-        if (!settings.getRuntimeBroker().isWebTerminal()) {
-            throw new ManagedAgentException(409, "workspace_unavailable",
-                    "The Managed web terminal is not enabled.");
-        }
+        requireEnabled();
         sessions.admitTerminalSession(tenantId, actorId, sessionId);
+        return terminalBinding(tenantId, sessionId);
+    }
+
+    /** The Session's current terminal-capable binding. The upgrade re-reads
+     * it here because a ticket names the binding but never stores its lease. */
+    public RuntimeBindingRecord terminalBinding(String tenantId, String sessionId) {
+        requireEnabled();
         RuntimeBindingRecord binding =
                 broker.findLatestBindingByHarnessSession(tenantId, sessionId);
         if (binding == null
@@ -48,5 +52,12 @@ public final class WorkspaceTerminalRelayService {
                     "The Session runtime does not admit a terminal.");
         }
         return binding;
+    }
+
+    private void requireEnabled() {
+        if (!settings.getRuntimeBroker().isWebTerminal()) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "The Managed web terminal is not enabled.");
+        }
     }
 }

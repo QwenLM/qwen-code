@@ -61,6 +61,8 @@ export interface DaemonTransportSubscribeOptions {
   previousSseStreamId?: string;
   /** Called after a REST/SSE handshake is accepted. */
   onSseStreamAccepted?: (streamId: string | undefined) => void;
+  /** Called when the subscription is ready to receive session events. */
+  onEventStreamReady?: () => void;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**

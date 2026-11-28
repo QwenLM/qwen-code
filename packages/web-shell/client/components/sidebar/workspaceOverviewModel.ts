@@ -37,13 +37,19 @@ export type WorkspaceOverviewItem = (typeof WORKSPACE_OVERVIEW_ITEMS)[number];
 export const DEFAULT_WORKSPACE_OVERVIEW_ITEMS: readonly WorkspaceOverviewItem[] =
   ['mcp', 'skills', 'extensions', 'channels', 'context'];
 
-/** Management pages a workspace row can open for itself. */
-export type WorkspaceManagementTarget =
+/** Management pages exposed inside the workspace `⋮` menu. */
+export type WorkspaceMenuManagementTarget =
   | 'mcp'
   | 'skills'
   | 'extensions'
   | 'channels'
   | 'settings';
+
+/** Management targets a workspace row or hover details popover can open. */
+export type WorkspaceManagementTarget =
+  | WorkspaceMenuManagementTarget
+  | 'context'
+  | 'hooks';
 
 export interface WorkspaceSessionStats {
   /** Sessions in the list the stats were computed from. */

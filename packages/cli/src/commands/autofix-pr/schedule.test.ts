@@ -86,9 +86,95 @@ describe('runSchedule', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it('refuses an in-place watch: its rounds run only when asked', () => {
+  it('schedules an in-place watch prepared with --watch, adding --in-place to the tick prompt and durable in a daemon session', () => {
+    write({
+      inPlace: true,
+      inPlaceWatch: true,
+      worktreePath: repo,
+      branch: 'main',
+    });
+    writeFileSync(paths.instructionsPath, 'keep exports stable\n', 'utf8');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    const task = runSchedule({
+      pr: 7,
+      every: 5,
+      noReply: true,
+      instructions: true,
+    });
+    expect(task).toEqual({
+      cron: '*/5 * * * *',
+      recurring: true,
+      gate: `${GATE}${task.task}`,
+      prompt: `Run /autofix-pr tick o/r#7 --task ${task.task} --in-place --no-reply -- keep exports stable`,
+      durable: true,
+      sessionMode: 'current',
+      every: 5,
+      reply: false,
+      instructions: 'keep exports stable',
+      task: expect.stringMatching(TASK),
+    });
+    expect(state().watch).toEqual({
+      every: 5,
+      reply: false,
+      instructions: 'keep exports stable',
+      task: task.task,
+    });
+    // --again preserves --in-place and options under a new task id.
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again.task).not.toBe(task.task);
+    expect(again).toMatchObject({
+      cron: '*/5 * * * *',
+      durable: true,
+      sessionMode: 'current',
+      prompt: `Run /autofix-pr tick o/r#7 --task ${again.task} --in-place --no-reply -- keep exports stable`,
+    });
+  });
+
+  it('refuses scheduling a one-shot in-place watch that was not prepared with --watch', () => {
     write({ inPlace: true, worktreePath: repo, branch: 'main' });
-    expect(() => runSchedule({ pr: 7 })).toThrow(/in-place watch/);
+    expect(() => runSchedule({ pr: 7, every: 5 })).toThrow(
+      /one-shot in-place watch.*--in-place --watch/,
+    );
+    expect(state().watch).toBeUndefined();
+  });
+
+  it('still allows --again on a legacy scheduled in-place state that has watch set without inPlaceWatch', () => {
+    write({
+      inPlace: true,
+      worktreePath: repo,
+      branch: 'main',
+      watch: { every: 5, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again.task).not.toBe('aaaaaaaaaaaa');
+    expect(again.prompt).toBe(
+      `Run /autofix-pr tick o/r#7 --task ${again.task} --in-place`,
+    );
+  });
+
+  it('refuses --again on an unscheduled in-place watch, naming --in-place --watch', () => {
+    write({
+      inPlace: true,
+      inPlaceWatch: true,
+      worktreePath: repo,
+      branch: 'main',
+    });
+    expect(() => runSchedule({ pr: 7, again: true })).toThrow(
+      /--in-place --watch/,
+    );
+  });
+
+  it('still refuses scheduling an in-place watch when the PR author cannot push', () => {
+    write({
+      inPlace: true,
+      inPlaceWatch: true,
+      worktreePath: repo,
+      branch: 'main',
+      authorCanPush: false,
+    });
+    expect(() => runSchedule({ pr: 7 })).toThrow(
+      /only --once \(or a one-shot --in-place/,
+    );
     expect(state().watch).toBeUndefined();
   });
 

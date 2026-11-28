@@ -23,6 +23,10 @@ import {
 } from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
+  appendPermissionContext,
+  findLatestPermissionContext,
+} from '../core/permission-context.js';
+import {
   clearApiHistoryDirectoryContext,
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -354,6 +358,21 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'permission_context_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot &&
+          findLatestPermissionContext([{ role: 'user', parts: [snapshot] }]) &&
+          typeof snapshot.text === 'string' &&
+          findLatestPermissionContext(this.history)?.text !== snapshot.text
+        ) {
+          const length = this.history.length;
+          appendPermissionContext(this.history, { ...snapshot });
+          if (this.history.length > length)
+            this.systemNotificationFlags.push(false);
+        }
+        return;
+      }
       if (record.subtype === 'memory_catalog_snapshot') {
         const snapshot = record.message?.parts?.[0];
         if (

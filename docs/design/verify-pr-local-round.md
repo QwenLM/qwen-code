@@ -5,6 +5,15 @@
 Status: implemented; extended with the counting, guard, coverage and
 attribution-footer rules below.
 
+Compatibility note (2026-11-22): the executable execution and approval
+contract is now [verify-pr-execution-preflight](verify-pr-execution-preflight.md).
+This document remains the baseline history, not a current host/VM command
+recipe. A coordinate prepare with no `--execution` retains the legacy
+**container** behavior; explicit host/VM requires the approval object and
+host context described there, and an old waiver containing only a permalink
+cannot pass publication without `executionApproval` and a matching snapshot
+digest.
+
 ## Problem
 
 `/verify-pr` has two entry paths. The sandboxed lane supplies the PR metadata

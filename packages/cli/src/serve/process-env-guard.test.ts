@@ -41,10 +41,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/memory-import.ts',
     {
       reason:
-        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them.',
       accesses: {
         'computed:key': 1,
-        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
       },
     },
   ],
@@ -71,14 +70,32 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/hosted-harness-session.ts',
+    'packages/cli/src/serve/hosted-harness-session/session-open.ts',
     {
       reason:
-        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once. The idle-suspension acceptance arms set QWEN_E2E_IDLE_SUSPEND_MS to a shorter candidate idle period so a packaged run observes suspension without waiting out the production constant; it is read once per registration and only accepts a value below that constant.',
+        'The packaged load-reply-lost fault arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement Harness so the bridge loses exactly the first load attach reply for that Session. Test-only, read once per registration and fires once.',
+      accesses: {
+        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-session/session-suspension.ts',
+    {
+      reason:
+        'Packaged idle-suspension acceptance sets QWEN_E2E_IDLE_SUSPEND_MS to observe suspension without waiting out the production idle period. Read once per registration and only accepts a value below the production constant.',
+      accesses: {
+        'key:QWEN_E2E_IDLE_SUSPEND_MS': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-harness-session/turn.ts',
+    {
+      reason:
+        'The packaged finished-before-commit fault arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the Harness generation that must crash, so the turn holds after its stream Finished marker is durable but before the assistant output commits. Test-only, read once and fires once.',
       accesses: {
         'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
-        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
-        'key:QWEN_E2E_IDLE_SUSPEND_MS': 1,
       },
     },
   ],

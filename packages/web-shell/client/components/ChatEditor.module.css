@@ -393,6 +393,32 @@
   padding: 6px;
 }
 
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu]) {
+  width: min(
+    var(--radix-popover-trigger-width),
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
+  max-width: min(
+    var(--radix-popover-trigger-width),
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu])
+  .slashList {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu])
+  .slashItem {
+  min-height: 44px;
+  justify-content: center;
+  padding: 8px 12px;
+}
+
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   width: min(320px, calc(100vw - 24px));
@@ -536,7 +562,8 @@
 .slashPanel {
   max-height: min(
     460px,
-    calc(var(--radix-popover-content-available-height) - 20px)
+    calc(var(--radix-popover-content-available-height) - 20px),
+    var(--slash-panel-viewport-max-height, 460px)
   );
   overflow: hidden;
   cursor: default;
@@ -681,6 +708,9 @@
 }
 
 .slashDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-height: 0;
   max-height: min(
     180px,
@@ -691,20 +721,71 @@
 }
 
 .slashDetailCommand {
-  margin-bottom: 5px;
+  flex-shrink: 0;
   color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
-  font-weight: 400;
-  line-height: 22px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: normal;
+}
+
+.slashDetailExtension {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.slashDetailExtension:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.slashDetailExtensionLabel {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.slashDetailExtensionIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.slashDetailExtensionName {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  overflow-wrap: anywhere;
   white-space: normal;
 }
 
 .slashDetailText {
+  flex-shrink: 0;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
-  line-height: 20px;
+  line-height: 19px;
   white-space: pre-wrap;
 }
 
@@ -1393,14 +1474,21 @@
    4px inset plus the workspace chip's 8px padding lines their content up with the
    editor's text. */
 .contextRow {
+  --git-branch-badge-ring: var(--muted);
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 4px;
   margin-top: -12px;
   padding: 18px 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--agent-gray-200) 70%, transparent);
+  border-top: none;
   border-radius: 0 0 12px 12px;
-  background: color-mix(in srgb, var(--muted) 70%, transparent);
+  background: color-mix(in srgb, var(--muted) 75%, transparent);
+}
+
+.contextRow > * {
+  min-width: 0;
 }
 
 .contextRow button[data-web-shell-git-branch] {
@@ -1413,16 +1501,30 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
   font-weight: 400;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .contextRow button[data-web-shell-git-branch]:hover,
 .contextRow button[data-web-shell-git-branch]:focus-visible {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+  --git-branch-badge-ring: var(--chat-editor-bg-tertiary);
+}
+
+.contextRow .gitBranchText {
+  max-width: 220px;
 }
 
 .contextRow button[data-web-shell-git-branch] > svg {
   display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contextRow button[data-web-shell-git-branch] {
+    transition: none;
+  }
 }
 
 .toolbarLeading,
@@ -1469,7 +1571,7 @@
 .gitBranchChip {
   display: inline-flex;
   min-width: 0;
-  max-width: 180px;
+  max-width: 100%;
   height: 28px;
   padding: 0 8px;
   align-items: center;
@@ -1478,22 +1580,38 @@
   color: var(--agent-gray-500);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
-  line-height: 1;
+  line-height: 1.4;
 }
 
 /* When the chip opens the Changes dialog it renders as a <button>; reset the
    UA button chrome so it looks identical to the read-only <output> chip. */
 .gitBranchChipButton {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
   appearance: none;
   border: 0;
   background: transparent;
   cursor: pointer;
   margin: 0;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.gitBranchChipButton:not(.gitBranchChip) {
+  padding: 0;
+}
+
+.gitBranchChipButton .gitBranchChip {
+  color: inherit;
 }
 
 .gitBranchChipButton:hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+  --git-branch-badge-ring: var(--chat-editor-bg-tertiary);
 }
 
 .gitBranchChipButton:focus-visible {
@@ -1501,26 +1619,39 @@
   outline-offset: -2px;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .gitBranchChipButton {
+    transition: none;
+  }
+}
+
 .gitBranchIcon {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: var(--git-branch-icon-size, 16px);
   height: var(--git-branch-icon-size, 16px);
   flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchIcon svg {
+  display: block;
   width: var(--git-branch-icon-size, 16px);
   height: var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchText {
   min-width: 0;
+  max-width: 150px;
+  flex: 0 1 auto;
   overflow: hidden;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.gitBranchChip[data-detached='true'] .gitBranchText {
+.gitBranchChip[data-detached='true'] .gitBranchText,
+[data-web-shell-git-branch][data-detached='true'] .gitBranchText {
   color: var(--warning-color);
 }
 
@@ -1545,9 +1676,12 @@
   height: var(--git-branch-badge-size, 7px);
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
-  box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+  box-shadow: 0 0 0 1.5px
+    var(--git-branch-badge-ring, var(--chat-editor-bg-primary, transparent));
 }
 
+.gitBranchBadgeDot[data-compact='true'],
+.gitBranchBadgeDot[data-details-collapsed='true'],
 .gitBranchChipCompact .gitBranchBadgeDot {
   display: block;
 }
@@ -1563,20 +1697,24 @@
 .gitBranchIndicators {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   flex: 0 0 auto;
 }
 
 .gitBranchDirtyDot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   display: inline-block;
 }
 
 .gitBranchAheadBehind {
+  display: inline-flex;
+  align-items: center;
   color: var(--muted-foreground);
+  font-weight: 500;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1585,12 +1723,16 @@
   align-items: center;
   gap: 2px;
   color: var(--muted-foreground);
+  font-weight: 500;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 
 .gitBranchStash svg {
+  display: block;
   width: 13px;
   height: 13px;
+  flex-shrink: 0;
 }
 
 .gitBranchConflicted {
@@ -1598,19 +1740,25 @@
   align-items: center;
   gap: 2px;
   color: var(--error-color);
-  font-weight: 600;
+  font-weight: 500;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 
 .gitBranchConflicted svg {
+  display: block;
   width: 13px;
   height: 13px;
+  flex-shrink: 0;
 }
 
 .gitBranchOperation {
+  display: inline-flex;
+  align-items: center;
   color: var(--warning-color);
-  font-weight: 600;
+  font-weight: 500;
   font-size: 11px;
+  line-height: 1.4;
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
@@ -1643,7 +1791,7 @@
   color: var(--agent-gray-500);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
-  line-height: 1;
+  line-height: 1.4;
 }
 
 /* On a multi-workspace daemon the chip gets a stable per-workspace accent
@@ -1902,6 +2050,7 @@
 }
 
 .dropdownItem.modelPickerRow {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18px;
   gap: 10px;
@@ -2082,6 +2231,11 @@
 .toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.toolBtn:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
 }
 
 /* The trigger names the active mode, so Full Access stays dangerous after it
@@ -2270,6 +2424,7 @@
   flex: 0 0 28px;
 }
 
+.gitBranchText[data-compact='true'],
 .gitBranchChipCompact .gitBranchText,
 .workspaceChipCompact .workspaceChipText,
 .workspaceSelectTriggerCompact [data-slot='select-value'],
@@ -2338,11 +2493,15 @@
 
 .contextUsageBtn {
   flex-shrink: 0;
-  padding: 0 4px;
+  gap: 5px;
+  padding: 0 6px;
 }
 
 .contextUsagePercentage {
   display: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2491,7 +2650,7 @@
   overflow: hidden;
   display: inline-flex;
   align-items: center;
-  color: var(--agent-gray-500);
+  color: inherit;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3204,14 +3363,13 @@
   --chat-editor-max-height: var(--chat-editor-composer-cap);
 }
 
-/* The workspace/Git row lives inside the capped box; without its height added
-   back, a soft keyboard leaves the attachments strip almost no room. The
-   height is measured because the row wraps on narrow viewports, and the 8px
-   is the pull-up the editing row gives up below it. */
+/* Wide and medium touch layouts keep workspace/Git on one inline row. Its
+   measured height and the editing row's 4px inset stay inside the cap so a
+   soft keyboard leaves room for the attachments strip. */
 .editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
   --chat-editor-max-height: calc(
     var(--chat-editor-composer-cap) +
-      var(--chat-editor-context-row-height, 44px) + 8px
+      var(--chat-editor-context-row-height, 36px) + 4px
   );
 }
 
@@ -3232,18 +3390,35 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  min-width: 0;
   max-width: 100%;
   margin-left: 0;
 }
 
+.editorShell[data-web-shell-mobile-composer]
+  .dropdownWrapper:not(.dropdownWrapperCompact),
+.editorShell[data-web-shell-mobile-composer] .modelToolBtn:not(.toolBtnCompact),
+.editorShell[data-web-shell-mobile-composer] .modeToolBtn:not(.toolBtnCompact) {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   margin-left: auto;
   margin-right: 0;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeft {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolBtn {
@@ -3262,85 +3437,242 @@
   gap: 4px;
 }
 
+.mobileEditingActions {
+  flex-wrap: nowrap;
+  gap: 2px;
+  min-width: 0;
+  margin-top: -6px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) {
+  gap: 4px;
+  margin-top: -4px;
+}
+
 .mobileContextRow {
-  min-width: 44px;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 44px;
   min-height: 44px;
-  flex: 1;
-  flex-wrap: wrap;
+  padding-right: 1px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .mobileContextRow > *,
 .mobileContextRow [data-web-shell-git-branch] {
+  min-width: 0;
   max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  width: auto;
+  height: 44px;
+  min-width: 44px;
   max-width: 100%;
-  flex-shrink: 1;
+  flex: 0 1 auto;
 }
 
-@supports (container-type: inline-size) {
-  @container (max-width: 320px) {
-    .mobileContextRow [data-slot='select-value'],
-    .mobileContextRow [data-web-shell-git-branch-label],
-    .mobileContextRow .gitBranchText,
-    .mobileContextRow .workspaceChipText {
-      display: none;
-    }
-    .mobileContextRow .gitBranchIndicators {
-      display: none;
-    }
-    .mobileContextRow .gitBranchBadgeDot {
-      display: block;
-    }
-  }
+.editorShell[data-web-shell-mobile-composer]
+  .mobileContextRow
+  > :has([data-web-shell-git-branch]) {
+  min-width: 44px;
 }
 
-.mobileEditingActions {
-  flex-wrap: wrap;
-  margin-top: -8px;
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch]),
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > [data-web-shell-git-branch] {
+  min-width: 44px;
+  flex: 0 1 auto;
 }
 
-/* Keep the controls together so hide-keyboard/expand stay an adjacent tail.
-   Group-internal wrapping preserves 44px targets and keeps them right aligned. */
+/* Host Git can shrink, but the built-in wrapper must fit its 44px chip. */
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch-label]) {
+  flex: 0 0 auto;
+}
+
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  [data-web-shell-git-branch-label],
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchIndicators {
+  display: none;
+}
+
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchBadgeDot {
+  display: block;
+}
+
+/* Keep the 6 editing keys strictly on one row alongside any inline context. */
 .mobileEditingKeys {
   display: flex;
-  flex-basis: 100%;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingKeys {
+  flex: 0 1 auto;
+  min-height: 44px;
 }
 
 .mobileEditingTail {
   display: inline-flex;
-  flex-shrink: 0;
-  gap: 4px;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
   margin-inline-start: auto;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingTail {
+  margin-inline-start: 2px;
 }
 
 .mobileKeyboardPlaceholder {
   visibility: hidden;
 }
 
-.mobileEditingActions:has(.mobileContextRow) {
-  align-items: flex-start;
-  margin-top: 0;
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+  position: relative;
+  width: 40px;
+  min-width: 34px;
+  flex: 0 1 40px;
+  height: 36px;
+  padding: 0;
+  justify-content: center;
 }
 
-.mobileEditingActions > button > svg {
-  width: 18px;
-  height: 18px;
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn::before {
+  content: '';
+  position: absolute;
+  inset: -4px -1px;
 }
 
-/* Direction, hide-keyboard and expand buttons share this group's 18px icon
-   geometry, including when the keyboard button appears and disappears. */
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions[data-mobile-layout='medium']
+  .mobileEditingActionBtn {
+  width: 36px;
+  min-width: 34px;
+  flex: 0 1 36px;
+}
+
+.mobileEditingActions > button > svg,
 :is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }
 
-.mobileEditingSpacer {
-  flex: 1;
+.editorShell[data-web-shell-mobile-composer] .contextRow {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin-top: -10px;
+  padding: 12px 6px 2px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow::-webkit-scrollbar {
+  display: none;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow > * {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow button {
+  width: auto;
+  height: 44px;
+  min-width: 44px;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .contextRow
+  .workspaceSelectTrigger:has(+ *) {
+  max-width: 58%;
+}
+
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-slot='select-value'],
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-web-shell-git-branch-label],
+    .editorShell[data-web-shell-mobile-composer] .contextRow .gitBranchText,
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .workspaceChipText {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchIndicators {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchBadgeDot {
+      display: block;
+    }
+  }
+
+  @container (max-width: 260px) {
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActions {
+      gap: 1px;
+      padding-block: 4px;
+      margin-block: -4px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActions::-webkit-scrollbar {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingKeys {
+      gap: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingTail {
+      flex: 2 1 0;
+      gap: 1px;
+      margin-inline-start: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+      width: auto;
+      min-width: 26px;
+      flex: 1 1 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActionBtn::before {
+      inset: -4px 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      :is(.mobileEditingKeys, .mobileEditingTail)
+      > button
+      > svg {
+      width: 15px;
+      height: 15px;
+    }
+  }
 }
 
 .mobileExpandedEditor {

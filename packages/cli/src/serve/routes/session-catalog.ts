@@ -190,6 +190,7 @@ export function registerSessionCatalogRoutes(
                   { ...options, cursor },
                   {
                     mergeLive: runtime.trusted,
+                    allowSidecarWrite: runtime.trusted,
                     paginateMerged: true,
                     includeGroups,
                     runtimeBaseDir: runtime.sessionRuntimeBaseDir,

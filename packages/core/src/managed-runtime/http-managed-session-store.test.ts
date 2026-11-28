@@ -2355,6 +2355,65 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('releases a quiesced placement with the retained grant after a wake seal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.suspensionPlacementRelease = true;
+    const releases: Array<Record<string, unknown>> = [];
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/writers:quiesce-ownership')) {
+        return jsonResponse({ state: 'QUIESCING' });
+      }
+      if (requestUrl(input).endsWith('/writers:release-ownership')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        releases.push(body);
+        return jsonResponse({
+          format: 'qwen-hosted-harness-release/1',
+          state: 'RELEASED',
+          ...SESSION_KEY,
+          operationId: body['operationId'],
+          instanceId: body['instanceId'],
+          bootId: body['bootId'],
+          placementEpoch: body['placementEpoch'],
+          writerGeneration: body['writerGeneration'],
+          journalRevision: body['journalRevision'],
+          commitProof: body['commitProof'],
+          committedSequence: (
+            body['commitProof'] as { lastCommitSequence: number }
+          ).lastCommitSequence,
+        });
+      }
+      return server.fetch(input, init);
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      expect(stores.supportsSuspensionPlacementRelease()).toBe(true);
+      await stores.quiesceOwnership({
+        instanceId: 'pod-a',
+        bootId: 'harness-a',
+        placementEpoch: 1,
+      });
+      await authority.releaseActivation();
+      await authority.close({ pending: false, dueAt: 0 });
+      const receipt = await stores.releaseOwnership({
+        instanceId: 'pod-a',
+        bootId: 'harness-a',
+        placementEpoch: 1,
+        operationId: randomUUID(),
+        commitProof: authority.commitProof,
+      });
+
+      expect(receipt.state).toBe('RELEASED');
+      expect(releases).toHaveLength(1);
+      expect(server.sealCount).toBe(1);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
   it('joins the queued original renewal and stages one exact release without HTTP or append', async () => {
     const server = new FakeManagedSessionStore();
     let enterRenewal!: () => void;
@@ -2893,6 +2952,79 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  it('carries the action-parking capability and seal certificate', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345, approvalRevision: 7 },
+    });
+  });
+
+  it('carries a park certificate beside a background hold', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsBackgroundActionParking()).toBe(false);
+    server.backgroundActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsBackgroundActionParking()).toBe(true);
+    await session.authority.close({
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: false,
+      dueAt: 0,
+      backgroundHeld: true,
+      parkedTurn: { promptId: 'prompt-1', wakeAt: 2345 },
+    });
+  });
+
+  it("carries a wake-started Turn's park certificate with its wake claim", async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    server.actionParking = true;
+    const { stores, session } = await bootStoresAndSession(server);
+    expect(stores.supportsWakeActionParking()).toBe(false);
+    server.wakeActionParking = true;
+    await stores.assertWritable();
+    expect(stores.supportsWakeActionParking()).toBe(true);
+    await session.authority.close({
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+    expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+      revision: server.storedTransactions.length,
+      pending: true,
+      dueAt: 2345,
+      parkedTurn: {
+        promptId: 'monitor-1:notify:1',
+        wakeAt: 2345,
+        owner: 'wake',
+      },
+    });
+  });
+
   it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
     server.wakeDispatch = true;
@@ -2901,17 +3033,38 @@ describe('HTTP Managed Session store', () => {
     expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
   });
 
-  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+  it('refreshes grant capabilities on every ordinary writer renewal', async () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
       server.wakeDispatch = false;
+      server.actionParking = false;
       await stores.assertWritable();
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('refreshes the suspension placement-release capability with the grant', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsSuspensionPlacementRelease()).toBe(false);
+      server.suspensionPlacementRelease = true;
+      await stores.assertWritable();
+      expect(stores.supportsSuspensionPlacementRelease()).toBe(true);
+      server.suspensionPlacementRelease = false;
+      await stores.assertWritable();
+      expect(stores.supportsSuspensionPlacementRelease()).toBe(false);
     } finally {
       await session.close().catch(() => undefined);
     }
@@ -2923,9 +3076,12 @@ describe('HTTP Managed Session store', () => {
     const { stores, authority } = await bootOriginalCsiAuthority(server);
     try {
       expect(stores.supportsWakeDispatch()).toBe(false);
+      expect(stores.supportsActionParking()).toBe(false);
       server.wakeDispatch = true;
+      server.actionParking = true;
       await authority.renewActivation({ leaseDurationMs: 60_000 });
       expect(stores.supportsWakeDispatch()).toBe(true);
+      expect(stores.supportsActionParking()).toBe(true);
     } finally {
       await stores.stopLocal();
     }
@@ -6531,6 +6687,79 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('pushes ingest batches as the writer and allows only the park marker after the seal', async () => {
+    const server = new FakeManagedSessionStore();
+    const ingested: Array<Record<string, unknown>> = [];
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (requestUrl(input).endsWith('/events:ingest')) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        ingested.push(body);
+        if (body['afterSequence'] === 9)
+          return jsonResponse(
+            {
+              error: {
+                code: 'managed_event_ingest_cursor_mismatch',
+                message: 'behind',
+                cursor: 2,
+              },
+            },
+            409,
+          );
+        return jsonResponse({
+          cursor: body['throughSequence'],
+          leaseRenewAfterMillis: 20_000,
+          terminal: body['end'] === undefined,
+        });
+      }
+      return server.fetch(input, init);
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    const request = {
+      eventEpoch: 'epoch_1',
+      turnId: 'turn_1',
+      promptId: 'prompt-1',
+      afterSequence: 0,
+      throughSequence: 2,
+      events: [{ v: 1, id: 1, type: 'session_update', data: {} }],
+    };
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await stores.assertWritable();
+    await expect(stores.ingestEvents(request)).resolves.toEqual({
+      cursor: 2,
+      leaseRenewAfterMillis: 20_000,
+      terminal: true,
+    });
+    expect(ingested[0]).toMatchObject({
+      workspaceId: SESSION_KEY.workspaceId,
+      writerId: 'harness-a',
+      writerGeneration: expect.any(Number),
+      ...request,
+    });
+    expect(ingested[0]).not.toHaveProperty('end');
+    await expect(
+      stores.ingestEvents({ ...request, afterSequence: 9 }),
+    ).rejects.toMatchObject({
+      remoteCode: 'managed_event_ingest_cursor_mismatch',
+      details: { cursor: 2 },
+    });
+
+    await stores.close();
+    await expect(stores.ingestEvents(request)).rejects.toThrow(
+      'writer is not active',
+    );
+    await expect(
+      stores.ingestEvents({ ...request, end: 'parked' }),
+    ).resolves.toMatchObject({ cursor: 2, terminal: false });
+    expect(ingested.at(-1)).toMatchObject({ end: 'parked' });
+  });
+
   it('gives up on a persistently contended guard at the request deadline', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
@@ -9748,6 +9977,10 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   wakeDispatch = false;
+  actionParking = false;
+  backgroundActionParking = false;
+  wakeActionParking = false;
+  suspensionPlacementRelease = false;
   readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   readonly commits: Array<Record<string, unknown>> = [];
@@ -10201,6 +10434,14 @@ class FakeManagedSessionStore {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
       ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
+      ...(this.actionParking ? { actionParking: true } : {}),
+      ...(this.backgroundActionParking
+        ? { backgroundActionParking: true }
+        : {}),
+      ...(this.wakeActionParking ? { wakeActionParking: true } : {}),
+      ...(this.suspensionPlacementRelease
+        ? { suspensionPlacementRelease: true }
+        : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

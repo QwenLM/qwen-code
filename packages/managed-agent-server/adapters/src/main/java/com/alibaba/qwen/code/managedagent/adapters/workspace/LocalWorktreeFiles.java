@@ -3,12 +3,13 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 
 import java.nio.file.Path;
+import java.util.Map;
 public final class LocalWorktreeFiles implements WorktreeFiles {
     public String verify(Plan plan, String savedIdentity) { return SessionWorktreeGit.verify(plan, savedIdentity); }
     public void requireRoot(Plan plan) { SessionWorktreeGit.requireRoot(plan); }
     public String currentBranch(String verifiedIdentity) { return SessionWorktreeGit.currentBranch(verifiedIdentity); }
     public String identity(Path path) { return SessionWorktreeGit.identity(path); }
-    public java.util.Map<String, String> reattest(Plan plan, String savedIdentity, String volumeUuid) {
+    public Map<String, String> reattest(Plan plan, String savedIdentity, String volumeUuid) {
         return SessionWorktreeGit.reattest(plan, savedIdentity, volumeUuid);
     }
 }

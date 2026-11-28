@@ -109,7 +109,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // from the facts batch.
     boolean maySubmitWorkspaceTurn(SessionRecord session,
             Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
-            java.util.Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
+            Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
         if (!maySubmitShape(session, worktree)) {
             return false;
         }

@@ -156,7 +156,7 @@ class HostedChannelFaultGatesIT {
                 "fg7-cases", letter);
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-channel-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         start(tenant);
         for (String fault : cases) {
             try {
@@ -222,11 +222,10 @@ class HostedChannelFaultGatesIT {
         // base-url before the packaged process exists; the harness opens
         // Workspace sessions only after the broker URL it carries is live.
         harnessPort = reservePort();
-        int brokerPort = reservePort();
-        startSpring(tenant, internal, brokerPort);
+        startSpring(tenant, internal);
         support = new HostedChannelGateSupport(jdbc,
                 System.getProperty("node.executable"), repoRoot());
-        startHarness("http://127.0.0.1:" + brokerPort);
+        startHarness("http://127.0.0.1:" + internal);
     }
 
     // --- fixture ---
@@ -415,8 +414,7 @@ class HostedChannelFaultGatesIT {
         return cliEntry().getParent().getParent();
     }
 
-    private void startSpring(String tenant, int internal, int brokerPort)
-            throws Exception {
+    private void startSpring(String tenant, int internal) throws Exception {
         Path cli = cliEntry();
         String node = System.getProperty("node.executable");
         Path workspace = Files.createDirectories(
@@ -441,7 +439,6 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=fg7-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",

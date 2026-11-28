@@ -215,6 +215,15 @@ export type {
   ShellToolInvocation,
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
+export {
+  getSkillSource,
+  getTurnSkillSnapshot,
+  prepareTurnSkillSnapshot,
+  hasTurnResourceWork,
+  runWithTurnSkillSnapshot,
+  type TurnSkillSnapshot,
+  type TurnSkillSnapshotLease,
+} from './skills/turn-skill-snapshot.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
 export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
@@ -360,6 +369,8 @@ export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
+  CronTaskDeletionHistory,
+  CronTaskDeletionObservation,
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
@@ -371,6 +382,8 @@ export {
   readCronTasks,
   withTaskGate,
   cronTaskSessionDeletionId,
+  cronTaskLegacyDeletionId,
+  isCronTaskDeletionObservationIntact,
   updateCronTasks,
   removeCronTasks,
   getCronFilePath,
@@ -402,13 +415,6 @@ export {
 export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export {
-  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
-  GLOBAL_DUPLICATE_THRESHOLD,
-  getToolCallRepeatKey,
-  getTurnToolCallCapHalt,
-} from './services/loopDetectionService.js';
-export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -489,11 +495,15 @@ export {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
   getTokenUsageFilePath,
+  loadTokenUsageDailyByModel,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
 } from './services/tokenUsageService.js';
 export type {
+  TokenUsageCompletedMonthCache,
+  TokenUsageDailyByModel,
+  TokenUsageDayModelTotals,
   TokenUsageExportFormat,
   TokenUsageExportOptions,
   TokenUsageGroupSummary,
@@ -662,7 +672,6 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
-  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -681,7 +690,6 @@ export {
   LoopDetectedEvent,
   LoopReason,
   LoopType,
-  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,

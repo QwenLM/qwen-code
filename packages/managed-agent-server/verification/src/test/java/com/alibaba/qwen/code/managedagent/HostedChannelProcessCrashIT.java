@@ -117,7 +117,7 @@ class HostedChannelProcessCrashIT {
                 "fg7-cases", "crash");
         deleteRecursively(casesRoot);
         Files.createDirectories(casesRoot);
-        String tenant = "hosted-channel-crash-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         for (String fault : cases) {
             try {
                 runCrashCase(tenant, fault, casesRoot);
@@ -230,7 +230,7 @@ class HostedChannelProcessCrashIT {
         Path stateDir = Files.createDirectories(caseDir.resolve("state"));
         String channelId = "fg7c-" + fault;
         String marker = "fg7-" + fault.replace("spring-kill-", "kill-");
-        int internalPort = reservePort();
+        int internalPort = brokerPort;
         startFixture(caseDir, tenant, internalPort);
         Map<String, Object> base = support.caseBase(tenant, fault, stateDir,
                 internalPort);

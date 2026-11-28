@@ -1,0 +1,2 @@
+com.alibaba.qwen.code.managedagent.EventTransportMultiNodeGate
+com.alibaba.qwen.code.managedagent.persistence.SessionResourceCollectionMySqlIT#rocketMqWakeupsAndPolling

@@ -92,7 +92,7 @@ class HostedTeamMemberCommandMySqlIT {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "h4eb3-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final AtomicReference<Throwable> modelFailure =
             new AtomicReference<>();
     // Member reports seen by the scripted lead across her wake turns. A
@@ -798,7 +798,7 @@ class HostedTeamMemberCommandMySqlIT {
         Files.createDirectory(temporary.resolve("harness-decoy"));
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -845,7 +845,6 @@ class HostedTeamMemberCommandMySqlIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
