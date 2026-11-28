@@ -232,7 +232,7 @@ the header row with its action buttons and the session search bar are removed.
 ```ts
 type WebShellSidebarSessionActionItem =
   | 'details' // 📝 Details (dropdown sub-menu)
-  | 'rename' // ✏️ Rename (dropdown menu)
+  | 'rename' // ✏️ Rename (dropdown menu by default; inline button when listed in inlineItems)
   | 'bindPr' // 🔗 Bind a GitHub PR (dropdown menu)
   | 'group' // 📁 Group/Move to folder (dropdown menu)
   | 'export' // 📤 Export chat history (dropdown menu)
@@ -259,6 +259,8 @@ Controls which action buttons appear on session rows:
 - **`items`**: Master availability control for both inline and dropdown actions. Standard rows hide items excluded from this list; Recent keeps its fixed action slot and represents excluded items as disabled controls rather than enabling them.
 - **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `[]`, so optional actions such as Pin appear in the More menu by default. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. On coarse-pointer devices, all optional actions stay in More regardless of this option. `'details'`, `'bindPr'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
 - **`bindPr` built-in condition**: shown only when the session supports metadata mutation — the current session in a primary or locked workspace, or any other session with the `workspace_session_metadata` capability (plus `workspace_qualified_rest_core` when that session is in a locked or restricted secondary workspace) — and the row is not a standalone session (including recents rows) — standalone metadata routes only accept a display name. It is independent of the `rename` item: a host may whitelist `bindPr` without `rename`.
+
+When `rename` is available for a session, its row can take keyboard focus (active sessions; archived rows are not focusable), and the row is not busy with another action, pressing **F2** on the focused row also starts a rename, regardless of `inlineItems`. F2 is ignored while another row action is in flight, matching the disabled Rename action, and F2 with Ctrl, Alt or Meta held is left for the host. Workspace rows open the inline rename editor; standalone (No workspace) rows open their rename dialog instead. Rows in the Recent sessions list have no rename affordance, so F2 does nothing there. A pinned session can render twice (Pinned section and its group or workspace list); while the Pinned section is expanded it alone hosts the editor, so F2 on the other copy opens the editor on the Pinned row and focus follows it.
 
 Archived rows in Settings use Export conversation and Restore as inline buttons, with Rename and Delete in More. Their actions still follow `items` and built-in availability restrictions; `inlineItems` does not change this layout. The existing styles reveal these buttons on hover or keyboard focus and keep them visible on touch devices. Rows loaded by the Recent section keep dedicated Pin and Archive buttons on desktop. On coarse-pointer devices, they use a More menu with the same actions and disabled-state guards instead. Recent reserves that fixed action slot and renders excluded or unavailable actions as disabled instead of hiding the slot.
 

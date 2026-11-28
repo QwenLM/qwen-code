@@ -289,7 +289,12 @@ describe('WebShellSidebar bind PR', () => {
     connection.sessionId = 's1';
     active.sessions = [makeSession('s1')];
     active.data = active.sessions;
-    renderSidebar({ sessionActions: { items: ['rename', 'delete', 'pin'] } });
+    renderSidebar({
+      sessionActions: {
+        items: ['rename', 'delete', 'pin'],
+        inlineItems: ['pin'],
+      },
+    });
     await flushSidebar();
 
     const menu = await openSessionMenu();
@@ -549,7 +554,10 @@ describe('WebShellSidebar bind PR', () => {
         },
       ],
     });
-    renderSidebar({ standalone: true });
+    renderSidebar({
+      standalone: true,
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await flushSidebar();
 
     const menu = await openSessionMenu();
