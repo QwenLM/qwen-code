@@ -9,7 +9,7 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type {
   AnsiOutput,
   Config,
@@ -79,7 +79,7 @@ export const useShellCommandProcessor = (
   setPendingHistoryItem: React.Dispatch<
     React.SetStateAction<HistoryItemWithoutId | null>
   >,
-  onExec: (command: Promise<void>) => void,
+  onExec: (command: Promise<void>, signal: AbortSignal) => void,
   onDebugMessage: (message: string) => void,
   config: Config,
   llmClient: LlmClient,
@@ -88,14 +88,28 @@ export const useShellCommandProcessor = (
   terminalHeight?: number,
 ) => {
   const [activeShellPtyId, setActiveShellPtyId] = useState<number | null>(null);
+  const activeShellInvocationRef = useRef<symbol | null>(null);
   const handleShellCommand = useCallback(
     (rawQuery: PartListUnion, abortSignal: AbortSignal): boolean => {
       if (typeof rawQuery !== 'string' || rawQuery.trim() === '') {
         return false;
       }
 
+      const invocation = Symbol();
+      activeShellInvocationRef.current = invocation;
+      const ownsShellUi = () => activeShellInvocationRef.current === invocation;
       const userMessageTimestamp = Date.now();
       const callId = `shell-${userMessageTimestamp}`;
+      const clearPendingShellItem = () => {
+        if (!ownsShellUi()) return;
+        setPendingHistoryItem((item) =>
+          item?.type === 'tool_group' &&
+          item.isUserInitiated === true &&
+          item.tools.some((tool) => tool.callId === callId)
+            ? null
+            : item,
+        );
+      };
       addItemToHistory(
         { type: 'user_shell', text: rawQuery },
         userMessageTimestamp,
@@ -165,11 +179,18 @@ export const useShellCommandProcessor = (
 
         const cleanupShellCommand = () => {
           abortSignal.removeEventListener('abort', abortHandler);
-          if (pwdFilePath && fs.existsSync(pwdFilePath)) {
-            fs.unlinkSync(pwdFilePath);
+          try {
+            if (pwdFilePath && fs.existsSync(pwdFilePath)) {
+              fs.unlinkSync(pwdFilePath);
+            }
+          } catch (error) {
+            debugLogger.debug('Failed to remove shell pwd file', error);
           }
-          setActiveShellPtyId(null);
-          setShellInputFocused(false);
+          if (ownsShellUi()) {
+            activeShellInvocationRef.current = null;
+            setActiveShellPtyId(null);
+            setShellInputFocused(false);
+          }
           resolve();
         };
 
@@ -236,8 +257,9 @@ export const useShellCommandProcessor = (
 
               // Throttle pending UI updates, but allow forced updates.
               if (
-                shouldUpdate ||
-                Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS
+                ownsShellUi() &&
+                (shouldUpdate ||
+                  Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS)
               ) {
                 setPendingHistoryItem((prevItem) => {
                   if (prevItem?.type === 'tool_group') {
@@ -273,7 +295,7 @@ export const useShellCommandProcessor = (
           debugLogger.debug(terminalHeight, terminalWidth);
 
           executionPid = pid;
-          if (pid) {
+          if (pid && ownsShellUi()) {
             setActiveShellPtyId(pid);
             setPendingHistoryItem((prevItem) => {
               if (prevItem?.type === 'tool_group') {
@@ -290,7 +312,7 @@ export const useShellCommandProcessor = (
 
           result
             .then((result: ShellExecutionResult) => {
-              setPendingHistoryItem(null);
+              clearPendingShellItem();
 
               let mainContent: string;
 
@@ -347,7 +369,7 @@ export const useShellCommandProcessor = (
               addShellCommandToLlmHistory(llmClient, rawQuery, finalOutput);
             })
             .catch((err) => {
-              setPendingHistoryItem(null);
+              clearPendingShellItem();
               const errorMessage =
                 err instanceof Error ? err.message : String(err);
               addItemToHistory(
@@ -363,7 +385,7 @@ export const useShellCommandProcessor = (
             });
         } catch (err) {
           // This block handles synchronous errors from `execute`
-          setPendingHistoryItem(null);
+          clearPendingShellItem();
           const errorMessage = err instanceof Error ? err.message : String(err);
           addItemToHistory(
             {
@@ -381,7 +403,7 @@ export const useShellCommandProcessor = (
         executeCommand(resolve);
       });
 
-      onExec(execPromise);
+      onExec(execPromise, abortSignal);
       return true;
     },
     [
