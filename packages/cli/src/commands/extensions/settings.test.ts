@@ -130,6 +130,7 @@ describe('settings set handler', () => {
     const mockExtension = {
       name: 'my-extension',
       id: 'ext-id-123',
+      path: '/extensions/my-extension',
       config: { name: 'my-extension', settings: [] },
     };
     mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
@@ -143,6 +144,12 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'user',
+      // Versioned installs resolve their settings files from the artifact's
+      // directory and the invoking workspace, so the handler passes both.
+      {
+        workspaceDir: process.cwd(),
+        extensionDir: mockExtension.path,
+      },
     );
   });
 
@@ -150,6 +157,7 @@ describe('settings set handler', () => {
     const mockExtension = {
       name: 'my-extension',
       id: 'ext-id-123',
+      path: '/extensions/my-extension',
       config: { name: 'my-extension', settings: [] },
     };
     mockGetLoadedExtensions.mockReturnValueOnce([mockExtension]);
@@ -165,6 +173,10 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'workspace',
+      {
+        workspaceDir: process.cwd(),
+        extensionDir: mockExtension.path,
+      },
     );
   });
 });

@@ -72,9 +72,39 @@ describe('handleLink', () => {
         type: 'link',
       },
       expect.any(Function),
+      // The install records the value the link targets, the invoking workspace
+      // as the install workspace, and the user scope by default.
+      undefined,
+      process.cwd(),
+      undefined,
+      { scope: 'user' },
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "linked-extension" linked successfully and enabled.',
+    );
+
+    processExitSpy.mockRestore();
+  });
+
+  it('should record the workspace scope when the link asks for it', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
+    mockInstallExtension.mockResolvedValueOnce({ name: 'linked-extension' });
+
+    await handleLink({ path: '/some/local/path', scope: 'workspace' });
+
+    expect(mockInstallExtension).toHaveBeenCalledWith(
+      {
+        source: '/some/local/path',
+        type: 'link',
+      },
+      expect.any(Function),
+      undefined,
+      process.cwd(),
+      undefined,
+      { scope: 'workspace', workspacePath: process.cwd() },
     );
 
     processExitSpy.mockRestore();
