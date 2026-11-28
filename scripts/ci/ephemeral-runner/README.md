@@ -229,24 +229,26 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
-Failed cycles retry with jittered exponential backoff: 10 s doubling to a
-60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
-so a rate-limited pool stops sustaining its own rate limit. The backoff
-sleep stays interruptible and a shutdown cuts it short.
+Failed cycles use jittered exponential backoff: 10 s doubling to a 60 s
+cap, or 30 s doubling to a 300 s cap on rate limits without a usable
+deadline. For JIT registration, a quota reset applies when GitHub reports zero
+remaining quota and the reset is within the next two hours. The manager logs and
+ignores resets beyond that window. It waits at least until the applicable reset
+or `Retry-After`, whichever is later when both apply, and spreads retries after
+that time to avoid a burst across slots. A 403 without rate-limit evidence
+uses the ordinary cadence. The journal includes recognized GitHub permission
+diagnostics. Restart the service if the token changes. Shutdown can interrupt
+the wait.
 
 `stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
-repeat the same failure before the manager logs `STALL ALERT` instead of the
-ordinary retry line. The threshold is wall-clock, so it holds under any retry
-cadence, and the default sits well above the 300 s backoff ceiling on purpose:
-a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
-than the cadence would put one alert per slot in the journal simultaneously.
-The clock resets whenever a cycle succeeds or the failure changes, and each
-stall episode alerts once. Because the check happens when a failure is
-observed, the alert lands on the first failure at or after the threshold, so
-the reported duration is the threshold rounded up to the current cadence. A
-stall alert means the slot is serving no jobs and needs reconciliation; the
-manager keeps retrying and never exits on its own, so systemd does not restart
-it. Alert on that journal marker rather than on service state.
+repeat the same failure before the manager logs `STALL ALERT`. The clock resets
+whenever a cycle succeeds or the failure changes, and each stall episode alerts
+once. The manager checks the threshold after a failure and once per second while
+waiting for a GitHub retry deadline. The alert identifies a slot serving no
+jobs and reports when it is waiting on GitHub. Check the error
+to see whether operator action is needed. The manager keeps retrying and never
+exits on its own, so systemd does not restart it. Alert on that journal marker
+rather than on service state.
 
 `drainTimeoutSeconds` (default 0, disabled; the example config sets 1800)
 turns SIGTERM into a drain instead of a fixed grace deadline. Replenishment
