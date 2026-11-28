@@ -13,6 +13,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,6 +49,7 @@ class HarnessWorkPollTest {
         verify(harness).onClaimDemand(listener.capture());
         demand = listener.getValue();
         when(harness.acceptsWorkPullClaims("pod-b", "boot-b")).thenReturn(true);
+        when(harness.acceptsWorkPullReoffers("pod-b", "boot-b")).thenReturn(true);
     }
 
     @AfterEach
@@ -78,7 +81,7 @@ class HarnessWorkPollTest {
         var live = candidate("live", 2);
         var released = candidate("released", 5);
         var taken = claim("released", 6);
-        when(placements.findReservedClaims("pod-b", "boot-b", 3)).thenReturn(List.of(held));
+        when(placements.findReservedClaims("pod-b", "boot-b", 100)).thenReturn(List.of(held));
         when(placements.findClaimCandidates(2)).thenReturn(List.of(live, released));
         when(placements.claim("t", "live", live, "pod-b", "boot-b"))
                 .thenThrow(new ManagedAgentException(409, "harness_owner_still_live", "live"));
@@ -97,12 +100,48 @@ class HarnessWorkPollTest {
     }
 
     @Test
-    void aNonMemberOrAPollerWithoutAFreeSlotClaimsNothing() throws Exception {
+    void aNonMemberClaimsNothing() throws Exception {
         when(harness.acceptsWorkPullClaims("pod-b", "boot-b")).thenReturn(false);
+        when(harness.acceptsWorkPullReoffers("pod-b", "boot-b")).thenReturn(false);
         assertThat(work.poll("test-token", poll(1, 0)).get(5, TimeUnit.SECONDS).claims()).isEmpty();
-        when(harness.acceptsWorkPullClaims("pod-b", "boot-b")).thenReturn(true);
-        assertThat(work.poll("test-token", poll(0, 0)).get(5, TimeUnit.SECONDS).claims()).isEmpty();
         verifyNoInteractions(placements);
+    }
+
+    @Test
+    void aZeroSlotOrDrainingPollerStillReceivesItsHeldClaim() throws Exception {
+        var held = claim("held", 4);
+        when(placements.findReservedClaims("pod-b", "boot-b", 100)).thenReturn(List.of(held));
+        when(harness.claimLoad("t", "held", held.placement())).thenReturn(Map.of("sessionId", "held"));
+
+        assertThat(work.poll("test-token", poll(0, 0)).get(5, TimeUnit.SECONDS).claims())
+                .extracting(HarnessWorkPoll.ClaimOffer::sessionId).containsExactly("held");
+
+        when(harness.acceptsWorkPullClaims("pod-b", "boot-b")).thenReturn(false);
+        assertThat(work.poll("test-token", poll(0, 0)).get(5, TimeUnit.SECONDS).claims())
+                .extracting(HarnessWorkPoll.ClaimOffer::sessionId).containsExactly("held");
+        verify(placements, never()).findClaimCandidates(anyInt());
+    }
+
+    @Test
+    void aHeldClaimWhoseLoadFailsDoesNotConsumeANewClaimSlot() throws Exception {
+        var held = claim("held", 4);
+        var live = candidate("live", 2);
+        var released = candidate("released", 5);
+        when(placements.findReservedClaims("pod-b", "boot-b", 100)).thenReturn(List.of(held));
+        when(placements.findClaimCandidates(2)).thenReturn(List.of(live, released));
+        when(placements.claim("t", "live", live, "pod-b", "boot-b")).thenReturn(claim("live", 3));
+        when(placements.claim("t", "released", released, "pod-b", "boot-b")).thenReturn(claim("released", 6));
+        when(harness.claimLoad(eq("t"), anyString(), any())).thenAnswer(call -> {
+            if (call.getArgument(1).equals("held")) {
+                throw new IllegalStateException("not loadable");
+            }
+            return Map.of("sessionId", call.getArgument(1));
+        });
+
+        var reply = work.poll("test-token", poll(2, 0)).get(5, TimeUnit.SECONDS);
+
+        assertThat(reply.claims()).extracting(HarnessWorkPoll.ClaimOffer::sessionId)
+                .containsExactly("live", "released");
     }
 
     @Test
@@ -143,6 +182,50 @@ class HarnessWorkPollTest {
 
         assertThat(older.get(1, TimeUnit.SECONDS).claims()).isEmpty();
         assertThat(newer).isNotDone();
+    }
+
+    @Test
+    void concurrentPollsKeepOneWaiterPerProcess() throws Exception {
+        when(harness.acceptsWorkPullClaims(anyString(), anyString())).thenReturn(true);
+        when(harness.acceptsWorkPullReoffers(anyString(), anyString())).thenReturn(true);
+        when(placements.findReservedClaims(anyString(), anyString(), anyInt())).thenReturn(List.of());
+        when(placements.findClaimCandidates(anyInt())).thenReturn(List.of());
+        var requests = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 2_000; round++) {
+                var start = new CountDownLatch(1);
+                var poll = new HarnessWorkPoll.Poll("pod-b", "boot-" + round, DIGEST, FEATURES, 1, 20_000);
+                var first = requests.submit(() -> {
+                    start.await();
+                    return work.poll("test-token", poll);
+                });
+                var second = requests.submit(() -> {
+                    start.await();
+                    return work.poll("test-token", poll);
+                });
+                start.countDown();
+                var firstReply = first.get(5, TimeUnit.SECONDS);
+                var secondReply = second.get(5, TimeUnit.SECONDS);
+                assertThat(firstReply.isDone() ^ secondReply.isDone()).as("round %s", round).isTrue();
+                var superseded = firstReply.isDone() ? firstReply : secondReply;
+                assertThat(superseded.get(1, TimeUnit.SECONDS).claims()).isEmpty();
+            }
+        } finally {
+            requests.shutdownNow();
+        }
+    }
+
+    @Test
+    void pollsFromDifferentProcessesStayIndependent() {
+        when(harness.acceptsWorkPullClaims(anyString(), anyString())).thenReturn(true);
+        when(harness.acceptsWorkPullReoffers(anyString(), anyString())).thenReturn(true);
+        when(placements.findReservedClaims(anyString(), anyString(), anyInt())).thenReturn(List.of());
+        when(placements.findClaimCandidates(anyInt())).thenReturn(List.of());
+        var first = work.poll("test-token", new HarnessWorkPoll.Poll("pod-a", "boot-a", DIGEST, FEATURES, 1, 20_000));
+        var second = work.poll("test-token", poll(1, 20_000));
+
+        assertThat(first).isNotDone();
+        assertThat(second).isNotDone();
     }
 
     private static HarnessWorkPoll.Poll poll(int freeSlots, long waitMillis) {

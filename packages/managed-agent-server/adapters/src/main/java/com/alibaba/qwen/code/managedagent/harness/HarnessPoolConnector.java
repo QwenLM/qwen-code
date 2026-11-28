@@ -369,6 +369,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean acceptsWorkPullReoffers(String instanceId, String bootId) {
+        return workPull() && members.containsKey(new Owner(instanceId, bootId));
+    }
+
+    @Override
     public Map<String, Object> claimLoad(String tenant, String session, Placement placement) {
         Member member = members.get(new Owner(placement.instanceId(), placement.bootId()));
         if (closed || member == null) {

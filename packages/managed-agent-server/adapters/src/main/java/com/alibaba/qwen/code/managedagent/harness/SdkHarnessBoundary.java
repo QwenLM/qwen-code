@@ -116,6 +116,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean acceptsWorkPullReoffers(String instanceId, String bootId) {
+        return call(() -> delegate.acceptsWorkPullReoffers(instanceId, bootId));
+    }
+
+    @Override
     public Map<String, Object> claimLoad(String tenantId, String sessionId,
             HarnessPlacementStore.Placement placement) {
         return call(() -> delegate.claimLoad(tenantId, sessionId, placement));

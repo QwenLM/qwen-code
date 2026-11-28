@@ -67,6 +67,9 @@ public interface HarnessConnector extends AutoCloseable {
     /** Whether a work-pull poller with this instance and boot may claim; P1.1 admits negotiated pool members only. */
     public default boolean acceptsWorkPullClaims(String instanceId, String bootId) { return false; }
 
+    /** Whether the same poller may retrieve its existing reservations while it is draining or has no free slot. */
+    public default boolean acceptsWorkPullReoffers(String instanceId, String bootId) { return false; }
+
     /** The passive load body a claimer runs for wake recovery, built for the claimed placement without sending it. */
     public default Map<String, Object> claimLoad(String tenantId, String sessionId, HarnessPlacementStore.Placement placement) {
         throw new UnsupportedOperationException("Work-pull claims are unavailable");

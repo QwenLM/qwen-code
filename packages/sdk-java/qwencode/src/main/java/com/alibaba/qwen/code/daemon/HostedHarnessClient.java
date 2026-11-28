@@ -482,7 +482,8 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
-        requireSessionConfigurationCapabilities(request.toJson());
+        Map<String, Object> body = request.toJson();
+        requireSessionConfigurationCapabilities(body);
         if (request.getRecoveryCleanupPromptId() != null
                 && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
             throw new DaemonProtocolException("Hosted cleanup-only load capability is required");
@@ -491,7 +492,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                 && !capabilities.getFeatures().contains("targeted-cancel/1")) {
             throw new DaemonProtocolException("Hosted targeted cancellation capability is required");
         }
-        return request.toJson();
+        return body;
     }
 
     private HarnessSessionRef loadSession(LoadHarnessSession request, boolean mcpManagementOnly) {

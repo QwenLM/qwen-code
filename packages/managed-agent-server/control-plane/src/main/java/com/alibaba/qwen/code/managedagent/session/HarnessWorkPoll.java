@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -42,7 +43,7 @@ public class HarnessWorkPoll {
     private final HarnessPlacementStore placements;
     private final HarnessConnector harness;
     private final ManagedAgentSettings settings;
-    private final Set<Waiter> waiters = ConcurrentHashMap.newKeySet();
+    private final ConcurrentMap<ProcessKey, Waiter> waiters = new ConcurrentHashMap<>();
     private final AtomicBoolean wakePending = new AtomicBoolean();
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "managed-harness-work-poll");
@@ -61,7 +62,10 @@ public class HarnessWorkPoll {
     public record Reply(List<ClaimOffer> claims) {
     }
 
-    private record Waiter(Poll poll, long deadline, CompletableFuture<Reply> reply) {
+    private record ProcessKey(String instanceId, String bootId) {
+    }
+
+    private record Waiter(ProcessKey key, Poll poll, long deadline, CompletableFuture<Reply> reply) {
     }
 
     public HarnessWorkPoll(HarnessPlacementStore placements, HarnessConnector harness, ManagedAgentSettings settings) {
@@ -80,16 +84,14 @@ public class HarnessWorkPoll {
     public CompletableFuture<Reply> poll(String token, Poll poll) {
         authenticate(token, poll);
         long wait = Math.min(Math.max(poll.waitMillis(), 0), MAX_WAIT_MILLIS);
-        var waiter = new Waiter(poll, System.currentTimeMillis() + wait, new CompletableFuture<>());
+        var key = new ProcessKey(poll.instanceId(), poll.bootId());
+        var waiter = new Waiter(key, poll, System.currentTimeMillis() + wait, new CompletableFuture<>());
         // One open poll per process: a newer poll supersedes an older one, whose caller has given up,
         // so the same reserved claim is never offered twice and free slots are never counted twice.
-        for (Waiter older : waiters) {
-            if (older.poll().instanceId().equals(poll.instanceId()) && older.poll().bootId().equals(poll.bootId())) {
-                waiters.remove(older);
-                older.reply().complete(new Reply(List.of()));
-            }
+        Waiter older = waiters.put(key, waiter);
+        if (older != null) {
+            older.reply().complete(new Reply(List.of()));
         }
-        waiters.add(waiter);
         poller.execute(() -> attempt(waiter));
         return waiter.reply();
     }
@@ -118,7 +120,7 @@ public class HarnessWorkPoll {
         if (wakePending.compareAndSet(false, true)) {
             poller.execute(() -> {
                 wakePending.set(false);
-                waiters.forEach(this::check);
+                waiters.values().forEach(this::check);
             });
         }
     }
@@ -132,7 +134,7 @@ public class HarnessWorkPoll {
     /** Answers the waiter when it has claims or its wait elapsed; false while it keeps waiting. */
     private boolean check(Waiter waiter) {
         if (waiter.reply().isDone()) {
-            waiters.remove(waiter);
+            waiters.remove(waiter.key(), waiter);
             return true;
         }
         List<ClaimOffer> offers;
@@ -144,7 +146,7 @@ public class HarnessWorkPoll {
             offers = List.of();
         }
         if (!offers.isEmpty() || System.currentTimeMillis() >= waiter.deadline()) {
-            waiters.remove(waiter);
+            waiters.remove(waiter.key(), waiter);
             waiter.reply().complete(new Reply(offers));
             return true;
         }
@@ -152,20 +154,21 @@ public class HarnessWorkPoll {
     }
 
     private List<ClaimOffer> offers(Poll poll) {
-        // P1.1 serves later calls by push, so only a negotiated, accepting pool member may claim.
-        if (poll.freeSlots() == 0 || !harness.acceptsWorkPullClaims(poll.instanceId(), poll.bootId())) {
-            return List.of();
-        }
+        boolean acceptsNew = harness.acceptsWorkPullClaims(poll.instanceId(), poll.bootId());
         List<ClaimOffer> offers = new ArrayList<>();
-        List<Claim> held = placements.findReservedClaims(poll.instanceId(), poll.bootId(), poll.freeSlots());
-        for (Claim claim : held) {
-            Map<String, Object> load = load(claim.placement());
-            if (load != null) {
-                offers.add(offer(claim, load));
+        // Re-offering an existing reservation is recovery, not new-work admission:
+        // a draining or zero-slot member can receive it, but cannot claim more.
+        if (harness.acceptsWorkPullReoffers(poll.instanceId(), poll.bootId())) {
+            List<Claim> held = placements.findReservedClaims(poll.instanceId(), poll.bootId(), MAX_SLOTS);
+            for (Claim claim : held) {
+                Map<String, Object> load = load(claim.placement());
+                if (load != null) {
+                    offers.add(offer(claim, load));
+                }
             }
         }
-        int remaining = poll.freeSlots() - held.size();
-        if (remaining <= 0) {
+        int remaining = poll.freeSlots() - offers.size();
+        if (!acceptsNew || remaining <= 0) {
             return offers;
         }
         for (Placement candidate : placements.findClaimCandidates(remaining)) {

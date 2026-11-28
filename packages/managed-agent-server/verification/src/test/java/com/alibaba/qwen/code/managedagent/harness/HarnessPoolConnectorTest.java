@@ -884,6 +884,7 @@ class HarnessPoolConnectorTest {
         var released = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 1,
                 "RELEASED");
         when(placements.get("tenant", "session")).thenReturn(released);
+        when(placements.hasUnreleasedOwnership("a", released.bootId())).thenReturn(true);
         when(placements.recordDemand("tenant", "session")).thenReturn(0L);
         try (var pool = new HarnessPoolConnector(settings(), placements,
                 () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
@@ -891,6 +892,7 @@ class HarnessPoolConnectorTest {
             pool.enableWorkPull();
             pool.refresh();
             assertThat(pool.acceptsWorkPullClaims("a", released.bootId())).isFalse();
+            assertThat(pool.acceptsWorkPullReoffers("a", released.bootId())).isTrue();
             assertThatThrownBy(() -> pool.recoverForWake("tenant", "session"))
                     .isInstanceOf(ManagedAgentException.class).extracting("code")
                     .isEqualTo("harness_placement_released");
@@ -916,10 +918,14 @@ class HarnessPoolConnectorTest {
                 ignored -> clientA)) {
             pool.refresh();
             assertThat(pool.acceptsWorkPullClaims("a", boot)).isFalse();
+            assertThat(pool.acceptsWorkPullReoffers("a", boot)).isFalse();
             pool.enableWorkPull();
             assertThat(pool.acceptsWorkPullClaims("a", boot)).isTrue();
+            assertThat(pool.acceptsWorkPullReoffers("a", boot)).isTrue();
             assertThat(pool.acceptsWorkPullClaims("a", "other-boot")).isFalse();
+            assertThat(pool.acceptsWorkPullReoffers("a", "other-boot")).isFalse();
             assertThat(pool.acceptsWorkPullClaims("z", boot)).isFalse();
+            assertThat(pool.acceptsWorkPullReoffers("z", boot)).isFalse();
             var claimed = new Placement("tenant", "session", "workspace", "a", boot, 3, "ACTIVE");
             assertThat(pool.claimLoad("tenant", "session", claimed)).containsEntry("sessionId", "session");
             var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
