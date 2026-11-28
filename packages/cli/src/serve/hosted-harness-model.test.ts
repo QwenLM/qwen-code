@@ -23,6 +23,10 @@ import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+} from '@qwen-code/qwen-code-core/utils/typed-prompt.js';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   HookEventName,
@@ -247,6 +251,51 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.fire.mock.calls.map(([event]) => event)).not.toContain(
       HookEventName.UserPromptSubmit,
     );
+  });
+
+  describe('typed-prompt mark (#9455)', () => {
+    it('marks a user prompt that reaches the model as written', async () => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({ ...input, userPrompt: true });
+      expect(model.requests[0][0]).toEqual(markTypedPrompt({ text: 'hello' }));
+    });
+
+    it('leaves a prompt that is not new user input unmarked', async () => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({ ...input, userPrompt: false });
+      expect(model.requests[0][0]).toEqual({ text: 'hello' });
+    });
+
+    it.each([
+      ['a hook rewrote', { updatedPrompt: 'rewritten prompt' }],
+      ['a hook added context to', { additionalContext: 'hook context' }],
+    ])('leaves a prompt %s unmarked', async (_label, output) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+      hooks.fire.mockImplementation(async (event) =>
+        event === HookEventName.UserPromptSubmit
+          ? { hookSpecificOutput: { hookEventName: event, ...output } }
+          : undefined,
+      );
+      await runHostedHarnessTextTurn({
+        ...input,
+        userPrompt: true,
+        hooks: hooks.session,
+      });
+      expect(model.requests[0][0].text).not.toBe('hello');
+      expect(isTypedPrompt(model.requests[0][0])).toBe(false);
+    });
+
+    it('leaves a prompt that recalled memory was joined to unmarked', async () => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({
+        ...input,
+        userPrompt: true,
+        memory: { recall: vi.fn().mockResolvedValue('recalled memory') },
+      });
+      expect(model.requests[0][0].text).toContain('recalled memory');
+      expect(isTypedPrompt(model.requests[0][0])).toBe(false);
+    });
   });
 
   it.each(['tool-results', 'model'] as const)(

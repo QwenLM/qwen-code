@@ -40,6 +40,11 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+  typedPromptPrefix,
+} from '../utils/typed-prompt.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -2203,6 +2208,128 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('typed-prompt mark (#9455)', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    /** Texts of the sent parts that carry the typed-prompt mark. */
+    const markedTexts = () =>
+      ((mockTurnRunFn.mock.lastCall?.[1] ?? []) as Array<string | Part>)
+        .filter((part) => typeof part !== 'string' && isTypedPrompt(part))
+        .map((part) => (part as Part).text);
+
+    it.each<[string, PartListUnion, string]>([
+      ['a string', 'port the parser', 'port the parser'],
+      [
+        'a text part ahead of what it attached',
+        [
+          { text: 'port @a.ts' },
+          { text: '\n--- Content from referenced files ---' },
+          { text: 'Content from @a.ts:\nbody' },
+        ],
+        'port @a.ts',
+      ],
+    ])(
+      "marks only the first text part of a person's prompt sent as %s",
+      async (_label, request, typed) => {
+        await run(request, 'typed-prompt', {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: typed },
+        });
+        expect(markedTexts()).toEqual([typed]);
+      },
+    );
+
+    it('leaves a prompt its front end already marked as it is', async () => {
+      // ACP sends what the person attached first and marks the instruction
+      // it ends with, and passes `humanInput` on the shared agent loop.
+      await run(
+        [
+          { text: '<reference content>' },
+          markTypedPrompt({ text: 'port the parser' }),
+        ],
+        'typed-prompt-premarked',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+        },
+      );
+      expect(markedTexts()).toEqual(['port the parser']);
+    });
+
+    it.each<[string, Part, string[]]>([
+      [
+        'marks a retry of the prompt the failed send marked',
+        markTypedPrompt({ text: 'port the parser' }),
+        ['port the parser'],
+      ],
+      [
+        'leaves a retry unmarked when the failed send did not mark it',
+        { text: 'port the parser' },
+        [],
+      ],
+    ])('%s', async (_label, failedPart, expected) => {
+      // The CLI retries with the prompt as it first sent it; the entry the
+      // failed send left in history carries that send's mark.
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [failedPart] }]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      await run([{ text: 'port the parser' }], 'typed-prompt-retry', {
+        type: SendMessageType.Retry,
+      });
+      expect(markedTexts()).toEqual(expected);
+    });
+
+    it.each<[string, SendMessageOptions]>([
+      ['a prompt with no humanInput', { type: SendMessageType.UserQuery }],
+      ...[
+        SendMessageType.Retry,
+        SendMessageType.Cron,
+        SendMessageType.Notification,
+        SendMessageType.Steer,
+        SendMessageType.Hook,
+      ].map((type): [string, SendMessageOptions] => [
+        `an internal ${type} send`,
+        { type, humanInput: { text: 'port the parser' } },
+      ]),
+      [
+        "a Mod's prompt",
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+          submittedByMod: 'mod',
+        },
+      ],
+      [
+        'a concurrent side query',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+          isConcurrentSideQuery: true,
+        },
+      ],
+    ])('marks nothing for %s', async (_label, options) => {
+      await run('port the parser', 'typed-prompt-none', options);
+      expect(markedTexts()).toEqual([]);
+    });
+
+    it('marks nothing when the first text part is empty, not a later one', async () => {
+      await run(
+        [{ text: '' }, { text: '\n--- Content from referenced files ---' }],
+        'typed-prompt-empty',
+        { type: SendMessageType.UserQuery, humanInput: { text: '' } },
+      );
+      expect(markedTexts()).toEqual([]);
+    });
+  });
+
   describe('DW03: human workflow intent', () => {
     beforeEach(() => {
       Object.assign(mockConfig, {
@@ -2229,7 +2356,10 @@ describe('Gemini Client (client.ts)', () => {
       await run([{ text: 'expanded request' }], 'dw03-human', options);
       expect(notices()).toHaveLength(1);
       const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
-      expect(parts).toContainEqual({ text: 'expanded request' });
+      // The prompt part also carries the typed-prompt mark (#9455).
+      expect(parts).toContainEqual(
+        markTypedPrompt({ text: 'expanded request' }),
+      );
       expect(
         parts.some(
           (part) =>
@@ -7421,6 +7551,42 @@ Active file:
 \`\`\`
 hello
 \`\`\``;
+
+    it("keeps the typed-prompt mark on the person's prompt the editor context is merged into, and records the context's length (#9455)", async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordCronPrompt: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      vi.mocked(ideContextStore.get).mockReturnValue(
+        ideContext([activeIdeFile()]),
+      );
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+      await run([{ text: 'port the parser' }], 'prompt-id-ide-typed', {
+        type: SendMessageType.UserQuery,
+        humanInput: { text: 'port the parser' },
+      });
+      const marked = (
+        (mockTurnRunFn.mock.lastCall?.[1] ?? []) as Array<string | Part>
+      ).filter(
+        (part): part is Part => typeof part !== 'string' && isTypedPrompt(part),
+      );
+      expect(marked).toHaveLength(1);
+      expect(marked[0]!.text).toContain(activeContextText);
+      expect(marked[0]!.text!.slice(typedPromptPrefix(marked[0]!))).toBe(
+        'port the parser',
+      );
+      // The session file keeps the prompt as the person sent it, before the
+      // context is merged in, so a resumed session has no prefix to set
+      // apart.
+      const [recorded] = recordUserMessage.mock.calls[0]![0] as Part[];
+      expect(recorded!.text).toBe('port the parser');
+      expect(isTypedPrompt(recorded!)).toBe(true);
+      expect(typedPromptPrefix(recorded!)).toBeUndefined();
+    });
 
     it('should merge editor context into the user request when ideMode is enabled', async () => {
       const mockChat = await ideTurn(

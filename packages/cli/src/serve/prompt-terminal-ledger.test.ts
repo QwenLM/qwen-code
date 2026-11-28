@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  markTypedPrompt,
   SessionService,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   type ChatRecord,
@@ -1174,7 +1175,12 @@ describe('reconcileDanglingPromptTerminals', () => {
     ]);
   });
 
-  it('stamps a locally handled slash command completed', async () => {
+  it.each([
+    ['plain', { text: '/help' }],
+    // The accumulator pops a command part that carries the typed-prompt mark
+    // too, so this mirror must recognise that shape as well.
+    ['typed-prompt-marked', markTypedPrompt({ text: '/help' })],
+  ])('stamps a %s local slash command completed', async (_shape, part) => {
     // A local command (`/help`, `/docs`, `/export md`, ...) never reaches the
     // model: `Session.prompt()` records the prompt as an ordinary user message
     // and the command answers with a `system` / `slash_command`
@@ -1193,7 +1199,10 @@ describe('reconcileDanglingPromptTerminals', () => {
       { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
     ]);
     writeTranscript(fixture, [
-      recordAt(fixture, 'u1', null, '/help', RECORD_BASE_MS + 1000),
+      {
+        ...recordAt(fixture, 'u1', null, '/help', RECORD_BASE_MS + 1000),
+        message: { role: 'user', parts: [part] },
+      },
       {
         ...systemRecord(fixture, 's1', 'u1', 'slash_command', {
           phase: 'result',

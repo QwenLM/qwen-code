@@ -11,6 +11,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import { getErrorStatus } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/typed-prompt.js';
 import {
   LlmRequestPreparationError,
   llmPreparedProviderPin,
@@ -1085,6 +1086,14 @@ async function runPreparedHostedHarnessTextTurn(
     input.hooks?.setMessagesProvider(() =>
       client.getHistory().map((message) => ({ ...message })),
     );
+    // The prompt the session's user sent (the input memory recall reads) is
+    // marked for compaction when it reaches the model as they wrote it. One a
+    // hook rewrote or extended, or that recalled memory was joined to, is
+    // left unmarked, as is input queued while the turn runs.
+    const promptPart: Part =
+      input.userPrompt && !input.resumeModel && effectivePrompt === input.prompt
+        ? markTypedPrompt({ text: effectivePrompt })
+        : { text: effectivePrompt };
     let request: Part[] = input.resumeFromToolResults
       ? ((await input.toolTurn?.resumeHookResults?.(
           input.resumeFromToolResults,
@@ -1092,7 +1101,7 @@ async function runPreparedHostedHarnessTextTurn(
           input.signal,
         )) ?? [...input.resumeFromToolResults])
       : [
-          ...(effectivePrompt ? [{ text: effectivePrompt }] : []),
+          ...(effectivePrompt ? [promptPart] : []),
           ...(input.attachmentParts ?? []),
         ];
     const selectedSkills =

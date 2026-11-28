@@ -745,6 +745,25 @@ describe('LlmContentGenerator', () => {
     });
   });
 
+  it('strips the typed-prompt mark before the Vertex request is built', async () => {
+    // The mark compaction reads rides `partMetadata`, which Vertex rejects.
+    const vertexGenerator = new LlmContentGenerator({
+      apiKey: 'test-api-key',
+      vertexai: true,
+    });
+    mockGoogleGenAI.models.generateContent.mockResolvedValue({});
+
+    await vertexGenerator.generateContent(
+      userReq({
+        text: 'port the parser',
+        partMetadata: { 'qwen-code:typed-prompt': true },
+      }),
+      'prompt-id',
+    );
+
+    expect(sent().contents[0].parts).toEqual([{ text: 'port the parser' }]);
+  });
+
   // Sends one user turn holding a Read functionResponse with these nested
   // parts; returns the functionResponse object the SDK received.
   async function sentFunctionResponse(

@@ -41,6 +41,11 @@ import {
 } from '../core/environmentContext.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import {
+  isTypedPrompt,
+  markTypedPrompt,
+  TYPED_PROMPT_METADATA,
+} from '../utils/typed-prompt.js';
+import {
   countApiUserPrompts,
   findApiRewindCutPoint,
 } from './api-user-prompt.js';
@@ -382,6 +387,77 @@ describe('completed local slash commands', () => {
       expect(messages).toEqual(original);
     },
   );
+
+  // A command part may carry the typed-prompt mark. Without accepting that
+  // shape, a resumed session sends `/docs` to the model and reports it as an
+  // interrupted prompt.
+  it.each(['/docs', '/export md'])(
+    'excludes completed %s recorded with the typed-prompt mark',
+    (command) => {
+      const [user, output] = commandRecords(command);
+      const marked: ChatRecord = {
+        ...user,
+        message: { role: 'user', parts: [markTypedPrompt({ text: command })] },
+      };
+      const history = buildApiHistoryFromConversation({
+        messages: [marked, output],
+      });
+      expect(history).toEqual([]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+    },
+  );
+
+  it.each([
+    [
+      'metadata that is not the mark',
+      {
+        text: '/docs',
+        partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+      },
+    ],
+    [
+      'other metadata besides the mark',
+      {
+        text: '/docs',
+        partMetadata: {
+          [TYPED_PROMPT_METADATA]: true,
+          [AUTO_MEMORY_SNAPSHOT_METADATA]: true,
+        },
+      },
+    ],
+    [
+      'a field other than text',
+      { ...markTypedPrompt({ text: '/docs' }), thoughtSignature: 'sig' },
+    ],
+  ])('keeps command input whose part carries %s', (_label, part) => {
+    const [user, output] = commandRecords();
+    const input: ChatRecord = {
+      ...user,
+      message: { role: 'user', parts: [part] },
+    };
+    expect(
+      buildApiHistoryFromConversation({ messages: [input, output] }),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the typed-prompt mark on a prompt read back from the session file', () => {
+    const [user] = commandRecords();
+    const prompt: ChatRecord = {
+      ...user,
+      message: {
+        role: 'user',
+        parts: [
+          markTypedPrompt({ text: 'port the parser' }),
+          { text: '\n--- Content from referenced files ---' },
+        ],
+      },
+    };
+    // The session file is JSON: what is written is what resume reads.
+    const [entry] = buildApiHistoryFromConversation({
+      messages: [JSON.parse(JSON.stringify(prompt)) as ChatRecord],
+    });
+    expect(entry?.parts?.map(isTypedPrompt)).toEqual([true, false]);
+  });
 
   it('preserves unanswered input before and after a completed command', () => {
     const [user, output] = commandRecords();

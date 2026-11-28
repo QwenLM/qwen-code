@@ -18,6 +18,7 @@ import {
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
   USER_PROMPT_SUBMIT_CONTEXT_OPEN,
 } from '../utils/transcript-records.js';
+import { isTypedPrompt, typedPromptPrefix } from '../utils/typed-prompt.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -292,6 +293,16 @@ interface SlimResult {
 /** Appended to text payloads truncated by `maxTextChars`. */
 export const SLIM_TEXT_TRUNCATION_MARKER = '\n[...truncated for compaction]';
 
+/**
+ * Longest stretch of what a person typed that `keepTypedText` keeps. Past it
+ * the text is cut here, by the rule any other cut text follows. The service
+ * sends the kept request only while the characters it keeps beyond the plain
+ * cut take at most half of the summary's output budget, itself at most 20,000
+ * tokens, so today a message is kept up to about 14,000 characters and this
+ * cap does not bind. It applies if that budget grows.
+ */
+export const TYPED_TEXT_MAX_CHARS = 32_000;
+
 const OMITTED_THOUGHT_PLACEHOLDER = '[thought omitted]';
 
 export interface SlimOptions {
@@ -305,6 +316,13 @@ export interface SlimOptions {
    * nothing and keep text intact.
    */
   maxTextChars?: number;
+  /**
+   * With `maxTextChars`, a user part marked as what the person typed keeps
+   * that text up to TYPED_TEXT_MAX_CHARS instead. What the client recorded
+   * putting in front of it, such as the IDE context, is cut to
+   * `maxTextChars` like other text. Unmarked parts are cut as before.
+   */
+  keepTypedText?: boolean;
   /**
    * When true, strip historical `thought: true` parts that do not carry a
    * `thoughtSignature`. Cold compression side-queries do not share prompt
@@ -344,6 +362,10 @@ export function slimCompactionInput(
     if (!content.parts || content.parts.length === 0) return content;
 
     let touched = false;
+    const typedTextCap =
+      options?.keepTypedText === true && content.role === 'user'
+        ? options.maxTextChars
+        : undefined;
     const newParts: Part[] = [];
     for (const part of content.parts) {
       if (
@@ -362,12 +384,10 @@ export function slimCompactionInput(
         touched = true;
         continue;
       }
-      const replacement = transformPart(
-        part,
-        stats,
-        supportedModalities,
-        options,
-      );
+      const replacement =
+        typedTextCap !== undefined && isTypedPrompt(part)
+          ? keepTypedPart(part, typedTextCap, stats)
+          : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
         touched = true;
       }
@@ -577,14 +597,40 @@ interface EnvelopeSpan {
  * The envelopes at the start and at the end of `value`, the two places a
  * writer puts one. Writers stack them there: the CLI prepends one reminder
  * over another, and a tool result can end with more than one, so each end
- * holds a run of envelopes apart only by whitespace (#15936 R3-3). The
- * writers escape tags inside an envelope's body, so the first closing tag
- * after a leading opening, and the last opening tag before a trailing closing
- * tag, are the envelope's own. The text around them, such as a file a tool
- * read or what the user typed, is not escaped, so a tag inside it is never
- * taken for an envelope.
+ * holds a run of envelopes apart only by whitespace (#15936 R3-3). The first
+ * closing tag after a leading opening, and the last opening tag before a
+ * trailing closing tag, are taken as the envelope's own. That is exact where
+ * the writer escapes tags inside the body, as the hook-context writer, the
+ * task-notification writers and several reminder writers do. Not every
+ * writer does: the reminder a todo-list result ends with holds the list as
+ * JSON, unescaped, so an opening tag a todo quotes is taken for that
+ * reminder's own (#15936 R11-1). The text around the envelopes, such as a
+ * file a tool read or what the user typed, is not escaped either; an envelope
+ * is read only from a tag at either end of `value`, so a tag in the middle of
+ * such text is not taken for one.
  */
 function envelopesAtEnds(value: string): EnvelopeSpan[] {
+  const spans = leadingEnvelopes(value);
+  let end = value.trimEnd().length;
+  for (;;) {
+    const text = value.slice(0, end);
+    const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
+    if (!trailing) break;
+    const closeAt = end - trailing.close.length;
+    const lastOpenAt = text.lastIndexOf(trailing.open, closeAt);
+    if (lastOpenAt === -1) break;
+    spans.push({
+      bodyAt: lastOpenAt + trailing.open.length,
+      closeAt,
+      close: trailing.close,
+    });
+    end = value.slice(0, lastOpenAt).trimEnd().length;
+  }
+  return spans;
+}
+
+/** The run of envelopes `value` opens with, apart only by whitespace. */
+function leadingEnvelopes(value: string): EnvelopeSpan[] {
   const spans: EnvelopeSpan[] = [];
   let openAt = 0;
   for (;;) {
@@ -603,22 +649,61 @@ function envelopesAtEnds(value: string): EnvelopeSpan[] {
     openAt =
       next + (value.length - next - value.slice(next).trimStart().length);
   }
-  let end = value.trimEnd().length;
-  for (;;) {
-    const text = value.slice(0, end);
-    const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
-    if (!trailing) break;
-    const closeAt = end - trailing.close.length;
-    const lastOpenAt = text.lastIndexOf(trailing.open, closeAt);
-    if (lastOpenAt === -1) break;
-    spans.push({
-      bodyAt: lastOpenAt + trailing.open.length,
-      closeAt,
-      close: trailing.close,
-    });
-    end = value.slice(0, lastOpenAt).trimEnd().length;
-  }
   return spans;
+}
+
+/**
+ * Where what the person typed begins in a marked part: after the prefix the
+ * client recorded putting in front of it, such as the IDE context (#9455
+ * R3-1). A part with no prefix recorded is all theirs, so a prompt that
+ * itself opens with a reminder block is kept as typed. A recorded prefix the
+ * text does not bear out, one that is not a run of whole envelopes and the
+ * whitespace after them, is not trusted: the start is then read from the
+ * envelopes leading the text, as it was before the prefix was recorded.
+ */
+function typedTextStart(part: Part, value: string): number {
+  const prefix = typedPromptPrefix(part);
+  if (prefix === undefined) return 0;
+  const head = value.slice(0, prefix);
+  const lastInHead = leadingEnvelopes(head).at(-1);
+  const headEnd = lastInHead
+    ? lastInHead.closeAt + lastInHead.close.length
+    : undefined;
+  // The whitespace closing the prefix stays with the typed text, as the cut
+  // read from the text left it.
+  if (headEnd !== undefined && head.slice(headEnd).trim() === '') {
+    return headEnd;
+  }
+  const lastLeading = leadingEnvelopes(value).at(-1);
+  return lastLeading ? lastLeading.closeAt + lastLeading.close.length : 0;
+}
+
+/**
+ * A marked part in a reduced request: what the person typed is kept up to
+ * TYPED_TEXT_MAX_CHARS. What the client put in front of it is not theirs,
+ * so that run is cut to `maxTextChars` like other text first. Both cuts
+ * follow `truncateKeepingEnvelopes`, so every block open where either one
+ * ends is closed there.
+ */
+function keepTypedPart(
+  part: Part,
+  maxTextChars: number,
+  stats: SlimStats,
+): Part {
+  const value = part.text ?? '';
+  const typedAt = typedTextStart(part, value);
+  const leading = value.slice(0, typedAt);
+  const typed = value.slice(typedAt);
+  const text =
+    (leading.length > maxTextChars
+      ? truncateKeepingEnvelopes(leading, maxTextChars)
+      : leading) +
+    (typed.length > TYPED_TEXT_MAX_CHARS
+      ? truncateKeepingEnvelopes(typed, TYPED_TEXT_MAX_CHARS)
+      : typed);
+  if (text === value) return part;
+  stats.textPartsTruncated++;
+  return { ...part, text };
 }
 
 /**
@@ -671,7 +756,7 @@ function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
  * closes that block after the marker too. Wherever the text ends, every block
  * open there is closed, the inner one first: an envelope can hold another
  * block, and a file's contents carried in a tool call's arguments are not
- * escaped the way an envelope's body is (#15936 R8-1).
+ * escaped the way most envelope bodies are (#15936 R8-1).
  */
 function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
   const span = envelopesAtEnds(value).find(

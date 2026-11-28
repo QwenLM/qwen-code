@@ -41,9 +41,11 @@ import {
   statedContextWindows,
 } from '../utils/contextLengthError.js';
 import {
+  estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
+  type SlimOptions,
 } from './compactionInputSlimming.js';
 import {
   CHARS_PER_TOKEN,
@@ -124,7 +126,10 @@ function compactionOutputReserve(window: number): number {
 interface ColdRequestSizing {
   /** The receiving model's window, or the smaller one a rejection reported. */
   window: number;
-  /** The output budget a retry was sized with. Unset, it follows the estimate. */
+  /**
+   * The output budget a retry, or a request that keeps what the person
+   * typed, was sized with. Unset, it follows the estimate.
+   */
   outputTokens?: number;
 }
 
@@ -353,6 +358,26 @@ export type CompactTrigger = 'manual' | 'auto';
  */
 export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
 
+/**
+ * The slim options of a cold compaction request. The payload-overflow
+ * request and the request reduced to fit its window (#9455) add the text
+ * cap, and the kept request adds `keepTypedText` to that and nothing else,
+ * so it differs from the reduced request only in the typed text it keeps:
+ * the output budget it gives up is measured on that difference. Built from
+ * one another so an option added here reaches all of them (#9455 R3-4).
+ */
+const COLD_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  stripUnsignedThoughts: true,
+});
+const REDUCED_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  ...COLD_SLIM_OPTIONS,
+  maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+});
+const KEPT_SLIM_OPTIONS: Readonly<SlimOptions> = Object.freeze({
+  ...REDUCED_SLIM_OPTIONS,
+  keepTypedText: true,
+});
+
 export interface ChatCompressionCandidate {
   readonly newHistory: Content[];
   readonly info: ChatCompressionInfo;
@@ -567,6 +592,20 @@ function hasStateSnapshot(summary: string): boolean {
     start >= 0 &&
     end > start + startTag.length &&
     stripped.slice(start + startTag.length, end).trim().length > 0
+  );
+}
+
+/**
+ * Whether `usage` gives no output count, the case in which the truncation
+ * checks after a cold send read a local estimate of the summary instead.
+ */
+function lacksOutputCount(usage: GenerateTextResult['usage']): boolean {
+  return (
+    usage?.candidatesTokenCount === undefined &&
+    !(
+      typeof usage?.totalTokenCount === 'number' &&
+      typeof usage?.promptTokenCount === 'number'
+    )
   );
 }
 
@@ -904,12 +943,7 @@ export class ChatCompressionService {
       coldInput ??= slimCompactionInput(
         sideQueryHistory,
         undefined,
-        opts.requestPayloadTooLarge
-          ? {
-              maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
-              stripUnsignedThoughts: true,
-            }
-          : { stripUnsignedThoughts: true },
+        opts.requestPayloadTooLarge ? REDUCED_SLIM_OPTIONS : COLD_SLIM_OPTIONS,
       );
       return coldInput;
     };
@@ -1090,10 +1124,58 @@ export class ChatCompressionService {
     const reduceColdInput = (): Content[] =>
       opts.requestPayloadTooLarge
         ? getColdInput().slimmedHistory
-        : slimCompactionInput(sideQueryHistory, undefined, {
-            maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
-            stripUnsignedThoughts: true,
-          }).slimmedHistory;
+        : slimCompactionInput(sideQueryHistory, undefined, REDUCED_SLIM_OPTIONS)
+            .slimmedHistory;
+    const historyChars = (history: Content[]) =>
+      history.reduce(
+        (sum, content) =>
+          sum +
+          estimateContentChars(content, slimmingConfig.imageTokenEstimate),
+        0,
+      );
+    // The reduced request with what the person typed kept (#9455), sent in
+    // place of `plain` when the summary keeps at least half of `plain`'s
+    // output budget, and its minimum. It asks for no more in all than
+    // `plain` does: its input is larger by the characters it keeps, each
+    // counted as a whole token, and its output budget smaller by as many.
+    // The estimate reads four characters to a token and dense text such as
+    // CJK runs far denser, so this keeps a request the server would accept
+    // in its plain form from being rejected for the text kept, at any
+    // density up to a token a character. The half bounds what the kept text
+    // costs the summary: a summary longer than the kept budget is dropped as
+    // truncated where `plain` would have fit it. Only the first send keeps
+    // the text; the retry sends the plain cut. The payload-overflow path
+    // never gets here: its input is the plain cut from the start, so the
+    // reduction leaves it no smaller.
+    const keepTypedText = (
+      plain: Content[],
+    ): { history: Content[]; sizing: ColdRequestSizing } | undefined => {
+      const kept = slimCompactionInput(
+        sideQueryHistory,
+        undefined,
+        KEPT_SLIM_OPTIONS,
+      ).slimmedHistory;
+      const keptChars = historyChars(kept) - historyChars(plain);
+      if (keptChars <= 0) return undefined;
+      const plainBudget = coldBudgetFor(plain);
+      const outputTokens = plainBudget - keptChars;
+      if (
+        outputTokens <
+        Math.max(
+          minCompactionOutputTokens(budgetWindow),
+          Math.ceil(plainBudget / 2),
+        )
+      ) {
+        return undefined;
+      }
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] the reduced request keeps ${keptChars} more ` +
+            `characters the user typed (output budget ${outputTokens})`,
+        );
+      return { history: kept, sizing: { window: budgetWindow, outputTokens } };
+    };
     // A context-length rejection means the estimate ran low for this request.
     // The one retry is sized from the local estimate alone. The rejection's
     // prose is read only for a window it states, which can only make the
@@ -1105,7 +1187,11 @@ export class ChatCompressionService {
     // nothing, with an output budget held to the reserve, since the estimate
     // that sized the rejected request has just run low. It is sent when it
     // asks for less than the rejected request and its estimate leaves room
-    // in the window, the test the first send passes.
+    // in the window, the test the first send passes. The reduced request
+    // counts as smaller when it holds fewer characters even where char/4
+    // rounds both to one estimate: a rejected kept request (#9455) can be
+    // only a few characters longer than the plain cut, and the retry must
+    // still be the plain cut.
     const shrinkAfterOverflow = (
       error: unknown,
       rejected: Content[],
@@ -1114,7 +1200,8 @@ export class ChatCompressionService {
       const window = Math.min(budgetWindow, ...statedContextWindows(error));
       const reduced = reduceColdInput();
       const inputShrinks =
-        estimateColdRequest(reduced) < estimateColdRequest(rejected);
+        estimateColdRequest(reduced) < estimateColdRequest(rejected) ||
+        historyChars(reduced) < historyChars(rejected);
       const history = inputShrinks ? reduced : rejected;
       const room =
         window - estimateColdRequest(history) - COMPACTION_BUDGET_SAFETY_MARGIN;
@@ -1407,6 +1494,14 @@ export class ChatCompressionService {
       let coldTextReduced = Boolean(opts.requestPayloadTooLarge);
       let coldHistory = slim.slimmedHistory;
       let coldSizing = initialSizing;
+      // The kept request (#9455) and the plain cut it stands in for.
+      let keptSend:
+        | {
+            kept: Content[];
+            plain: Content[];
+            plainSizing: ColdRequestSizing;
+          }
+        | undefined;
       // A request that leaves its summary less than the minimum is reduced
       // first. Only one whose input then leaves no output room at all is not
       // sent: one that fits is sent with the room left, as before the
@@ -1422,6 +1517,16 @@ export class ChatCompressionService {
         if (estimateColdRequest(reduced) < estimateColdRequest(coldHistory)) {
           coldInputReduced = true;
           coldHistory = reduced;
+          const kept = keepTypedText(reduced);
+          if (kept) {
+            keptSend = {
+              kept: kept.history,
+              plain: reduced,
+              plainSizing: coldSizing,
+            };
+            coldHistory = kept.history;
+            coldSizing = kept.sizing;
+          }
         }
         if (
           budgetWindow -
@@ -1448,92 +1553,122 @@ export class ChatCompressionService {
           };
         }
       }
-      for (let attempt = 0; summaryResult === undefined; attempt++) {
-        try {
-          summaryResult = await runColdCompression(coldHistory, coldSizing);
-        } catch (error) {
-          if (abortSignal.aborted) throw error;
-          const retry: OverflowRetry =
-            attempt === 0
-              ? shrinkAfterOverflow(error, coldHistory)
-              : isContextLengthExceededError(error)
-                ? { kind: 'too-large' }
-                : { kind: 'none' };
-          if (retry.kind !== 'retry') {
-            const tooLarge = retry.kind === 'too-large';
-            config
-              .getDebugLogger()
-              .warn(
-                tooLarge
-                  ? `[chat-compression] compression side-query exceeded the ` +
-                      `context window and no smaller request fits it; not ` +
-                      `retrying: ${String(error)}`
-                  : `[chat-compression] compression side-query failed: ${String(error)}`,
-              );
-            return {
-              newHistory: null,
-              info: {
-                originalTokenCount: originalHistoryTokenCount,
-                newTokenCount: originalHistoryTokenCount,
-                compressionStatus: tooLarge
-                  ? CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
-                  : CompressionStatus.COMPRESSION_FAILED_API_ERROR,
-              },
-            };
-          }
-          const sameInput = retry.history === coldHistory;
-          config
-            .getDebugLogger()
-            .warn(
-              `[chat-compression] compression side-query exceeded the ` +
-                `context window; retrying once with a smaller ` +
-                `${sameInput ? 'output budget' : 'request'}: ${String(error)}`,
-            );
-          if (!sameInput) coldInputReduced = true;
-          coldHistory = retry.history;
-          coldSizing = retry.sizing;
-          continue;
-        }
-        // When a clamped output budget was exhausted, the truncation guard
-        // below drops the summary regardless of its visible shape (it keys off
-        // the same reported spend >= budget). Retrying once with the reduced
-        // input frees headroom up to the full output reserve instead of
-        // deadlocking at the same clamped cap on every /compress attempt —
-        // whether the cut landed in thinking, an unclosed <analysis>, a
-        // started <state_snapshot>, or plain prose. `coldTextReduced` is set
-        // when this fires, so it runs at most once; the budget-growth guard
-        // below also blocks it after a same-input overflow retry, whose
-        // smaller window leaves no extra room to free.
-        if (
-          !coldTextReduced &&
-          coldOutputBudget < compactionOutputReserve(coldWindow)
-        ) {
-          const spent = computeReportedOutputSpent(summaryResult.usage);
-          if (typeof spent === 'number' && spent >= coldOutputBudget) {
-            const reduced = reduceColdInput();
-            coldTextReduced = true;
-            const reducedBudget = computeCompactionOutputBudget(
-              estimateColdRequest(reduced),
-              coldWindow,
-            );
-            if (
-              estimateColdRequest(reduced) < estimateColdRequest(coldHistory) &&
-              reducedBudget > coldOutputBudget
-            ) {
+      for (;;) {
+        for (let attempt = 0; summaryResult === undefined; attempt++) {
+          try {
+            summaryResult = await runColdCompression(coldHistory, coldSizing);
+          } catch (error) {
+            if (abortSignal.aborted) throw error;
+            const retry: OverflowRetry =
+              attempt === 0
+                ? shrinkAfterOverflow(error, coldHistory)
+                : isContextLengthExceededError(error)
+                  ? { kind: 'too-large' }
+                  : { kind: 'none' };
+            if (retry.kind !== 'retry') {
+              const tooLarge = retry.kind === 'too-large';
               config
                 .getDebugLogger()
                 .warn(
-                  `[chat-compression] clamped output budget (${coldOutputBudget}) ` +
-                    `was exhausted before producing a summary; retrying once ` +
-                    `with reduced input (budget ${reducedBudget}).`,
+                  tooLarge
+                    ? `[chat-compression] compression side-query exceeded the ` +
+                        `context window and no smaller request fits it; not ` +
+                        `retrying: ${String(error)}`
+                    : `[chat-compression] compression side-query failed: ${String(error)}`,
                 );
-              coldInputReduced = true;
-              coldHistory = reduced;
-              coldSizing = { window: coldWindow };
-              summaryResult = undefined;
+              return {
+                newHistory: null,
+                info: {
+                  originalTokenCount: originalHistoryTokenCount,
+                  newTokenCount: originalHistoryTokenCount,
+                  compressionStatus: tooLarge
+                    ? CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
+                    : CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+                },
+              };
+            }
+            const sameInput = retry.history === coldHistory;
+            config
+              .getDebugLogger()
+              .warn(
+                `[chat-compression] compression side-query exceeded the ` +
+                  `context window; retrying once with a smaller ` +
+                  `${sameInput ? 'output budget' : 'request'}: ${String(error)}`,
+              );
+            if (!sameInput) coldInputReduced = true;
+            coldHistory = retry.history;
+            coldSizing = retry.sizing;
+            continue;
+          }
+          // When a clamped output budget was exhausted, the truncation guard
+          // below drops the summary regardless of its visible shape (it keys off
+          // the same reported spend >= budget). Retrying once with the reduced
+          // input frees headroom up to the full output reserve instead of
+          // deadlocking at the same clamped cap on every /compress attempt —
+          // whether the cut landed in thinking, an unclosed <analysis>, a
+          // started <state_snapshot>, or plain prose. `coldTextReduced` is set
+          // when this fires, so it runs at most once; the budget-growth guard
+          // below also blocks it after a same-input overflow retry, whose
+          // smaller window leaves no extra room to free.
+          if (
+            !coldTextReduced &&
+            coldOutputBudget < compactionOutputReserve(coldWindow)
+          ) {
+            const spent = computeReportedOutputSpent(summaryResult.usage);
+            if (typeof spent === 'number' && spent >= coldOutputBudget) {
+              const reduced = reduceColdInput();
+              coldTextReduced = true;
+              const reducedBudget = computeCompactionOutputBudget(
+                estimateColdRequest(reduced),
+                coldWindow,
+              );
+              if (
+                estimateColdRequest(reduced) <
+                  estimateColdRequest(coldHistory) &&
+                reducedBudget > coldOutputBudget
+              ) {
+                config
+                  .getDebugLogger()
+                  .warn(
+                    `[chat-compression] clamped output budget (${coldOutputBudget}) ` +
+                      `was exhausted before producing a summary; retrying once ` +
+                      `with reduced input (budget ${reducedBudget}).`,
+                  );
+                coldInputReduced = true;
+                coldHistory = reduced;
+                coldSizing = { window: coldWindow };
+                summaryResult = undefined;
+              }
             }
           }
         }
+        // A kept request is sized below the summary ceiling. When its reply
+        // carries no output count and its summary no closed
+        // <state_snapshot>, the truncation check below drops that summary
+        // for the smaller budget, where the plain cut, sized at the ceiling,
+        // would keep it. The plain cut is sent once instead, so keeping the
+        // text never fails a compaction the plain cut completes.
+        if (
+          keptSend !== undefined &&
+          coldHistory === keptSend.kept &&
+          lacksOutputCount(summaryResult.usage) &&
+          stripAnalysisBlock(summaryResult.text).trim().length > 0 &&
+          !hasStateSnapshot(summaryResult.text)
+        ) {
+          config
+            .getDebugLogger()
+            .warn(
+              `[chat-compression] the kept request's summary has no output ` +
+                `count and no closed <state_snapshot>; sending the plain ` +
+                `cut once instead.`,
+            );
+          coldHistory = keptSend.plain;
+          coldSizing = keptSend.plainSizing;
+          keptSend = undefined;
+          summaryResult = undefined;
+          continue;
+        }
+        break;
       }
     }
     const summary = stripCompactionTranscriptHint(summaryResult.text ?? '');
