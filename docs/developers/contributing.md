@@ -228,13 +228,13 @@ To work on the documentation and preview changes locally:
    npm install
    ```
 
-3. Link the documentation content from the main `docs` directory:
+3. Prepare the public documentation for local preview:
 
    ```bash
    npm run link
    ```
 
-   This creates a symbolic link from `../docs` to `content` in the docs-site project, allowing the documentation content to be served by the Next.js site.
+   The command links `docs/users/` and `docs/developers/` into `docs-site/content/` and copies `docs/index.md` and `docs/_meta.ts`. Internal sections such as `docs/design/` are outside the preview.
 
 4. Start the development server:
 
@@ -242,9 +242,9 @@ To work on the documentation and preview changes locally:
    npm run dev
    ```
 
-5. Open [http://localhost:3000](http://localhost:3000) in your browser to see the documentation site with live updates as you make changes.
+5. Open [http://localhost:3000](http://localhost:3000) in your browser to view the local preview.
 
-Any changes made to the documentation files in the main `docs` directory will be reflected immediately in the documentation site.
+Edits under either linked directory are available without running the link command again. After changing `docs/index.md` or `docs/_meta.ts`, run `npm run link` again from `docs-site` to refresh the copies.
 
 ## Debugging
 
