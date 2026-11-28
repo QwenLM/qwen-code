@@ -11,7 +11,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
-import type { SettingDefinition } from '../../config/settingsSchema.js';
+import type {
+  SettingDefinition,
+  SettingsType,
+} from '../../config/settingsSchema.js';
 import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
@@ -23,7 +26,11 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 
-const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
+function isSettableType(
+  type: SettingsType,
+): type is Exclude<SettingsType, 'array' | 'object'> {
+  return type !== 'array' && type !== 'object';
+}
 
 const SENSITIVE_KEY_PATTERNS = [
   /apikey/i,
@@ -61,7 +68,7 @@ function findClosestKey(input: string): string | undefined {
 
   for (const key of allKeys) {
     const def = getSettingDefinition(key);
-    if (!def || !SETTABLE_TYPES.has(def.type)) continue;
+    if (!def || !isSettableType(def.type)) continue;
     const distance = levenshteinDistance(
       input.toLowerCase(),
       key.toLowerCase(),
@@ -103,7 +110,17 @@ function coerceValue(
   def: SettingDefinition,
   rawValue: string | undefined,
 ): { value: unknown; error?: string } {
-  switch (def.type) {
+  const type = def.type;
+  if (!isSettableType(type)) {
+    return {
+      value: undefined,
+      error: t(
+        'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+        { type },
+      ),
+    };
+  }
+  switch (type) {
     case 'boolean': {
       const normalised = rawValue?.toLowerCase().trim();
       if (normalised === 'true' || normalised === '1') return { value: true };
@@ -167,23 +184,15 @@ function coerceValue(
       return { value: rawValue };
     }
 
-    case 'array':
-    case 'object':
-      return {
-        value: undefined,
-        error: t(
-          'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
-          { type: def.type },
-        ),
-      };
-
-    default:
+    default: {
+      const unsupported: never = type;
       return {
         value: undefined,
         error: t('Unsupported setting type: "{{type}}".', {
-          type: String(def.type),
+          type: String(unsupported),
         }),
       };
+    }
   }
 }
 
@@ -205,20 +214,26 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
 
   const lines: string[] = [];
 
+  const keys = Object.keys(flattened)
+    .filter((key) => isSettableType(flattened[key]!.type))
+    .sort();
+  // The key column is the longest settable name, so a deep model.* knob is
+  // not truncated away: `model.chatCompression.screenshotTriggerThreshold`
+  // alone is 48 characters.
+  const keyWidth = Math.max(40, ...keys.map((key) => key.length + 1));
+
   lines.push(t('Available settings:'));
   lines.push('');
   lines.push(
-    padRight('Key', 40) +
+    padRight('Key', keyWidth) +
       padRight('Type', 10) +
       padRight('Current', 15) +
       'Description',
   );
-  lines.push('-'.repeat(90));
+  lines.push('-'.repeat(keyWidth + 10 + 15 + 'Description'.length));
 
-  const keys = Object.keys(flattened).sort();
   for (const key of keys) {
     const def = flattened[key]!;
-    if (!SETTABLE_TYPES.has(def.type)) continue;
 
     const current = getNestedProperty(merged as Record<string, unknown>, key);
     let displayCurrent: string;
@@ -230,7 +245,7 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
     }
 
     lines.push(
-      padRight(key, 40) +
+      padRight(key, keyWidth) +
         padRight(def.type, 10) +
         padRight(displayCurrent, 15) +
         (def.description ?? def.label),
@@ -402,7 +417,7 @@ export const configCommand: SlashCommand = {
       .filter((k) => {
         if (!k.startsWith(current)) return false;
         const def = getSettingDefinition(k);
-        return def && SETTABLE_TYPES.has(def.type);
+        return def && isSettableType(def.type);
       })
       .map((k) => {
         const def = getSettingDefinition(k);
