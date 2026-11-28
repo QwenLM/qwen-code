@@ -178,7 +178,7 @@ final class CsiNativeToolReservation {
                             require(recoveryByteCount <= 8 * 1024 * 1024);
                         }
                         JsonNode stored = CsiNativeActivationProof.readObject(utf8(rows.getString("reference_json")));
-                        ToolExecutionRecord execution = JdbcToolExecutionRepository.mapExecution(rows);
+                        ToolExecutionRecord execution = ToolExecutionRows.mapExecution(rows);
                         JsonNode ref = JSON.valueToTree(execution.getReference());
                         require(canonical(stored).equals(canonical(ref)));
                         String batchId = id(ref, "batchId");
@@ -247,7 +247,7 @@ final class CsiNativeToolReservation {
                 && prefix.intents().values().stream().noneMatch(intent -> id(ref, "batchId").equals(id(intent.payload(), "batchId"))));
         store(connection, original, resources, ref.path("inputRef"), input);
         store(connection, original, resources, ref.path("toolDefinitionRef"), definition);
-        JdbcToolExecutionRepository.insertExecution(connection, candidate);
+        ToolExecutionRows.insertExecution(connection, candidate);
         return candidate;
     }
 
