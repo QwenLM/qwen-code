@@ -151,3 +151,43 @@ export function getChannelStartupProfileAttributes(
 
   return attributes;
 }
+
+/**
+ * One-line, stderr-friendly rendering of a channel's startup profile.
+ *
+ * The same durations already leave as telemetry span attributes, which a
+ * deployment that only collects stderr never sees — so "channel startup
+ * initialize timed out after 20000ms" arrives with no indication of which
+ * phase consumed the budget. Emitting the per-phase breakdown next to the
+ * timeout makes the budget decision auditable from the daemon log alone.
+ *
+ * Returns `undefined` when the child reported no profile (older child, or the
+ * handshake failed before `initialize` produced a response).
+ */
+export function formatChannelStartupProfileLine(
+  response: unknown,
+  receivedAtEpochMs: number,
+  initializeTimeoutMs: number,
+  totalMs: number,
+): string | undefined {
+  const attributes = getChannelStartupProfileAttributes(
+    response,
+    receivedAtEpochMs,
+    initializeTimeoutMs,
+  );
+  if (!attributes) {
+    return undefined;
+  }
+  const parts: string[] = [
+    `total_ms=${totalMs}`,
+    `profile_complete=${attributes[`${ATTRIBUTE_PREFIX}.profile.complete`] === true}`,
+  ];
+  for (const [key, value] of Object.entries(attributes)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (!key.startsWith(`${ATTRIBUTE_PREFIX}.`)) continue;
+    const name = key.slice(ATTRIBUTE_PREFIX.length + 1);
+    if (name.startsWith('profile.')) continue;
+    parts.push(`${name}=${value}`);
+  }
+  return `channel startup ${parts.join(' ')}`;
+}

@@ -383,6 +383,27 @@ describe('McpClientManager', () => {
     expect(acquireSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('records why a pool acquire failed, for the startup warning', async () => {
+    // The ACP daemon injects a transport pool, so THIS is the path its
+    // servers fail on. The error is otherwise only logged at debug/error
+    // level, which the daemon's collected stderr does not include.
+    const acquireSpy = vi.fn().mockImplementation((name: string) => {
+      if (name === 'broken') throw new Error('connect ECONNREFUSED');
+      return Promise.resolve(mkConn(name));
+    });
+    const { config, manager } = poolManager(
+      () => ({ broken: {}, ok: {} }),
+      acquireSpy,
+    );
+
+    await manager.discoverAllMcpTools(config);
+
+    expect(manager.getServerFailureReason('broken')).toBe(
+      'connect failed: connect ECONNREFUSED',
+    );
+    expect(manager.getServerFailureReason('ok')).toBeUndefined();
+  });
+
   it('pool path skips a gated server pending approval — no acquire, no spawn (#4615, sub-task 3)', async () => {
     // Trust boundary: pre-fix the pool path only checked
     // `isMcpServerDisabled`, so a hot-reload adding a pending
@@ -1083,6 +1104,56 @@ describe('McpClientManager', () => {
       await manager.stop();
       vi.useRealTimers();
     }
+  });
+
+  it('records why a server failed, so the warning can name the cause', async () => {
+    // Discovery is best-effort: connect/discover errors only reach
+    // `debugLogger`, which a daemon/non-interactive run does not enable, and
+    // the timeout path rejects outside the per-server catch. Without this
+    // reason the stderr warning could only say "not connected" — unable to
+    // tell a dead endpoint from a rejected token from a slow handshake.
+    stubClient(
+      mkClient({
+        connect: vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')),
+        disconnect: resolved(),
+      }),
+    );
+    const manager = mkManager({
+      config: mkConfig(() => ({ 'test-server': {} })),
+    });
+
+    await discoverTestServer(manager);
+
+    expect(manager.getServerFailureReason('test-server')).toBe(
+      'connect failed: connect ECONNREFUSED',
+    );
+  });
+
+  it('drops the recorded reason once a later attempt connects', async () => {
+    // The reason describes the LAST attempt only: a server that recovers on
+    // reconnect / health-check retry must not keep reporting the stale cause
+    // in the operator-visible warning.
+    const failedClient = mkClient({
+      connect: vi.fn().mockRejectedValue(new Error('transient failure')),
+      disconnect: resolved(),
+    });
+    const recoveredClient = asyncClient({
+      getStatus: vi.fn().mockReturnValue(MCPServerStatus.CONNECTED),
+    });
+    vi.mocked(McpClient)
+      .mockReturnValueOnce(failedClient as unknown as McpClient)
+      .mockReturnValueOnce(recoveredClient as unknown as McpClient);
+    const manager = mkManager({
+      config: mkConfig(() => ({ 'test-server': {} })),
+    });
+
+    await discoverTestServer(manager);
+    expect(manager.getServerFailureReason('test-server')).toContain(
+      'connect failed',
+    );
+
+    await discoverTestServer(manager);
+    expect(manager.getServerFailureReason('test-server')).toBeUndefined();
   });
 
   it('unrefs health-check timers so they never hold the event loop open (issue #9944)', async () => {

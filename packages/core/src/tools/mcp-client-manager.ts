@@ -399,6 +399,22 @@ export class McpClientManager {
   private serverDiscoveryPromises: Map<string, Promise<void>> = new Map();
 
   /**
+   * Last discovery failure per server as `"<kind>: <message>"` (kinds:
+   * `connect`, `discover`, `timeout`, `budget`).
+   *
+   * Discovery is best-effort by design: `discoverMcpToolsForServerInternal`
+   * catches connect/discover errors and only sends them to `debugLogger`,
+   * while the timeout path rejects outside that catch. Non-interactive
+   * callers therefore used to learn "this server is not CONNECTED" but never
+   * WHY, which made a failed MCP startup indistinguishable between a dead
+   * endpoint, a rejected token and a slow handshake. Recorded here so
+   * `getServerFailureReason` / `Config.getFailedMcpServerDetails` can render
+   * the reason in the operator-visible warning. Cleared on success and on
+   * every teardown path.
+   */
+  private readonly serverFailureReasons = new Map<string, string>();
+
+  /**
    * Per connected server, the single-session "connected config key" of the
    * config it was last connected with — see {@link singleSessionConnectedKeyOf}.
    * Single-session path only; pool mode tracks transport identity via
@@ -714,6 +730,16 @@ export class McpClientManager {
       this.clients.get(serverName)?.getStatus() ??
       MCPServerStatus.DISCONNECTED
     );
+  }
+
+  /**
+   * Why this server's last discovery attempt did not end CONNECTED, or
+   * `undefined` when it succeeded / was never attempted. Companion to
+   * `getServerStatus`: the status says "not connected", this says whether the
+   * cause was the transport, tool discovery, a timeout or the budget cap.
+   */
+  getServerFailureReason(serverName: string): string | undefined {
+    return this.serverFailureReasons.get(serverName);
   }
 
   /** Resolved budget mode (env-var or constructor-supplied). */
@@ -1344,6 +1370,13 @@ export class McpClientManager {
     const reservation = this.tryReserveSlot(serverName);
     if (reservation === 'refused') {
       this.refuseAndLog(serverName, serverConfig);
+      // A refused server is never attempted, so no connect/discover catch
+      // runs for it — record the reason here or the warning would report the
+      // name with no cause at all.
+      this.serverFailureReasons.set(
+        serverName,
+        `budget: refused before connecting (cap ${this.clientBudget ?? 'n/a'}, mode ${this.budgetMode})`,
+      );
       // single-server refusal (e.g. health-monitor retry into
       // a full budget, `/mcp reconnect <name>`) emits a length-1
       // batch for shape consistency with the bulk-pass refusal.
@@ -1430,8 +1463,13 @@ export class McpClientManager {
     this.clients.set(serverName, client);
     this.eventEmitter?.emit('mcp-client-update', this.clients);
 
+    // Which half of the attempt failed, so the recorded reason distinguishes
+    // "transport never came up" (bad URL / rejected token / no route) from
+    // "connected but tool discovery failed" (protocol / server error).
+    let discoveryPhase: 'connect' | 'discover' = 'connect';
     try {
       await client.connect();
+      discoveryPhase = 'discover';
       await client.discover(cliConfig);
       // Record the connected-config key of the config this client is now
       // connected with, so the incremental reconcile can detect a later
@@ -1453,6 +1491,10 @@ export class McpClientManager {
       // snapshots immediately reflect reality. Mirrors the same
       // pattern in `readResource`'s late-reserve branch.
       this.dropRefusalEntry(serverName);
+      // The reason only describes the LAST attempt: a server that comes up on
+      // a later pass (reconnect / health-check retry) must not keep reporting
+      // the stale failure in the operator-visible warning.
+      this.serverFailureReasons.delete(serverName);
       // fix #4: hysteresis is driven inline by
       // `tryReserveSlot` (upward) and `releaseSlotName` (downward).
       // The standalone `evaluateBudgetState` that used to live here
@@ -1505,6 +1547,13 @@ export class McpClientManager {
         `Error during discovery for server '${serverName}': ${getErrorMessage(
           error,
         )}`,
+      );
+      // `debugLogger` is invisible unless debug logging is on, which is
+      // exactly the setting a non-interactive/daemon run does not have. Keep
+      // the reason so the stderr warning can name it.
+      this.serverFailureReasons.set(
+        serverName,
+        `${discoveryPhase} failed: ${getErrorMessage(error)}`,
       );
     } finally {
       this.startHealthCheck(serverName);
@@ -1747,6 +1796,9 @@ export class McpClientManager {
               return;
             }
             this.pooledConnections.set(name, conn);
+            // The reason describes the LAST attempt — a server that comes up
+            // through the pool on this pass must stop being reported as failed.
+            this.serverFailureReasons.delete(name);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
             // siblings (matches the legacy `discoverMcpToolsForServer`
@@ -1766,6 +1818,10 @@ export class McpClientManager {
                 `Pool refused acquire for ${name} (budget exhausted, ` +
                   `budget=${err.budget}, reservedCount=${err.reservedCount})`,
               );
+              this.serverFailureReasons.set(
+                name,
+                `budget: refused before connecting (cap ${err.budget}, reserved ${err.reservedCount})`,
+              );
             } else {
               // The shared pool is injected by the ACP daemon, where opening
               // a local browser is invalid. Record the OAuth requirement so a
@@ -1773,6 +1829,13 @@ export class McpClientManager {
               await probeMcpServerForOAuth(name, config);
               debugLogger.error(
                 `Pool acquire failed for ${name}: ${getErrorMessage(err)}`,
+              );
+              // Same reason the legacy per-server path records: the daemon
+              // only ships stderr, so `debugLogger` alone leaves the warning
+              // naming the server without a cause.
+              this.serverFailureReasons.set(
+                name,
+                `connect failed: ${getErrorMessage(err)}`,
               );
             }
           }
@@ -1914,6 +1977,7 @@ export class McpClientManager {
     this.consecutiveFailures.clear();
     this.isReconnecting.clear();
     this.serverDiscoveryPromises.clear();
+    this.serverFailureReasons.clear();
     // clean shutdown releases ALL budget slots. A subsequent
     // `discoverAllMcpTools*` (e.g. the `discoverAllMcpTools` call in
     // its own body line 90, which awaits `this.stop()` first) starts
@@ -1976,6 +2040,7 @@ export class McpClientManager {
     // method, so reconnect still doesn't release the slot.
     this.releaseSlotName(serverName);
     this.dropRefusalEntry(serverName);
+    this.serverFailureReasons.delete(serverName);
   }
 
   getDiscoveryState(): MCPDiscoveryState {
@@ -2529,6 +2594,15 @@ export class McpClientManager {
         // shouldn't keep tagging a now-slotless server as
         // `disabledReason: 'budget'`.
         this.dropRefusalEntry(serverName);
+        // The timeout rejects OUTSIDE `discoverMcpToolsForServerInternal`'s
+        // catch (the inner attempt is still awaiting its handshake), so the
+        // reason has to be recorded here — otherwise a hung endpoint reports
+        // as a nameless failure, which is the exact case operators need to
+        // tell apart from a rejected token.
+        this.serverFailureReasons.set(
+          serverName,
+          `timeout: discovery did not finish within ${timeoutMs}ms`,
+        );
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,
@@ -2663,6 +2737,7 @@ export class McpClientManager {
     // The server has been removed from configuration, so drop it from the
     // global status registry too — the health pill should no longer count it.
     removeMCPServerStatus(serverName);
+    this.serverFailureReasons.delete(serverName);
 
     this.eventEmitter?.emit('mcp-client-update', this.clients);
   }

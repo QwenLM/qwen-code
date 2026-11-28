@@ -9,7 +9,10 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   type ChannelStartupProfileV1,
 } from './bridgeTypes.js';
-import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
+import {
+  formatChannelStartupProfileLine,
+  getChannelStartupProfileAttributes,
+} from './channel-startup-profile.js';
 
 function makeProfile(): ChannelStartupProfileV1 {
   return {
@@ -127,5 +130,48 @@ describe('channel startup profile parsing', () => {
     expect(attributes).not.toHaveProperty(
       'qwen-code.daemon.acp_startup.response_transport_ms',
     );
+  });
+});
+
+describe('channel startup profile line', () => {
+  it('renders the total and per-phase durations in one grep-able line', () => {
+    // The timeout line says a startup exceeded its budget; only this line can
+    // say which phase spent it.
+    const line = formatChannelStartupProfileLine(
+      makeResponse(makeProfile()),
+      1_007,
+      10_000,
+      1_234,
+    );
+
+    expect(line).toContain('channel startup');
+    expect(line).toContain('total_ms=1234');
+    expect(line).toContain('profile_complete=true');
+    expect(line).toContain('phase.settings_load_ms=20');
+    expect(line).toContain('config.tool_warmup_ms=20');
+    expect(line).toContain('response_transport_ms=7');
+  });
+
+  it('returns undefined when the child reported no profile', () => {
+    expect(
+      formatChannelStartupProfileLine({ _meta: {} }, 1_007, 10_000, 1_234),
+    ).toBeUndefined();
+  });
+
+  it('marks a truncated profile incomplete instead of claiming completeness', () => {
+    const partial = {
+      ...makeProfile(),
+      phases: { processToProfilerReadyMs: 100 },
+    };
+
+    const line = formatChannelStartupProfileLine(
+      makeResponse(partial),
+      1_007,
+      10_000,
+      1_234,
+    );
+
+    expect(line).toContain('profile_complete=false');
+    expect(line).toContain('phase.process_to_profiler_ready_ms=100');
   });
 });

@@ -8186,6 +8186,35 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
 
+    it('getFailedMcpServerDetails carries the reason recorded by discovery', () => {
+      // The non-interactive "Warning: MCP server(s) failed to start" uses this
+      // to distinguish a dead endpoint from a rejected token; the per-server
+      // error itself only reaches `debugLogger`.
+      const config = makeConfig({
+        mcpServers: { broken: new MCPServerConfig() },
+      });
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getServerFailureReason: (name: string) =>
+            name === 'broken' ? 'connect failed: boom' : undefined,
+        }),
+      } as unknown as ToolRegistry);
+
+      expect(config.getFailedMcpServerDetails()).toEqual([
+        { name: 'broken', reason: 'connect failed: boom' },
+      ]);
+    });
+
+    it('getFailedMcpServerDetails omits the reason when none was recorded', () => {
+      // No registry yet (pre-`initialize`) / a manager that never attempted a
+      // connect: degrade to the bare name instead of throwing.
+      const config = makeConfig({
+        mcpServers: { quiet: new MCPServerConfig() },
+      });
+
+      expect(config.getFailedMcpServerDetails()).toEqual([{ name: 'quiet' }]);
+    });
+
     it('approveMcpServerForSession drops only the approved pending server', () => {
       const config = makeConfig({ pendingMcpServers: ['a', 'b'] });
 

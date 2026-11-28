@@ -42,7 +42,10 @@ import {
   sampleChannelProcess,
   type ChannelProcessSample,
 } from './channel-process-sample.js';
-import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
+import {
+  formatChannelStartupProfileLine,
+  getChannelStartupProfileAttributes,
+} from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
@@ -52,6 +55,16 @@ import { writeStderrLine } from './internal/stderrLine.js';
 function wchanEvidence(sample: ChannelProcessSample | undefined): string {
   return sample?.wchan || '?';
 }
+
+/**
+ * Startup duration from which the per-phase profile is echoed to stderr.
+ *
+ * A healthy channel handshake is hundreds of milliseconds, so logging every
+ * one of them would only add noise to the daemon log. Above this threshold the
+ * breakdown is what tells an operator whether the budget went to child import,
+ * settings/skills load, tool warmup or the transport (#14977).
+ */
+const SLOW_CHANNEL_STARTUP_MS = 2_000;
 
 function rssMbEvidence(sample: ChannelProcessSample | undefined): string {
   return sample ? String(Math.round(sample.rssBytes / 1048576)) : '?';
@@ -332,14 +345,36 @@ export function createChannelStartup({
             info.activeWork = { ...capabilities.activeWork, seq: 0 };
           }
           channelLivenessNegotiated = capabilities.channelLiveness;
+          const receivedAtEpochMs = Date.now();
           try {
             const attributes = getChannelStartupProfileAttributes(
               response,
-              Date.now(),
+              receivedAtEpochMs,
               initTimeoutMs,
             );
             if (attributes && telemetry.setActiveSpanAttributes) {
               telemetry.setActiveSpanAttributes(attributes);
+            }
+            // Also surface the breakdown on stderr, but only for startups slow
+            // enough to matter: telemetry attributes are not collected
+            // everywhere, and a timeout line alone cannot say which phase spent
+            // the budget (#14977). Normal (~hundreds of ms) startups stay
+            // quiet so the daemon log is not spammed.
+            if (
+              receivedAtEpochMs - startupStartedAt >=
+              SLOW_CHANNEL_STARTUP_MS
+            ) {
+              writeStderrLine(
+                `qwen serve: ${
+                  formatChannelStartupProfileLine(
+                    response,
+                    receivedAtEpochMs,
+                    initTimeoutMs,
+                    receivedAtEpochMs - startupStartedAt,
+                  ) ??
+                  `channel startup profile unavailable total_ms=${receivedAtEpochMs - startupStartedAt}`
+                } channel=${acpChannelId}`,
+              );
             }
           } catch {
             // Startup profiling must not affect bridge behavior.
@@ -360,6 +395,15 @@ export function createChannelStartup({
       // newSession-failure / `shutdown`): "any channel in
       // `aliveChannels` with `isDying === true` is mid-teardown."
       info.isDying = true;
+      // The timeout/crash line names the elapsed time next to the configured
+      // budget: "timed out after 19998ms" over a 20000ms budget means the
+      // child never answered, which is a different bug from a slow transport.
+      writeStderrLine(
+        `qwen serve: channel startup failed channel=${acpChannelId}` +
+          ` elapsed_ms=${Date.now() - startupStartedAt}` +
+          ` init_timeout_ms=${initTimeoutMs}` +
+          ` error=${err instanceof Error ? err.message : String(err)}`,
+      );
       startupAbort.abort(err);
       await terminateChannel(
         channel,

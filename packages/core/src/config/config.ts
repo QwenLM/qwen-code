@@ -5729,6 +5729,44 @@ export class Config {
     return failed;
   }
 
+  /**
+   * Like {@link getFailedMcpServerNames}, but each entry also carries the
+   * reason the last discovery attempt recorded (`connect failed: ...`,
+   * `timeout: ...`, `budget: ...`).
+   *
+   * The name alone tells an operator that a server is missing, not whether the
+   * endpoint refused the connection, rejected the token or simply exceeded the
+   * discovery budget — and the underlying error goes to `debugLogger`, which
+   * non-interactive runs do not enable. Callers that surface a user-visible
+   * warning should prefer this over the bare name list.
+   */
+  getFailedMcpServerDetails(): Array<{ name: string; reason?: string }> {
+    const names = this.getFailedMcpServerNames();
+    if (names.length === 0) {
+      return [];
+    }
+    // Same defensive read as `startMcpDiscoveryInBackground`: the registry
+    // only exists after `initialize()`, and test stubs may be plain objects
+    // that do not implement the getter.
+    const registry = this.getToolRegistry() as
+      | (ToolRegistry & {
+          getMcpClientManager?: () => ReturnType<
+            ToolRegistry['getMcpClientManager']
+          >;
+        })
+      | undefined;
+    const manager = registry?.getMcpClientManager?.();
+    return names.map((name) => {
+      // `typeof` guard, not optional chaining: test ToolRegistry stubs carry a
+      // minimal manager object that predates this method.
+      const reason =
+        manager && typeof manager.getServerFailureReason === 'function'
+          ? manager.getServerFailureReason(name)
+          : undefined;
+      return reason === undefined ? { name } : { name, reason };
+    });
+  }
+
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
