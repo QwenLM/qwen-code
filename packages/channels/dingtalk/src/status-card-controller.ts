@@ -24,6 +24,8 @@ const BREAKER_PROBE_INTERVAL_MS = 30_000;
 const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
 const INITIAL_RETRY_INTERVAL_MS = 1_000;
 const MAX_RETRY_INTERVAL_MS = 30_000;
+const ACTION_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MAX_ACTION_CARDS = 1000;
 export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
@@ -36,6 +38,7 @@ type StatusState =
   | 'Partial';
 
 interface TerminalIntent {
+  state: Exclude<StatusState, 'Running'>;
   content: string;
   isError: boolean;
   /** Computed once so terminal retries do not inflate the elapsed time. */
@@ -44,6 +47,8 @@ interface TerminalIntent {
 }
 
 interface StatusRecord {
+  context: ChannelOutputSegmentContext;
+  quoteContent: string;
   segmentId: string;
   runId: string;
   sessionId: string;
@@ -86,8 +91,18 @@ interface StatusRecord {
 export interface StatusCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
+  quoteContent?(segment: ChannelOutputSegmentContext): string;
+  executeCommand?(
+    context: ChannelOutputSegmentContext,
+    command: '/new' | '/compress',
+  ): Promise<void>;
   model?: string;
   language?: string;
+  showModel?: boolean;
+  showReasoningEffort?: boolean;
+  sessionModelInfo?(
+    segment: ChannelOutputSegmentContext,
+  ): { model?: string; reasoningEffort?: string } | undefined;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -133,6 +148,15 @@ export class StatusCardController {
   private readonly recordsByOutTrack = new Map<string, StatusRecord>();
   private readonly segmentIdsByRun = new Map<string, Set<string>>();
   private readonly terminalSegmentIds = new Set<string>();
+  private readonly actionCards = new Map<
+    string,
+    {
+      context: ChannelOutputSegmentContext;
+      expiresAt: number;
+      claimedCommands: Set<string>;
+      forbiddenActors: Set<string>;
+    }
+  >();
   private disposed = false;
 
   constructor(private readonly options: StatusCardControllerOptions) {}
@@ -149,7 +173,7 @@ export class StatusCardController {
     if (this.disposed || !text.trim() || content.length > CONTENT_LIMIT) {
       return false;
     }
-    const state =
+    const state: Exclude<StatusState, 'Running'> =
       result.status === 'failed'
         ? 'Failed'
         : result.status === 'stopped'
@@ -166,9 +190,10 @@ export class StatusCardController {
         target,
         cardParamMap: this.terminalCardParams(
           content,
-          [this.statusStateLabel(state), this.options.model?.trim()]
+          [this.statusStateLabel(state), this.statusModelLabel()]
             .filter(Boolean)
             .join(' · '),
+          state,
         ),
       });
       return true;
@@ -178,14 +203,30 @@ export class StatusCardController {
     }
   }
 
-  private terminalCardParams(content: string, statusLine: string) {
+  private terminalCardParams(
+    content: string,
+    statusLine: string,
+    state: TerminalIntent['state'],
+    hasAction = false,
+  ) {
     return {
       blockList: JSON.stringify([{ type: 0, markdown: content }]),
       content,
+      markdown: content,
+      cardState: state.toLowerCase(),
+      headerTitle: {
+        Completed: '已完成',
+        Failed: '执行失败',
+        Stopped: '已停止',
+        Cancelled: '已取消',
+        Partial: '部分结果',
+      }[state],
+      headerColor:
+        state === 'Completed' ? 'green' : state === 'Failed' ? 'red' : 'grey',
       copy_content: content,
       flowStatus: 3,
       statusLine,
-      hasAction: 'false',
+      hasAction: String(hasAction),
       stop_action: 'false',
     };
   }
@@ -276,6 +317,9 @@ export class StatusCardController {
         .updateInstance({
           outTrackId: record.outTrackId,
           cardParamMap: {
+            cardState: 'cancelled',
+            headerTitle: '已取消',
+            headerColor: 'grey',
             flowStatus: 3,
             hasAction: 'false',
             stop_action: 'false',
@@ -304,6 +348,8 @@ export class StatusCardController {
   ): StatusRecord {
     const outTrackId = `qwen-status-${randomUUID()}`;
     const record: StatusRecord = {
+      context: segment,
+      quoteContent: (this.options.quoteContent?.(segment) ?? '').slice(0, 2000),
       segmentId: segment.segmentId,
       runId: segment.runId,
       sessionId: segment.sessionId,
@@ -435,6 +481,54 @@ export class StatusCardController {
     };
   }
 
+  claimCommand(
+    outTrackId: string,
+    actorId: string,
+    command: '/new' | '/compress',
+  ): DingtalkCardCallbackResult {
+    this.pruneActionCards();
+    const card = this.actionCards.get(outTrackId);
+    if (
+      this.disposed ||
+      !card ||
+      card.claimedCommands.has(command) ||
+      !this.options.executeCommand
+    ) {
+      return { kind: 'ignored', actorId };
+    }
+    if (card.context.owner.id !== actorId) {
+      if (card.forbiddenActors.has(actorId)) {
+        return { kind: 'ignored' };
+      }
+      card.forbiddenActors.add(actorId);
+      return {
+        kind: 'forbidden',
+        actorId,
+        target: {
+          chatId: card.context.target.chatId,
+          isGroup: card.context.target.isGroup === true,
+        },
+      };
+    }
+    card.claimedCommands.add(command);
+    return {
+      kind: 'accepted',
+      execute: async () => {
+        if (this.disposed || this.actionCards.get(outTrackId) !== card) return;
+        await this.options.executeCommand?.(card.context, command);
+      },
+    };
+  }
+
+  private pruneActionCards(): void {
+    for (const [id, card] of this.actionCards) {
+      if (card.expiresAt <= Date.now()) this.actionCards.delete(id);
+    }
+    while (this.actionCards.size > MAX_ACTION_CARDS) {
+      this.actionCards.delete(this.actionCards.keys().next().value!);
+    }
+  }
+
   private async create(
     record: StatusRecord,
     target: { chatId: string; isGroup: boolean },
@@ -450,6 +544,11 @@ export class StatusCardController {
           outTrackId: record.outTrackId,
           target,
           cardParamMap: {
+            cardState: 'running',
+            headerTitle: '处理中',
+            headerColor: 'blue',
+            quoteContent: record.quoteContent,
+            agentName: '',
             content: activeContent(
               record.phase,
               record.content,
@@ -617,6 +716,7 @@ export class StatusCardController {
       content ||
       (retainedContent ? retainedContent(record.content) : record.content);
     record.terminalIntent = {
+      state,
       content: boundContent(sanitizeStreamingImageMarkers(retained)),
       isError,
       statusLine: this.statusLine(record, state).text,
@@ -656,9 +756,20 @@ export class StatusCardController {
         cardParamMap: this.terminalCardParams(
           intent.content,
           intent.statusLine,
+          intent.state,
+          Boolean(this.options.executeCommand),
         ),
       });
       record.content = '';
+      if (this.options.executeCommand) {
+        this.actionCards.set(record.outTrackId, {
+          context: record.context,
+          expiresAt: Date.now() + ACTION_RETENTION_MS,
+          claimedCommands: new Set(),
+          forbiddenActors: new Set(),
+        });
+        this.pruneActionCards();
+      }
       this.removeRecord(record);
       return true;
     } catch (error) {
@@ -761,6 +872,14 @@ export class StatusCardController {
       this.removeRecord(record);
     }
     this.terminalSegmentIds.clear();
+    this.actionCards.clear();
+  }
+
+  private statusModelLabel(sessionModel?: string): string | undefined {
+    if (this.options.showModel === false) return undefined;
+    return (sessionModel?.trim() || this.options.model?.trim())
+      ?.replace(/\(openai\)$/u, '')
+      .trim();
   }
 
   private statusLine(
@@ -771,11 +890,21 @@ export class StatusCardController {
       0,
       Math.floor((Date.now() - record.startedAt) / 1000),
     );
-    const model = this.options.model?.trim();
+    const showModel = this.options.showModel !== false;
+    const showReasoningEffort = this.options.showReasoningEffort !== false;
+    const modelInfo =
+      showModel || showReasoningEffort
+        ? this.options.sessionModelInfo?.(record.context)
+        : undefined;
+    const model = this.statusModelLabel(modelInfo?.model);
+    const effort = showReasoningEffort
+      ? modelInfo?.reasoningEffort?.trim()
+      : undefined;
     return {
       text: [
         state ? this.statusStateLabel(state) : undefined,
         model,
+        effort === 'default' ? undefined : effort,
         `${second}s`,
       ]
         .filter(Boolean)

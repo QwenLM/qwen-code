@@ -15,10 +15,11 @@ import { inspect } from 'node:util';
 import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
-  BackgroundResponseContext,
   BackgroundOutputDelivery,
   BackgroundOutputPacket,
   BackgroundOutputTarget,
+  BackgroundResponseContext,
+  ChannelAgentBridge,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
   ChannelPermissionRequestContext,
@@ -156,6 +157,7 @@ vi.mock('@qwen-code/channel-base', async () => {
   );
   return {
     ChannelBase: class {
+      protected bridge: unknown;
       protected config: Record<string, unknown>;
       protected name: string;
       protected locale: 'en' | 'zh';
@@ -311,6 +313,7 @@ vi.mock('@qwen-code/channel-base', async () => {
       ) {
         this.name = name;
         this.config = config;
+        this.bridge = _bridge;
         this.locale = options?.locale ?? 'en';
       }
     },
@@ -337,6 +340,7 @@ type DingtalkChannelInstance = InstanceType<typeof DingtalkChannel>;
 function createChannel(
   overrides: Record<string, unknown> = {},
   options: Record<string, unknown> = {},
+  bridge: Partial<ChannelAgentBridge> = {},
 ): DingtalkChannelInstance {
   return new DingtalkChannel(
     'test-dingtalk',
@@ -355,7 +359,7 @@ function createChannel(
       interactiveCards: {},
       ...overrides,
     } as never,
-    {} as never,
+    bridge as never,
     options as never,
   );
 }
@@ -1832,6 +1836,7 @@ it('routes the built-in btn_stop action to the status card controller', () => {
     execute: vi.fn().mockResolvedValue(undefined),
   };
   const claimStop = vi.fn().mockReturnValue(stopResult);
+  const claimCommand = vi.fn().mockReturnValue(stopResult);
   class CallbackRoutingChannel extends DingtalkChannel {
     route(callback: DingtalkCardCallback) {
       return this.routeCardCallback(callback);
@@ -1854,17 +1859,37 @@ it('routes the built-in btn_stop action to the status card controller', () => {
     } as never,
     {} as never,
   );
-  Object.assign(channel, { statusCardController: { claimStop } });
+  Object.assign(channel, {
+    statusCardController: { claimStop, claimCommand },
+  });
 
   expect(
     channel.route({
-      outTrackId: 'status-1',
+      outTrackId: 'qwen-status-1',
       actionId: 'btn_stop',
       actorId: 'owner-1',
       formData: {},
     }),
   ).toBe(stopResult);
-  expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
+  expect(claimStop).toHaveBeenCalledWith('qwen-status-1', 'owner-1');
+  for (const [actionId, command] of [
+    ['btn_new_session', '/new'],
+    ['btn_compact', '/compress'],
+  ]) {
+    expect(
+      channel.route({
+        outTrackId: 'qwen-status-1',
+        actionId,
+        actorId: 'owner-1',
+        formData: {},
+      }),
+    ).toBe(stopResult);
+    expect(claimCommand).toHaveBeenLastCalledWith(
+      'qwen-status-1',
+      'owner-1',
+      command,
+    );
+  }
 });
 
 it('routes permission callbacks before question callbacks', () => {
@@ -3890,6 +3915,58 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
+  it('delivers the original request with the owning session model and effort', async () => {
+    const getSessionModelInfo = vi.fn().mockReturnValue({
+      model: 'qwen3.8-max',
+      reasoningEffort: 'high',
+    });
+    const channel = createChannel({}, {}, { getSessionModelInfo });
+    const cardClient = (
+      channel as unknown as {
+        interactiveCardClient: {
+          createAndDeliver: ReturnType<typeof vi.fn>;
+          openOrUpdateStream: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).interactiveCardClient;
+    cardClient.createAndDeliver = vi.fn().mockResolvedValue(undefined);
+    cardClient.openOrUpdateStream = vi.fn().mockResolvedValue(undefined);
+    await DingtalkChannel.prototype.handleInbound.call(channel, {
+      channelName: 'dingtalk',
+      senderId: 'owner-1',
+      senderName: 'Alice',
+      chatId: 'cid-1',
+      messageId: 'message-1',
+      text: '检查当前分支',
+      metadata: 'model-facing enriched prompt',
+      isGroup: true,
+      isMentioned: true,
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+    await vi.waitFor(() =>
+      expect(cardClient.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    expect(getSessionModelInfo).toHaveBeenCalledWith('session-1');
+    expect(cardClient.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          quoteContent: 'Alice：检查当前分支',
+          statusLine: expect.stringMatching(/^qwen3\.8-max · high · \d+s$/),
+        }),
+      }),
+    );
+    channel.disconnect();
+    await channel.waitForDisconnect();
+  });
+
   it('disposes status-card recovery after disconnect drains', async () => {
     const channel = createChannel();
     const dispose = vi.fn();
@@ -3901,18 +3978,34 @@ describe('DingtalkChannel status cards', () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it('passes the configured model to the status card controller', () => {
-    const channel = createChannel({ model: 'qwen3.7-max' });
+  it('passes model metadata settings to the status card controller', () => {
+    const channel = createChannel({
+      model: 'qwen3.7-max',
+      interactiveCards: {
+        statusCard: {
+          showModel: false,
+          showReasoningEffort: false,
+        },
+      },
+    });
 
     expect(
       (
         channel as unknown as {
           statusCardController?: {
-            options: { model?: string };
+            options: {
+              model?: string;
+              showModel?: boolean;
+              showReasoningEffort?: boolean;
+            };
           };
         }
-      ).statusCardController?.options.model,
-    ).toBe('qwen3.7-max');
+      ).statusCardController?.options,
+    ).toMatchObject({
+      model: 'qwen3.7-max',
+      showModel: false,
+      showReasoningEffort: false,
+    });
   });
 
   it('passes the display language to the card controllers and presenter', () => {
@@ -4156,6 +4249,7 @@ describe('DingtalkChannel status cards', () => {
       ).inboundCardOwners.get('message-1'),
     ).toEqual({
       ownerId: 'owner-1',
+      quoteContent: 'Owner：hello',
       target: { chatId: 'conversation-1', isGroup: false },
     });
   });
@@ -4194,6 +4288,7 @@ describe('DingtalkChannel status cards', () => {
       ).inboundCardOwners.get('message-quote'),
     ).toEqual({
       ownerId: 'staff-1',
+      quoteContent: 'Alice：@qwen-code What changed?',
       target: { chatId: 'cid-quote', isGroup: true },
       sender: { senderName: 'Alice' },
     });
@@ -4233,6 +4328,7 @@ describe('DingtalkChannel status cards', () => {
       ).inboundCardOwners.get('message-quote'),
     ).toEqual({
       ownerId: 'staff-1',
+      quoteContent: 'Alice：@qwen-code What changed?',
       target: { chatId: 'cid-quote', isGroup: true },
     });
   });

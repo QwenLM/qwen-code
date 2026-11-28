@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 export const STATUS_CARD_TEMPLATE_ID =
-  '675cde2f-f526-40cb-b828-f5b2b57b8b77.schema';
+  '209eb64b-daba-460e-967d-c40905325779.schema';
 export const QUESTION_CARD_TEMPLATE_ID =
   'c2a6355b-9724-4f7e-9653-d33fcb3311bb.schema';
 
