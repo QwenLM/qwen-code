@@ -384,19 +384,50 @@ export class DaemonSessionClient {
   /** Replays the latest confirmed denial so late subscribers cannot miss it. */
   subscribeGeneratedUiRevocation(listener: (revision: number) => void) {
     this.generatedUiRevocationListeners.add(listener);
-    if (this.generatedUiRevocationRevision > 0)
-      listener(this.generatedUiRevocationRevision);
+    if (this.generatedUiRevocationRevision > 0) {
+      this.notifyGeneratedUiRevocation(
+        listener,
+        this.generatedUiRevocationRevision,
+      );
+    }
     return () => {
       this.generatedUiRevocationListeners.delete(listener);
     };
+  }
+
+  private notifyGeneratedUiRevocation(
+    listener: (revision: number) => void,
+    revision: number,
+  ) {
+    try {
+      listener(revision);
+    } catch (error) {
+      try {
+        const reporter = (
+          globalThis as typeof globalThis & {
+            reportError?: (error: unknown) => void;
+          }
+        ).reportError;
+        if (typeof reporter === 'function') {
+          reporter(error);
+        } else {
+          globalThis.console?.error(error);
+        }
+      } catch {
+        // Diagnostics cannot prevent delivery to the remaining listeners.
+      }
+    }
   }
 
   private updateGeneratedUi(status: DaemonSession['generatedUi']) {
     this.session.generatedUi = status;
     if (status?.version !== 1 || status.enabled !== false) return;
     const revision = ++this.generatedUiRevocationRevision;
-    for (const listener of this.generatedUiRevocationListeners)
-      listener(revision);
+    for (const listener of [...this.generatedUiRevocationListeners]) {
+      if (this.generatedUiRevocationListeners.has(listener)) {
+        this.notifyGeneratedUiRevocation(listener, revision);
+      }
+    }
   }
 
   /**

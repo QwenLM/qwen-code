@@ -4272,6 +4272,208 @@ describe('DaemonSessionClient clientId self-heal', () => {
     expect(revoked).toHaveBeenLastCalledWith(1);
   });
 
+  it('preserves a confirmed Generated UI denial when an observer throws', async () => {
+    const reportError = vi.fn();
+    vi.stubGlobal('reportError', reportError);
+    try {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: {
+            _meta: { generatedUi: { version: 1, enabled: false } },
+          },
+        }),
+      );
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const listenerError = new Error('listener failed');
+      const first = vi.fn(() => {
+        throw listenerError;
+      });
+      const second = vi.fn();
+      session.subscribeGeneratedUiRevocation(first);
+      session.subscribeGeneratedUiRevocation(second);
+
+      await expect(session.context()).resolves.toMatchObject({
+        v: 1,
+        sessionId: 's-1',
+      });
+      expect(session.session.generatedUi).toEqual({
+        version: 1,
+        enabled: false,
+      });
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledWith(1);
+      expect(reportError).toHaveBeenCalledWith(listenerError);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('continues Generated UI revocation when error reporting throws', async () => {
+    vi.stubGlobal(
+      'reportError',
+      vi.fn(() => {
+        throw new Error('reporter failed');
+      }),
+    );
+    try {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: {
+            _meta: { generatedUi: { version: 1, enabled: false } },
+          },
+        }),
+      );
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const second = vi.fn();
+      session.subscribeGeneratedUiRevocation(() => {
+        throw new Error('listener failed');
+      });
+      session.subscribeGeneratedUiRevocation(second);
+
+      await expect(session.context()).resolves.toMatchObject({
+        v: 1,
+        sessionId: 's-1',
+      });
+      expect(session.session.generatedUi?.enabled).toBe(false);
+      expect(second).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledWith(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('returns an unsubscribe after a failing immediate Generated UI replay', async () => {
+    const reportError = vi.fn();
+    vi.stubGlobal('reportError', reportError);
+    try {
+      let enabled = true;
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: { _meta: { generatedUi: { version: 1, enabled } } },
+        }),
+      );
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          generatedUi: { version: 1, enabled: false },
+        },
+      });
+      const listener = vi.fn(() => {
+        throw new Error('listener failed');
+      });
+      let unsubscribe: (() => void) | undefined;
+      expect(() => {
+        unsubscribe = session.subscribeGeneratedUiRevocation(listener);
+      }).not.toThrow();
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(unsubscribe).toBeTypeOf('function');
+
+      unsubscribe?.();
+      enabled = false;
+      await session.context();
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports Generated UI replay failures with console.error when reportError is unavailable', () => {
+    vi.stubGlobal('reportError', undefined);
+    const consoleError = vi
+      .spyOn(globalThis.console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon' }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          generatedUi: { version: 1, enabled: false },
+        },
+      });
+      const listenerError = new Error('listener failed');
+      const listener = vi.fn(() => {
+        throw listenerError;
+      });
+
+      session.subscribeGeneratedUiRevocation(listener);
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(listenerError);
+    } finally {
+      consoleError.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not deliver the current revision twice to observers added during notification', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(200, {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        state: {
+          _meta: { generatedUi: { version: 1, enabled: false } },
+        },
+      }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const late = vi.fn();
+    const first = vi.fn(() => {
+      session.subscribeGeneratedUiRevocation(late);
+    });
+    session.subscribeGeneratedUiRevocation(first);
+
+    await session.context();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(late).toHaveBeenCalledWith(1);
+  });
+
+  it('skips observers removed during Generated UI notification', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(200, {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        state: {
+          _meta: { generatedUi: { version: 1, enabled: false } },
+        },
+      }),
+    );
+    const session = newSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+    const second = vi.fn();
+    let unsubscribeSecond = () => {};
+    const first = vi.fn(() => {
+      unsubscribeSecond();
+    });
+    session.subscribeGeneratedUiRevocation(first);
+    unsubscribeSecond = session.subscribeGeneratedUiRevocation(second);
+
+    await session.context();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+  });
+
   it('does not replace a newer Generated UI restriction with an older reattach response', async () => {
     let resolveResume!: (response: Response) => void;
     const resume = new Promise<Response>((resolve) => {
