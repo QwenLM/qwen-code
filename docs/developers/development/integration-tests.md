@@ -128,10 +128,12 @@ This structure makes it easy to locate the artifacts for a specific test run, fi
 
 ## Continuous integration
 
-To ensure the integration tests are always run, a GitHub Actions workflow is defined in `.github/workflows/e2e.yml`. This workflow automatically runs the integrations tests for pull requests against the `main` branch, or when a pull request is added to a merge queue.
+The dedicated [E2E Tests workflow](https://github.com/QwenLM/qwen-code/blob/main/.github/workflows/e2e.yml) runs on
+pushes to `main` and `feat/e2e/**` branches, on a nightly schedule, and by manual
+dispatch. Its Linux sandbox matrix runs with `sandbox:none` and `sandbox:docker`.
+For local Podman runs, see the [sandbox matrix](#sandbox-matrix) above.
 
-The workflow runs the tests in different sandboxing environments to ensure Qwen Code is tested across each:
-
-- `sandbox:none`: Runs the tests without any sandboxing.
-- `sandbox:docker`: Runs the tests in a Docker container.
-- `sandbox:podman`: Runs the tests in a Podman container.
+On pull requests and in the merge queue, look for **Integration Tests (no-AK, No
+Sandbox)** in the [main CI workflow](https://github.com/QwenLM/qwen-code/blob/main/.github/workflows/ci.yml) when the
+change needs integration checks. That workflow also runs **Integration Tests
+(CLI, No Sandbox)** in the merge queue.
