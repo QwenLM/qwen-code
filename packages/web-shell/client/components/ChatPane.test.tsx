@@ -12,6 +12,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
 import { DaemonTranscriptViewport } from './DaemonTranscriptViewport';
+import { DAEMON_STATUS_CARD_RENDERERS } from './messages/daemon-status-cards';
+import {
+  useDaemonStatusCards,
+  type DaemonStatusCardRenderers,
+} from './messages/daemon-status-cards-context';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -251,12 +256,14 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 let latestTranscriptViewportProps: Record<string, any> = {};
+let latestDaemonStatusCards: DaemonStatusCardRenderers | undefined;
 vi.mock('./TranscriptViewport', () => ({
   TranscriptViewport: forwardRef(function MockTranscriptViewport(
     props: any,
     ref: any,
   ) {
     latestTranscriptViewportProps = props;
+    latestDaemonStatusCards = useDaemonStatusCards();
     useImperativeHandle(ref, () => ({
       scrollToBottom: transcriptScrollToBottom,
     }));
@@ -549,6 +556,8 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  latestTranscriptViewportProps = {};
+  latestDaemonStatusCards = undefined;
   latestToolApprovalProps = undefined;
   latestAskUserQuestionProps = undefined;
   renderRealChatEditor = false;
@@ -4976,5 +4985,18 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     });
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(cancelErr, 'Failed to cancel request');
+  });
+
+  it('resets viewport captures between tests and wires DaemonTranscriptViewport and DAEMON_STATUS_CARD_RENDERERS into TranscriptViewport', () => {
+    expect(
+      latestTranscriptViewportProps.sessionViewportComponent,
+    ).toBeUndefined();
+    expect(latestDaemonStatusCards).toBeUndefined();
+
+    render();
+    expect(latestTranscriptViewportProps.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
+    );
+    expect(latestDaemonStatusCards).toBe(DAEMON_STATUS_CARD_RENDERERS);
   });
 });

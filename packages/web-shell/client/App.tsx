@@ -4944,13 +4944,6 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
-  const workspaceRuntime = useMemo(
-    () =>
-      workspace.actions
-        ? workspace
-        : { ...workspace, actions: workspaceActions },
-    [workspace, workspaceActions],
-  );
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -26100,7 +26093,7 @@ export function App({
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
-          <WorkspaceRuntimeContext.Provider value={workspaceRuntime}>
+          <WorkspaceRuntimeContext.Provider value={workspace}>
           <DaemonStatusCardsContext.Provider
             value={DAEMON_STATUS_CARD_RENDERERS}
           >

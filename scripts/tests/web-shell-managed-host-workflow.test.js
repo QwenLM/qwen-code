@@ -217,6 +217,10 @@ describe('managed host build lane', () => {
     expect(verify.run).toContain(
       `if grep -rqF "$marker" 'packages/web-shell/dist-managed-host'; then`,
     );
+    expect(verify.run).toContain(
+      `echo "::error::Managed host bundle leaked daemon runtime marker: $marker"`,
+    );
+    expect(verify.run).toContain('exit 1');
   });
 
   it('keeps the output outside the directory the app build empties', () => {

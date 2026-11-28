@@ -146,9 +146,9 @@ daemon 值导入边：
 3. **CI 产物门禁的全部负向签名均经真实压缩产物验证为“活闸”。**
    - 压缩会改写部分内部类名（如 `RestSseTransport` 与
      `useDaemonSession must be used within` 在压缩后的 `dist/` 中命中 0 次），
-     因此门禁所选全部 8 个签名均先实测在压缩 `packages/web-shell/dist/` 中
-     命中 3–5 次、在 `packages/web-shell/dist-managed-host/` 全部 JS 中命中
-     0 次。
+     因此门禁所选全部 8 个签名均在 `build-artifact.test.ts` 中钉住必存于压
+     缩 `packages/web-shell/dist/`、同时在 `packages/web-shell/dist-managed-host/`
+     全部 JS 中命中 0 次。
 
 ## 约束
 

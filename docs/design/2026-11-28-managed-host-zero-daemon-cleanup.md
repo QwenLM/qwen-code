@@ -148,9 +148,10 @@ CI if daemon runtime code leaked back into the emitted managed-host bundle.
 3. **Verify every CI bundle-guard marker is live in the minified daemon bundle.**
    - Minification renames internal class/function identifiers (`RestSseTransport`
      and `useDaemonSession must be used within` do not appear in minified
-     `dist/`), so every marker pinned in `web-shell-managed-host.yml` was
-     verified to hit 3–5 times in minified `packages/web-shell/dist/` and 0
-     times across all emitted JS files in `packages/web-shell/dist-managed-host/`.
+     `dist/`), so every marker pinned in `web-shell-managed-host.yml` is
+     verified to be present in minified `packages/web-shell/dist/` (pinned by
+     `build-artifact.test.ts`) and absent across all emitted JS files in
+     `packages/web-shell/dist-managed-host/`.
 
 ## Constraints
 

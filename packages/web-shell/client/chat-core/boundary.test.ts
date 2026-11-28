@@ -713,8 +713,19 @@ describe('chat-core and managed-host boundary guards', () => {
   });
 
   it('enforces zero transitive daemon value-import edges and zero unresolved imports from managed-host.tsx', () => {
-    const { daemonEdges, unresolvedSpecifiers } =
+    const { daemonEdges, unresolvedSpecifiers, visitedFiles } =
       collectManagedHostGraph(MANAGED_HOST_ENTRY);
+    expect(visitedFiles).toEqual(
+      expect.arrayContaining([
+        'ManagedAgentWebShell.tsx',
+        'components/managed/ManagedSessionsPage.tsx',
+        'chat-core/ChatSurface.tsx',
+        'components/ChatEditor.tsx',
+        'components/TranscriptViewport.tsx',
+        'components/messages/SystemMessage.tsx',
+        'components/artifacts/TurnOutputs.tsx',
+      ]),
+    );
     expect(unresolvedSpecifiers).toEqual([]);
     expect(daemonEdges).toEqual([]);
   });

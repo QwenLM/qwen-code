@@ -9,6 +9,7 @@ import {
   type DaemonTurnNavigationClient,
 } from '../daemon/session/turn-navigation-store';
 import type { MessageListHandle, MessageListProps } from './MessageList';
+import type { TranscriptViewportProps } from './TranscriptViewport';
 import type { Message } from '../adapters/types';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 
@@ -182,7 +183,7 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
   root = createRoot(container);
   const ref = createRef<MessageListHandle>();
   const legacyLoad = vi.fn();
-  const props: MessageListProps = {
+  const props: TranscriptViewportProps = {
     messages: live,
     pendingApproval: null,
     isResponding: true,
@@ -647,31 +648,57 @@ describe('TranscriptViewport', () => {
     expect(ref.current?.scrollToMessage('any')).toBe(true);
   });
 
-  it('renders live MessageList without daemon hooks when sessionViewportComponent is omitted', () => {
+  it('renders live MessageList without daemon hooks when sessionViewportComponent is omitted and warns in dev when enabled', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const ref = createRef<MessageListHandle>();
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
-    act(() =>
-      root!.render(
-        <TranscriptViewport
-          ref={ref}
-          messages={live}
-          sourceSessionId="managed-only"
-          pendingApproval={null}
-          sessionKey="managed-only"
-          loadingTranscript={false}
-          isResponding={false}
-        />,
-      ),
-    );
-    expect(
-      container.querySelector('[data-history-viewport="live"]'),
-    ).not.toBeNull();
-    expect(observed.optionalHistoryCalls).toBe(0);
-    expect(observed.requiredHistoryCalls).toBe(0);
-    expect(observed.deletionCalls).toBe(0);
-    expect(observed.props?.messages).toBe(live);
-    expect(observed.props?.hookStatisticsSessionId).toBe('managed-only');
+    try {
+      act(() =>
+        root!.render(
+          <TranscriptViewport
+            ref={ref}
+            sessionViewportEnabled={false}
+            messages={live}
+            sourceSessionId="managed-only"
+            pendingApproval={null}
+            sessionKey="managed-only"
+            loadingTranscript={false}
+            isResponding={false}
+          />,
+        ),
+      );
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      act(() =>
+        root!.render(
+          <TranscriptViewport
+            ref={ref}
+            messages={live}
+            sourceSessionId="managed-only"
+            pendingApproval={null}
+            sessionKey="managed-only"
+            loadingTranscript={false}
+            isResponding={false}
+          />,
+        ),
+      );
+      expect(
+        container.querySelector('[data-history-viewport="live"]'),
+      ).not.toBeNull();
+      expect(observed.optionalHistoryCalls).toBe(0);
+      expect(observed.requiredHistoryCalls).toBe(0);
+      expect(observed.deletionCalls).toBe(0);
+      expect(observed.props?.messages).toBe(live);
+      expect(observed.props?.hookStatisticsSessionId).toBe('managed-only');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'sessionViewportEnabled without sessionViewportComponent',
+        ),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

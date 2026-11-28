@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { forwardRef, type ComponentType, type RefAttributes } from 'react';
+import {
+  forwardRef,
+  useEffect,
+  type ComponentType,
+  type RefAttributes,
+} from 'react';
 import {
   MessageList,
   type MessageListHandle,
@@ -55,14 +60,16 @@ export function followRangeFromRows(
 export interface TranscriptViewportProps extends MessageListProps {
   approvalOverlayActive?: boolean;
   /**
-   * Enables session-context historical turn navigation and message deletion.
-   * Defaults to `true` for daemon callers; pass `false` for flat live hosts
-   * (including non-daemon surfaces co-mounted inside a daemon provider tree).
+   * Enables session-context historical turn navigation and message deletion
+   * when paired with an injected {@link sessionViewportComponent}. Defaults to
+   * `true` for daemon callers; pass `false` for flat live hosts (including
+   * non-daemon surfaces co-mounted inside a daemon provider tree).
    */
   sessionViewportEnabled?: boolean;
   /**
-   * Optional session-aware viewport component injected by daemon hosts when
-   * historical turn navigation and message deletion are supported.
+   * Session-aware viewport component injected by daemon hosts when historical
+   * turn navigation and message deletion are supported. Required alongside
+   * {@link sessionViewportEnabled} to activate the session viewport.
    */
   sessionViewportComponent?: ComponentType<
     TranscriptViewportProps & RefAttributes<MessageListHandle>
@@ -111,6 +118,18 @@ export const TranscriptViewport = forwardRef<
   },
   ref,
 ) {
+  useEffect(() => {
+    if (
+      import.meta.env.DEV &&
+      sessionViewportEnabled &&
+      !SessionViewportComponent
+    ) {
+      console.warn(
+        '[web-shell] TranscriptViewport received sessionViewportEnabled without sessionViewportComponent; falling back to LiveTranscriptViewport.',
+      );
+    }
+  }, [sessionViewportEnabled, SessionViewportComponent]);
+
   if (!sessionViewportEnabled || !SessionViewportComponent) {
     return <LiveTranscriptViewport ref={ref} {...props} />;
   }

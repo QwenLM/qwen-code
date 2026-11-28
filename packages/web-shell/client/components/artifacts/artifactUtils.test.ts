@@ -855,5 +855,20 @@ describe('artifactUtils', () => {
     expect(readDaemonHttpErrorInfo(plainWithStatus)).toEqual({
       message: 'not daemon',
     });
+
+    // Recognizes an error whose prototype chain is broken while preserving
+    // `name === 'DaemonHttpError'` (intentionally diverges from
+    // `isSessionLevelNotFound`, which uses `instanceof DaemonHttpError`).
+    const foreignClassError = Object.assign(new Error('gone'), {
+      name: 'DaemonHttpError',
+      status: 404,
+      body: { code: 'session_not_found' },
+    });
+    expect(isSessionNotFoundArtifactError(foreignClassError)).toBe(true);
+    expect(readDaemonHttpErrorInfo(foreignClassError)).toEqual({
+      status: 404,
+      code: 'session_not_found',
+      message: 'gone',
+    });
   });
 });
