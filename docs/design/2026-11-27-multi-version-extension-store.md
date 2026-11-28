@@ -24,7 +24,7 @@ An earlier proposal in `#18339` suggested installing extensions physically insid
 - Enforce per-workspace same-name mutual exclusion inside a single store transaction so at most one version of any extension is active in a workspace, with strict no-fallback when disabled.
 - Isolate per-workspace `.env` and Keychain settings for shared versioned artifacts without mutating the shared artifact directory.
 - Prevent unbounded version growth through automatic pruning of zero-reference version slots on version switch and an explicit `qwen extensions prune` command for stale workspace references.
-- Fix CLI folder-trust handling to fail closed (`isTrusted === true`) instead of treating undecided (`undefined`) directories as trusted.
+- Fix extension install/uninstall folder-trust handling to fail closed (`isTrusted === true`) instead of treating undecided (`undefined`) directories as trusted.
 
 ### Non-Goals
 
@@ -70,7 +70,7 @@ Non-credentialed versioned installs compute a deterministic `versionKey` persist
 | `local` / `archive-url`         | `content:<name>:<directoryContentSha256>`        | Yes                    |
 | `snapshot` / `stored` HTTPS Git | None (retains random `installId`)                | Intentionally isolated |
 
-The 64-char hex `extensionId` is `sha256("v2:" + baseId + ":" + versionKey)`. When two workspaces install the exact same version (e.g., `@acme/foo@2.0.0` or the same archive content), both derive the identical `extensionId`. If the artifact already exists on disk and in `state.json`, the store commits idempotently by updating `workspaceOverrides` without creating a duplicate directory.
+For versioned installs, the 64-char hex `extensionId` is `sha256("v2:" + baseId + ":" + versionKey)`; content-addressed local/archive installs omit `baseId` so the download path cannot defeat reuse. When two workspaces install the exact same version (e.g., `@acme/foo@2.0.0` or the same archive content), both derive the identical `extensionId`. If the artifact already exists on disk and in `state.json`, the store commits idempotently by updating `workspaceOverrides` without creating a duplicate directory.
 
 ### Single-Store Mutual Exclusion and Views
 
@@ -106,7 +106,7 @@ Because multiple workspaces can share an immutable version slot under `extension
 2. **Idempotent reuse**: Installing the same archive/version in workspace B again and in workspace C produces the same `extensionId`, creates only one directory under `extension-versions/foo/`, and activates both workspaces independently.
 3. **Auto-prune & explicit `prune`**: Switching workspace B from `2.0.0` to `3.0.0` automatically reclaims `2.0.0` when unreferenced (and retains `2.0.0` while workspace C still uses it); deleting workspace C and running `prune` removes stale references and reclaims `2.0.0`.
 4. **Per-workspace settings & `link --scope workspace`**: Two workspaces sharing `2.0.0` write isolated `.env` files under `extension-store/workspace-env/`, and two workspaces can link two distinct local branches concurrently.
-5. **CLI fail-closed trust**: Undecided (`isTrusted: undefined`) workspaces are rejected on CLI extension installs instead of failing open.
+5. **Extension command fail-closed trust**: Undecided (`isTrusted: undefined`) workspaces are rejected on CLI extension installs instead of failing open.
 
 ## Follow-Up Work
 

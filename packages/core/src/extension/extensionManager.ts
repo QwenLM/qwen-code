@@ -2877,6 +2877,9 @@ export class ExtensionManager {
         }
 
         const newExtensionName = newExtensionConfig.name;
+        if (useVersionedSlot) {
+          await this.refreshCache();
+        }
         const allLoaded = this.getAllLoadedExtensions();
         const previous = isUpdate
           ? (allLoaded.find((installed) => installed.id === extensionId) ??
@@ -3776,6 +3779,7 @@ export class ExtensionManager {
         (candidate) => candidate.id === extensionId,
       );
       const destinationDirectory =
+        (extension?.versionSlot ? extension?.installDir : extension?.path) ??
         this.extensionStore.resolveArtifactDirectory(policy);
       const installMetadata =
         extension?.installMetadata ??
@@ -4140,7 +4144,12 @@ export function getExtensionId(
   }
   const baseId = hashValue(idValue);
   if (installMetadata?.versionKey) {
-    return getVersionedExtensionId(baseId, installMetadata.versionKey);
+    return getVersionedExtensionId(
+      installMetadata.type === 'local' || installMetadata.type === 'archive-url'
+        ? ''
+        : baseId,
+      installMetadata.versionKey,
+    );
   }
   return baseId;
 }

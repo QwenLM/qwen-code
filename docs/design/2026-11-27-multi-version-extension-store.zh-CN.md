@@ -24,7 +24,7 @@
 - 在单 Store 锁事务内强制“单工作区同名互斥”，确保同一工作区同一时刻至多激活一个同名版本，且禁用后绝不回退到其他版本。
 - 为共享的不可变版本产物提供按工作区隔离的 `.env` 与 Keychain 存储，不修改共享代码目录。
 - 通过切换版本时的零引用自动回收与显式 `qwen extensions prune` 命令防止版本目录无限堆积。
-- 修复 CLI 文件夹信任检查为 fail-closed（`isTrusted === true`），避免未表态（`undefined`）目录被默认放行。
+- 修复扩展安装/卸载命令的文件夹信任检查为 fail-closed（`isTrusted === true`），避免未表态（`undefined`）目录被默认放行。
 
 ### 非目标
 
@@ -70,7 +70,7 @@
 | `local` / `archive-url`         | `content:<name>:<directoryContentSha256>`        | 是             |
 | `snapshot` / `stored` HTTPS Git | 不设 `versionKey`（沿用随机 `installId`）        | 刻意隔离不共享 |
 
-64 位 hex `extensionId` 由 `sha256("v2:" + baseId + ":" + versionKey)` 生成。不同工作区安装同一真实版本（例如 `@acme/foo@2.0.0` 或内容完全一致的压缩包）时，会算出完全相同的 `extensionId`；若该产物已在磁盘与 `state.json` 中存在，Store 将幂等复用既有目录并仅更新 `workspaceOverrides`，不产生重复副本。
+版本化安装的 64 位 hex `extensionId` 由 `sha256("v2:" + baseId + ":" + versionKey)` 生成；本地/归档内容寻址安装省略 `baseId`，使下载路径不会破坏复用。不同工作区安装同一真实版本（例如 `@acme/foo@2.0.0` 或内容完全一致的压缩包）时，会算出完全相同的 `extensionId`；若该产物已在磁盘与 `state.json` 中存在，Store 将幂等复用既有目录并仅更新 `workspaceOverrides`，不产生重复副本。
 
 ### 单 Store 互斥与双视图
 
@@ -106,7 +106,7 @@
 2. **同版本幂等复用**：在工作区 B 重复安装或在新工作区 C 安装同一份 `foo@2.0.0` 产物时，算出同一 `extensionId`，`extension-versions/foo/` 下仅存 1 份目录，并各自独立激活。
 3. **自动回收与显式 `prune`**：工作区 B 从 `2.0.0` 切到 `3.0.0` 时，若无其他工作区引用则自动回收 `2.0.0`（若工作区 C 仍在使用则保留）；删除工作区 C 后执行 `prune` 可清除失效引用并回收 `2.0.0`。
 4. **按工作区配置隔离与 `link --scope workspace`**：两个工作区共享 `2.0.0` 时各自读写独立的 `workspace-env/` 文件；两个工作区可同时 `link` 同一扩展的两个本地分支。
-5. **CLI 信任 fail-closed**：未表态（`isTrusted: undefined`）目录在 CLI 扩展安装时被拒绝，不再默认信任。
+5. **扩展命令信任 fail-closed**：未表态（`isTrusted: undefined`）目录在 CLI 扩展安装时被拒绝，不再默认信任。
 
 ## 后续工作
 

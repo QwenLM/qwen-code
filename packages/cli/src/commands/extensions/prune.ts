@@ -66,8 +66,8 @@ export const pruneCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handlePrune({
-      dryRun: argv['dry-run'] as boolean | undefined,
-      keepMissingWorkspaces: argv['keep-missing-workspaces'] as
+      dryRun: argv['dryRun'] as boolean | undefined,
+      keepMissingWorkspaces: argv['keepMissingWorkspaces'] as
         | boolean
         | undefined,
     });

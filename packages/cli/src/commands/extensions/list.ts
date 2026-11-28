@@ -39,8 +39,15 @@ export async function handleList(args: ListArgs = {}) {
       : allExtensions.filter(
           (extension) => !extension.versionSlot || extension.isActive,
         );
-    const displayExtensions =
-      extensions.length > 0 ? extensions : allExtensions;
+
+    if (extensions.length === 0) {
+      writeStdoutLine(
+        t(
+          'No extensions active in this workspace. Use --all to see all installed versions.',
+        ),
+      );
+      return;
+    }
 
     let snapshot:
       | Awaited<ReturnType<typeof extensionManager.getExtensionStoreSnapshot>>
@@ -53,7 +60,7 @@ export async function handleList(args: ListArgs = {}) {
     }
 
     writeStdoutLine(
-      displayExtensions
+      extensions
         .map((extension): string => {
           let line = extensionToOutputString(extension, extensionManager, cwd);
           if (args.all && snapshot) {

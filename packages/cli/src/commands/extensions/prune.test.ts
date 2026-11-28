@@ -27,19 +27,26 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
 }));
 
+vi.mock('../../i18n/index.js', () => ({
+  t: (key: string) => key,
+}));
+
 describe('extensions prune command', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('parses prune flags cleanly', () => {
+  it('parses prune flags cleanly', async () => {
+    mockPruneUnusedVersions.mockResolvedValue({
+      pruned: [],
+      removedWorkspaceRefs: 0,
+    });
     const parser = yargs([]).command(pruneCommand).fail(false).locale('en');
-    const argv = parser.parse('prune --dry-run --keep-missing-workspaces') as {
-      dryRun?: boolean;
-      keepMissingWorkspaces?: boolean;
-    };
-    expect(argv.dryRun).toBe(true);
-    expect(argv.keepMissingWorkspaces).toBe(true);
+    await parser.parseAsync('prune --dry-run --keep-missing-workspaces');
+    expect(mockPruneUnusedVersions).toHaveBeenCalledWith({
+      dryRun: true,
+      removeMissingWorkspaces: false,
+    });
   });
 
   it('prints dry-run summary without mutating store', async () => {

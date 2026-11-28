@@ -77,6 +77,7 @@ describe('single-store multi-version extensions', () => {
         isWorkspaceTrusted: true,
         extensionStore: store,
         requestConsent: async () => undefined,
+        requestSetting: async () => 'test-value',
       });
       await manager.refreshCache();
       return manager;
@@ -202,13 +203,25 @@ describe('single-store multi-version extensions', () => {
     expect(second.id).toBe(first.id);
     expect(second.path).toBe(first.path);
 
+    const copiedSrc = path.join(sourcesDir, 'foo-2.0.0-copy');
+    await fs.cp(srcV2, copiedSrc, { recursive: true });
     const fooSlots = await fs.readdir(path.join(versionsDir, 'foo'));
     expect(fooSlots).toHaveLength(1);
 
-    // Unrelated workspace C does not activate it.
     const mgrC = await makeManager(wsC);
+    const third = await mgrC.installExtension(
+      { type: 'local', source: copiedSrc },
+      async () => undefined,
+      undefined,
+      wsC,
+      undefined,
+      { scope: 'workspace', workspacePath: wsC },
+    );
+    expect(third.id).toBe(first.id);
+    expect(third.path).toBe(first.path);
+    expect(await fs.readdir(path.join(versionsDir, 'foo'))).toHaveLength(1);
     expect(mgrC.getLoadedExtensions().filter((e) => e.isActive)).toHaveLength(
-      0,
+      1,
     );
   });
 

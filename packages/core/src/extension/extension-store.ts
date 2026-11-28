@@ -870,6 +870,7 @@ export class ExtensionStore {
     extensions: readonly ExtensionIdentity[],
   ): Promise<ExtensionStoreSnapshot> {
     const loadedById = new Map<string, ExtensionIdentity>();
+    const loadedByName = new Map<string, ExtensionIdentity>();
     for (const identity of extensions) {
       assertIdentity(identity);
       const existingById = loadedById.get(identity.id);
@@ -878,7 +879,14 @@ export class ExtensionStore {
           `Extension id ${identity.id} conflicts between "${identity.name}" and "${existingById.name}".`,
         );
       }
+      const existingByName = loadedByName.get(identity.name.toLowerCase());
+      if (existingByName && existingByName.name !== identity.name) {
+        throw new ExtensionConflictError(
+          `Extension name "${identity.name}" conflicts with "${existingByName.name}".`,
+        );
+      }
       loadedById.set(identity.id, identity);
+      loadedByName.set(identity.name.toLowerCase(), identity);
     }
     const existing = await this.readSnapshotUnlocked();
     const legacy = await this.readLegacyProjection();
@@ -1193,10 +1201,17 @@ export class ExtensionStore {
       );
       const journalPath = path.join(transactionsDir, `${transactionId}.json`);
       const currentPolicy = snapshot.extensions[input.identity.id];
-      const destinationDirectory =
+      let destinationDirectory =
         input.operation !== 'install' && currentPolicy
           ? this.resolveArtifactDirectory(currentPolicy)
           : input.destinationDirectory;
+      if (
+        input.operation !== 'install' &&
+        !(await this.pathExists(destinationDirectory)) &&
+        (await this.pathExists(input.destinationDirectory))
+      ) {
+        destinationDirectory = input.destinationDirectory;
+      }
       this.assertArtifactDestination(destinationDirectory);
       const destinationExists = await this.pathExists(destinationDirectory);
       const isIdempotentReuse =
@@ -1655,6 +1670,13 @@ export class ExtensionStore {
         otherPolicy.workspaceOverrides[canonicalWs] = 'disabled';
       } else {
         otherPolicy.defaultActivation = 'disabled';
+        for (const [wsPath, override] of Object.entries(
+          otherPolicy.workspaceOverrides,
+        )) {
+          if (override === 'enabled') {
+            otherPolicy.workspaceOverrides[wsPath] = 'disabled';
+          }
+        }
       }
     }
   }

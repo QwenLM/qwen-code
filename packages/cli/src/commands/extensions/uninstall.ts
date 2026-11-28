@@ -51,19 +51,33 @@ export async function handleUninstall(args: UninstallArgs) {
           : extensionManager.getLoadedExtensions();
       const lowerName = args.name.toLowerCase();
       const selector = args.version.toLowerCase();
-      const target = allLoaded.find(
+      const matches = allLoaded.filter(
         (ext) =>
           ext.name.toLowerCase() === lowerName &&
           (ext.version.toLowerCase() === selector ||
             ext.versionSlot?.toLowerCase() === selector ||
             ext.id.toLowerCase().startsWith(selector)),
       );
-      if (!target) {
+      if (matches.length === 0) {
         throw new Error(
           `Extension "${args.name}" matching version "${args.version}" not found.`,
         );
       }
-      result = await extensionManager.uninstallExtensionById(target.id, false);
+      if (matches.length > 1) {
+        const candidates = matches
+          .map(
+            (ext) =>
+              `${ext.versionSlot ?? ext.version} (${ext.id.slice(0, 12)}…)`,
+          )
+          .join(', ');
+        throw new Error(
+          `Multiple versions of "${args.name}" match "${args.version}": ${candidates}. Use an exact version, slot, or a longer id prefix.`,
+        );
+      }
+      result = await extensionManager.uninstallExtensionById(
+        matches[0]!.id,
+        false,
+      );
     } else {
       result = await extensionManager.uninstallExtension(args.name, false);
     }

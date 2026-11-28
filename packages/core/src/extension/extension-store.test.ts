@@ -924,6 +924,22 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('disables workspace sibling activations when enabling the primary by default', async () => {
+    const primary = { id: 'a'.repeat(64), name: 'DotNet' };
+    const sibling = { id: 'b'.repeat(64), name: 'DotNet' };
+    const store = makeStore();
+    await store.ensureInitialized([primary, sibling]);
+    await store.setDefaultActivation(primary, 'disabled');
+    await store.setWorkspaceActivation(sibling, workspacePath('a'), 'enabled');
+
+    const snapshot = await store.setDefaultActivation(primary, 'enabled');
+
+    expect(snapshot.extensions[sibling.id]).toMatchObject({
+      defaultActivation: 'disabled',
+      workspaceOverrides: { [workspacePath('a')]: 'disabled' },
+    });
+  });
+
   it('re-keys across a case mismatch and normalizes the stored name', async () => {
     const { store, identity: oldIdentity } = newStore('a'.repeat(64), 'DotNet');
     const newIdentity = { id: 'b'.repeat(64), name: 'dotnet' };
