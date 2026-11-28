@@ -5,9 +5,7 @@
  */
 
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
@@ -16,11 +14,18 @@ import {
 import { notificationExcerpt } from './notification-text';
 import { getTranslator, loadLanguage, type WebShellLanguage } from './i18n';
 import {
+  BrowserNotificationSettingsContext,
+  useBrowserNotificationSettings,
+  type BrowserNotificationPermissionState as Permission,
+} from './browser-notification-settings-context';
+import {
   createTurnNotificationObserver,
   TurnNotificationContext,
   TurnNotificationNavigationContext,
   type TurnNotification,
 } from './daemon/session/turn-notification-context';
+
+export { useBrowserNotificationSettings };
 
 export const BROWSER_NOTIFICATIONS_STORAGE_KEY =
   'qwen-code-web-shell-browser-notifications';
@@ -47,28 +52,6 @@ interface BrowserTurnNotificationsProps {
   language: WebShellLanguage;
   options?: WebShellBrowserNotificationsOptions;
   active?: boolean;
-}
-
-type Permission = NotificationPermission | 'unavailable';
-
-interface BrowserNotificationSettings {
-  enabled: boolean;
-  permission: Permission;
-  pending: boolean;
-  persistent: boolean;
-  error: boolean;
-  setEnabled(enabled: boolean): Promise<void>;
-  requestPermissionOnce(): void;
-  refreshPermission(): void;
-  syncLanguage(language: WebShellLanguage): void;
-}
-
-const BrowserNotificationSettingsContext = createContext<
-  BrowserNotificationSettings | undefined
->(undefined);
-
-export function useBrowserNotificationSettings() {
-  return useContext(BrowserNotificationSettingsContext);
 }
 
 function permission(): Permission {

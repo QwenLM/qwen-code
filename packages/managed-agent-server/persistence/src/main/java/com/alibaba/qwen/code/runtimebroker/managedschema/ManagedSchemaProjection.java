@@ -140,7 +140,8 @@ public enum ManagedSchemaProjection {
                     + "is_resource_gc_completed, is_publication_retention_registered, model_id, model_revision, "
                     + "model_config_digest, model_config_key_id, model_config_ciphertext, "
                     + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
-                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
+                    + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state, "
+                    + "harness_claim_requested_at, harness_claim_reserved_until"),
     SESSION_HEAD(
             "tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
@@ -187,7 +188,7 @@ public enum ManagedSchemaProjection {
                     + "execution_state, execution_status, result_json, last_sequence, is_cancel_requested, "
                     + "dispatch_owner, dispatch_lease_until, dispatch_generation, record_version, "
                     + "settled_at, abandoned_at, loss_evidence_id, authorized_dispatch_generation, "
-                    + "authorized_binding_version"),
+                    + "authorized_binding_version, shared_dispatch_class"),
     TURN(
             "tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, "
                     + "is_submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "

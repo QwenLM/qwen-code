@@ -700,52 +700,7 @@ function collectManagedHostGraph(
   };
 }
 
-/**
- * Remaining transitive daemon value-import edges (`file => module`) reachable
- * from `client/managed-host.tsx` (burned down from 47 to 31 in Slice 6a).
- *
- * Slices 6b (`ChatEditor` toolbar/upload decoupling) and 6c
- * (`TranscriptViewport` / `TurnOutputs` / `ToolApproval` / `SystemMessage`
- * decoupling + `dist-managed-host/index.js` CI grep gate) will empty this list.
- * Never add entries; remove entries as each slice lands.
- */
-const REMAINING_MANAGED_HOST_DAEMON_EDGES: readonly string[] = [
-  // Slice 6b: ChatEditor daemon-only toolbar/upload controls (15 edges)
-  'components/BranchPickerPopover.tsx => @qwen-code/sdk/daemon',
-  'components/BranchPickerPopover.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useFileUpload.ts => ../daemon/availability-context.js',
-  'hooks/useFileUpload.ts => ../daemon/availability.js',
-  'live/useLiveBrowserHost.ts => ../daemon/availability-context.js',
-  'live/useLiveVoice.ts => ../daemon/availability-context.js',
-  'live/useLiveVoice.ts => ../daemon/availability.js',
-  'live/useLiveVoice.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'session-catalog/session-catalog-hooks.ts => ../daemon/availability-context.js',
-  'session-catalog/session-catalog-hooks.ts => ../daemon/availability.js',
-  'session-catalog/session-catalog-hooks.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'session-catalog/session-catalog-store.ts => ../daemon/availability.js',
-  'voice/VoiceButton.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'voice/useVoiceCapture.ts => ../daemon/availability-context.js',
-  'voice/useVoiceCapture.ts => ../daemon/availability.js',
-  // Slice 6c: TranscriptViewport / TurnOutputs / ToolApproval / SystemMessage (16 edges)
-  'adapters/transcriptToMessages.ts => @qwen-code/sdk/daemon',
-  'browser-turn-notifications.tsx => ./daemon/session/turn-notification-context',
-  'components/TranscriptViewport.tsx => ../daemon/session/DaemonSessionProvider',
-  'components/artifacts/artifactUtils.ts => @qwen-code/sdk/daemon',
-  'components/artifacts/useArtifactWorkspaceTarget.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/GoalStatusMessage.tsx => @qwen-code/sdk/daemon',
-  'components/messages/HookStatistics.tsx => @qwen-code/sdk/daemon',
-  'components/messages/McpStatusMessage.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/SystemMessage.tsx => @qwen-code/sdk/daemon',
-  'components/messages/TasksStatusMessage.tsx => ../../daemon/availability-context.js',
-  'components/messages/TasksStatusMessage.tsx => ../../daemon/availability.js',
-  'components/messages/TasksStatusMessage.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'components/messages/ToolFilePreviewButton.tsx => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useMessageDeletion.ts => @qwen-code/sdk/daemon',
-  'hooks/useMessageDeletion.ts => @qwen-code/web-shell/daemon-react-sdk',
-  'hooks/useTranscriptViewport.ts => ../daemon/session/DaemonSessionProvider',
-].sort();
-
-describe('chat-core and managed-host boundary guards (slice 6a)', () => {
+describe('chat-core and managed-host boundary guards', () => {
   it('enforces zero daemon imports (value or type, static or dynamic) recursively across chat-core/**', () => {
     const { files, violations } = findChatCoreDaemonViolations(CHAT_CORE_DIR);
     expect(files.length).toBeGreaterThan(0);
@@ -757,11 +712,22 @@ describe('chat-core and managed-host boundary guards (slice 6a)', () => {
     expect(findChatCoreControllerKindViolations(CHAT_CORE_DIR)).toEqual([]);
   });
 
-  it('holds managed-host.tsx transitive daemon value-import edges to the exact ratchet allowlist with zero unresolved imports', () => {
-    const { daemonEdges, unresolvedSpecifiers } =
+  it('enforces zero transitive daemon value-import edges and zero unresolved imports from managed-host.tsx', () => {
+    const { daemonEdges, unresolvedSpecifiers, visitedFiles } =
       collectManagedHostGraph(MANAGED_HOST_ENTRY);
+    expect(visitedFiles).toEqual(
+      expect.arrayContaining([
+        'ManagedAgentWebShell.tsx',
+        'components/managed/ManagedSessionsPage.tsx',
+        'chat-core/ChatSurface.tsx',
+        'components/ChatEditor.tsx',
+        'components/TranscriptViewport.tsx',
+        'components/messages/SystemMessage.tsx',
+        'components/artifacts/TurnOutputs.tsx',
+      ]),
+    );
     expect(unresolvedSpecifiers).toEqual([]);
-    expect(daemonEdges).toEqual(REMAINING_MANAGED_HOST_DAEMON_EDGES);
+    expect(daemonEdges).toEqual([]);
   });
 
   it('catches nested chat-core daemon imports, @qwen-code/sdk root, inline import() types, and computed dynamic imports', () => {

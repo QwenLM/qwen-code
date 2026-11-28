@@ -217,8 +217,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this(sessionResolver, provisioner, transport, bindingRepository,
                 sessionRepository, executionRepository, brokerOwnerId,
                 operationLeaseDuration, dispatchLeaseDuration, null,
-                DEFAULT_V3_RESULT_WINDOW, clock, executionIdSupplier,
-                newScheduler(), newRenewalScheduler());
+                DEFAULT_V3_RESULT_WINDOW, clock, executionIdSupplier, newScheduler(), newRenewalScheduler());
     }
 
     private RuntimeBrokerService(HarnessSessionResolver sessionResolver,
@@ -361,8 +360,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return drainCoordinator.retireStorageBinding(tenantId, storageId, operationId, bindingId, generation);
     }
 
-    public CompletionStage<RuntimeBindingRecord> warm(
-            String harnessSessionId) {
+    public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId) {
         return warm(harnessSessionId, null);
     }
 
@@ -1109,7 +1107,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                             if (family != null) {
                                                 admitBackgroundProcess(context, current, family);
                                             }
-                                            executionDispatcher.beginDispatch(context, current, payload, grant);
+                                            executionDispatcher.beginDispatch(context, current, payload,
+                                                    grant, digest, toolName);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1119,7 +1118,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            executionDispatcher.beginDispatch(context, record, payload);
+                            executionDispatcher.beginDispatch(context, record, payload,
+                                    null, digest, toolName);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -1789,8 +1789,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         "Runtime Session is not acquirable");
             }
             RuntimeSessionRecord expected = stored;
-            return mapFailure(safeStage(() -> transport.acquire(
-                    binding.lease(), session)),
+            return mapFailure(safeStage(() -> transport.acquire(binding.lease(), session)),
                     "runtime_session_acquire_failed",
                     "Runtime Session acquisition failed")
                     .handle((ignored, error) -> {
@@ -1826,6 +1825,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
     public CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration) {
         return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false);
+    }
+
+    /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
+    public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
+            String bindingId, long expectedGeneration, long expectedVersion) {
+        return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false, expectedVersion);
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

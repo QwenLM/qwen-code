@@ -53,6 +53,31 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     private Path mediaDirectory;
 
     @Test
+    void mysqlWakeHonorsGraceAndSkipsUnknownOrExternalSessions() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[] {1});
+        retire();
+        var properties = new ManagedAgentProperties();
+        var collector = SessionResourceCollectionCollector.mysqlOnly(jdbc, manager, properties);
+        collector.wake("unknown-tenant", "unknown-session");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tenant_guard WHERE tenant_id = 'unknown-tenant'",
+                Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = 'unknown-tenant'",
+                Long.class)).isZero();
+
+        collector.wake(tenant, session);
+        assertThat(ledger().get("gc_blocker")).isEqualTo("grace_period");
+        assertThat(ledger().get("gc_generation")).isEqualTo(0L);
+        properties.getToolPublication().setDeletionGrace(Duration.ZERO);
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind = 'SESSION_RESOURCE_GC'");
+        collector.wake(tenant, session);
+        assertThat(ledger().get("gc_blocker")).isEqualTo("external_storage_present");
+        assertThat(ledger().get("gc_generation")).isEqualTo(0L);
+        assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNotNull());
+    }
+
+    @Test
     void cleanupDebtSurvivesUntilItsNativeJournalIsPermanentlyCollected() {
         initSession();
         head(session);

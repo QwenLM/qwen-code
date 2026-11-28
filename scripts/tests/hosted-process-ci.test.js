@@ -449,7 +449,15 @@ describe('Hosted real-process gates', () => {
     // it would narrow the run unrecorded.
     const selection = /it\.test|includesFile|excludesFile|<test>/;
     expect(read('.github/workflows/sdk-java.yml')).not.toMatch(selection);
-    expect(pom).not.toMatch(selection);
+    const multiNode = pom
+      .split('<id>event-transport-multi-node-gates</id>')[1]
+      .split('</profile>')[0];
+    // The opt-in profile has its own report check for the exact GC method.
+    const multiNodeSelector =
+      '<includesFile>${project.basedir}/src/test/event-transport-multi-node-includes.txt</includesFile>';
+    expect(
+      pom.replace(multiNode, multiNode.replace(multiNodeSelector, '')),
+    ).not.toMatch(selection);
     const [nonHosted, hosted] = pom.split('<id>hosted-harness-mysql</id>');
     expect(nonHosted).toContain('<id>mysql-integration</id>');
     expect(nonHosted).toContain('<exclude>**/Hosted*IT.java</exclude>');

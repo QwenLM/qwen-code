@@ -44,6 +44,7 @@ type SurfaceOwnedTranscriptKeys =
   | 'approvalOverlayActive'
   | 'sessionViewportEnabled'
   | 'loadingTranscript'
+  | 'isResponding'
   | 'sessionKey'
   | 'hasOlderHistory'
   | 'onLoadOlderHistory'
@@ -160,10 +161,12 @@ export interface ChatSurfaceProps {
   readonly onComposerSubmit?: ChatEditorComponentProps['onSubmit'];
   readonly composerProps?: ChatSurfaceComposerProps;
   // Opt-in flags for host-context integrations (historical turn-navigation /
-  // message-deletion viewport, workspace-backed composer features, and explicit
-  // composer toolbar actions). All default closed/empty so a non-daemon surface
-  // never crashes outside daemon providers or leaks an ancestor daemon
-  // provider's session, workspace, or voice state when co-mounted.
+  // message-deletion viewport — requires pairing with
+  // `transcriptProps.sessionViewportComponent`, workspace-backed composer
+  // features, and explicit composer toolbar actions). All default closed/empty
+  // so a non-daemon surface never crashes outside daemon providers or leaks an
+  // ancestor daemon provider's session, workspace, or voice state when
+  // co-mounted.
   readonly sessionViewportEnabled?: boolean;
   readonly workspaceFeaturesEnabled?: boolean;
   readonly visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -686,11 +689,7 @@ export function ChatSurface({
               approvalOverlayActive={cardActive}
               sessionViewportEnabled={sessionViewportEnabled}
               loadingTranscript={controller.transcriptState === 'loading'}
-              isResponding={
-                transcriptProps && 'isResponding' in transcriptProps
-                  ? Boolean(transcriptProps.isResponding)
-                  : isRunning
-              }
+              isResponding={isRunning}
               sessionKey={controller.sessionId}
               hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
               onLoadOlderHistory={loadOlder}

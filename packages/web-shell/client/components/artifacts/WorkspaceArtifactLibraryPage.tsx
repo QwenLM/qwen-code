@@ -166,19 +166,14 @@ export function WorkspaceArtifactLibraryPage({
     [filteredRows, renderLimit],
   );
 
+  // The list is the page's landing view: nothing is selected or previewed
+  // until the user clicks a row (#18508). A passive fallback also had to be
+  // re-decided on every liveness poll, so it could not keep a user choice
+  // once that row went cold.
   const selectedRow = useMemo(() => {
-    if (selectedKey) {
-      const match = filteredRows.find((row) => row.key === selectedKey);
-      if (match) return match;
-    }
-    return visibleRows.find((row) => {
-      const dispatch = classifyWorkspaceArtifactDispatch(
-        row.artifact,
-        checkSessionLive(row.sessionId),
-      );
-      return dispatch.kind !== 'jump_web_preview_snapshot';
-    });
-  }, [checkSessionLive, filteredRows, selectedKey, visibleRows]);
+    if (!selectedKey) return undefined;
+    return filteredRows.find((row) => row.key === selectedKey);
+  }, [filteredRows, selectedKey]);
 
   const handleRowActivate = (row: WorkspaceArtifactLibraryRow) => {
     const dispatch = classifyWorkspaceArtifactDispatch(
@@ -455,6 +450,14 @@ export function WorkspaceArtifactLibraryPage({
                 }
               />
             </div>
+          )}
+          {!(selectedRow && workspaceTarget) && (
+            <p
+              className={styles.selectPrompt}
+              data-testid="workspace-artifact-library-select-prompt"
+            >
+              {t('workspaceArtifactLibrary.selectPrompt')}
+            </p>
           )}
         </div>
       )}

@@ -3,14 +3,13 @@
 [English](2026-11-16-unified-chat-surface.md) |
 [简体中文](2026-11-16-unified-chat-surface.zh-CN.md)
 
-Status: proposal. Date: 2026-11-16. Revised 2026-11-16 after review: the
-ChatPane chat column is now in scope, the contract separates admission from
-outcome establishment, and several current-state claims were corrected. A
-second revision tightens the contract (observable operation state,
-correlation identity, compile-time capability-mapping guards) and corrects
-the daemon-import exception scope and the guard lane. Nothing in this
-document is implemented yet; the current state below describes the code as
-of the proposal date.
+Status: implemented (Slices 1–6 landed on `main`; Slice 4b completed in
+#18596 on 2026-11-28). Original proposal date: 2026-11-16 (revised 2026-11-16
+after review to include `ChatPane`, separate admission from outcome
+establishment, tighten contract invariants, and clarify the guard lane). The
+"Current state" sections below are preserved as the historical baseline as of
+2026-11-16; see the implemented slice ledger under **Migration slices** for
+landed PRs and follow-up design docs.
 
 ## Problem
 
@@ -412,11 +411,13 @@ separately. Each slice is an independently shippable PR with its own tests.
      maximize/close, header actions) stays as slots; `ChatPane`'s inline
      transcript, tool-approval, question, and composer rendering plus its
      question handler are deleted.
-   - **Slice 4b (submit/cancel/status follow-up):** Converge `ChatPane`'s
-     remaining host-owned submit (`onComposerSubmit`), cancel
-     (`onComposerCancel`), and `composerStatus` orchestration onto the shared
-     controller/surface pipeline and retire the temporary host-owned cancel and
-     `transcriptProps.isResponding` overrides.
+   - **Slice 4b (cancel & responding convergence):** Retire `ChatPane`'s
+     temporary `onComposerCancel` and `transcriptProps.isResponding` overrides
+     by feeding live `responding` state and `cancelPrompt` into
+     `useDaemonChatControllerFromState` (restoring `'isResponding'` to
+     `ChatSurface`'s owned transcript keys). Daemon-specific slash/plan/goal/
+     queue submit (`onComposerSubmit`) and status chrome (`composerStatus`)
+     remain host-owned slots alongside `App.tsx`.
 5. **Capability-gated parity.** Unify status stack, usage stats, and context
    usage/compression display on both sides wherever backend facts exist.
    Conversation search and goal display remain gated pending the open
@@ -431,6 +432,18 @@ separately. Each slice is an independently shippable PR with its own tests.
    `web-shell-managed-host.yml` lane, because the default `build` does not
    emit the managed-only bundle and that lane runs no tests today. Remove
    dead orchestration and stale imports.
+
+### Implemented slice ledger
+
+| Slice     | Scope                                                                                                                        | Landed PRs & Design Docs                                                                                                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1–2a      | `chat-core` contract/guards, shared `ComposerStatusStack`                                                                    | #17684                                                                                                                                                                                         |
+| 2b–2e     | Daemon intent engine, controller, binding hook, `ChatSurface`                                                                | #17709, #17794, #17895, #17952 ([daemon controller](2026-11-19-daemon-chat-controller.md))                                                                                                     |
+| 2f.1–2f.3 | Session-scoped locks, history/cancel guards, `App.tsx` main column switch                                                    | #18066, #18091, #18505 ([session locks](2026-11-22-chat-surface-session-locks.md))                                                                                                             |
+| 3a–3c.3   | Managed adapter core & hook, Managed readiness, `AskUserQuestion` & `ManagedSessionsPage` switch                             | #18117, #18205, #18246, #18273, #18376 ([managed controller](2026-11-22-managed-chat-controller.md), [readiness](2026-11-24-chat-surface-managed-readiness.md))                                |
+| 4a–4b     | `ChatPane` convergence onto `ChatSurface` + retiring temporary cancel/`isResponding` overrides                               | #18476, #18596 ([ChatPane switch](2026-11-27-chat-pane-chat-surface-switch.md))                                                                                                                |
+| 5         | Capability-gated `ComposerUsageStats` and context-usage parity in Managed sessions                                           | #18518 ([usage & context parity](2026-11-27-managed-usage-stats-and-context-parity.md))                                                                                                        |
+| 6a–6c     | Fail-closed AST/compiler boundary guard, managed-host daemon graph burned down 47 → 31 → 16 → 0, CI zero-daemon bundle guard | #18532, #18543, #18582 ([6a](2026-11-27-managed-host-boundary-guards-and-cleanup.md), [6b](2026-11-27-chat-editor-daemon-decoupling.md), [6c](2026-11-28-managed-host-zero-daemon-cleanup.md)) |
 
 During slices 2–5, new chat features land only in `chat-core` once the
 affected region has moved, so the migration does not race feature work.
@@ -503,10 +516,12 @@ affected region has moved, so the migration does not race feature work.
 1. Every chat column — daemon main, split view, side task, and managed —
    renders through the same `ChatSurface` component; the import graph shows
    one surface, two adapters.
-2. The forked orchestrations listed in the current-state table are deleted
-   from `ManagedSessionsPage.tsx` and `ChatPane.tsx` (transcript, composer
-   wiring, approval flow, status display), with backend-specific panels
-   retained as slots.
+2. Transcript rendering, tool-approval flow, question rendering, and the
+   temporary pane cancel/`isResponding` overrides are deleted from
+   `ManagedSessionsPage.tsx` and `ChatPane.tsx`, while daemon-only slash/queue
+   submission (`onComposerSubmit`), backend-specific panels, and the
+   `composerStatus` slot (backed by shared `ComposerStatusStack`) remain
+   host-owned slots consistent with `App.tsx`.
 3. `chat-core`'s own modules contain no daemon imports and the managed-only
    source graph is cleared of daemon value imports, proven by a source-level
    check plus an artifact grep in the managed-host lane; the managed-only

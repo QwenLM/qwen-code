@@ -19,6 +19,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -51,11 +53,16 @@ class HarnessEventIngestTest {
     private String sessionId;
     private TurnRecord turn;
 
-    @BeforeEach
-    void setUp() {
+    protected DataSource dataSource() {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:event-ingest-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+
+    @BeforeEach
+    void setUp() {
+        DataSource source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         Clock clock = new Clock() {
@@ -85,13 +92,12 @@ class HarnessEventIngestTest {
                 .turnId();
         assertThat(store.claimTurn(TENANT, sessionId, turnId, "dispatcher", Duration.ofMinutes(1)))
                 .isPresent();
-        store.recordAdmission(TENANT, sessionId, turnId, "dispatcher", EPOCH, 0);
-        // The admission hand-off lands with the dispatcher change; until then
-        // the test hands the Turn to the Harness itself.
-        jdbc.update("UPDATE ma_turn SET dispatch_owner = ?, dispatch_lease_until = ?"
-                + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
-                OWNER, now.get() + 60_000, TENANT, sessionId, turnId);
+        assertThat(store.recordAdmissionHandOff(TENANT, sessionId, turnId, "dispatcher", EPOCH, 0,
+                OWNER, Duration.ofSeconds(60))).isTrue();
         turn = store.findTurn(TENANT, sessionId, turnId).orElseThrow();
+        assertThat(turn.status()).isEqualTo("RUNNING");
+        assertThat(turn.dispatchOwner()).isEqualTo(OWNER);
+        assertThat(turn.dispatchLeaseUntil()).isEqualTo(now.get() + 60_000);
         ManagedSessionStore sessions = mock(ManagedSessionStore.class);
         when(sessions.authenticateEventIngest(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyLong(), anyBoolean())).thenAnswer(ignored -> committed.get());
@@ -161,6 +167,52 @@ class HarnessEventIngestTest {
         refused(() -> ingest(0, 1, null, text(1, "a")),
                 ManagedSessionStoreModels.ERROR_INGEST_NOT_OWNER);
         assertThat(deltaTexts()).isEmpty();
+    }
+
+    @Test
+    void leavesAHeldTurnToTheHarnessUntilItsLeaseLapses() {
+        assertThat(store.findDispatchable(now.get(), 10)).isEmpty();
+        assertThat(store.claimTurn(TENANT, sessionId, turn.turnId(), "other", Duration.ofMinutes(1))).isEmpty();
+
+        now.addAndGet(61_000);
+        assertThat(store.findDispatchable(now.get(), 10)).hasSize(1);
+        assertThat(store.claimTurn(TENANT, sessionId, turn.turnId(), "other", Duration.ofMinutes(1))).isPresent();
+        refused(() -> ingest(0, 1, null, text(1, "a")), ManagedSessionStoreModels.ERROR_INGEST_NOT_OWNER);
+    }
+
+    @Test
+    void takesACancelledTurnBackFromTheHarnessAtOnce() {
+        ingest(0, 1, null, text(1, "a"));
+        jdbc.update("UPDATE ma_turn SET status = 'CANCELLING', retry_after = ? WHERE turn_id = ?",
+                now.get() + 60_000, turn.turnId());
+
+        assertThat(store.findDispatchable(now.get(), 10)).hasSize(1);
+        TurnRecord claimed = store.claimTurn(TENANT, sessionId, turn.turnId(), "canceller",
+                Duration.ofMinutes(1)).orElseThrow();
+        assertThat(claimed.dispatchOwner()).isEqualTo("canceller");
+        assertThat(claimed.harnessLastEventId()).isEqualTo(1);
+        assertThat(store.findDispatchable(now.get(), 10)).isEmpty();
+        refused(() -> ingest(1, 2, null, text(2, "b")), ManagedSessionStoreModels.ERROR_INGEST_NOT_OWNER);
+        assertThat(deltaTexts()).containsExactly("a");
+    }
+
+    @Test
+    void keepsATurnCancelledBeforeItsAdmissionWithTheDispatcher() {
+        String otherSession = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create-other", "digest",
+                "qwen-code", null, null, List.of(), null).sessionId();
+        String turnId = store.insertTurnCommand(TENANT, "SUBMIT_TURN", "submit-other", "digest", otherSession,
+                List.of(Map.of("type", "text", "text", "again")), "sha256:" + "d".repeat(64), "actor")
+                .turnId();
+        jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE turn_id = ?", turnId);
+        assertThat(store.claimTurn(TENANT, otherSession, turnId, "dispatcher", Duration.ofMinutes(1)))
+                .isPresent();
+
+        assertThat(store.recordAdmissionHandOff(TENANT, otherSession, turnId, "dispatcher", EPOCH, 0,
+                OWNER, Duration.ofSeconds(60))).isFalse();
+        TurnRecord admitted = store.findTurn(TENANT, otherSession, turnId).orElseThrow();
+        assertThat(admitted.status()).isEqualTo("CANCELLING");
+        assertThat(admitted.harnessEventEpoch()).isEqualTo(EPOCH);
+        assertThat(admitted.dispatchOwner()).isEqualTo("dispatcher");
     }
 
     @Test
