@@ -620,6 +620,14 @@ const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 /** Carries an output-limit truncation from the turn to the ACP boundary. */
 const OUTPUT_TRUNCATED_META_KEY = 'qwen.outputTruncated';
+function turnResultWithOutputLimit(
+  stopReason: PromptResponse['stopReason'],
+  outputTruncated: boolean,
+): PromptResponse {
+  return outputTruncated && stopReason === 'end_turn'
+    ? { stopReason, _meta: { [OUTPUT_TRUNCATED_META_KEY]: true } }
+    : { stopReason };
+}
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
 function readDaemonAttachmentReferences(
   value: unknown,
@@ -1063,7 +1071,7 @@ interface SharedRound {
 }
 
 type SharedRoundResult =
-  | { ended: { stopReason: PromptResponse['stopReason'] } }
+  | { ended: PromptResponse }
   | {
       ended?: undefined;
       usageMetadata: GenerateContentResponseUsageMetadata | null;
@@ -8978,11 +8986,10 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
-                    };
+                    return turnResultWithOutputLimit(
+                      getAbortAwareEndTurnStopReason(pendingSend.signal),
+                      truncatedAtOutputLimit,
+                    );
                   }
                   if (
                     await this.#endTurnAfterToolRun(
@@ -8992,11 +8999,10 @@ export class Session implements SessionContext {
                       responseCapture.channelDelivery !== undefined,
                     )
                   ) {
-                    const result = {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
-                    };
+                    const result = turnResultWithOutputLimit(
+                      getAbortAwareEndTurnStopReason(pendingSend.signal),
+                      truncatedAtOutputLimit,
+                    );
                     this.#recordPromptCompletionEffects(
                       result,
                       responseCapture,
@@ -9019,14 +9025,15 @@ export class Session implements SessionContext {
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     modTurn?.fail();
                     pauseGoalForLoopStop();
-                    return {
-                      stopReason: rejectOnLoopDetected
+                    return turnResultWithOutputLimit(
+                      rejectOnLoopDetected
                         ? cancelledOrThrowLoopDetected(
                             pendingSend.signal,
                             toolLoopState,
                           )
                         : getAbortAwareEndTurnStopReason(pendingSend.signal),
-                    };
+                      truncatedAtOutputLimit,
+                    );
                   }
                   if (toolRun.loopDetected) {
                     modTurn?.fail();
@@ -9036,14 +9043,15 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return {
-                      stopReason: rejectOnLoopDetected
+                    return turnResultWithOutputLimit(
+                      rejectOnLoopDetected
                         ? cancelledOrThrowLoopDetected(
                             pendingSend.signal,
                             toolLoopState,
                           )
                         : getAbortAwareEndTurnStopReason(pendingSend.signal),
-                    };
+                      truncatedAtOutputLimit,
+                    );
                   }
                 }
               }
@@ -9098,12 +9106,10 @@ export class Session implements SessionContext {
                 truncatedAtOutputLimit =
                   continuationFinishReason === FinishReason.MAX_TOKENS;
               }
-              return truncatedAtOutputLimit && result.stopReason === 'end_turn'
-                ? {
-                    stopReason: result.stopReason,
-                    _meta: { [OUTPUT_TRUNCATED_META_KEY]: true },
-                  }
-                : { stopReason: result.stopReason };
+              return turnResultWithOutputLimit(
+                result.stopReason,
+                truncatedAtOutputLimit,
+              );
             } catch (error) {
               modTurn?.fail();
               throw error;
@@ -9562,11 +9568,10 @@ export class Session implements SessionContext {
         return { ended: { stopReason: 'max_turn_requests' } };
       }
       return {
-        ended: {
-          stopReason: round.onLoopStop
-            ? round.onLoopStop(loopStop)
-            : 'end_turn',
-        },
+        ended: turnResultWithOutputLimit(
+          round.onLoopStop ? round.onLoopStop(loopStop) : 'end_turn',
+          lastFinishReason === FinishReason.MAX_TOKENS,
+        ),
       };
     }
     await showBackgroundResponse();

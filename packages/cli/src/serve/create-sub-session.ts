@@ -536,8 +536,9 @@ function subSessionName(label: string, includeThreadGlyph = true): string {
 
 function sentCompletionStatus(
   stopReason: string,
+  outputTruncated = false,
 ): 'completed' | 'failed' | 'cancelled' {
-  if (stopReason === 'end_turn') return 'completed';
+  if (stopReason === 'end_turn' || outputTruncated) return 'completed';
   if (stopReason === 'cancelled' || stopReason === 'shutdown') {
     return 'cancelled';
   }
@@ -575,12 +576,15 @@ function buildSentCompletionNotification(
   personMessage?: string,
   fromSession?: BridgeBackgroundNotification['fromSession'],
   sentMessageContext?: string,
+  outputTruncated = false,
 ): BridgeBackgroundNotification {
-  const status = sentCompletionStatus(stopReason);
+  const status = sentCompletionStatus(stopReason, outputTruncated);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
   const statusText =
     status === 'completed'
-      ? 'completed'
+      ? outputTruncated
+        ? 'completed with truncated output'
+        : 'completed'
       : status === 'cancelled'
         ? 'was cancelled'
         : `failed (${boundedStopReason})`;
@@ -989,7 +993,7 @@ async function awaitFirstTurn(
     onWaitingChange?: (waiting: boolean) => void;
     pendingPermissionIds?: readonly string[];
   },
-): Promise<{ result: string; stopReason: string }> {
+): Promise<{ result: string; stopReason: string; outputTruncated?: true }> {
   const ac = new AbortController();
   // `ac.signal.aborted` cannot report whether the deadline passed: the `finally`
   // below aborts unconditionally to tear the subscription down, so by the time
@@ -1018,6 +1022,7 @@ async function awaitFirstTurn(
 
   let acc = '';
   let truncated = false;
+  let outputTruncated = false;
   let stopReason: string | undefined;
 
   const appendChunk = (text: string): void => {
@@ -1088,9 +1093,15 @@ async function awaitFirstTurn(
           appendChunk(d.update.content.text);
         }
       } else if (e.type === 'turn_complete') {
-        const d = e.data as { promptId?: string; stopReason?: string };
+        const d = e.data as {
+          promptId?: string;
+          stopReason?: string;
+          outputTruncated?: unknown;
+        };
         if (d?.promptId === promptId) {
           stopReason = d.stopReason ?? 'end_turn';
+          outputTruncated =
+            stopReason === 'max_tokens' && d.outputTruncated === true;
           break;
         }
       } else if (e.type === 'turn_error') {
@@ -1126,7 +1137,11 @@ async function awaitFirstTurn(
         : 'incomplete';
   }
   if (truncated) acc += '\n[…output truncated]';
-  return { result: acc, stopReason };
+  return {
+    result: acc,
+    stopReason,
+    ...(outputTruncated ? { outputTruncated } : {}),
+  };
 }
 
 export function createSubSessionLauncher(
@@ -1910,7 +1925,10 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              settledStatus = sentCompletionStatus(completion.stopReason);
+              settledStatus = sentCompletionStatus(
+                completion.stopReason,
+                completion.outputTruncated,
+              );
               if (notify) {
                 notification = buildSentCompletionNotification(
                   sessionId,
@@ -1922,6 +1940,7 @@ export function createSubSessionLauncher(
                   personMessage,
                   fromSession,
                   sentRecord?.modelText,
+                  completion.outputTruncated,
                 );
               }
             } catch (err) {

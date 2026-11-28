@@ -865,6 +865,8 @@ export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  /** The model reached its output cap after producing a partial answer. */
+  outputTruncated?: boolean;
   branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }

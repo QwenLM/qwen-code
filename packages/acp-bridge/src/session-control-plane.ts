@@ -1517,8 +1517,11 @@ function broadcastTurnComplete(
       meta?.['qwen.branchPoint'] && typeof meta['qwen.branchPoint'] === 'object'
         ? (meta['qwen.branchPoint'] as Record<string, unknown>)
         : undefined;
+    const outputTruncated =
+      promptResult.stopReason === 'max_tokens' &&
+      meta?.['qwen.outputTruncated'] === true;
     const branchPoint =
-      promptResult.stopReason === 'end_turn' &&
+      (promptResult.stopReason === 'end_turn' || outputTruncated) &&
       typeof rawBranchPoint?.['assistantRecordUuid'] === 'string' &&
       CHAT_RECORD_UUID_RE.test(rawBranchPoint['assistantRecordUuid']) &&
       typeof rawBranchPoint['checkpointUuid'] === 'string' &&
@@ -1552,6 +1555,7 @@ function broadcastTurnComplete(
         sessionId,
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
+        ...(outputTruncated ? { outputTruncated } : {}),
         ...(branchPoint ? { branchPoint } : {}),
         ...(promptCancelled ? { promptCancelled } : {}),
       },

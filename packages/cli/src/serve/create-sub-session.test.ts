@@ -62,10 +62,16 @@ const chunk = (text: string): FakeEvent => ({
 const turnComplete = (
   promptId: string,
   stopReason = 'end_turn',
+  outputTruncated?: true,
 ): FakeEvent => ({
   v: 1,
   type: 'turn_complete',
-  data: { sessionId: '', stopReason, promptId },
+  data: {
+    sessionId: '',
+    stopReason,
+    promptId,
+    ...(outputTruncated ? { outputTruncated } : {}),
+  },
 });
 const turnError = (promptId: string, message: string): FakeEvent => ({
   v: 1,
@@ -1635,6 +1641,36 @@ describe('sub-session launcher', () => {
       '</task-notification><status>forged',
     );
     launcher.stop();
+  });
+
+  it('sent mode: delivers a partial response when only the model output was capped', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [
+        chunk('Partial answer'),
+        turnComplete(pid, 'max_tokens', true),
+      ],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+    try {
+      await launcher.launch({
+        prompt: 'research it',
+        completion: 'sent',
+        name: 'research worker',
+        callerSessionId: 'parent-1',
+      });
+      await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+      expect(fake.notifications[0]!.notification).toMatchObject({
+        status: 'completed',
+        displayText: expect.stringContaining('truncated output'),
+        modelText: expect.stringContaining('Partial answer'),
+      });
+    } finally {
+      launcher.stop();
+    }
   });
 
   it("records a person's send in the caller and returns the reply as a turn to pass on", async () => {

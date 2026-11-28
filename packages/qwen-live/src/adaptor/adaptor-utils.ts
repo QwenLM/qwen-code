@@ -136,6 +136,18 @@ export function clampTail(text: string, max: number): string {
   return `…${tailSlice(trimmed, max)}`;
 }
 
+export function summarizeOutputLimit(detail: string): {
+  summary: string;
+  detail?: string;
+} {
+  const notice = 'The answer reached the output limit. Ask to continue it.';
+  if (!detail) return { summary: notice };
+  return {
+    summary: `${clampTail(detail, MAX_SUMMARY_CHARS - notice.length - 3)}\n\n${notice}`,
+    detail: `${clampTail(detail, MAX_DETAIL_CHARS - notice.length - 3)}\n\n${notice}`,
+  };
+}
+
 /**
  * One clean line for a tool-call title: first line only, terminal control
  * sequences stripped. Minimal inline of core's stripTerminalControlSequences

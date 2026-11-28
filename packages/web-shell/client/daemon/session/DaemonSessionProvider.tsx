@@ -299,9 +299,11 @@ function assistantDoneFromTurnEvent(
 ): DaemonUiEvent {
   const serverTimestamp = extractServerTimestamp(event);
   const data = isRecord(event.data) ? event.data : undefined;
+  const outputTruncated =
+    reason === 'max_tokens' && data?.['outputTruncated'] === true;
   const rawBranchPoint =
     event.type === 'turn_complete' &&
-    reason === 'end_turn' &&
+    (reason === 'end_turn' || outputTruncated) &&
     isRecord(data?.['branchPoint'])
       ? data['branchPoint']
       : undefined;
@@ -321,6 +323,7 @@ function assistantDoneFromTurnEvent(
   return {
     type: 'assistant.done',
     reason,
+    ...(outputTruncated ? { outputTruncated } : {}),
     eventId: event.id,
     ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),

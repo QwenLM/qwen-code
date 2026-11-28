@@ -11327,71 +11327,75 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
-  it('attaches a live branch point only to its restored prompt response', async () => {
-    const turnCompleted = createDeferred<void>();
-    const session = createMockSession({
-      hasActivePrompt: true,
-      lastEventId: 5,
-      events: async function* restoredPromptThenBranchPoint() {
-        yield {
-          id: 6,
-          v: 1,
-          type: 'session_update',
-          promptId: 'restored-prompt',
-          data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'completed answer' },
-            },
-          },
-        };
-        yield {
-          id: 7,
-          v: 1,
-          type: 'turn_complete',
-          promptId: 'restored-prompt',
-          data: {
+  it.each(['end_turn', 'max_tokens'] as const)(
+    'attaches a live branch point only to its restored prompt response (%s)',
+    async (stopReason) => {
+      const turnCompleted = createDeferred<void>();
+      const session = createMockSession({
+        hasActivePrompt: true,
+        lastEventId: 5,
+        events: async function* restoredPromptThenBranchPoint() {
+          yield {
+            id: 6,
+            v: 1,
+            type: 'session_update',
             promptId: 'restored-prompt',
-            stopReason: 'end_turn',
-            branchPoint: {
-              assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
-              checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'completed answer' },
+              },
             },
-          },
-        };
-        turnCompleted.resolve();
-      },
-    });
-    sdkMocks.sessions.push(session);
-    let blocks: readonly DaemonTranscriptBlock[] = [];
+          };
+          yield {
+            id: 7,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'restored-prompt',
+            data: {
+              promptId: 'restored-prompt',
+              stopReason,
+              ...(stopReason === 'max_tokens' ? { outputTruncated: true } : {}),
+              branchPoint: {
+                assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+                checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+              },
+            },
+          };
+          turnCompleted.resolve();
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let blocks: readonly DaemonTranscriptBlock[] = [];
 
-    function Harness() {
-      blocks = useDaemonTranscriptBlocks();
-      return null;
-    }
+      function Harness() {
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
 
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      autoReconnect: false,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-    await act(async () => {
-      await turnCompleted.promise;
-      await flushPromises();
-    });
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: false,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await turnCompleted.promise;
+        await flushPromises();
+      });
 
-    expect(blocks).toMatchObject([
-      {
-        kind: 'assistant',
-        text: 'completed answer',
-        promptId: 'restored-prompt',
-        sourceRecordIds: ['a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d'],
-        branchRecordId: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
-        streaming: false,
-      },
-    ]);
-  });
+      expect(blocks).toMatchObject([
+        {
+          kind: 'assistant',
+          text: 'completed answer',
+          promptId: 'restored-prompt',
+          sourceRecordIds: ['a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d'],
+          branchRecordId: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+          streaming: false,
+        },
+      ]);
+    },
+  );
 
   it('settles restored active prompts when turn_error arrives', async () => {
     const turnErrored = createDeferred<void>();

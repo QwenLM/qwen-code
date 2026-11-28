@@ -29,6 +29,7 @@
 
 import { DaemonClient } from '@qwen-code/sdk';
 import { publicActivity } from './public-activity.js';
+import { summarizeOutputLimit } from './adaptor-utils.js';
 import type {
   BackendAdaptor,
   BackendCapabilities,
@@ -864,12 +865,19 @@ export class QwenCodeAdaptor implements BackendAdaptor {
         if (data['stopReason'] === 'cancelled') {
           return [{ type: 'turn_error', jobRef, error: 'cancelled' }];
         }
+        const outcome =
+          data['stopReason'] === 'max_tokens' &&
+          data['outputTruncated'] === true
+            ? summarizeOutputLimit(detail)
+            : {
+                summary: clampTail(detail, MAX_SUMMARY_CHARS),
+                ...(detail ? { detail } : {}),
+              };
         return [
           {
             type: 'turn_complete',
             ...(jobRef !== undefined ? { jobRef } : {}),
-            summary: clampTail(detail, MAX_SUMMARY_CHARS),
-            ...(detail ? { detail } : {}),
+            ...outcome,
           },
         ];
       }

@@ -21890,48 +21890,58 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('turn_complete branchPoint', () => {
-    it('publishes a validated completed-turn branch point', async () => {
-      const events: BridgeEvent[] = [];
-      const handle = makeChannel({
-        promptImpl: () =>
-          ({
-            stopReason: 'end_turn',
-            _meta: {
-              'qwen.branchPoint': {
+    it.each(['end_turn', 'max_tokens'] as const)(
+      'publishes a validated branch point for %s',
+      async (stopReason) => {
+        const events: BridgeEvent[] = [];
+        const handle = makeChannel({
+          promptImpl: () =>
+            ({
+              stopReason,
+              _meta: {
+                ...(stopReason === 'max_tokens'
+                  ? { 'qwen.outputTruncated': true }
+                  : {}),
+                'qwen.branchPoint': {
+                  assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+                  checkpointUuid: '22222222-2222-4222-8222-222222222222',
+                },
+              },
+            }) as PromptResponse,
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const sub = (async () => {
+          for await (const event of bridge.subscribeEvents(session.sessionId)) {
+            events.push(event);
+          }
+        })();
+        sub.catch(() => {});
+
+        await bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'branchable' }],
+        });
+
+        await vi.waitFor(() =>
+          expect(
+            events.find((event) => event.type === 'turn_complete'),
+          ).toMatchObject({
+            data: {
+              stopReason,
+              ...(stopReason === 'max_tokens' ? { outputTruncated: true } : {}),
+              branchPoint: {
                 assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
                 checkpointUuid: '22222222-2222-4222-8222-222222222222',
               },
             },
-          }) as PromptResponse,
-      });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const sub = (async () => {
-        for await (const event of bridge.subscribeEvents(session.sessionId)) {
-          events.push(event);
-        }
-      })();
-      sub.catch(() => {});
-
-      await bridge.sendPrompt(session.sessionId, {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'branchable' }],
-      });
-
-      await vi.waitFor(() =>
-        expect(
-          events.find((event) => event.type === 'turn_complete'),
-        ).toMatchObject({
-          data: {
-            branchPoint: {
-              assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
-              checkpointUuid: '22222222-2222-4222-8222-222222222222',
-            },
-          },
-        }),
-      );
-      await bridge.shutdown();
-    });
+          }),
+        );
+        await bridge.shutdown();
+      },
+    );
 
     it('retains a completed-turn branch point in ring replay and compaction', async () => {
       const branchPoint = {

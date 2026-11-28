@@ -60,6 +60,7 @@ import {
   pickLeastEscalating,
   sanitizeTitleLine,
   stripControlSequences,
+  summarizeOutputLimit,
   tailSlice,
 } from './adaptor-utils.js';
 import type {
@@ -102,7 +103,10 @@ export interface AcpConnectionLike {
   initialize(params: Record<string, unknown>): Promise<Record<string, unknown>>;
   authenticate(params: Record<string, unknown>): Promise<unknown>;
   newSession(params: Record<string, unknown>): Promise<Record<string, unknown>>;
-  prompt(params: Record<string, unknown>): Promise<{ stopReason?: string }>;
+  prompt(params: Record<string, unknown>): Promise<{
+    stopReason?: string;
+    _meta?: Record<string, unknown>;
+  }>;
   cancel(params: Record<string, unknown>): Promise<void>;
   extMethod(
     method: string,
@@ -524,12 +528,15 @@ export class AcpAdaptor implements BackendAdaptor {
             : { type: 'text', text: block.text },
         ),
       });
-      this.onTurnEnd(state, jobRef, response.stopReason);
+      this.onTurnEnd(state, jobRef, {
+        stopReason: response.stopReason,
+        outputTruncated: response._meta?.['qwen.outputTruncated'] === true,
+      });
     } catch (error) {
       // The exit handler already reported the child's death; do not
       // double-report it as a turn error.
       if (state.closed) return;
-      this.onTurnEnd(state, jobRef, undefined, error);
+      this.onTurnEnd(state, jobRef, { error });
     }
     this.continueAfterTurn(state);
   }
@@ -537,8 +544,11 @@ export class AcpAdaptor implements BackendAdaptor {
   private onTurnEnd(
     state: AcpSessionState,
     jobRef: string,
-    stopReason: string | undefined,
-    error?: unknown,
+    outcome: {
+      stopReason?: string;
+      outputTruncated?: boolean;
+      error?: unknown;
+    },
   ): void {
     if (
       state.closed ||
@@ -551,10 +561,19 @@ export class AcpAdaptor implements BackendAdaptor {
     state.turnBuffer = '';
     state.activeJobRef = undefined;
     state.cancellingJobRef = undefined;
+    const { stopReason, outputTruncated, error } = outcome;
     if (error !== undefined) {
       const message =
         error instanceof Error ? error.message : String(error ?? 'failed');
       state.queue.push({ type: 'turn_error', jobRef, error: message });
+      return;
+    }
+    if (stopReason === 'max_tokens' && outputTruncated) {
+      state.queue.push({
+        type: 'turn_complete',
+        jobRef,
+        ...summarizeOutputLimit(detail),
+      });
       return;
     }
     switch (stopReason) {

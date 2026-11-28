@@ -4918,60 +4918,64 @@ describe('Session', () => {
       expect(result.stopReason).toBe('max_tokens');
     });
 
-    it('reports a Stop-hook continuation that completes the answer as end_turn', async () => {
-      // The MAX_TOKENS finish belonged to the round the Stop hook supersedes;
-      // the continuation's own STOP finish must decide the stop reason.
-      const messageBus = {
-        request: vi.fn().mockResolvedValue({
-          success: true,
-          output: { decision: 'block', reason: 'Finish the answer' },
-        }),
-      };
-      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-      mockConfig.hasHooksForEvent = vi
-        .fn()
-        .mockImplementation((name: string) => name === 'Stop');
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [
-                  {
-                    content: { parts: [{ text: 'Half an ans' }] },
-                    finishReason: FinishReason.MAX_TOKENS,
-                  },
-                ],
+    it.each([
+      [FinishReason.MAX_TOKENS, FinishReason.STOP, 'end_turn'],
+      [FinishReason.STOP, FinishReason.MAX_TOKENS, 'max_tokens'],
+    ] as const)(
+      'uses the Stop-hook continuation finish (%s then %s) for %s',
+      async (mainFinish, hookFinish, stopReason) => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: { decision: 'block', reason: 'Finish the answer' },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((name: string) => name === 'Stop');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'Half an ans' }] },
+                      finishReason: mainFinish,
+                    },
+                  ],
+                },
               },
-            },
-          ]),
-        )
-        .mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: {
-                candidates: [
-                  {
-                    content: { parts: [{ text: 'The rest of the answer.' }] },
-                    finishReason: FinishReason.STOP,
-                  },
-                ],
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: 'The rest of the answer.' }] },
+                      finishReason: hookFinish,
+                    },
+                  ],
+                },
               },
-            },
-          ]),
-        )
-        .mockResolvedValue(createEmptyStream());
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
 
-      const result = await session.prompt({
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'write it' }],
-      });
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'write it' }],
+        });
 
-      expect(result.stopReason).toBe('end_turn');
-    });
+        expect(result.stopReason).toBe(stopReason);
+      },
+    );
 
     it('keeps a failed-recovery rollback truncated as max_tokens', async () => {
       // Core's synthetic terminal chunk after a failed recovery attempt
@@ -6864,27 +6868,33 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
     });
 
-    it('ends the turn when a tool asks to end it', async () => {
-      useTool(core.Kind.Other, 'goal_checkpoint');
-      runAcpToolBatchSpy.mockImplementation(
-        async (
-          host: unknown,
-          options: { requests: core.ToolCallRequestInfo[] },
-        ) => ({
-          ...(await runEachTool(host, options)),
-          stop: 'tool_ended_turn',
-        }),
-      );
-      const send = useSharedRounds([
-        toolCall({ id: 'call-end', name: 'goal_checkpoint', args: {} }),
-        finished(),
-      ]);
+    it.each([
+      [FinishReason.STOP, 'end_turn'],
+      [FinishReason.MAX_TOKENS, 'max_tokens'],
+    ] as const)(
+      'reports a tool-terminated turn with finish %s as %s',
+      async (finishReason, stopReason) => {
+        useTool(core.Kind.Other, 'goal_checkpoint');
+        runAcpToolBatchSpy.mockImplementation(
+          async (
+            host: unknown,
+            options: { requests: core.ToolCallRequestInfo[] },
+          ) => ({
+            ...(await runEachTool(host, options)),
+            stop: 'tool_ended_turn',
+          }),
+        );
+        const send = useSharedRounds([
+          toolCall({ id: 'call-end', name: 'goal_checkpoint', args: {} }),
+          finished(finishReason),
+        ]);
 
-      const result = await prompt();
+        const result = await prompt();
 
-      expect(result.stopReason).toBe('end_turn');
-      expect(send).toHaveBeenCalledOnce();
-    });
+        expect(result.stopReason).toBe(stopReason);
+        expect(send).toHaveBeenCalledOnce();
+      },
+    );
 
     it('refuses a Goal approval the turn cannot own', async () => {
       useTool(core.Kind.Read, 'read_file');
