@@ -116,9 +116,14 @@ export function WebShellNavigationBoundary({
     const urlRoute = enabled
       ? readNavigationUrl(new URL(window.location.href), basePath)
       : undefined;
-    const explicit = Object.values(externalTarget).some(
-      (value) => value !== undefined,
-    );
+    const explicitTarget =
+      externalTarget.sessionId !== undefined ||
+      externalTarget.workspaceId !== undefined ||
+      externalTarget.workspaceCwd !== undefined;
+    const explicit =
+      explicitTarget ||
+      (externalTarget.sessionContext !== undefined &&
+        !(urlRoute?.page === 'chat' && urlRoute.sessionId));
     const target = explicit
       ? externalTarget
       : urlRoute?.page === 'chat'

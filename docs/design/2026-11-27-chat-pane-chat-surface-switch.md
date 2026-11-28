@@ -3,10 +3,13 @@
 [English](2026-11-27-chat-pane-chat-surface-switch.md) |
 [简体中文](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)
 
-Status: implemented (Slice 4a of
-[Unified Chat Surface](2026-11-16-unified-chat-surface.md) — `ChatPane`
-rendering plus approval/question routing; remaining submit/cancel/status
-convergence is tracked as Slice 4b in the parent design). Date: 2026-11-27.
+Status: implemented (Slice 4a landed in #18476; Slice 4b completed 2026-11-28,
+retiring `ChatPane`'s temporary `onComposerCancel` and
+`transcriptProps.isResponding` overrides via `responding` and `cancelPrompt` on
+`useDaemonChatControllerFromState` while keeping daemon-only slash/queue
+`onComposerSubmit` and `composerStatus` as host-owned slots; see
+[Unified Chat Surface](2026-11-16-unified-chat-surface.md)). Date: 2026-11-27
+(updated 2026-11-28).
 
 ## Problem
 
@@ -90,34 +93,32 @@ main daemon column in `App.tsx`.
     `AskUserQuestion`) to `TranscriptViewport.pendingApproval`, while keeping
     `approvalOverlayActive={cardActive}` covering both approvals and questions.
   - Guard `ToolApproval.onConfirm` error reporting on mounted + owning session.
-  - Add five minimal, backend-neutral host seams actively consumed by
+  - Add minimal, backend-neutral host seams actively consumed by
     `ChatPane.tsx` (omitting them preserves all existing defaults):
     - `transcriptRef?: Ref<MessageListHandle>` forwarded to
       `TranscriptViewport` (adding `'ref'` to `SurfaceOwnedTranscriptKeys`).
-    - `transcriptProps.isResponding` host override (removing `'isResponding'`
-      from `SurfaceOwnedTranscriptKeys`, falling back to controller-derived
-      `isRunning` when omitted): needed when a pane reopens onto an
-      already-admitted turn or submits through `onComposerSubmit`, where the
-      controller has no non-terminal submit so `deriveChatPhase` returns
-      `'idle'` while `TranscriptViewport` deletion gating and streaming
-      affordances still require the live responding state.
+    - `transcriptProps.isResponding` host override (introduced in Slice 4a and
+      **retired in Slice 4b / #18596**): `'isResponding'` is now restored to
+      `SurfaceOwnedTranscriptKeys` and derived from `controller.phase`, with
+      `ChatPane` feeding live `responding: isResponding` through
+      `useDaemonChatControllerFromState`.
     - `footerClassName?: string` optionally wrapping the bottom stack (decision
       cards, `panels`, admission banner, composer block) in a single styled
       container.
     - `composerEditorVisible?: boolean` (default `true`) hiding `ChatEditor`
       and `composerFooter` while keeping `composerStatus` mounted inside the
       approval-hidden wrapper (used by `ChatPane` when `readOnly` is `true`).
-    - `onComposerCancel?: () => void` optional cancel override (paralleling
-      `onComposerSubmit`, still gated by `composerCancelEnabled`), allowing a
-      host whose submit pipeline stays outside the controller to cancel via
-      `actions.cancel()` without recording an unsettleable `failed` cancel
-      operation in `controller.operations`.
+    - `onComposerCancel?: () => void` optional cancel override (still used by
+      `App.tsx` for inline-shell queue draining and cancelled-prompt take-back;
+      **retired from `ChatPane.tsx` in Slice 4b / #18596**, which now routes
+      Stop through `ChatSurface` → `controller.cancel()` via `cancelPrompt`).
 - **`packages/web-shell/client/components/ChatPane.tsx`,
   `ChatPane.module.css`, and `App.css.test.ts`:**
   - Replace the inline `<TranscriptViewport>`, `<ToolApproval>`,
     `<AskUserQuestion>`, and `<ChatEditor>` blocks with `<ChatSurface>` driven
-    by `useDaemonChatControllerFromState`, passing `onComposerCancel` and
-    preserving specific permission-failure / mode-lock causes through the
+    by `useDaemonChatControllerFromState`, routing both permission decisions
+    and Stop cancellation through the controller while preserving specific
+    permission-failure, mode-lock, and cancel causes in FIFO order through the
     surface error sink without double-reporting.
   - Delete direct value imports of `TranscriptViewport`, `ToolApproval`,
     `AskUserQuestion`, and `ChatEditor`, delete `handleAskUserConfirm`, and
@@ -167,15 +168,18 @@ main daemon column in `App.tsx`.
      Keeping `composerVisible` for whole-block hiding (used by
      `ManagedSessionsPage`) and adding `composerEditorVisible` (default `true`)
      preserves both hosts cleanly with zero backend branching.
-5. **Keep `ChatPane.handleSubmit` and `handleCancel` behind
-   `ChatSurface.onComposerSubmit` / `onComposerCancel`.**
+5. **Keep `ChatPane.handleSubmit` and `composerStatus` host-owned while
+   converging Stop onto `controller.cancel()` (Slice 4b / #18596).**
    - Pane-local slash commands, `/plan` mode preparation, `/goal` commands,
-     mid-turn prompt queueing, and capacity-recovery dialogs remain behind
-     `onComposerSubmit` until a dedicated submit-pipeline convergence pass.
-   - Because host-submitted turns do not populate the daemon controller's
-     live-turn queue, `ChatPane` passes `onComposerCancel` so Stop dispatches
-     `actions.cancel()` directly instead of recording an unsettleable `failed`
-     cancel operation on `controller.operations`.
+     mid-turn prompt queueing, and capacity-recovery dialogs stay behind
+     `onComposerSubmit` and `composerStatus`, matching `App.tsx`.
+   - Slice 4b converged Stop cancellation onto `ChatSurface` →
+     `controller.cancel()` via `useDaemonChatControllerFromState`'s
+     `cancelPrompt` and `responding` options, and updated
+     `createDaemonChatController.cancel()` so cancelling a host-driven
+     responding turn (`cancelTarget === undefined && deps.responding`) surfaces
+     `'cancelling'` while in flight without fabricating a `failed` cancel row
+     on `controller.operations`.
 
 ## Constraints
 
@@ -200,13 +204,15 @@ main daemon column in `App.tsx`.
     `daemon/permission-signals.test.ts`, and `build-artifact.test.ts` all pass.
   - New regression tests cover `useOptionalDaemonPromptSettled` (no-provider,
     provider delivery, listener update), `useDaemonChatControllerFromState`
-    (including same-signature session switch re-seeding), `ChatSurface` new
-    seams (`transcriptRef`, `transcriptProps.isResponding`, `footerClassName`,
-    `composerEditorVisible`, `onComposerCancel`, question-only
-    `pendingApproval === null`, and session-scoped approval error reporting in
-    `ChatSurface.test.tsx`), `App.css.test.ts` `.pane .body` / `.pane .surface`
-    pins, and `ChatPane` `<ChatSurface>` rendering + `AskUserQuestion`
-    submit/dismiss + preserved approval failure diagnostics.
+    (including same-signature session switch re-seeding, `responding` phase
+    precedence, and `cancelPrompt` delegation), `ChatSurface` seams
+    (`transcriptRef`, controller-derived `isResponding`, `footerClassName`,
+    `composerEditorVisible`, `onComposerCancel` for `App.tsx`, question-only
+    `pendingApproval === null`, and session-scoped approval/cancel error
+    reporting in `ChatSurface.test.tsx`), `App.css.test.ts` `.pane .body` /
+    `.pane .surface` pins, and `ChatPane` `<ChatSurface>` rendering +
+    `AskUserQuestion` submit/dismiss + single-transport resolving Stop + FIFO
+    preserved cancel/approval failure diagnostics.
 - **Mutation witnesses:** Reachable new guards and seams verified red under an
   isolated mutation harness.
 - **Static gates:** `tsconfig.lib.json`, `tsconfig.json`,

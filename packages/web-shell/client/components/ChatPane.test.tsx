@@ -11,6 +11,12 @@ import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import { DAEMON_COMPOSER_INTEGRATIONS } from './composer/daemon-composer-integrations';
+import { DaemonTranscriptViewport } from './DaemonTranscriptViewport';
+import { DAEMON_STATUS_CARD_RENDERERS } from './messages/daemon-status-cards';
+import {
+  useDaemonStatusCards,
+  type DaemonStatusCardRenderers,
+} from './messages/daemon-status-cards-context';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -249,11 +255,15 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
+let latestTranscriptViewportProps: Record<string, any> = {};
+let latestDaemonStatusCards: DaemonStatusCardRenderers | undefined;
 vi.mock('./TranscriptViewport', () => ({
   TranscriptViewport: forwardRef(function MockTranscriptViewport(
     props: any,
     ref: any,
   ) {
+    latestTranscriptViewportProps = props;
+    latestDaemonStatusCards = useDaemonStatusCards();
     useImperativeHandle(ref, () => ({
       scrollToBottom: transcriptScrollToBottom,
     }));
@@ -546,6 +556,8 @@ beforeEach(() => {
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  latestTranscriptViewportProps = {};
+  latestDaemonStatusCards = undefined;
   latestToolApprovalProps = undefined;
   latestAskUserQuestionProps = undefined;
   renderRealChatEditor = false;
@@ -2166,6 +2178,9 @@ describe('ChatPane', () => {
     });
     expect(latestChatEditorProps.composerIntegrations).toBe(
       DAEMON_COMPOSER_INTEGRATIONS,
+    );
+    expect(latestTranscriptViewportProps.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
     );
   });
 
@@ -4956,19 +4971,132 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     );
   });
 
-  it('wires onComposerCancel so a failed cancel reports the pane handler error instead of the surface fallback', async () => {
+  it('routes Stop through ChatSurface controller.cancel(), preserving the cancel cause once and suppressing late errors after unmount', async () => {
     const onError = vi.fn();
     streamingStateValue = 'responding';
     const cancelErr = new Error('daemon cancel boom');
     cancel.mockRejectedValueOnce(cancelErr);
     render({ onError });
+    expect(latestTranscriptViewportProps.isResponding).toBe(true);
+
     await act(async () => {
       testid('pane-cancel')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true }),
       );
       await Promise.resolve();
+      await Promise.resolve();
     });
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(cancelErr, 'Failed to cancel request');
+
+    // Controller phase returns to idle when streaming stops.
+    streamingStateValue = 'idle';
+    rerender({ onError });
+    expect(latestTranscriptViewportProps.isResponding).toBe(false);
+
+    // A late cancel failure settling after unmount must not report an error.
+    onError.mockClear();
+    streamingStateValue = 'responding';
+    rerender({ onError });
+    let rejectLateCancel!: (reason: unknown) => void;
+    cancel.mockReturnValueOnce(
+      new Promise<void>((_resolve, reject) => {
+        rejectLateCancel = reject;
+      }),
+    );
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    act(() => root!.unmount());
+    root = null;
+    await act(async () => {
+      rejectLateCancel(new Error('late cancel boom'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('sends exactly one cancel and reports no error when Stop resolves', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    render({ onError });
+
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('preserves FIFO error causes when two concurrent Stop attempts reject in the same tick', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    let rejectA!: (reason: unknown) => void;
+    let rejectB!: (reason: unknown) => void;
+    cancel
+      .mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectA = reject;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectB = reject;
+        }),
+      );
+    render({ onError });
+
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+
+    const errA = new Error('stop A boom');
+    const errB = new Error('stop B boom');
+    await act(async () => {
+      rejectA(errA);
+      rejectB(errB);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenNthCalledWith(
+      1,
+      errA,
+      'Failed to cancel request',
+    );
+    expect(onError).toHaveBeenNthCalledWith(
+      2,
+      errB,
+      'Failed to cancel request',
+    );
+  });
+
+  it('resets viewport captures between tests and wires DaemonTranscriptViewport and DAEMON_STATUS_CARD_RENDERERS into TranscriptViewport', () => {
+    expect(
+      latestTranscriptViewportProps.sessionViewportComponent,
+    ).toBeUndefined();
+    expect(latestDaemonStatusCards).toBeUndefined();
+
+    render();
+    expect(latestTranscriptViewportProps.sessionViewportComponent).toBe(
+      DaemonTranscriptViewport,
+    );
+    expect(latestDaemonStatusCards).toBe(DAEMON_STATUS_CARD_RENDERERS);
   });
 });

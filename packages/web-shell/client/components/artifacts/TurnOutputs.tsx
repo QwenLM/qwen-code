@@ -24,7 +24,8 @@ import {
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
 import { ArtifactIcon } from './ArtifactIcon';
-import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
+import { useOptionalWorkspaceRuntime } from '../../utils/workspace-context.js';
+import { useArtifactWorkspaceTargetFromRuntime } from './artifact-workspace-target.js';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -201,7 +202,12 @@ function TurnOutputsComponent({
         filterArtifact(artifact, { turnId, sourceSessionId }),
       )
     : allArtifacts;
-  const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspace = useOptionalWorkspaceRuntime();
+  const workspaceTarget = useArtifactWorkspaceTargetFromRuntime(
+    workspace,
+    workspace?.actions,
+    workspaceCwd,
+  );
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
   const [showAllArtifacts, setShowAllArtifacts] = useState(false);

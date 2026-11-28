@@ -142,6 +142,16 @@ final class JournalWriterLifecycle {
 
     WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
+        WriterGrant grant = acquire(tenantId, sessionId, writerToken, request, authority);
+        // A null grant commits and retries, so only a granted writer consumes the claim.
+        if (grant != null) {
+            JdbcHarnessPlacementStore.consumeClaim(jdbc, tenantId, sessionId);
+        }
+        return grant;
+    }
+
+    private WriterGrant acquire(String tenantId, String sessionId, String writerToken,
+            AcquireWriterRequest request, RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);

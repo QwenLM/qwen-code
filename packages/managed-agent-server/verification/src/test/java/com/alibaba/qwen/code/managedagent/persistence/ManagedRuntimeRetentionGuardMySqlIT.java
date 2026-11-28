@@ -10,7 +10,13 @@ import javax.sql.DataSource;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 class ManagedRuntimeRetentionGuardMySqlIT {
+    private static final String VARCHAR_512_PERMISSIVE =
+            "ALTER TABLE ma_session_record MODIFY session_id VARCHAR(512)"
+                    + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL";
+
     private JdbcTemplate admin;
     private String schema;
     private ManagedRuntimeRetentionGuardTest contract;
@@ -66,6 +72,10 @@ class ManagedRuntimeRetentionGuardMySqlIT {
 
     @Test
     void backgroundOwnersRemainDistinctUnderPermissiveCollation() throws Exception {
+        // The contract then applies the same collation at the declared width,
+        // required by ma_session_record's composite key byte limit.
+        assertThatThrownBy(() -> contract.configureSessionRecordIdentity(VARCHAR_512_PERMISSIVE))
+                .hasStackTraceContaining("Specified key was too long; max key length is 3072 bytes");
         contract.backgroundOwnersRemainDistinctUnderPermissiveCollation();
     }
 

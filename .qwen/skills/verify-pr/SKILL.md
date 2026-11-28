@@ -492,6 +492,12 @@ come from `<trusted-clone>`. A PR can rewrite a script in its own tree, and
 these steps run with the real key, the maintainer's `gh` access, or the
 authority to certify the round.
 
+On local `--publish` rounds, allocate `<round-id>` and capture the per-round
+`guard-start.json` outside the container-mounted verify cache **before**
+running step 1 below (see **Bind the guard before every local publish**), so
+`review-threads.json` is never older than the guard baseline and unfiltered
+guard snapshots are never mounted into the container.
+
 1. **Prepare from the trusted copy with the PR clone as its cwd**, writing the
    authoritative snapshot straight to a host destination outside the tree
    (`--context-out`) and base-pinning `.qwen`:
@@ -1479,6 +1485,112 @@ them as though nothing had changed. Those are the fields that change what a
 reviewer said or decided; reaction counts are deliberately not compared, so a
 thumbs-up does not make a round dirty.
 
+**Bind the guard before every local publish.** Running the guard only by
+convention fails whenever a busy round forgets the re-check or posts after a
+mid-round push: on PR #18494, Round 4 published 8 minutes after a new
+top-level P1 review on the same head, and Round 5 published `merge-ready` 23
+minutes after two new P1s and 18 minutes after the head had already moved.
+Keep every round's start snapshot, final snapshot, verdict, log, and digest in
+a **per-round host directory** outside the container-mounted verify cache
+(`qwen-verify-guard/pr<n>/<round-id>/`, never under the `qwen-verify/pr<n>/`
+tree that Docker mounts read-only as the container's `verify-context` mount,
+because raw guard snapshots store unfiltered comment bodies for edit detection
+and must stay unreadable from inside the verification sandbox; if reusing a
+workstation cache that held older guard files under `qwen-verify/pr<n>/`,
+remove those stale guard files before starting the container). Allocate
+`<round-id>` (a unique per-round identifier independent of `prepare`'s
+artifact directory name) and create `guard-start.json` exclusively with
+`--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`
+(if `prepare` already ran first, re-run `prepare` after creating
+`guard-start.json` so the validator's `review-threads.json` is never older
+than the guard baseline), and reference that same `<round-id>` through
+publication so concurrent local rounds on the same PR cannot overwrite each
+other's `guard-start.json`:
+
+```bash
+mkdir -p ~/.cache/qwen-verify-guard/pr<n>/<round-id>
+node <trusted-clone>/scripts/verify-pr-guard.mjs \
+  --pr <n> --repo <owner>/<repo> \
+  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \
+  --no-clobber \
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
+```
+
+On every local `--publish` path, clear stale guard files in that same
+`<round-id>` directory, refresh `guard-now.json` in the same publish step
+(failing closed immediately if the refresh errors or if the PR head, state,
+formal reviews, or inline review comments change while pages are being
+fetched), write the structured verdict into that per-round host directory
+outside the PR clone and outside the container's `verify-context` mount, and
+run `verify-pr-check.mjs` with `--require-guard` before posting the PR comment:
+
+```bash
+rm -f ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256
+node <trusted-clone>/scripts/verify-pr-guard.mjs \
+  --pr <n> --repo <owner>/<repo> \
+  --snapshot ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
+node <trusted-clone>/scripts/verify-pr-guard.mjs --compare \
+  --start ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-start.json \
+  --now ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-now.json \
+  --out ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log 2>&1 || { cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log >&2; exit 1; }
+sed -n 's/^  guard-sha256  //p' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.log > ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256
+grep -Eq '^[0-9a-f]{64}$' ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256 || { echo "guard printed no valid guard-sha256; see guard.log" >&2; exit 1; }
+node <trusted-clone>/scripts/verify-pr-check.mjs \
+  --context ~/.cache/qwen-verify/pr<n>/pr.json \
+  --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \
+  --context-root "<pr-clone>" \
+  --require-guard \
+  --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
+  "$rd"
+```
+
+For runner-backed VM rounds (`microvm` or `provider-vm`, such as Firecracker,
+vfkit, or provider VM), run the same per-round refresh, compare, and
+`guard.sha256` extraction above, then keep the runner's host execution record,
+digest, and vault artifact directory in the same final check together with the
+guard flags:
+
+```bash
+node <trusted-clone>/scripts/verify-pr-check.mjs \
+  --context ~/.cache/qwen-verify/pr<n>/pr.json \
+  --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \
+  --execution-record <execution-record> \
+  --execution-record-sha256 <execution-record-sha256> \
+  --require-guard \
+  --guard ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard-verdict.json \
+  --guard-sha256 "$(cat ~/.cache/qwen-verify-guard/pr<n>/<round-id>/guard.sha256)" \
+  <artifact-dir>
+```
+
+A `--snapshot` refresh re-checks `reviews` and `reviewComments`, runs
+incremental `since`-based checks on inline review comments and top-level
+comments (catching edits to already-read pages during multi-page REST
+pagination and same-second `updatedAt` ties), and then runs a closing GraphQL
+probe **after** all REST fetches finish (paginating backward when a PR has more
+than 100 formal reviews) to confirm PR head, PR state, every formal review
+(state, `submittedAt`, and body — for multi-page review histories above 100
+reviews, each review is verified as of the response that read its page, rather
+than as a cross-page transaction), top-level comment count and latest created
+comment, and most-recently-updated top-level comment all stayed unchanged
+(requiring valid JSON objects/arrays and rejecting mid-fetch pushes, state
+changes, `CHANGES_REQUESTED` reviews, review edits/dismissals occurring up to
+the page read that covers that review, inline review comment edits across
+pages, new top-level comments, or in-place edits of earlier top-level
+comments), and removes any stale regular snapshot already at that path on
+either fetch failure or write failure (while refusing to touch symlinks,
+hardlinks, or non-regular files).
+`--compare --out` overwrites the verdict on dirty runs and invalidates any
+stale regular verdict on write failure (so an older `clean: true` file cannot
+survive), and `verify-pr-check.mjs` with `--require-guard` refuses a missing
+verdict, missing `--guard-sha256`, missing or unbound host `--context`,
+mismatched PR coordinates or verified head, non-`OPEN` PR state, dirty verdict,
+stale capture timestamp (default `--guard-max-age-sec 600`),
+symlink/hardlink/in-tree verdict path, or a `guard-verdict.json` planted inside
+the PR-writable artifact directory. Only exit 0 permits posting.
+
 **Local rounds start from CI.** Before building any harness, pull the
 failing test names from every red job and reproduce them on both arms: a
 deterministic unit failure the PR introduces (2 of 51 tests red on the PR,
@@ -1519,6 +1631,60 @@ secondary claims. Budget by value:
    claim; it named Harness generation adoption as the claim, so the rule
    never applied, although it mutated the cancellation-load branches. The
    trigger is therefore the diff, not the claim.
+
+   For destructive, exclusion, ignore, cleanup, snapshot, or migration diffs,
+   apply the same diff-triggered rule: whenever the diff changes what is
+   excluded, ignored, skipped, pruned, deleted, snapshotted, or migrated, do
+   not treat the author's exclusion/cleanup claim as the oracle. Write down
+   the **safety invariant** the system must preserve (for example, no excluded
+   or deleted subtree may hold unique user work, unique commit objects, or a
+   link/dependency required to read retained data) and reserve a dedicated
+   adversarial-falsification slot — **including in follow-up rounds**, where
+   re-running prior cells and mutating written guards cannot find uncoded
+   model gaps. Before designing cells, `grep` the codebase for real in-repo
+   writers into the excluded/cleaned paths (e.g., `.qwen/tmp/review-pr-<id>`),
+   then enumerate and exercise these six axes (list which ran in the report
+   and move any skipped axis to _Not covered_):
+   - **Path indirection and reverse dependencies**: targets whose `realpath`
+     is outside the deleted tree while an intermediate symlink hop lives
+     inside an excluded/deleted directory, or external stores whose internals
+     (`objects/`, `refs/`, `objects/info/alternates`, symlinks) point back
+     into a deleted directory.
+   - **Placement and nesting depth**: non-default parent directories (e.g.
+     `vendor/inner`), the container root itself (`.qwen/tmp` as a checkout),
+     deeper descendants (`.qwen/tmp/runs/inner`), and ignored subtrees inside
+     an otherwise preserved or excluded child.
+   - **Rule-spelling variants, mixed layouts, and complexity ladders**: drive
+     both collapsed directory rules (`dir/`) and expanded wildcard rules
+     (such as `dir/` followed by a wildcard star) plus no-rule workspaces;
+     step directory/entry counts (e.g. 16 / 32 / 64 or thousands) on any new
+     scan or predicate to catch quadratic `lstat`/I/O regressions; and include
+     mixed fixtures (ignored cache beside a clean nested checkout) in the
+     central A/B so a bugfix cannot silently collapse the exclusion savings
+     back to 0%.
+   - **Real caller entry point and multi-round steady state**: drive the real
+     upper cleanup/retention caller (not only a low-level capture helper) for
+     at least two consecutive rounds to confirm the first round converges and
+     the second does not loop or accumulate duplicate artifacts.
+   - **Combinatorial control-flow interaction**: inspect new `continue`,
+     `handled`, `visited`, and skip-set branches and construct combined
+     fixtures (such as an empty ignored sibling beside an unignored repo
+     whose object store sits in another ignored directory) to catch early-mark
+     bugs that single-factor fixtures miss.
+   - **Anti-over-refusal (liveness) control**: for every new `refuse` or block
+     guard, pair a benign neighbor that looks structurally similar but must
+     still be accepted/archived (for example, an independent `--separate-git-dir`
+     repository with a draft vs an external linked worktree), and verify it
+     still completes cleanly.
+
+   Measured example: across six rounds of PR #18494, fixed single-shape A/B
+   cells and 16-row mutation matrices certified `merge-ready` while missing
+   in-repo `.qwen/tmp/review-pr-<id>` worktrees, wildcard-expanded `.qwen/tmp`
+   quadratic `lstat` scans, multi-round sweep archive duplication, early-marked
+   `handledCheckouts` with an ignored sibling, over-refusal of standalone
+   external `--separate-git-dir` repos, and external `objects/` symlinked back
+   into ignored `.qwen/tmp/git-objects/`.
+
 2. **One or two wire-oracle harnesses** on the changed surface.
 3. **Targeted gates**: tests/typecheck of the affected workspace(s) only.
 4. **Capture the A/B and the matrix as they print** — one command each,
@@ -1535,7 +1701,11 @@ secondary claims. Budget by value:
    unmeasured rules out `merge-ready`, so this is budget, not breadth.
    The blocking threads that are not open get what is left after this list,
    and are not out of scope: the ones left unmeasured are counted in the
-   verdict line.
+   verdict line. Apply the exact same budget and `merge-ready` bar to
+   top-level blocking review comments in `review-threads.json`'s
+   `issueComments` (`OWNER`, `MEMBER`, or `COLLABORATOR` comments tagged
+   Critical, Blocker, P0, or P1, excluding `/verify-pr` reports and bot
+   lifecycle/fallback comments).
 
 Everything else is explicitly out of scope — and is **listed as not covered**
 in the report. Never let breadth eat the A/B: one proven load-bearing claim
@@ -2479,6 +2649,22 @@ or contract version too.
   the migration, cold launches, and a confirmed "Reset connections" whose
   dialog promised to delete every saved credential. The new code only ever
   cleaned the named profiles it created itself.
+- **Snapshot, backup, cleanup, and pruning PRs**: never treat the system under
+  test's own `verify()` return value, archive member counts, or working-tree
+  draft presence as the final recovery oracle. Seed history that cannot be
+  reconstructed from the working tree alone (for example, two commits where
+  the second deletes `old.txt` from the first), run the real destructive step
+  plus external maintenance (`rm`/cleanup sweep and
+  `git worktree prune --expire=now`), restore in place, and verify with an
+  independent consumer (checking commit reachability with `cat-file`, reading
+  the deleted `old.txt` via `git show <first>:old.txt`, and verifying object
+  integrity with `fsck`).
+  Drive at least two consecutive cleanup sweeps to confirm steady-state
+  convergence with zero duplicate leftover archives. Measured example: on PR
+  #18494 (`088ecd3bee`), `verifyRestoredWorktreeSnapshot` returned `true` and
+  the working-tree draft restored cleanly even though cleanup had deleted the
+  only symlinked `objects/` directory and both commit lookup (`cat-file`) and
+  reading `old.txt` from the earlier commit failed.
 - **Contracts between separately deployed components**: when the PR changes
   a field, event kind, status value or header that independently deployed
   parts exchange — Harness, server, broker and worker; Web Shell and daemon;
@@ -2791,7 +2977,18 @@ the report what the count holds.
    bot's standing change request, and Critical R1-26 had been marked fixed
    three days before. The report mentions neither, and eight hours later the
    review bot, at the head that round certified, still could not rule out
-   R1-26's residual.
+   R1-26's residual. `review-threads.json` also carries `issueComments`
+   (non-minimized top-level comments from `OWNER`, `MEMBER`, or `COLLABORATOR`
+   authors, fetched with `last: 100`) and `issueCommentCount`: exclude
+   `/verify-pr` reports (lines carrying the `/verify-pr` attribution footer or
+   verify marker) and bot lifecycle/fallback comments (`qwen-review-fallback`,
+   stale/triage/release notices), and treat every remaining top-level comment
+   tagged Critical, Blocker, P0, or P1 as an **open blocking review item** on
+   par with open blocking review threads — list one row per distinct finding,
+   measure each at the verified head, and rule out `merge-ready` (degrading to
+   `inconclusive` when nothing else failed) if any remains `not measured`.
+   When `issueCommentCount > 100`, disclose under _Not covered_ that only the
+   latest 100 top-level comments were snapshotted.
 5. **Corrections**, when an earlier review round or bot comment described
    the code inaccurately (a wrong ARIA role, a wrong mechanism, a
    misattributed cause). State the correct fact with its evidence and label
@@ -2814,7 +3011,12 @@ the report what the count holds.
    unchanged. If the suite is green both with and without the patch, say
    so and name the fixture that would pin it — that is the unpinned-axis
    signal from the vacuity section, and the fix should ship with its
-   fixture.
+   fixture. When your suggested fix introduces a new discriminator or
+   allow/exclude branch (such as branching on `.git` file vs directory),
+   **adversarially attack your own patch too**: name the assumption it relies
+   on and test at least one counterexample (for example `--separate-git-dir`
+   or a detached linked worktree after `git worktree prune`) so the suggested
+   fix does not seed the next round's defect.
 7. **Not covered** — every claim, surface, or gate you skipped. A silent cap
    reads as "covered everything"; never allow that. When something failed to
    run rather than being skipped by choice, **prove it was environmental

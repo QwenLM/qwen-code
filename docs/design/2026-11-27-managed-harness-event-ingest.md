@@ -203,7 +203,8 @@ The reply is `{ "cursor": 131, "leaseRenewAfterMillis": 20000, "terminal": false
 
 - `server/.../api/ManagedSessionStoreController.java`: the `events:ingest` route.
 - `persistence/.../JournalWriterLifecycle.java` and `JdbcManagedSessionStore.java`: ingest authentication, live or clean-sealed.
-- `persistence/.../AgentTurnExecution.java`: the admission hand-off, the CANCELLING take-back predicates in `findDispatchable` and `claimTurn`, and cursor advance without events.
+- `persistence/.../AgentTurnHandOff.java`: the admission hand-off, and the CANCELLING take-back predicate (`HARNESS_HELD_CANCEL`).
+- `persistence/.../AgentTurnExecution.java`: that predicate in `findDispatchable` and `claimTurn`, and cursor advance without events.
 - `control-plane/.../HarnessCoordinator.java`: request ingest and hand off after a fresh submission. The per-envelope logic of `consumeStream` moves to a class shared by the stream and the ingest handler.
 - `adapters/.../QwenHostedHarnessConnector.java` and `contracts/.../HarnessConnector.java`: `eventDelivery` on submit, and feature detection.
 - `adapters/.../harness/HarnessFeature.java`: the `event-ingest/1` token.
