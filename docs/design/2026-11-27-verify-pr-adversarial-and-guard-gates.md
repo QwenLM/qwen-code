@@ -206,6 +206,13 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
 - `comments(last: 100)` caps the top-level snapshot at the latest 100 comments;
   `issueCommentCount` exposes truncation so the round discloses it rather than
   claiming completeness.
+- When a PR has more than 100 formal reviews and the closing GraphQL probe
+  paginates backward via `before` cursors, GitHub provides per-request
+  responses rather than a cross-page transaction: `seenReviewIds.size` ensures
+  every review is checked, and each review's authoritative observation time is
+  the response that read its page (a dismissal on an unread page is caught in
+  that check, whereas a dismissal of an already-read page arriving between
+  GraphQL pages is caught on the next refresh).
 - `verify-pr-guard.mjs --compare --out` relies on host clock accuracy within 60 s
   between snapshot capture and check execution.
 - Prompt-level adversarial rules in `SKILL.md` still depend on agent adherence;

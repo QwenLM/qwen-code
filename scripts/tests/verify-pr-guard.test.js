@@ -2209,6 +2209,174 @@ esac`,
       expect(try2.stage).toBe('compare');
       expect(try2.res.status).toBe(1);
       expect(try2.res.stdout).toContain('reviews: 1 was edited');
+
+      // Multi-page observation-time boundary control (117 reviews, 2 GraphQL
+      // pages): dismissing an APPROVED review on the unread second page before
+      // page 2 returns is blocked on the first attempt; dismissing a review on
+      // the already-read first page between GraphQL page 1 and page 2 is
+      // bounded by per-page observation time and caught on the immediate retry.
+      const make117 = (dismissId) =>
+        Array.from({ length: 117 }, (_, idx) => {
+          const id = idx + 1;
+          return {
+            id,
+            submitted_at: `2026-10-28T00:${String(Math.floor(idx / 60)).padStart(2, '0')}:${String(idx % 60).padStart(2, '0')}Z`,
+            body: `r${id}`,
+            state: id === dismissId ? 'DISMISSED' : 'APPROVED',
+          };
+        });
+      const r117Init = make117(null);
+      const r117UnreadDismiss = make117(5); // on page 2 (#1..#17)
+      const r117ReadDismiss = make117(110); // on page 1 (#18..#117)
+      const f117RestInit = join(dir, 'r117-rest-init.json');
+      const f117RestUnread = join(dir, 'r117-rest-unread.json');
+      const f117RestRead = join(dir, 'r117-rest-read.json');
+      const f117P1Init = join(dir, 'r117-p1-init.json');
+      const f117P1ReadDismiss = join(dir, 'r117-p1-read-dismiss.json');
+      const f117P2Init = join(dir, 'r117-p2-init.json');
+      const f117P2UnreadDismiss = join(dir, 'r117-p2-unread-dismiss.json');
+      writeFileSync(f117RestInit, JSON.stringify(r117Init));
+      writeFileSync(f117RestUnread, JSON.stringify(r117UnreadDismiss));
+      writeFileSync(f117RestRead, JSON.stringify(r117ReadDismiss));
+      writeFileSync(
+        f117P1Init,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 117,
+              pageInfo: { hasPreviousPage: true, startCursor: 'cur-117' },
+              nodes: toGqlNodes(r117Init.slice(17)),
+            },
+          }),
+        ),
+      );
+      writeFileSync(
+        f117P1ReadDismiss,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 117,
+              pageInfo: { hasPreviousPage: true, startCursor: 'cur-117' },
+              nodes: toGqlNodes(r117ReadDismiss.slice(17)),
+            },
+          }),
+        ),
+      );
+      writeFileSync(
+        f117P2Init,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 117,
+              pageInfo: { hasPreviousPage: false, startCursor: 'cur-1' },
+              nodes: toGqlNodes(r117Init.slice(0, 17)),
+            },
+          }),
+        ),
+      );
+      writeFileSync(
+        f117P2UnreadDismiss,
+        JSON.stringify(
+          confirmPayload({
+            reviews: {
+              totalCount: 117,
+              pageInfo: { hasPreviousPage: false, startCursor: 'cur-1' },
+              nodes: toGqlNodes(r117UnreadDismiss.slice(0, 17)),
+            },
+          }),
+        ),
+      );
+
+      // Control A: unread page-2 review #5 dismissed between page 1 and page 2 -> blocked immediately.
+      const d117A = join(dir, 'guard-117-unread');
+      mkdirSync(d117A, { recursive: true });
+      const env117Start = withGh(
+        join(dir, 'gh-117-start'),
+        `case "$*" in
+  *graphql*before=cur-117*) cat "${f117P2Init}" ;;
+  *graphql*) cat "${f117P1Init}" ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) cat "${f117RestInit}" ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(d117A, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          env117Start,
+        ).status,
+      ).toBe(0);
+      const flag117A = join(dir, 'flag-117-a');
+      const env117A = withGh(
+        join(dir, 'gh-117-unread'),
+        `case "$*" in
+  *graphql*before=cur-117*) cat "${f117P2UnreadDismiss}" ;;
+  *graphql*) touch "${flag117A}"; cat "${f117P1Init}" ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) if [ -f "${flag117A}" ]; then cat "${f117RestUnread}"; else cat "${f117RestInit}"; fi ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      const a1 = runPublishChain(d117A, env117A);
+      expect(a1.stage).toBe('snapshot');
+      expect(a1.res.status).toBe(1);
+      expect(a1.res.stderr).toContain('reviews changed during snapshot fetch');
+      const a2 = runPublishChain(d117A, env117A);
+      expect(a2.stage).toBe('compare');
+      expect(a2.res.status).toBe(1);
+      expect(a2.res.stdout).toContain(
+        'reviews: 5 changed state (APPROVED -> DISMISSED)',
+      );
+
+      // Control B: already-read page-1 review #110 dismissed AFTER page 1 was
+      // read (per-page observation boundary) -> caught on the immediate retry.
+      const d117B = join(dir, 'guard-117-read');
+      mkdirSync(d117B, { recursive: true });
+      expect(
+        run(
+          [
+            '--pr',
+            '7',
+            '--repo',
+            'owner/repo',
+            '--snapshot',
+            join(d117B, 'guard-start.json'),
+            '--no-clobber',
+          ],
+          env117Start,
+        ).status,
+      ).toBe(0);
+      const flag117B = join(dir, 'flag-117-b');
+      const env117B = withGh(
+        join(dir, 'gh-117-read'),
+        `case "$*" in
+  *graphql*before=cur-117*) touch "${flag117B}"; cat "${f117P2Init}" ;;
+  *graphql*) if [ -f "${flag117B}" ]; then cat "${f117P1ReadDismiss}"; else cat "${f117P1Init}"; fi ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*) if [ -f "${flag117B}" ]; then cat "${f117RestRead}"; else cat "${f117RestInit}"; fi ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+      );
+      const b1 = runPublishChain(d117B, env117B);
+      expect(b1.stage).toBe('check');
+      expect(b1.res.status).toBe(0);
+      const b2 = runPublishChain(d117B, env117B);
+      expect(b2.stage).toBe('compare');
+      expect(b2.res.status).toBe(1);
+      expect(b2.res.stdout).toContain(
+        'reviews: 110 changed state (APPROVED -> DISMISSED)',
+      );
     }
 
     // Case 6 (169 inline review comments across 2 REST pages): During the

@@ -1568,17 +1568,20 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
 A `--snapshot` refresh re-checks `reviews` and `reviewComments`, runs
 incremental `since`-based checks on inline review comments and top-level
 comments (catching edits to already-read pages during multi-page REST
-pagination and same-second `updatedAt` ties), and then runs a closing GraphQL probe **after**
-all REST fetches finish (paginating backward when a PR has more than 100 formal
-reviews) to confirm PR head, PR state, every formal review (state,
-`submittedAt`, and body), top-level comment count and latest created comment,
-and most-recently-updated top-level comment all stayed unchanged (requiring
-valid JSON objects/arrays and rejecting mid-fetch pushes, state changes,
-`CHANGES_REQUESTED` reviews, earlier review edits/dismissals, body-only review
-edits, inline review comment edits across pages, new top-level comments, or
-in-place edits of earlier top-level comments), and removes any stale regular
-snapshot already at that path on either fetch failure or write failure (while
-refusing to touch symlinks, hardlinks, or non-regular files).
+pagination and same-second `updatedAt` ties), and then runs a closing GraphQL
+probe **after** all REST fetches finish (paginating backward when a PR has more
+than 100 formal reviews) to confirm PR head, PR state, every formal review
+(state, `submittedAt`, and body — for multi-page review histories above 100
+reviews, each review is verified as of the response that read its page, rather
+than as a cross-page transaction), top-level comment count and latest created
+comment, and most-recently-updated top-level comment all stayed unchanged
+(requiring valid JSON objects/arrays and rejecting mid-fetch pushes, state
+changes, `CHANGES_REQUESTED` reviews, review edits/dismissals occurring up to
+the page read that covers that review, inline review comment edits across
+pages, new top-level comments, or in-place edits of earlier top-level
+comments), and removes any stale regular snapshot already at that path on
+either fetch failure or write failure (while refusing to touch symlinks,
+hardlinks, or non-regular files).
 `--compare --out` overwrites the verdict on dirty runs and invalidates any
 stale regular verdict on write failure (so an older `clean: true` file cannot
 survive), and `verify-pr-check.mjs` with `--require-guard` refuses a missing
