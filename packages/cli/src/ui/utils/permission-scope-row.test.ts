@@ -194,6 +194,21 @@ describe('permissionScopeItems row width', () => {
     },
   );
 
+  it('keeps the Project path when narrow Japanese rows clip surrounding text', async () => {
+    await setLanguageAsync('ja');
+    const wideItem = permissionScopeItems(67)[0]!;
+    const rowOverhead = getCachedStringWidth(wideItem.label) + SCOPE_LABEL_GAP;
+    expect(wideItem.description).toMatch(/^\.qwen\/settings\.json\s+\S/);
+    expect(
+      permissionScopeItems(rowOverhead + '.qwen/settings.json'.length)[0]
+        ?.description,
+    ).toBe('.qwen/settings.json');
+    expect(
+      permissionScopeItems(rowOverhead + 'settings.json'.length)[0]
+        ?.description,
+    ).toBe('settings.json');
+  });
+
   it('fits the Project row to the same budget as the User row', () => {
     // Both rows are painted at rowWidth; sizing only the User row left the
     // Project row to the renderer's truncate, which drops `settings.json`.

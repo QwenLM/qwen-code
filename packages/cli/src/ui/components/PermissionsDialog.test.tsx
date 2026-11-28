@@ -109,9 +109,8 @@ describe('PermissionsDialog scope rows', () => {
   });
 
   it('budgets the row from the layout cap, not from the terminal width', async () => {
-    // The companion to the test above: a short QWEN_HOME fits at 200 columns
-    // whichever width the row budget came from, so it cannot tell a 200-column
-    // budget from the 100-column cap. A home long enough to fill the cap can.
+    // A long home fills the 100-column content area, so budgeting against the
+    // full terminal width would let the renderer clip the file name.
     process.env['QWEN_HOME'] = nodePath.join(
       nodePath.sep,
       'srv',
@@ -174,13 +173,9 @@ describe('PermissionsDialog scope rows', () => {
     }
   });
 
-  it('keeps the settings file name when the terminal is wider than the layout cap', async () => {
-    // The app caps its content area at 100 columns, so a 200-column terminal
-    // must not budget the row from 200: the renderer clips at the cap and the
-    // file name is what falls off the right edge.
-    // A short relocated home keeps the directory in the row: at this width no
-    // middle-compression hides it, so the assertion can tell a row built from
-    // QWEN_HOME from one that hard-codes `~/.qwen`.
+  it('shows the relocated global settings path in the scope picker', async () => {
+    // Keep the full path short enough to distinguish the relocated directory
+    // from the default one in the rendered picker.
     process.env['QWEN_HOME'] = '/tmp/custom-qwen';
     const originalColumns = Object.getOwnPropertyDescriptor(
       process.stdout,
@@ -201,10 +196,13 @@ describe('PermissionsDialog scope rows', () => {
         () => expect(stripAnsi(lastFrame())).toContain('Enter to submit'),
         { timeout: 3000 },
       );
+      expect(stripAnsi(lastFrame())).toContain('Enter permission rule');
       stdin.write('Bash');
-      await waitFor(() => expect(stripAnsi(lastFrame())).toContain('Bash'), {
-        timeout: 3000,
-      });
+      await waitFor(
+        () =>
+          expect(stripAnsi(lastFrame())).not.toContain('Enter permission rule'),
+        { timeout: 3000 },
+      );
       // Let the keypress parser flush the text chunk before the submit Return,
       // otherwise both arrive in one chunk and the Return is read as paste.
       await new Promise((resolve) => setTimeout(resolve, 300));

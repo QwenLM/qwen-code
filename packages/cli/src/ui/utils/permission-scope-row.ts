@@ -13,7 +13,6 @@ import {
 import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
-  clipToWidthFromEnd,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -55,11 +54,7 @@ export function permissionScopeItems(rowWidth: number): PermissionScopeItem[] {
   return [
     {
       label: projectLabel,
-      description: fitScopeDescription(
-        sanitizeTerminalLine(t('Checked in at .qwen/settings.json')),
-        projectLabel,
-        rowWidth,
-      ),
+      description: fitProjectScopeDescription(projectLabel, rowWidth),
       value: SettingScope.Workspace,
       key: 'project',
     },
@@ -74,30 +69,22 @@ export function permissionScopeItems(rowWidth: number): PermissionScopeItem[] {
   ];
 }
 
-/**
- * Bounds a fixed description to the row, keeping its tail: the Project row's
- * file name is what this dialog exists to show, and the renderer clips with
- * `wrap="truncate"`, which drops the tail instead. The prefix goes first and
- * an ellipsis replaces it, so `.qwen/settings.json` survives a narrow row.
- */
-function fitScopeDescription(
-  description: string,
-  label: string,
-  rowWidth: number,
-): string {
+function fitProjectScopeDescription(label: string, rowWidth: number): string {
+  const description = sanitizeTerminalLine(
+    t('Checked in at .qwen/settings.json'),
+  );
   const budget = rowWidth - getCachedStringWidth(label) - SCOPE_LABEL_GAP;
   if (getCachedStringWidth(description) <= budget) {
     return description;
   }
-  const ellipsis = '…';
-  if (budget <= getCachedStringWidth(ellipsis)) {
-    return truncateToWidth(description, budget);
+
+  // The localized text can put the path at either end of the sentence.
+  const name = 'settings.json';
+  const path = `.qwen/${name}`;
+  if (getCachedStringWidth(path) <= budget) {
+    return path;
   }
-  const tail = clipToWidthFromEnd(
-    description,
-    budget - getCachedStringWidth(ellipsis),
-  );
-  return `${ellipsis}${tail}`;
+  return truncateToWidth(name, budget);
 }
 
 function savedSettingsPath(label: string, rowWidth: number): string {
