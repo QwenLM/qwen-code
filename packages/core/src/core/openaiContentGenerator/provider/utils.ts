@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerateContentConfig } from '@google/genai';
 import type OpenAI from 'openai';
 import { retryContext } from '../../../utils/retryContext.js';
 import type { ExtendedChatCompletionAssistantMessageParam } from '../converter.js';
@@ -42,6 +43,15 @@ export function filterIsolatedModelOverrides<T extends Record<string, unknown>>(
       ([key]) => !ISOLATED_MODEL_REQUEST_FIELDS.has(key),
     ),
   ) as Partial<T>;
+}
+
+export function mapOpenAIToolChoice(
+  toolConfig: GenerateContentConfig['toolConfig'],
+): 'required' | 'none' | undefined {
+  const mode = toolConfig?.functionCallingConfig?.mode;
+  if (mode === 'ANY') return 'required';
+  if (mode === 'NONE') return 'none';
+  return undefined;
 }
 
 // Some thinking-mode OpenAI-compatible APIs require `reasoning_content` to be

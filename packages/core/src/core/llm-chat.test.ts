@@ -32,7 +32,7 @@ import type {
   SendMessageParameters,
   Tool,
 } from '@google/genai';
-import { ApiError } from '@google/genai';
+import { ApiError, FunctionCallingConfigMode } from '@google/genai';
 import {
   AuthType,
   type ContentGenerator,
@@ -8670,6 +8670,27 @@ describe('LlmChat', async () => {
       chat_template_kwargs: { response_format: jsonObjectResponseFormat },
     };
     const textResponseFormat = { type: 'text' };
+    const strictReportFormat = {
+      ...reportResponseFormat,
+      json_schema: { ...reportResponseFormat.json_schema, strict: true },
+    };
+    const nestedUnnamedReportFormat = {
+      chat_template_kwargs: {
+        response_format: {
+          type: 'json_schema',
+          json_schema: { schema: reportResponseFormat.json_schema.schema },
+        },
+      },
+    };
+    const reportTools = [
+      { type: 'function', function: { name: 'submit_report' } },
+    ];
+    const requireReportTool = {
+      tools: [{ functionDeclarations: [{ name: 'submit_report' }] }],
+      toolConfig: {
+        functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+      },
+    };
     const responseAwareTemplate =
       '{{ response_format | default("none") }}{{ messages }}';
     it.each<{
@@ -8678,6 +8699,7 @@ describe('LlmChat', async () => {
       primaryBody?: Record<string, unknown>;
       body?: Record<string, unknown>;
       sampling?: Record<string, unknown>;
+      generation?: Pick<GenerateContentConfig, 'tools' | 'toolConfig'>;
       output: number;
     }>([
       {
@@ -8908,6 +8930,72 @@ describe('LlmChat', async () => {
         output: 32_000,
       },
       {
+        primary: kimiRoute,
+        name: 'strictness added only to a repeated Kimi schema',
+        primaryBody: nestedReportFormat,
+        body: {
+          ...nestedReportFormat,
+          response_format: strictReportFormat,
+        },
+        output: 32_000,
+      },
+      {
+        name: 'a name added only to a repeated MiniMax schema',
+        primaryBody: nestedUnnamedReportFormat,
+        body: {
+          ...nestedUnnamedReportFormat,
+          response_format: reportResponseFormat,
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the same Kimi schema with different nested wrapper fields',
+        primaryBody: nestedReportFormat,
+        body: {
+          chat_template_kwargs: { response_format: strictReportFormat },
+        },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a required tool choice after warming Kimi with auto',
+        primaryBody: { tools: reportTools, tool_choice: 'auto' },
+        body: { tools: reportTools, tool_choice: 'required' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
+        primary: { ...kimiRoute, wireModel: 'moonshotai/Kimi-K3' },
+        name: 'the default tool choice on an unpinned Kimi route',
+        primaryBody: { tools: reportTools },
+        sampling: { max_tokens: 32_000 },
+        body: { tools: reportTools, tool_choice: 'auto' },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'the default tool choice without tools',
+        generation: { tools: [] },
+        body: { tool_choice: 'none' },
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a generated Kimi tool choice overriding sampling',
+        primaryBody: { tools: reportTools },
+        sampling: { tool_choice: 'none' },
+        body: { tools: reportTools },
+        generation: requireReportTool,
+        output: 32_000,
+      },
+      {
+        primary: kimiRoute,
+        name: 'a Kimi body override of the generated tool choice',
+        generation: requireReportTool,
+        body: { tool_choice: 'none' },
+        output: kimiRoute.primaryOutput,
+      },
+      {
         name: 'a repeated MiniMax JSON object format',
         primaryBody: nestedJsonObjectFormat,
         body: {
@@ -8979,6 +9067,7 @@ describe('LlmChat', async () => {
         primaryBody,
         body,
         sampling,
+        generation,
         output,
       }) => {
         const { wireModel, primaryWindow, warmPromptTokens, primaryOutput } =
@@ -9014,7 +9103,10 @@ describe('LlmChat', async () => {
         await drain(
           await chat.sendMessageStream(
             wireModel,
-            { message: 'Read the report.', config: { maxOutputTokens: 1_000 } },
+            {
+              message: 'Read the report.',
+              config: { ...generation, maxOutputTokens: 1_000 },
+            },
             'warm-template-first',
           ),
         );
@@ -9022,7 +9114,7 @@ describe('LlmChat', async () => {
         await drain(
           await chat.sendMessageStream(
             wireModel,
-            { message: 'Answer from the report.' },
+            { message: 'Answer from the report.', config: generation },
             'warm-template-second',
           ),
         );

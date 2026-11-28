@@ -91,7 +91,10 @@ import type {
 } from './contentGenerator.js';
 import { getRequestModel, getSystemPromptModel } from './request-model.js';
 import { getWireOutputBudget } from './openaiContentGenerator/output-budget.js';
-import { filterIsolatedModelOverrides } from './openaiContentGenerator/provider/utils.js';
+import {
+  filterIsolatedModelOverrides,
+  mapOpenAIToolChoice,
+} from './openaiContentGenerator/provider/utils.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
@@ -1034,11 +1037,30 @@ function normalizeRenderOptions(options: unknown): unknown {
   return options ?? undefined;
 }
 
+function normalizeNativeChatResponseFormat(format: unknown) {
+  const jsonObject = { type: 'json_object' };
+  if (isDeepStrictEqual(format, jsonObject)) return jsonObject;
+
+  const schemaFormat = format as
+    | { type?: unknown; json_schema?: { schema?: unknown } }
+    | undefined;
+  const schema = schemaFormat?.json_schema?.schema;
+  if (
+    schemaFormat?.type === 'json_schema' &&
+    schema !== null &&
+    typeof schema === 'object' &&
+    !Array.isArray(schema)
+  ) {
+    return { type: 'json_schema', json_schema: { schema } };
+  }
+  return undefined;
+}
+
 function openAIChatPromptSource(
   config: ContentGeneratorConfig | undefined,
   model: string | undefined,
   generation:
-    | Pick<GenerateContentConfig, 'systemInstruction' | 'tools'>
+    | Pick<GenerateContentConfig, 'systemInstruction' | 'tools' | 'toolConfig'>
     | undefined,
 ): OpenAIChatPromptSource | undefined {
   if (!model || config?.authType !== AuthType.USE_OPENAI) {
@@ -1060,12 +1082,11 @@ function openAIChatPromptSource(
   const rawMessages = Array.isArray(messages) ? messages : undefined;
   const chatTemplate = body['chat_template'] ?? undefined;
   const templateOptions = normalizeRenderOptions(body['chat_template_kwargs']);
-  const templateResponseFormat =
-    templateOptions !== null &&
-    typeof templateOptions === 'object' &&
-    'response_format' in templateOptions
-      ? (templateOptions.response_format ?? undefined)
+  const templateArgs =
+    templateOptions !== null && typeof templateOptions === 'object'
+      ? (templateOptions as Record<string, unknown>)
       : undefined;
+  const templateResponseFormat = templateArgs?.['response_format'] ?? undefined;
   const responseFormat = body['response_format'] ?? undefined;
   const plainText = { type: 'text' };
   const wireModel = model.trim().toLowerCase();
@@ -1077,39 +1098,52 @@ function openAIChatPromptSource(
     isDeepStrictEqual(responseFormat, plainText) &&
     (isDeepStrictEqual(templateResponseFormat, plainText) ||
       (templateResponseFormat === undefined && pinnedMiniMax));
-  const structuredFormat = responseFormat as
-    | { type?: unknown; json_schema?: { schema?: unknown } }
-    | undefined;
-  const responseSchema = structuredFormat?.json_schema?.schema;
-  // Repeating the same structured format does not change these native prompts.
-  const omitRedundantStructuredFormat =
+  const nativeRenderer =
     chatTemplate === undefined &&
-    (pinnedMiniMax || wireModel === 'moonshotai/kimi-k3:fireworks') &&
-    (isDeepStrictEqual(responseFormat, { type: 'json_object' }) ||
-      (structuredFormat?.type === 'json_schema' &&
-        responseSchema !== null &&
-        typeof responseSchema === 'object' &&
-        !Array.isArray(responseSchema))) &&
-    isDeepStrictEqual(responseFormat, templateResponseFormat);
-  // The Chat pipeline installs generated tools after sampling params and before
-  // the provider applies extra_body. Only compare the tools that survive.
+    (pinnedMiniMax || wireModel === 'moonshotai/kimi-k3:fireworks');
+  // The native prompt uses the inner schema. The provider sends the wrapper.
+  const nativeResponseFormat = nativeRenderer
+    ? normalizeNativeChatResponseFormat(responseFormat)
+    : undefined;
+  const nativeTemplateFormat = nativeRenderer
+    ? normalizeNativeChatResponseFormat(templateResponseFormat)
+    : undefined;
+  const omitRedundantStructuredFormat =
+    nativeResponseFormat !== undefined &&
+    isDeepStrictEqual(nativeResponseFormat, nativeTemplateFormat);
+  // The Chat pipeline applies generated tools and tool choice after sampling
+  // params. The provider applies extra_body last.
   const generatedTools =
     generation?.tools?.length && !Object.hasOwn(extraBody ?? {}, 'tools')
       ? generation.tools
       : undefined;
+  const generatedToolChoice =
+    generation?.tools?.length && !Object.hasOwn(extraBody ?? {}, 'tool_choice')
+      ? mapOpenAIToolChoice(generation.toolConfig)
+      : undefined;
+  const toolChoice = generatedToolChoice ?? body['tool_choice'];
+  const requestTools = generatedTools ?? tools;
+  const defaultToolChoice =
+    Array.isArray(requestTools) && requestTools.length > 0 ? 'auto' : 'none';
   return {
     model,
     messages: rawMessages,
-    tools: generatedTools ?? tools,
+    tools: requestTools,
     // These overrides can change the tokens rendered from the same messages and tools.
     rendering: {
       chat_template: chatTemplate,
-      chat_template_kwargs: templateOptions,
+      chat_template_kwargs: nativeTemplateFormat
+        ? { ...templateArgs, response_format: nativeTemplateFormat }
+        : templateOptions,
       documents: body['documents'] ?? undefined,
       response_format:
         omitPlainText || omitRedundantStructuredFormat
           ? undefined
-          : responseFormat,
+          : (nativeResponseFormat ?? responseFormat),
+      tool_choice:
+        toolChoice === defaultToolChoice
+          ? undefined
+          : (toolChoice ?? undefined),
       add_generation_prompt: addGenerationPrompt,
       continue_final_message: continueFinalMessage,
       add_special_tokens: addSpecialTokens,
