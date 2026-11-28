@@ -2172,13 +2172,6 @@ function extractBlockingFindingsFromSection(body) {
                 normalizeTableCellToken(cells[c] ?? ''),
               ),
             );
-          const isZeroCountSummary =
-            rowHasCountValues &&
-            countCols.every((c) =>
-              ZERO_OR_NONE_CELL_RE.test(
-                normalizeTableCellToken(cells[c] ?? ''),
-              ),
-            );
           const hasDescriptionCell = cells.some(
             (cell, idx) =>
               !severityCols.includes(idx) &&
@@ -2200,11 +2193,21 @@ function extractBlockingFindingsFromSection(body) {
               SEVERITY_KV_BLOCKING_TAG_RE.test(cleaned)
             );
           });
+          // Only pure count-summary rows (numeric/zero count cells with no
+          // independent prose description and no explicit inline blocking tag)
+          // qualify for zero-count exemption or summary-table fallback.
+          const isPureCountSummaryRow =
+            rowHasCountValues && !hasDescriptionCell && !hasInlineTagInRow;
+          const isZeroCountSummary =
+            isPureCountSummaryRow &&
+            countCols.every((c) =>
+              ZERO_OR_NONE_CELL_RE.test(
+                normalizeTableCellToken(cells[c] ?? ''),
+              ),
+            );
           if (!isZeroCountSummary && (hasSeverityCell || hasInlineTagInRow)) {
             const entry = buildFindingRecord(rowLine);
-            const isCountSummaryRow =
-              rowHasCountValues && !hasDescriptionCell && !hasInlineTagInRow;
-            if (isCountSummaryRow) {
+            if (isPureCountSummaryRow) {
               summaryTableFindings.push(entry);
             } else {
               findings.push(entry);
@@ -2239,10 +2242,12 @@ function extractBlockingFindingsFromSection(body) {
         nextIdx < lines.length ? LIST_ITEM_RE.exec(lines[nextIdx]) : null;
       if (firstListMatch) {
         const baseIndent = lineIndentWidth(firstListMatch[1]);
+        const baseQuoted = firstListMatch[1].includes('>');
         const listFindings = [];
         let cursor = nextIdx;
         let itemFenceChar = null;
         let itemFenceLen = 0;
+        let inItemParagraph = false;
         let currentItemLines = null;
         const flushCurrentItem = () => {
           if (currentItemLines && currentItemLines.length > 0) {
@@ -2253,6 +2258,35 @@ function extractBlockingFindingsFromSection(body) {
             );
             currentItemLines = null;
           }
+        };
+        const interruptsParagraph = (lineText, lineIdx) => {
+          const unquoted = lineText.replace(/^\s*(?:>\s*)+/, '');
+          if (/^\s*#{1,6}(?:\s|$)/.test(unquoted)) return true;
+          if (/^\s*(?:[-*_]\s*){3,}$/.test(unquoted)) return true;
+          if (
+            /^\s*<\/?(?:details|summary|div|section|hr|table|h[1-6]|pre|blockquote)\b/i.test(
+              unquoted,
+            )
+          ) {
+            return true;
+          }
+          if (
+            !baseQuoted &&
+            /^\s*>/.test(lineText) &&
+            lineIndentWidth(/^(\s*)/.exec(lineText)?.[1] ?? '') <= baseIndent
+          ) {
+            return true;
+          }
+          if (lineIdx + 1 < lines.length && lineText.includes('|')) {
+            const hdr = splitMarkdownTableRow(lineText);
+            if (
+              hdr &&
+              isMarkdownTableSeparator(lines[lineIdx + 1], hdr.length)
+            ) {
+              return true;
+            }
+          }
+          return false;
         };
         while (cursor < lines.length) {
           const curLine = lines[cursor];
@@ -2266,12 +2300,14 @@ function extractBlockingFindingsFromSection(body) {
             ) {
               itemFenceChar = null;
               itemFenceLen = 0;
+              inItemParagraph = false;
             }
             if (currentItemLines) currentItemLines.push(curLine);
             cursor++;
             continue;
           }
           if (curLine.replace(/^\s*(?:>\s*)+/, '').trim() === '') {
+            inItemParagraph = false;
             let peek = cursor + 1;
             while (
               peek < lines.length &&
@@ -2281,6 +2317,7 @@ function extractBlockingFindingsFromSection(body) {
             }
             if (peek >= lines.length) break;
             const peekLine = lines[peek];
+            if (baseQuoted && !/^\s*>/.test(peekLine)) break;
             const peekListMatch = LIST_ITEM_RE.exec(peekLine);
             if (peekListMatch) {
               cursor = peek;
@@ -2293,6 +2330,7 @@ function extractBlockingFindingsFromSection(body) {
             }
             break;
           }
+          if (baseQuoted && !/^\s*>/.test(curLine)) break;
           const fenceMatch = /^(\s*(?:>\s*)?)(`{3,}|~{3,})/.exec(curLine);
           if (fenceMatch) {
             const fenceIndent = lineIndentWidth(fenceMatch[1]);
@@ -2303,6 +2341,7 @@ function extractBlockingFindingsFromSection(body) {
             ) {
               itemFenceChar = fenceMatch[2][0];
               itemFenceLen = fenceMatch[2].length;
+              inItemParagraph = false;
               if (currentItemLines) currentItemLines.push(curLine);
               cursor++;
               continue;
@@ -2319,12 +2358,28 @@ function extractBlockingFindingsFromSection(body) {
             } else if (currentItemLines) {
               currentItemLines.push(curLine);
             }
+            inItemParagraph = true;
             cursor++;
             continue;
           }
-          // Stop at non-indented prose or next section heading.
+          if (
+            !baseQuoted &&
+            /^\s*>/.test(curLine) &&
+            lineIndentWidth(/^(\s*)/.exec(curLine)?.[1] ?? '') <= baseIndent
+          ) {
+            break;
+          }
           const leading = /^(\s*(?:>\s*)?)/.exec(curLine)?.[1] ?? '';
-          if (lineIndentWidth(leading) <= baseIndent) break;
+          if (lineIndentWidth(leading) <= baseIndent) {
+            // CommonMark §5.2 lazy paragraph continuation: a non-blank line
+            // immediately following a paragraph line stays inside the current
+            // list item unless it opens a paragraph-interrupting block.
+            if (!inItemParagraph || interruptsParagraph(curLine, cursor)) {
+              break;
+            }
+          } else {
+            inItemParagraph = !interruptsParagraph(curLine, cursor);
+          }
           if (currentItemLines) currentItemLines.push(curLine);
           cursor++;
         }
@@ -2383,11 +2438,17 @@ function buildFindingRecord(rawText, { excerptLine = null } = {}) {
     if (!GENERIC_SEVERITY_TOKENS.has(tok)) tokens.add(tok);
   }
 
+  const findingIdCodes = new Set();
+  for (const m of rawText.matchAll(/\b(?:R\d+-)?F\d+\b/gi)) {
+    findingIdCodes.add(m[0].toLowerCase());
+  }
+
   return {
     excerpt: compactFindingExcerpt(firstLine),
     severity,
     listNumber,
     tokens,
+    findingIdCodes,
   };
 }
 
@@ -2405,6 +2466,24 @@ function severitiesCompatible(a, b) {
   );
 }
 
+function findingsExplicitlyConflict(a, b) {
+  if (
+    a.listNumber !== null &&
+    b.listNumber !== null &&
+    a.listNumber !== b.listNumber
+  ) {
+    return true;
+  }
+  if (
+    a.findingIdCodes.size > 0 &&
+    b.findingIdCodes.size > 0 &&
+    tokenOverlapCount(a.findingIdCodes, b.findingIdCodes) === 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function mergeBilingualFindings(mainFindings, translationFindings) {
   if (translationFindings.length === 0) return mainFindings;
   if (mainFindings.length === 0) return translationFindings;
@@ -2412,13 +2491,15 @@ function mergeBilingualFindings(mainFindings, translationFindings) {
   const matchedMain = new Set();
   const matchedTrans = new Set();
 
-  // Pass 1: greedy 1-to-1 match by shared language-independent technical tokens.
+  // Pass 1: greedy 1-to-1 match by shared language-independent technical tokens,
+  // never merging items whose explicit item numbers or finding IDs conflict.
   const candidates = [];
   for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
     const t = translationFindings[tIdx];
     for (let mIdx = 0; mIdx < mainFindings.length; mIdx++) {
       const m = mainFindings[mIdx];
       if (!severitiesCompatible(m, t)) continue;
+      if (findingsExplicitlyConflict(m, t)) continue;
       const overlap = tokenOverlapCount(m.tokens, t.tokens);
       if (overlap > 0) {
         const numBonus =
@@ -2447,21 +2528,14 @@ function mergeBilingualFindings(mainFindings, translationFindings) {
   }
 
   // Pass 2: positional 1-to-1 mirror match for pure-prose translations without
-  // conflicting technical tokens; never merges two items with disjoint tokens,
-  // and never absorbs extra items beyond the main list.
+  // conflicting item numbers, finding IDs, or disjoint technical tokens.
   for (let tIdx = 0; tIdx < translationFindings.length; tIdx++) {
     if (matchedTrans.has(tIdx)) continue;
     if (tIdx >= mainFindings.length || matchedMain.has(tIdx)) continue;
     const m = mainFindings[tIdx];
     const t = translationFindings[tIdx];
     if (!severitiesCompatible(m, t)) continue;
-    if (
-      m.listNumber !== null &&
-      t.listNumber !== null &&
-      m.listNumber !== t.listNumber
-    ) {
-      continue;
-    }
+    if (findingsExplicitlyConflict(m, t)) continue;
     if (
       m.tokens.size > 0 &&
       t.tokens.size > 0 &&
@@ -2728,7 +2802,9 @@ function lineMentionsOtherReviewAnchor(line, ownTokens) {
 }
 
 function parseFindingNumberSpec(spec, intervals) {
-  const parts = spec.split(/(?:[,、，&+]|\band\b|和|与|及)/i);
+  const parts = spec.split(
+    /(?:[,、，]\s*(?:and\b|和|与|及|&)|[,、，&+]|\band\b|和|与|及)/i,
+  );
   for (const rawPart of parts) {
     const part = rawPart.trim();
     if (!part) continue;
@@ -2762,10 +2838,10 @@ function extractReferencedFindingIntervals(text) {
   const intervals = [];
   const patterns = [
     /#finding-(\d+)\b/gi,
-    /\b(?:findings?|items?|points?|issues?)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、&+]|\band\b)\s*#?\d+))*)/gi,
-    /第\s*(\d+(?:\s*(?:[-–—~～]\s*第?\s*\d+|(?:[,、，&+]|和|与|及)\s*第?\s*\d+))*)\s*(?:项|条|个|点|处|问|题)/g,
-    /(?:发现|问题|阻塞项|缺陷)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，&+]|和|与|及)\s*#?\d+))*)/g,
-    /\(\s*#(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、&+]|\band\b|和|与|及)\s*#?\d+))*)\s*\)/gi,
+    /\b(?:findings?|items?|points?|issues?)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:,\s*(?:and\b|&)|[,、&+]|\band\b)\s*#?\d+))*)/gi,
+    /第\s*(\d+(?:\s*(?:[-–—~～]\s*第?\s*\d+|(?:[,、，]\s*(?:和|与|及|&)|[,、，&+]|和|与|及)\s*第?\s*\d+))*)\s*(?:项|条|个|点|处|问|题)/g,
+    /(?:发现|问题|阻塞项|缺陷)\s*#?(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，]\s*(?:和|与|及|&)|[,、，&+]|和|与|及)\s*#?\d+))*)/g,
+    /\(\s*#(\d+(?:\s*(?:[-–—~～]\s*#?\d+|(?:[,、，]\s*(?:and\b|和|与|及|&)|[,、，&+]|\band\b|和|与|及)\s*#?\d+))*)\s*\)/gi,
   ];
   for (const re of patterns) {
     for (const m of text.matchAll(re)) {
@@ -2775,13 +2851,133 @@ function extractReferencedFindingIntervals(text) {
   return intervals;
 }
 
+function splitTopLevelCommas(text) {
+  const parts = [];
+  let current = '';
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '(' || ch === '（' || ch === '[') {
+      depth++;
+      current += ch;
+    } else if (ch === ')' || ch === '）' || ch === ']') {
+      if (depth > 0) depth--;
+      current += ch;
+    } else if ((ch === ',' || ch === '，') && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+const ANY_REVIEW_ANCHOR_TEST_RE =
+  /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+#(?:issuecomment-|discussion_r|pullrequestreview-)\d+|(?:issuecomment-|discussion_r|pullrequestreview-)\d+|(?<![0-9A-Za-z_#/.:-])#?\d{7,}(?![0-9A-Za-z_])/;
+
+function hasAnyReviewAnchor(text) {
+  return ANY_REVIEW_ANCHOR_TEST_RE.test(text);
+}
+
+function splitTopLevelCommasPreservingAnchors(text) {
+  const rawParts = splitTopLevelCommas(text);
+  const grouped = [];
+  let pendingPrefix = '';
+  for (const part of rawParts) {
+    if (!hasAnyReviewAnchor(part)) {
+      if (grouped.length === 0) {
+        pendingPrefix = pendingPrefix ? `${pendingPrefix},${part}` : part;
+      } else {
+        grouped[grouped.length - 1] = `${grouped[grouped.length - 1]},${part}`;
+      }
+    } else {
+      const combined = pendingPrefix ? `${pendingPrefix},${part}` : part;
+      pendingPrefix = '';
+      grouped.push(combined);
+    }
+  }
+  if (pendingPrefix) {
+    if (grouped.length > 0) {
+      grouped[grouped.length - 1] =
+        `${grouped[grouped.length - 1]},${pendingPrefix}`;
+    } else {
+      grouped.push(pendingPrefix);
+    }
+  }
+  return grouped;
+}
+
+function sliceByAnchorSpans(segment, ownTokens) {
+  const spans = [];
+  const anchorRe = new RegExp(ANY_REVIEW_ANCHOR_TEST_RE.source, 'g');
+  for (const m of segment.matchAll(anchorRe)) {
+    const raw = m[0];
+    spans.push({
+      start: m.index,
+      end: m.index + raw.length,
+      isOwn: textMentionsReviewTokens(raw, ownTokens),
+    });
+  }
+  const ownIndices = spans
+    .map((span, idx) => (span.isOwn ? idx : -1))
+    .filter((idx) => idx !== -1);
+  if (ownIndices.length === 0) return segment;
+  // Determine whether findings precede anchors (`findings 1 and 2 of A ...`) or
+  // follow anchors (`A findings 1 and 2 ...`) based on the first anchor span.
+  const firstSpan = spans[0];
+  const findingsPrecedeAnchors =
+    extractReferencedFindingIntervals(segment.slice(0, firstSpan.start))
+      .length > 0;
+  const kept = [];
+  for (const idx of ownIndices) {
+    const own = spans[idx];
+    const prevOtherEnd =
+      idx > 0 && !spans[idx - 1].isOwn ? spans[idx - 1].end : 0;
+    const nextOtherStart =
+      idx + 1 < spans.length && !spans[idx + 1].isOwn
+        ? spans[idx + 1].start
+        : segment.length;
+    if (findingsPrecedeAnchors) {
+      kept.push(segment.slice(prevOtherEnd, own.end));
+    } else {
+      kept.push(segment.slice(own.start, nextOtherStart));
+    }
+  }
+  return kept.join(' ');
+}
+
 function isolateClauseForReviewAnchor(line, ownTokens) {
   if (!lineMentionsOtherReviewAnchor(line, ownTokens)) return line;
-  const clauses = line.split(/[;；。]/);
-  const matching = clauses.filter((clause) =>
-    textMentionsReviewTokens(clause, ownTokens),
+  // 1. Split on sentence/clause boundaries (`;`, `；`, `。`, `!`, `?`, or `. `
+  // before whitespace without breaking URLs or abbreviations like `e.g. `).
+  const sentences = line.split(
+    /(?:[;；。!?！？]+|(?<![A-Za-z]\.[A-Za-z])\.(?=\s+))/,
   );
-  return matching.length > 0 ? matching.join(' ') : line;
+  const owned = [];
+  for (const sentence of sentences) {
+    if (!textMentionsReviewTokens(sentence, ownTokens)) continue;
+    if (!lineMentionsOtherReviewAnchor(sentence, ownTokens)) {
+      owned.push(sentence);
+      continue;
+    }
+    // 2. If multiple anchors share one sentence, group top-level comma parts
+    // around each anchor (preserving Oxford commas inside `findings 1, 2, and 3`).
+    const commaParts = splitTopLevelCommasPreservingAnchors(sentence).filter(
+      (part) => textMentionsReviewTokens(part, ownTokens),
+    );
+    const refined =
+      commaParts.length > 0
+        ? commaParts.map((part) =>
+            lineMentionsOtherReviewAnchor(part, ownTokens)
+              ? sliceByAnchorSpans(part, ownTokens)
+              : part,
+          )
+        : [sliceByAnchorSpans(sentence, ownTokens)];
+    owned.push(...refined);
+  }
+  return owned.length > 0 ? owned.join(' ') : line;
 }
 
 function scopedCitationBlockForLine(lines, idx, ownTokens) {

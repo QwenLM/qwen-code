@@ -8145,4 +8145,151 @@ describe('container boundary-gate.json uid check and --review-threads blocking-r
     });
     expect(bothDisclosedInComment.errors).toEqual([]);
   });
+
+  it('prevents merging differently numbered same-file bilingual findings, preserves descriptive tables with dash/zero counts, supports lazy list continuations, isolates period-separated same-line comments, and parses Oxford-comma enumerations', () => {
+    // 1. Conflicting explicit item numbers (1 vs 2) mentioning the SAME file (`codec.ts`) must NOT merge.
+    const sameFileDifferentNumbers = [
+      '1. **[P1] `codec.ts` drops notes on export.**',
+      '',
+      '<details>',
+      '<summary>中文说明</summary>',
+      '',
+      '2. **[P1] `codec.ts` 重试导入会重复创建订单。**',
+      '',
+      '</details>',
+    ].join('\n');
+    expect(extractBlockingFindings(sameFileDifferentNumbers)).toHaveLength(2);
+
+    // Conflicting explicit finding IDs (R2-F1 vs R2-F2) mentioning the same file must NOT merge either.
+    const conflictingFindingIds = [
+      '1. **[P1] R2-F1 `codec.ts` drops notes on export.**',
+      '',
+      '<details>',
+      '<summary>中文说明</summary>',
+      '',
+      '1. **[P1] R2-F2 `codec.ts` 重试导入会重复创建订单。**',
+      '',
+      '</details>',
+    ].join('\n');
+    expect(extractBlockingFindings(conflictingFindingIds)).toHaveLength(2);
+
+    // 2. Severity | Count | Description tables with Count = "—" or "0" MUST keep rows with descriptions or inline [P1].
+    const dashCountTable = [
+      '| Severity | Count | Description |',
+      '| --- | --- | --- |',
+      '| P1 | — | [P1] 重新打开发票会创建重复记录 |',
+    ].join('\n');
+    expect(extractBlockingFindings(dashCountTable)).toHaveLength(1);
+
+    const zeroCountWithDescriptionTable = [
+      '| Severity | Count | Description |',
+      '| --- | --- | --- |',
+      '| P1 | 0 | 输入两张发票，导出零行 |',
+    ].join('\n');
+    expect(extractBlockingFindings(zeroCountWithDescriptionTable)).toHaveLength(
+      1,
+    );
+
+    // Pure 2-column zero-count summary table with NO description column still skips cleanly.
+    expect(
+      extractBlockingFindings(
+        '| Severity | Count |\n| --- | --- |\n| P1 | 0 |\n| Critical | — |',
+      ),
+    ).toEqual([]);
+
+    // 3. CommonMark lazy paragraph continuation (zero-indent line wrap with no blank line) keeps item 2 under ### Blockers.
+    const lazyContinuationList = [
+      '### Blockers',
+      '',
+      '1. First blocker title wraps onto',
+      'the next line with zero indentation.',
+      '2. Second blocker title',
+    ].join('\n');
+    const lazyFindings = extractBlockingFindings(lazyContinuationList);
+    expect(lazyFindings).toHaveLength(2);
+    expect(lazyFindings[0].excerpt).toContain('First blocker title');
+    expect(lazyFindings[1].excerpt).toContain('Second blocker title');
+
+    // Paragraph-interrupting ATX heading and unindented blockquote without blank line still terminate ### Blockers.
+    const interruptedByHeading = [
+      '### Blockers',
+      '1. Real blocker',
+      '### Non-blocking',
+      '1. Minor nit',
+    ].join('\n');
+    expect(extractBlockingFindings(interruptedByHeading)).toHaveLength(1);
+    expect(
+      extractBlockingFindings(
+        '### Blockers\n1. Real blocker\n> standalone quote\n2. Later non-blocker',
+      ),
+    ).toHaveLength(1);
+
+    // 4. Period-separated, comma-separated, and punctuation-free same-line comments must NOT borrow finding numbers.
+    const urlA =
+      'https://github.com/QwenLM/qwen-code/pull/18609#issuecomment-7240861153';
+    const urlB =
+      'https://github.com/QwenLM/qwen-code/pull/18609#issuecomment-7241663536';
+
+    const periodLine = `${urlA} findings 1 and 2. ${urlB} finding 1.`;
+    expect(reportMentionsReviewFinding(periodLine, urlA, 1, 2)).toBe(true);
+    expect(reportMentionsReviewFinding(periodLine, urlA, 2, 2)).toBe(true);
+    expect(reportMentionsReviewFinding(periodLine, urlB, 1, 2)).toBe(true);
+    expect(reportMentionsReviewFinding(periodLine, urlB, 2, 2)).toBe(false);
+
+    // Mixed-order period-separated sentences (findings-first then anchor-first) require sentence splitting.
+    const mixedOrderPeriod = `Findings 1 and 2 of ${urlA}. ${urlB} finding 1.`;
+    expect(reportMentionsReviewFinding(mixedOrderPeriod, urlB, 1, 2)).toBe(
+      true,
+    );
+    expect(reportMentionsReviewFinding(mixedOrderPeriod, urlB, 2, 2)).toBe(
+      false,
+    );
+
+    // Oxford-comma enumeration on A followed by comma + B finding 1 keeps all 3 for A and only 1 for B!
+    const oxfordAndB = `${urlA} findings 1, 2, and 3, and ${urlB} finding 1.`;
+    expect(reportMentionsReviewFinding(oxfordAndB, urlA, 1, 3)).toBe(true);
+    expect(reportMentionsReviewFinding(oxfordAndB, urlA, 2, 3)).toBe(true);
+    expect(reportMentionsReviewFinding(oxfordAndB, urlA, 3, 3)).toBe(true);
+    expect(reportMentionsReviewFinding(oxfordAndB, urlB, 1, 2)).toBe(true);
+    expect(reportMentionsReviewFinding(oxfordAndB, urlB, 2, 2)).toBe(false);
+
+    // Punctuation-free same-line `A findings 1 and 2 B` must NOT lend A's findings to B.
+    const bareAdjacent = `${urlA} findings 1 and 2 ${urlB}`;
+    expect(reportMentionsReviewFinding(bareAdjacent, urlB, 1, 2)).toBe(false);
+    expect(reportMentionsReviewFinding(bareAdjacent, urlB, 2, 2)).toBe(false);
+
+    // 5. Oxford-comma English and Chinese enumerations cover all listed items.
+    expect(
+      reportMentionsReviewFinding(
+        `Verified ${urlB} (findings 1, 2, and 3).`,
+        urlB,
+        3,
+        3,
+      ),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(
+        `Verified ${urlB} (findings 1, 2, & 3).`,
+        urlB,
+        3,
+        3,
+      ),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(
+        `已核实 ${urlB}（第 1、2、和 3 项）。`,
+        urlB,
+        3,
+        3,
+      ),
+    ).toBe(true);
+    expect(
+      reportMentionsReviewFinding(
+        `Verified ${urlB} (#1, #2, and #3).`,
+        urlB,
+        3,
+        3,
+      ),
+    ).toBe(true);
+  });
 });

@@ -121,18 +121,20 @@ the certified head `2490bb3f` using real `e2fsprogs`:
       replay).
     - Detect every distinct blocking finding (`P0`, `P1`, `Critical`, `Blocker`)
       outside Markdown fenced code blocks — including standalone severity cells
-      in Markdown tables (using both column headers and cell values so tables
-      like `Severity | Findings` with prose descriptions are kept per-row while
-      numeric count-summary tables like `| Critical | 0 |` or `| Critical | 2 |`
-      are classified accurately), heading-led blocker bullet lists
-      (`**Blockers**`, preserving scope across indented continuation paragraphs,
-      sub-bullets, and indented fenced code blocks), and multiple numbered or
-      bulleted blockers within a single comment — merging 1-to-1 bilingual
-      translations inside `<details><summary>中文说明</summary>` while
-      preserving any extra or disjoint findings unique to the fold, and ignoring
-      inline backtick mentions in prose (such as `` `[P1]` ``), closed HTML
-      comments, zero/none headings (`**Blockers**: None`, `### Critical (0)`,
-      `### Blockers\nNone`), and ordinary prose.
+      in Markdown tables (exempting only pure count-summary rows with numeric/zero
+      count cells, no independent prose description column, and no explicit inline
+      blocking tag, so tables like `Severity | Findings` or
+      `Severity | Count | Description` with `—`/`0` counts keep every described
+      finding), heading-led blocker bullet lists (`**Blockers**`, preserving scope
+      across CommonMark lazy paragraph continuations, indented continuation
+      paragraphs, sub-bullets, and indented fenced code blocks), and multiple
+      numbered or bulleted blockers within a single comment — merging 1-to-1
+      bilingual translations inside `<details><summary>中文说明</summary>` without
+      ever merging findings whose explicit item numbers or finding IDs conflict,
+      while preserving any extra or disjoint findings unique to the fold, and
+      ignoring inline backtick mentions in prose (such as `` `[P1]` ``), closed
+      HTML comments, zero/none headings (`**Blockers**: None`,
+      `### Critical (0)`, `### Blockers\nNone`), and ordinary prose.
     - Collect open blocking inline threads (`resolved !== true` or parent review
       in standing `changeRequests`), blocking standing `changeRequests` bodies,
       and blocking top-level `OWNER`/`MEMBER`/`COLLABORATOR` `issueComments`
@@ -153,9 +155,11 @@ the certified head `2490bb3f` using real `e2fsprogs`:
     - Refuse `merge-ready` if any open blocking finding is omitted, marked
       `reproduced` or `not-measured`, or marked `not-reproduced` without a
       matching visible URL/fragment/comment-ID citation — plus explicit
-      per-finding number disclosure (for example `finding 2`, `findings 1, 2`,
-      or `第 1、2 项`) when a comment carries multiple findings — in **both
-      `report.md` and `comment.md` (when present)**.
+      per-finding number disclosure (supporting single or combined enumerations
+      such as `finding 2`, `findings 1, 2, and 3`, or `第 1、2 项`, isolated per
+      comment across sentence, comma, and anchor-span boundaries on the same
+      line) when a comment carries multiple findings — in **both `report.md` and
+      `comment.md` (when present)**.
     - Downgrade omissions on non-`merge-ready` verdicts (`inconclusive`,
       `findings`, `blocked`) to warnings so partial or failing rounds can still
       publish.
