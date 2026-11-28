@@ -39,6 +39,7 @@ import {
   isSatisfiesExpression,
   isSetAccessorDeclaration,
   isStringLiteral,
+  isTypeAssertionExpression,
   isVariableDeclaration,
   isVariableStatement,
   ScriptTarget,
@@ -113,13 +114,14 @@ const fencedShellBlocks = (text) =>
   ].map((match) => match[1]);
 
 // A type assertion, a non-null assertion and parentheses do not change the
-// expression, so every reader below strips them the same way.
+// expression, so the readers that resolve an expression strip them here.
 const unwrap = (node) => {
   let current = node;
   while (
     current !== undefined &&
     (isParenthesizedExpression(current) ||
       isAsExpression(current) ||
+      isTypeAssertionExpression(current) ||
       isNonNullExpression(current) ||
       isSatisfiesExpression(current))
   ) {
@@ -232,8 +234,8 @@ const classifierDelegation = (text) => {
   const collectFakes = (node) => {
     if (
       isCallExpression(node) &&
-      isIdentifier(node.expression) &&
-      node.expression.text === 'startFakeOpenAIServer'
+      isIdentifier(unwrap(node.expression)) &&
+      unwrap(node.expression).text === 'startFakeOpenAIServer'
     ) {
       const fn = resolve(node.arguments[0]);
       if (fn !== undefined && isFn(fn)) fakes.add(fn);
@@ -4015,7 +4017,8 @@ describe('managed-agent-server e2e runner', () => {
   // every clause is satisfied by both the strong and the weak form, so
   // weakening one would otherwise stay green. The positive controls below carry
   // the shapes the retired inventories used to judge — they are green now by
-  // decision, and the packaged /loop arms own that behaviour.
+  // decision. The design record names which of those the packaged arms were
+  // measured to catch; most carry no arm verdict.
   it('executes the delegation predicate against hostile wiring', () => {
     const decision = [
       "function classifierBlockAnswer(p) { return p && 'shouldBlock' in p ? { shouldBlock: false } : undefined; }",
@@ -4140,7 +4143,7 @@ describe('managed-agent-server e2e runner', () => {
           fire(FIRE),
         ].join('\n'),
       ],
-      // Both delegations served by ONE fake leaves the sibling fake silent.
+      // Both ids inside ONE callback: the ids differ, the callbacks do not.
       ['distinct-callbacks', withSkill(SKILL + '\n' + FIRE)],
       // A fake name declared twice resolves to nothing rather than guessing
       // which binding a lookup happened to find, so the call is not credited.
@@ -4220,6 +4223,7 @@ describe('managed-agent-server e2e runner', () => {
         '`loop-classifier`',
         "('loop-classifier'!)",
         "('loop-classifier' satisfies string)",
+        "(<string>'loop-classifier')",
         "('loop-' as string) + 'classifier'",
         'ID',
       ].map((id) => [
@@ -4244,6 +4248,16 @@ describe('managed-agent-server e2e runner', () => {
           'const skillFake = ({ body }) => {\n' + SKILL + '\n};',
           'const alias = skillFake;',
           'if (loopSkill) {\nfake = await startFakeOpenAIServer(alias);\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
+      // The fake-server callee in parentheses is the same registration.
+      [
+        'parenthesized fake-server callee',
+        [
+          decision,
+          'const skillFake = ({ body }) => {\n' + SKILL + '\n};',
+          'if (loopSkill) {\nfake = (startFakeOpenAIServer)(skillFake);\n}',
           fire(FIRE),
         ].join('\n'),
       ],
