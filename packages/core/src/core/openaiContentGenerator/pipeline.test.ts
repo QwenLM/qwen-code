@@ -1859,12 +1859,36 @@ describe('ContentGenerationPipeline', () => {
       ['gpt-5.4', 'none'],
       ['gpt-5', undefined],
       ['gpt-6-astra', undefined],
+      ['gpt-6.1-sol', undefined],
+      ['gpt-6.2-astra', undefined],
+      ['gpt-6.2-sol', undefined],
     ] as const)(
       'respects %s support for disabling thinking',
       async (model, expected) => {
         const apiCall = await executeWith(
           {
             samplingParams: { reasoning_effort: 'none' },
+          } as Partial<ContentGeneratorConfig>,
+          sideQuery(model),
+          'side-query:permission-classifier',
+        );
+        expect(apiCall.reasoning_effort).toBe(expected);
+      },
+    );
+
+    it.each([
+      ['gpt-6-luna', 'none'],
+      ['gpt-6-sol', 'none'],
+      ['gpt-6.1-terra', 'none'],
+      ['gpt-6.1-sol', undefined],
+      ['gpt-6.2-astra', undefined],
+      ['gpt-6.2-sol', undefined],
+    ] as const)(
+      'disables thinking for %s when reasoning is false (expects %s)',
+      async (model, expected) => {
+        const apiCall = await executeWith(
+          {
+            reasoning: false,
           } as Partial<ContentGeneratorConfig>,
           sideQuery(model),
           'side-query:permission-classifier',
