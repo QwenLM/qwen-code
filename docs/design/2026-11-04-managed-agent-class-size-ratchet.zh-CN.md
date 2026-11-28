@@ -15,7 +15,7 @@
 
 ## 当前落地状态（2026-11-28）
 
-门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,309 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。当前次大类是 `JdbcRuntimeBindingRepository`，实际 2,131 行；此处把较早的 2,319 行 pin 收紧到当前行数。`JdbcManagedExtensionRecordStore` 实际为 2,129 行，保留较早的 2,170 行 pin。除此之外，pin 仅由显式评审编辑下调、不会自动收紧，因此目前 25 条已入 pin 条目中有 18 条高于对应类的实测行数。
+门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,309 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。当前次大类是 `JdbcManagedExtensionRecordStore`，实际为 2,129 行，保留较早的 2,170 行 pin；`JdbcRuntimeBindingRepository` 实际 2,088 行，保留最近一次合并 main 后的 2,095 行 pin。由于 pin 仅由显式评审编辑下调、不会自动收紧，目前 25 条已入 pin 条目中有 16 条高于对应类的实测行数。
 
 新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #17478 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。随后 `ToolPublicationObjectKeys` 删除了不再使用的 import，使该类、全局上限和按类 pin 均降至 2,481。以 main 的这一基线为起点，#17846 先提取 guard、再提取回执谓词到 `ToolPublicationRequirements`，使分支上的上限先后降至 2,476 和 2,470；合并 main 上的上述缩减后，该类行数、全局上限和按类 pin 均降至 2,306。随后合并 #18325，在其经评审的纯 import 宽免下增加三条 import 行；全局只降不升的棘轮也相应获得三行例外，最终该类行数、全局上限与按类 pin 均为 2,309。持久化 key 布局不变。上文历史叙述中的 4,216 行及其他类体量描述原始设计基线，而非当前上限。
 

@@ -393,6 +393,32 @@
   padding: 6px;
 }
 
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu]) {
+  width: min(
+    var(--radix-popover-trigger-width),
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
+  max-width: min(
+    var(--radix-popover-trigger-width),
+    var(--radix-popover-content-available-width),
+    calc(100vw - 16px)
+  );
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu])
+  .slashList {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+:global([data-web-shell-slash-menu][data-web-shell-mobile-slash-menu])
+  .slashItem {
+  min-height: 44px;
+  justify-content: center;
+  padding: 8px 12px;
+}
+
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   width: min(320px, calc(100vw - 24px));
@@ -536,7 +562,8 @@
 .slashPanel {
   max-height: min(
     460px,
-    calc(var(--radix-popover-content-available-height) - 20px)
+    calc(var(--radix-popover-content-available-height) - 20px),
+    var(--slash-panel-viewport-max-height, 460px)
   );
   overflow: hidden;
   cursor: default;

@@ -95,7 +95,9 @@ public class ContextCompressionCoordinator {
                 return;
             }
             if (!submitted && evidence == null) {
-                if (error instanceof ManagedAgentException refusal) {
+                // A released Session awaiting its claim retries; the claim fallback bounds that wait.
+                if (error instanceof ManagedAgentException refusal
+                        && !"harness_placement_released".equals(refusal.getCode())) {
                     store.settleContextCompression(operation, owner, "failed", null, refusal.getCode());
                 } else {
                     store.retryContextCompressionPreparation(operation, owner, clock.millis() + 1000);

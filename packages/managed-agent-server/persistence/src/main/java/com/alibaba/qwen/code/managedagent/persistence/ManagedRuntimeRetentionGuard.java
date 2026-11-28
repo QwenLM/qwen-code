@@ -80,6 +80,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                     + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(RIGHT(e.execution_call_id,"
                     + " 8) AS BINARY(8)) = CAST(':process' AS BINARY(8))) s JOIN ma_session_record"
                     + " r ON r.tenant_id = ? AND r.session_id = s.harness_session_id AND"
+                    + " CAST(r.session_id AS BINARY(2048)) = CAST(s.harness_session_id AS BINARY(2048)) AND"
                     + " r.record_kind = 'DOMAIN' AND r.domain = 'child_run' WHERE CAST(r.tenant_id"
                     + " AS BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.workspace_id AS"
                     + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.domain AS BINARY(2048)) ="

@@ -306,12 +306,12 @@ public class JdbcManagedWorkspaceRegistry
                     row.displayName(), row.state(),
                     row.access().atLeast(WorkspaceAccess.OPERATOR)
                             && "ACTIVE".equals(row.state())
-                            && (!"EXTERNAL".equals(row.storageKind()) || external[index]), ".",
+                            && (!managedExternal(row.storageKind()) || external[index]), ".",
                     "OWNER".equals(row.role()) && "ACTIVE".equals(row.state())
                             && "ROOT".equals(row.workspaceKind())
                             && !"SSH_LOCAL".equals(row.storageKind())
                             && !"CSI".equals(row.storageKind())
-                            && !"EXTERNAL".equals(row.storageKind()));
+                            && !managedExternal(row.storageKind()));
         }).toList();
     }
 
@@ -321,12 +321,12 @@ public class JdbcManagedWorkspaceRegistry
                 row.displayName(), row.state(),
                 row.access().atLeast(WorkspaceAccess.OPERATOR)
                         && "ACTIVE".equals(row.state())
-                        && (!"EXTERNAL".equals(row.storageKind()) || external), ".",
+                        && (!managedExternal(row.storageKind()) || external), ".",
                 "OWNER".equals(row.role()) && "ACTIVE".equals(row.state())
                         && "ROOT".equals(row.workspaceKind())
                         && !"SSH_LOCAL".equals(row.storageKind())
                         && !"CSI".equals(row.storageKind())
-                        && !"EXTERNAL".equals(row.storageKind()));
+                        && !managedExternal(row.storageKind()));
         return withDefaults(tenantId, List.of(summary)).getFirst();
     }
 
@@ -340,7 +340,7 @@ public class JdbcManagedWorkspaceRegistry
                     row.workspaceGeneration(), row.storageId(),
                     row.access().atLeast(WorkspaceAccess.OPERATOR)
                             && "ACTIVE".equals(row.state())
-                            && (!"EXTERNAL".equals(row.storageKind()) || external[index])));
+                            && (!managedExternal(row.storageKind()) || external[index])));
         }
         return result;
     }
@@ -353,7 +353,7 @@ public class JdbcManagedWorkspaceRegistry
     private boolean[] externalEligibility(String tenantId, List<WorkspaceRow> rows) {
         boolean[] result = new boolean[rows.size()];
         var external = IntStream.range(0, rows.size())
-                .filter(index -> "EXTERNAL".equals(rows.get(index).storageKind()))
+                .filter(index -> managedExternal(rows.get(index).storageKind()))
                 .boxed().toList();
         if (external.isEmpty() || !externalFilesAvailable()) {
             return result;
@@ -373,6 +373,10 @@ public class JdbcManagedWorkspaceRegistry
                     && properties.getRuntimeBroker().getExternalProviderId().equals(state.providerId());
         }
         return result;
+    }
+
+    private static boolean managedExternal(String storageKind) {
+        return "EXTERNAL".equals(storageKind) || "EPHEMERAL".equals(storageKind);
     }
 
     private static WorkspaceRow workspaceRow(ResultSet result) throws SQLException {
