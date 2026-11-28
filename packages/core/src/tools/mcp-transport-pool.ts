@@ -1326,6 +1326,15 @@ export class McpTransportPool {
       // `addMCPStatusChangeListener`, and only `forceShutdown`
       // removes it. Pre-fix every unpooled connect/discover failure
       // leaked one listener permanently.
+
+      // A completion after the owner stopped leaves the client
+      // DISCONNECTED, so `discoverAndReturn` rejects at its status guard
+      // before the post-await cancellation branch can classify this as a
+      // cancelled acquire. Capture the cancellation state before the
+      // cleanup below deletes the entry, and report it as cancellation so
+      // callers do not see a generic "not connected" for a stopped attempt.
+      const cancelled =
+        this.draining || !this.entries.has(id) || entry.isTerminated();
       try {
         await entry.forceShutdown('failed_acquire');
       } catch {
@@ -1343,6 +1352,16 @@ export class McpTransportPool {
       // The `failed_acquire` shutdown above is the only disconnect on this
       // path; discarding the acquire must not certify an owner stop, for the
       // same reason as the pooled path (issue #12160).
+      if (cancelled) {
+        try {
+          view.teardown();
+        } catch {
+          /* best effort — view may already be torn down */
+        }
+        throw new Error(
+          `McpTransportPool is draining or unpooled ${id} was cancelled`,
+        );
+      }
       throw err;
     }
   }

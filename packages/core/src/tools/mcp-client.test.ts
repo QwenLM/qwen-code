@@ -1449,7 +1449,10 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const serverName = `stop-during-allocation-${Date.now()}`;
       const client = newClient(serverName);
       const createTransportSpy = vi
-        .spyOn(client as unknown as Obj, 'createTransport')
+        .spyOn(
+          client as unknown as { createTransport: () => Promise<Obj> },
+          'createTransport',
+        )
         .mockReturnValue(factoryGate);
 
       const connecting = client.connect();
