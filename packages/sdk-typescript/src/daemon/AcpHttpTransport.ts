@@ -527,6 +527,7 @@ export class AcpHttpTransport implements DaemonTransport {
     abortPromise.catch(() => {});
 
     try {
+      if (!signal?.aborted) opts.onEventStreamReady?.();
       while (!signal?.aborted) {
         const { value, done } = await Promise.race([
           reader.read(),

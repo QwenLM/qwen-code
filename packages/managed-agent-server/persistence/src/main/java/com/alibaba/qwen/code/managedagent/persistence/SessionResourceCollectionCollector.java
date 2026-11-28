@@ -36,8 +36,6 @@ public final class SessionResourceCollectionCollector {
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     private static final int PAGE_ROWS = 100;
     private static final long PAGE_BYTES = 32L * 1024 * 1024;
-    // MySQL can choose a full scan and filesort even with the page limit.
-    // The scoped unique key follows the resource cursor. H2 ignores the hint.
     private static final String RESOURCE_PAGE =
             "SELECT resource_id, byte_length, CASE WHEN state IN ('PUBLISHED', 'REFERENCED') AND"
                 + " storage_kind = 'MYSQL_INLINE' AND publication_id IS NULL AND object_key IS NULL"
