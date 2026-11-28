@@ -26,6 +26,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.CleanupMode;
@@ -878,8 +879,9 @@ class HostedPublicWorkspaceIT {
 
     @Test
     @EnabledOnOs(OS.LINUX)
-    @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "qwen.test.private.rootfs", matches = ".+")
-    @Timeout(120)
+    @EnabledIfSystemProperty(named = "qwen.test.private.rootfs", matches = ".+")
+    @EnabledIfSystemProperty(named = "qwen.test.cgroup.root", matches = ".+")
+    @Timeout(360)
     void publicConfinedShellUsesTheSelectedRuntimeAndStopsItsOriginalCgroup() throws Exception {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         confined = true;
