@@ -2,7 +2,7 @@
 
 [English](2026-11-27-managed-harness-event-ingest.md) | [简体中文](2026-11-27-managed-harness-event-ingest.zh-CN.md)
 
-状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `43dc924882` 核实。§10 的前两步已实现。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
+状态：设计提案，2026-11-27。现状描述已对照 `main` 的 `add9dd8e3b` 核实。§10 的三步均已实现，其中的真实进程场景尚未运行。本设计基于[无状态 Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)和[挂起时释放 placement](2026-11-26-managed-suspension-placement-release.zh-CN.md)。
 
 ## 1. 问题与现状
 
@@ -149,7 +149,7 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
   - 全新提交指的是这样一次派发：Turn 还没有准入记录（`harness_event_epoch` 为空），并且 `submit` 成功。它包括新 Turn 的第一次派发，以及在任何准入被记录之前的重试，撤回提交标记之后的重新提交也在其中。
   - `submit` 返回 `hosted_prompt_recovery_required` 的不算，Turn 已经有 event epoch 之后的任何派发也不算。
   - 投递方式按每次准入决定，所以同一个 Turn 可以先走上报，恢复之后改为拉流。
-- **准入与交接。** `recordAdmission` 增加一个交接版本，在同一事务中设置 `dispatch_owner = 'harness:' + bootId` 和 `dispatch_lease_until = now + lease`。派发者先停掉自己的续租再交接，然后不接流直接返回。`coordinate` 的 `finally` 里的 `releaseTurnLease` 此时什么也匹配不到。记录准入时 Turn 已是 `CANCELLING` 的，不做交接：派发者继续走现有的 cancel 路径，Harness 的上报会得到 `not_owner`。
+- **准入与交接。** `recordAdmission` 增加一个交接版本，在同一事务中设置 `dispatch_owner = 'harness:' + bootId` 和 `dispatch_lease_until = now + lease`。派发者交接后不接流直接返回。它的续租以及 `coordinate` 的 `finally` 里的 `releaseTurnLease` 此时都匹配不到，因为两者都要求 owner 是派发者自己。记录准入时 Turn 已是 `CANCELLING` 的，不做交接：派发者继续走现有的 cancel 路径，Harness 的上报会得到 `not_owner`。
 - **保持不变的路径。** 恢复准入、续跑、cancel 和 recovery blocked 的观察通道，都像现在一样拉流，这些 Turn 仍由派发者持有。
 - **cancel 收回。** `findDispatchable` 和 `claimTurn` 额外放行 `status = 'CANCELLING' AND dispatch_owner LIKE 'harness:%'`，不论 `dispatch_lease_until` 和 `retry_after`。Harness 每 20 秒续一次这个租约，如果认领要等它过期，cancel 就永远送不到。认领者成为 owner，执行现有的 cancel 路径，包括 `cancelOriginalTurn` 和拉流。游标是共用的，所以收回时事件既不丢失也不重复。
 - **租约过期。** Harness 持有的租约过期后，就是一个普通的过期租约：扫描认领该 Turn，之后由现有的 attach、接管和恢复准入处理。
@@ -162,7 +162,8 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
   - 从准入的 `lastEventId` 开始。
   - 通过 Session Store 客户端新增的 `ingestEvents` 方法发送。
   - 收到 `terminal: true` 的回复、`not_owner`、writer 校验拒绝，或结束标记被确认后停止。
-- **准入。** 格式错误的 `eventDelivery` 返回 400 `invalid_hosted_event_delivery`；没有 HTTP Session Store 的 Session 返回 409 `hosted_event_ingest_unavailable`，派发者会重试，而不是让 Turn 失败。
+- **准入。** 格式错误的 `eventDelivery` 返回 400 `invalid_hosted_event_delivery`；没有 HTTP Session Store 的 Session 返回 409 `hosted_event_ingest_unavailable`。连接器只在 Session Store 开启时声明支持上报，因此派发者不会把它发给这样的 Session。
+- **重放的准入。** 重试的提交可能由内存中的准入或 journal 回答 202。带 `eventDelivery` 的这类回答也会从它回答的水位启动上报器，因为派发者收到任何 202 都会交接。该 prompt 已在运行的上报器会被替换。
 - **挂起与关闭。** 上报器视同一条打开的事件流：普通的空闲挂起会等它停止，各条关闭路径都会停掉它。因 Action 停靠而挂起时，会在 seal 之前暂停所有上报器。
 - **停靠。** 上报器暂停后，在 writer 仍然有效时分批补发已提交的事件。游标没有推进时停止补发。确认 seal 之后、释放 placement 之前（#18404），如果标记能到达已提交序号，上报器就以已 seal 的实例发送 `end: "parked"`。如果投递失败，挂起照常继续，Turn 在租约过期后恢复。
 - **recovery block。** 条件与 Java 现在轮询的相同：该 Turn 没有活跃 prompt、`recoveryBlocked` 为真、游标已到已提交序号。条件满足时，上报器发送 `end: "recovery_blocked"`。
@@ -207,13 +208,13 @@ Java 按 SDK 拉流解码器的规则解码每个 envelope，使投影器看到�
 - `adapters/.../QwenHostedHarnessConnector.java`、`contracts/.../HarnessConnector.java`：submit 携带 `eventDelivery`，以及 feature 检测。
 - `adapters/.../harness/HarnessFeature.java`：`event-ingest/1` 的定义。
 - `packages/sdk-java/qwencode/.../daemon/SubmitHarnessTurn.java`：submit 请求体中的 `eventDelivery` 字段。
-- `ManagedAgentProperties.java`、`application.yml`：`qwen.managed-agent.event-ingest.enabled`（默认 `false`）。
+- `application.yml` 与 `configuration-descriptions.json`：`qwen.managed-agent.event-ingest.enabled`（默认 `false`），由 `HarnessCoordinator` 读取。
 
 ### Harness 与 Store 客户端
 
 - `packages/core/src/managed-runtime/http-managed-session-store.ts`：`ingestEvents`。
 - `packages/cli/src/serve/hosted-harness-contract.ts`：`event-ingest/1`。
-- `packages/cli/src/serve/hosted-harness-session/turn.ts`：接受 `eventDelivery`。
+- `packages/cli/src/serve/hosted-harness-session/turn.ts`：接受 `eventDelivery`，并在全新或重放的准入时启动上报器。
 - `packages/cli/src/serve/hosted-harness-session/event-ingest.ts`（新增）：上报器。`observation-routes.ts` 导出 envelope 投影。
 - `packages/cli/src/serve/hosted-harness-session/session-suspension.ts` 与 Action 停靠流程：在 seal 和释放之间发送 `parked` 标记。
 
