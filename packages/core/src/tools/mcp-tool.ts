@@ -491,7 +491,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     ) {
       return true;
     }
-    return isMCPServerTeardownIntent(this.serverName);
+    // The name-keyed marker is shared by every connection under this name, so
+    // it only speaks for a connection with no status of its own. Once this
+    // invocation's transport is tracked, another owner's stop of the *name*
+    // says nothing about it: honouring it would keep a live sibling
+    // unrepaired, which is the opposite of the fail-closed direction.
+    return (
+      getMCPConnectionStatus(this.mcpClient) === undefined &&
+      isMCPServerTeardownIntent(this.serverName)
+    );
   }
 
   private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {

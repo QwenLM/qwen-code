@@ -2544,6 +2544,44 @@ describe('DiscoveredMCPTool', () => {
       expect(ensureTool).not.toHaveBeenCalled();
     });
 
+    it('repairs a tracked connection even while another owner has the name stopped', async () => {
+      // A sibling's owner stops the shared *name* while A keeps its own
+      // CONNECTED status. The name-keyed marker describes the sibling, not A,
+      // so A's unasked drop is still abort damage and must be repaired rather
+      // than vetoed by a stop recorded for someone else.
+      const toolName = 'literature.search_pubmed';
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(textResult('Repaired')),
+      };
+      const { config, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: newMockMcpClient }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      // Another owner stops the name; A's own status is untouched.
+      markMCPServerTeardownIntent(serverName);
+      recordMCPConnectionStatus(clientA, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      rejectCall!(new Error('Connection closed'));
+
+      const result = await executePromise;
+      expect(result.llmContent).toEqual([{ text: 'Repaired' }]);
+      expect(ensureTool).toHaveBeenCalledWith(toolA.name);
+    });
+
     it('leaves a live sibling recoverable after cleaning up a failed acquire', async () => {
       // A failed acquire of a sibling is disposed of while a live connection A
       // shares the name. That cleanup only closes the sibling's own transport:
