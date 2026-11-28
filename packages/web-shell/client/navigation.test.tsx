@@ -156,6 +156,27 @@ describe('navigation ownership', () => {
       );
     },
   );
+  it('restores a URL session when the host provides standalone context', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/agentic-code/session/from-url?context=standalone',
+    );
+    render({ sessionContext: { kind: 'standalone' } });
+    expect(target).toEqual({
+      sessionId: 'from-url',
+      workspaceId: undefined,
+      sessionContext: { kind: 'standalone' },
+    });
+    expect(location.pathname).toBe('/agentic-code/session/from-url');
+  });
+  it('preserves standalone context for a URL draft', () => {
+    window.history.replaceState(null, '', '/agentic-code/?context=standalone');
+    render({ sessionContext: { kind: 'standalone' } });
+    expect(target).toEqual({ sessionContext: { kind: 'standalone' } });
+    render({ sessionContext: { kind: 'live' } });
+    expect(target).toEqual({ sessionContext: { kind: 'live' } });
+  });
   it('keeps the requested origin while session loading is pending', () => {
     window.history.replaceState(null, '', '/agentic-code/session/a');
     render();

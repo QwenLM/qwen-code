@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -290,6 +291,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @ValueSource(booleans = {false, true})
     void idleJournalCheckReadsARevisionItsSnapshotCannotSee(boolean throughAdmission) throws Exception {
         var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         var journal = fixture.transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
@@ -402,7 +404,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
         var input = new ManagedSessionStoreModels.CommitResource("witness-input", "managed-input", 1, 2,
                 sha256("{}"), "e30=");
         var request = journal.requestDomainWithInput("witness-input", "hook_registration", registration,
-                List.of(data), "witness-turn", input);
+                List.of(data), "witness-turn", input, "user");
         try (var writer = Executors.newSingleThreadExecutor()) {
             writer.submit(() -> fixture.transactions.executeWithoutResult(ignored -> journal.commit(request)))
                     .get(30, TimeUnit.SECONDS);
