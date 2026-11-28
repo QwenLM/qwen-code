@@ -60,7 +60,16 @@ export function serializeTerminalToText(terminal: Terminal): string {
     lines.push(lineContent);
   }
 
-  return lines.join('\n').trimEnd();
+  // translateToString(true) only drops cells that were never written
+  // (getTrimmedLength stops at the last non-zero codepoint). Full-line
+  // repaints, e.g. from ConPTY, explicitly write the padding spaces, so
+  // every repainted line would otherwise keep trailing spaces up to the
+  // terminal width (#17350). Trim per logical line so wrapped segments
+  // keep the space at their join point.
+  return lines
+    .map((l) => l.replace(/[ \t]+$/, ''))
+    .join('\n')
+    .trimEnd();
 }
 
 const enum Attribute {
