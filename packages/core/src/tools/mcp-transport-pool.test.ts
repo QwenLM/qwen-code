@@ -26,6 +26,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-client.js';
 import {
   addMCPStatusChangeListener,
+  getMCPConnectionGeneration,
   getMCPServerStatus,
   isMCPConnectionTeardownIntent,
   isMCPServerTeardownIntent,
@@ -1097,22 +1098,32 @@ describe('McpTransportPool', () => {
       removeMCPServerStatus('srv');
     });
 
-    it('certifies a pooled eviction as a deliberate teardown before its transition fires (issue #12160)', async () => {
-      // An abort repair reads the `DISCONNECTED` a deliberate teardown
-      // produces and must not revive the server. The ordering that guarantees
-      // it lives in `McpClient.disconnect()`: it records the intent before it
-      // publishes the status (`mcp-client.ts`), so every teardown path that
-      // goes through it — this eviction included — is covered without the
-      // caller marking anything itself.
-      const { pool, cfg } = await acquireOne();
+    it('records teardown intent before the process sweep reports the transport down (issue #12160)', async () => {
+      const { pool, cfg, mocked } = await acquireOne({
+        beforePool: () => {
+          vi.mocked(SdkClientStdioLib.StdioClientTransport).mockReturnValue({
+            close: vi.fn().mockResolvedValue(undefined),
+            pid: 99999,
+          } as unknown as SdkClientStdioLib.StdioClientTransport);
+        },
+      });
+      vi.mocked(listDescendantPids).mockResolvedValueOnce([1001]);
+      vi.mocked(sigtermPids).mockImplementationOnce(() => {
+        sdkOnError(mocked, new Error('stdio exited during the sweep'));
+        return 1;
+      });
       const entry = entryOf(pool, cfg);
+      const generation = getMCPConnectionGeneration(mocked);
       const seen: boolean[] = [];
       const listener = (
         serverName: string,
         status: MCPServerStatus | undefined,
       ) => {
         if (serverName === 'srv' && status === MCPServerStatus.DISCONNECTED) {
-          seen.push(isMCPServerTeardownIntent('srv'));
+          seen.push(
+            isMCPServerTeardownIntent('srv') &&
+              isMCPConnectionTeardownIntent(mocked, generation),
+          );
         }
       };
       addMCPStatusChangeListener(listener);
@@ -1121,8 +1132,7 @@ describe('McpTransportPool', () => {
       } finally {
         removeMCPStatusChangeListener(listener);
       }
-      // The eviction really publishes the transition, and the mark was
-      // already set when each notification was delivered.
+      expect(sigtermPids).toHaveBeenCalledWith([1001]);
       expect(seen.length).toBeGreaterThan(0);
       expect(seen.every((marked) => marked)).toBe(true);
       removeMCPServerStatus('srv');

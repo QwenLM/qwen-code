@@ -859,6 +859,11 @@ export class PoolEntry {
    */
   private async sweepAndDisconnect(reason: string): Promise<SweepResult> {
     const result: SweepResult = {};
+    // A silent drop or an acquire that never became live is already a
+    // failure. For an owner stop, record intent before the sweep: signaling
+    // a descendant can publish DISCONNECTED before disconnect() runs.
+    const deliberate = reason !== 'silent_drop' && reason !== 'failed_acquire';
+    if (deliberate) this.client.markTeardownIntent();
     try {
       const rootPid = this.client.getTransportPid?.();
       if (rootPid !== undefined) {
@@ -882,14 +887,7 @@ export class PoolEntry {
       );
     }
     try {
-      // `silent_drop` and `failed_acquire` are the two sweeps nobody asked
-      // for: one closes a transport that was already dead, the other
-      // discards an acquire that never became live. Neither is the owner's
-      // intent, and certifying either would veto recovery for a live sibling
-      // connection under the same name (issue #12160).
-      await this.client.disconnect({
-        deliberate: reason !== 'silent_drop' && reason !== 'failed_acquire',
-      });
+      await this.client.disconnect({ deliberate });
     } catch (err) {
       // Disconnect failure is rare (usually a transport bug worth
       // surfacing) and gets a structured error log here. No

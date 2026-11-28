@@ -3313,35 +3313,41 @@ describe('DiscoveredMCPTool', () => {
     // transport reports the teardown one round trip AFTER the local abort
     // rejection, so the repair has to hang off the status transition rather
     // than a read inside the abort catch.
-    it('repairs the connection the abort tore down once the server reports it', async () => {
-      const retryClient = okClient();
-      const { config, discoverToolsForServer } = registry({
-        ensured: mkTool({ client: retryClient }),
-      });
-      const abortController = new AbortController();
-      const client = abortingClient(abortController, abortError());
-      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
-      const executePromise = exec(
-        mkTool({ config, client }),
-        'test',
-        abortController.signal,
-      );
-      abortController.abort();
+    it.each([false, true])(
+      'repairs the connection the abort tore down (guarded: %s)',
+      async (guarded) => {
+        const retryClient = okClient();
+        const { config, discoverToolsForServer } = registry({
+          ensured: mkTool({ client: retryClient }),
+          extra: {
+            getToolInvocationGuard: () => (guarded ? vi.fn() : undefined),
+          },
+        });
+        const abortController = new AbortController();
+        const client = abortingClient(abortController, abortError());
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        const executePromise = exec(
+          mkTool({ config, client }),
+          'test',
+          abortController.signal,
+        );
+        abortController.abort();
 
-      await expect(executePromise).rejects.toThrow('Tool call aborted');
+        await expect(executePromise).rejects.toThrow('Tool call aborted');
 
-      // Nothing reconnected while the status still claimed CONNECTED.
-      expect(client.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+        // Nothing reconnected while the status still claimed CONNECTED.
+        expect(client.callTool).toHaveBeenCalledTimes(1);
+        expect(discoverToolsForServer).not.toHaveBeenCalled();
 
-      // The transport dies after the cancel, as it does on the wire.
-      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
-      await vi.waitFor(() => {
-        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
-      });
-      expect(client.callTool).toHaveBeenCalledTimes(1);
-      expect(retryClient.callTool).not.toHaveBeenCalled();
-    });
+        // The transport dies after the cancel, as it does on the wire.
+        updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+        await vi.waitFor(() => {
+          expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+        });
+        expect(client.callTool).toHaveBeenCalledTimes(1);
+        expect(retryClient.callTool).not.toHaveBeenCalled();
+      },
+    );
 
     it('arms the abort repair against the generation the call started in', async () => {
       // The abort arm reaches `repairConnectionOnDisconnectAfterAbort` before

@@ -854,6 +854,16 @@ export class McpClient {
   }
 
   /**
+   * Records the owner's stop before either the pool's process sweep or the
+   * transport publishes a disconnect. Keep the mark on this connection as
+   * well as by name, because a sibling reconnect clears the shared marker.
+   */
+  markTeardownIntent(): void {
+    markMCPServerTeardownIntent(this.serverName);
+    markMCPConnectionTeardownIntent(this.client);
+  }
+
+  /**
    * Disconnects from the MCP server.
    *
    * The intentional DISCONNECTED status update must reach the global
@@ -877,18 +887,7 @@ export class McpClient {
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
     this.status = MCPServerStatus.DISCONNECTED;
-    if (deliberate) {
-      // Record the intent BEFORE the registry notifies listeners: a cancelled
-      // invocation's abort-repair listener fires synchronously inside the
-      // `updateMCPServerStatus` call below and must be able to tell this
-      // deliberate teardown from abort damage (issue #12160).
-      markMCPServerTeardownIntent(this.serverName);
-      // Name-keyed intent is shared by every connection registered under this
-      // name, and a sibling that reconnects clears it. Record this transport's
-      // stop on the connection itself so an invocation holding it still knows
-      // the owner asked for this teardown.
-      markMCPConnectionTeardownIntent(this.client);
-    }
+    if (deliberate) this.markTeardownIntent();
     // Record the per-connection truth too: this write skips `updateStatus()`,
     // but an abort repair holding this client reads the connection, not the
     // name-keyed registry, so it would otherwise keep a stale CONNECTED.
