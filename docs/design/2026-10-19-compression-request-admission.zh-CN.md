@@ -148,4 +148,4 @@
 - 用考虑中文的偏高估算来确定第一次请求的输出预算，让高密度会话不必先被拒绝、再靠重试修正。
 - 压缩遥测只在压缩走完全程时记录，所以这个状态和 API 失败都不会出现在遥测里。在失败返回处带上状态记录遥测，就能在看板上比较两者。
 - Anthropic 的 "input length and `max_tokens` exceed context limit: P + C > L" 不会被识别为上下文超长。识别它也会改变主对话路径的行为。
-- 另有一些超长报错同样不会被识别为上下文超长：xAI、Together 的 "The input (N tokens) is longer than"、SiliconFlow、Bedrock Titan、vLLM 引擎层的 "decoder prompt"、llama.cpp 无法拆分的输入、Kimi 的旧写法、MiniMax、智谱的 "Prompt exceeds max length"、LM Studio 和 Ollama 的 llama-server。它们的压缩请求被拒时仍像以前一样失败。识别它们也会改变主对话何时压缩，所以应当单独改动，就像 #16245 为 TGI 做的那样。
+- 另有一些超长报错同样不会被识别为上下文超长：xAI、SiliconFlow、Bedrock Titan、vLLM 引擎层的 "decoder prompt"、llama.cpp 无法拆分的输入、Kimi 的旧写法、MiniMax、智谱的 "Prompt exceeds max length"、LM Studio 和 Ollama 的 llama-server。它们的压缩请求被拒时仍像以前一样失败。识别它们也会改变主对话何时压缩，所以应当单独改动，就像 #16245 为 TGI、#14099 为 SGLang 和 Together 共用的 "The input (N tokens) is longer than the model's context length" 做的那样。

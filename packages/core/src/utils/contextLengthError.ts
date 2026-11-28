@@ -34,6 +34,9 @@ const TIMEOUT_PATTERNS = [
 const CONTEXT_LENGTH_PATTERNS = [
   /\bcontext[_\s-]?length[_\s-]?exceeded\b/i,
   /\bmaximum context length\b/i,
+  // SGLang: "The input (40000 tokens) is longer than the model's context
+  // length (32768 tokens)."
+  /\bis longer than the model's context length\b/i,
   /\bprompt\s+(?:is\s+)?too long\b/i,
   /\binput\s+(?:token\s+)?(?:count\s+|length\s+)?(?:is\s+)?too long\b/i,
   /\brange of input length should be\b/i,
@@ -63,7 +66,11 @@ function parseTokenCounts(text: string): {
   limitTokens?: number;
   limitKind?: 'input' | 'total';
 } {
-  const greaterThanMatch = text.match(/(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)/i);
+  // Digit runs are capped at 32 characters so an unanchored scan does not
+  // backtrack through a long run of digits from every position.
+  const greaterThanMatch = text.match(
+    /(\d[\d,]{0,31})\s*tokens?\s*>\s*(\d[\d,]{0,31})/i,
+  );
   if (greaterThanMatch) {
     return {
       actualTokens: parseInteger(greaterThanMatch[1]!),
@@ -71,12 +78,16 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // OpenAI says "maximum context length is N tokens ... requested M tokens";
+  // SGLang says "maximum context length of N tokens. You requested a total of
+  // M tokens: K tokens from the input messages and ...". SGLang's total also
+  // counts the completion budget, so its input count is the better anchor.
   const openAiMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?[\s\S]*?(?:resulted in|requested|used)\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]{0,31})\s*tokens?[\s\S]*?(?:resulted in|requested(?: a total of)?|used)\s*(\d[\d,]{0,31})\s*tokens?(?::\s*(\d[\d,]{0,31})\s*tokens? from the input messages)?/i,
   );
   if (openAiMatch) {
     return {
-      actualTokens: parseInteger(openAiMatch[2]!),
+      actualTokens: parseInteger(openAiMatch[3] ?? openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
       limitKind: 'total',
     };
@@ -84,7 +95,7 @@ function parseTokenCounts(text: string): {
 
   // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
-    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]{0,31})\s*tokens?/i,
   );
   if (maxContextLimitMatch) {
     return {
@@ -93,8 +104,21 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // SGLang: "The input (40000 tokens) is longer than the model's context
+  // length (32768 tokens)."
+  const sglangMatch = text.match(
+    /input \(\s*(\d[\d,]{0,31})\s*tokens?\s*\) is longer than the model's context length \(\s*(\d[\d,]{0,31})\s*tokens?\s*\)/i,
+  );
+  if (sglangMatch) {
+    return {
+      actualTokens: parseInteger(sglangMatch[1]!),
+      limitTokens: parseInteger(sglangMatch[2]!),
+      limitKind: 'total',
+    };
+  }
+
   const inputExceedsMatch = text.match(
-    /input\s+token\s+(?:count|length)[^\d]*(\d[\d,]*)[\s\S]*?exceed(?:s|ed)?[\s\S]*?(?:maximum|limit)[^\d]*(\d[\d,]*)/i,
+    /input\s+token\s+(?:count|length)[^\d]*(\d[\d,]{0,31})[\s\S]*?exceed(?:s|ed)?[\s\S]*?(?:maximum|limit)[^\d]*(\d[\d,]{0,31})/i,
   );
   if (inputExceedsMatch) {
     return {
