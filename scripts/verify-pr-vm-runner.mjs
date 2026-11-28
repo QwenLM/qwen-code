@@ -67,6 +67,7 @@ import {
   probeHostCapabilities,
   stageLocalVmRound,
   verifyFirecrackerDiskConfig,
+  verifyVfkitSeatbeltProfile,
 } from './verify-pr-vm-host.mjs';
 import {
   buildExecutionRecord,
@@ -1472,6 +1473,14 @@ export async function runHardwareRound({
       if (!diskConfigCheck.ok) {
         return failBeforeLaunch([diskConfigCheck.error]);
       }
+      const vfkitProfileCheck = verifyVfkitSeatbeltProfile(plan, {
+        approvedRoots,
+        vaultDir: realVault,
+        requireExists: stageAssets === true,
+      });
+      if (!vfkitProfileCheck.ok) {
+        return failBeforeLaunch([vfkitProfileCheck.error]);
+      }
     }
     kernelDigest = kHash.digest;
     rootfsDigest = rHash.digest;
@@ -1924,6 +1933,22 @@ export async function runHardwareRound({
           roundInput: preparedInput,
         });
       } else {
+        // Re-verify on-disk VM configs right before spawn to narrow the window
+        // after staging/token/collector setup.
+        const preSpawnConfigCheck = verifyFirecrackerDiskConfig(plan, {
+          requireExists: stageAssets === true,
+        });
+        if (!preSpawnConfigCheck.ok) {
+          throw new Error(preSpawnConfigCheck.error);
+        }
+        const preSpawnProfileCheck = verifyVfkitSeatbeltProfile(plan, {
+          approvedRoots,
+          vaultDir: realVault,
+          requireExists: stageAssets === true,
+        });
+        if (!preSpawnProfileCheck.ok) {
+          throw new Error(preSpawnProfileCheck.error);
+        }
         const child = spawn(plan.argv[0], plan.argv.slice(1), {
           stdio: 'ignore',
           detached: plan.backend === 'firecracker',

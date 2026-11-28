@@ -179,6 +179,30 @@ function canonicalizePreservingLeaf(absPath) {
   }
 }
 
+function canonicalizeVaultDir(vaultDir) {
+  if (!vaultDir) return null;
+  const abs = resolve(vaultDir);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return canonicalizePreservingLeaf(abs);
+  }
+}
+
+function normalizeApprovedRoots(approvedRoots) {
+  if (!Array.isArray(approvedRoots)) return [];
+  return approvedRoots
+    .filter((root) => typeof root === 'string' && root.trim() !== '')
+    .map((root) => {
+      const abs = resolve(root);
+      try {
+        return realpathSync(abs);
+      } catch {
+        return canonicalizePreservingLeaf(abs);
+      }
+    });
+}
+
 function readSingleLinkFile(filePath, maxBytes = MAX_CONFIG_BYTES) {
   let fd;
   try {
@@ -796,7 +820,8 @@ function assertApprovedDestination(
     throw new Error(`${label} path is required`);
   }
   const abs = resolve(targetPath);
-  if (!isPathWithinApprovedRoots(abs, approvedRoots)) {
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
+  if (!isPathWithinApprovedRoots(abs, normalizedRoots)) {
     throw new Error(`${label} ${abs} is outside approvedRoots`);
   }
   const canonical = canonicalizePreservingLeaf(abs);
@@ -813,12 +838,13 @@ function ensureApprovedDirHierarchy(
   label,
   dirPath,
   mode,
-  { approvedRoots, realVault, createdDirs = null },
+  { approvedRoots, realVault, createdDirs = null, requirePrivateLeaf = false },
 ) {
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
   const abs = assertApprovedDestination(
     label,
     dirPath,
-    approvedRoots,
+    normalizedRoots,
     realVault,
   );
   const missing = [];
@@ -831,12 +857,29 @@ function ensureApprovedDirHierarchy(
       if (error.code !== 'ENOENT') throw error;
     }
     if (st !== null) {
-      if (cursor === abs && (st.isSymbolicLink() || !st.isDirectory())) {
-        throw new Error(`${label} must be a real directory: ${abs}`);
+      if (cursor === abs) {
+        if (st.isSymbolicLink() || !st.isDirectory()) {
+          throw new Error(`${label} must be a real directory: ${abs}`);
+        }
+        if (requirePrivateLeaf && (st.mode & 0o077) !== 0) {
+          throw new Error(
+            `${label} must not allow group/other access (mode=${(st.mode & 0o777).toString(8)}): ${abs}`,
+          );
+        }
       }
       break;
     }
-    assertApprovedDestination(label, cursor, approvedRoots, realVault);
+    const canonicalCursor = canonicalizePreservingLeaf(cursor);
+    if (normalizedRoots.includes(canonicalCursor)) {
+      if (realVault && withinDir(realVault, canonicalCursor)) {
+        throw new Error(
+          `${label} ${canonicalCursor} must not reside inside vaultDir`,
+        );
+      }
+      missing.push(cursor);
+      break;
+    }
+    assertApprovedDestination(label, cursor, normalizedRoots, realVault);
     missing.push(cursor);
     const parent = dirname(cursor);
     if (parent === cursor) break;
@@ -845,10 +888,11 @@ function ensureApprovedDirHierarchy(
   for (let i = missing.length - 1; i >= 0; i -= 1) {
     const nextDir = missing[i];
     mkdirSync(nextDir, { mode });
+    chmodSync(nextDir, mode);
     if (createdDirs) createdDirs.push(nextDir);
   }
   const realDir = realpathSync(abs);
-  if (!isPathWithinApprovedRoots(realDir, approvedRoots)) {
+  if (!isPathWithinApprovedRoots(realDir, normalizedRoots)) {
     throw new Error(`${label} escaped approvedRoots: ${realDir}`);
   }
   if (realVault && withinDir(realVault, realDir)) {
@@ -874,14 +918,13 @@ export function copyIsolatedAsset(
     createdDirs = null,
   } = {},
 ) {
-  const realVault = vaultDir
-    ? canonicalizePreservingLeaf(resolve(vaultDir))
-    : null;
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
+  const realVault = canonicalizeVaultDir(vaultDir);
   const src = assertSafeSourceAsset('source asset', sourcePath, realVault);
   const absDest = assertApprovedDestination(
     'staged asset',
     destPath,
-    approvedRoots,
+    normalizedRoots,
     realVault,
   );
   if (absDest === src.real) {
@@ -899,10 +942,10 @@ export function copyIsolatedAsset(
     'staged asset parent',
     parent,
     0o750,
-    { approvedRoots, realVault, createdDirs },
+    { approvedRoots: normalizedRoots, realVault, createdDirs },
   );
   const safeDest = join(realParent, basename(absDest));
-  if (!isPathWithinApprovedRoots(safeDest, approvedRoots)) {
+  if (!isPathWithinApprovedRoots(safeDest, normalizedRoots)) {
     throw new Error(`staged asset parent escaped approvedRoots: ${realParent}`);
   }
   if (realVault && withinDir(realVault, safeDest)) {
@@ -1004,10 +1047,11 @@ function writeAtomicStagedFile(
     createdDirs = null,
   },
 ) {
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
   const absDest = assertApprovedDestination(
     'staged file',
     destPath,
-    approvedRoots,
+    normalizedRoots,
     realVault,
   );
   try {
@@ -1021,10 +1065,10 @@ function writeAtomicStagedFile(
     'staged file parent',
     parent,
     0o750,
-    { approvedRoots, realVault, createdDirs },
+    { approvedRoots: normalizedRoots, realVault, createdDirs },
   );
   const safeDest = join(realParent, basename(absDest));
-  if (!isPathWithinApprovedRoots(safeDest, approvedRoots)) {
+  if (!isPathWithinApprovedRoots(safeDest, normalizedRoots)) {
     throw new Error(`staged file parent escaped approvedRoots: ${realParent}`);
   }
   if (realVault && withinDir(realVault, safeDest)) {
@@ -1170,6 +1214,74 @@ export function verifyFirecrackerDiskConfig(
 }
 
 /**
+ * Verifies the macOS `vfkit` Seatbelt `.sb` profile on disk immediately before
+ * launch so a profile tampered with after staging (e.g. rewritten to
+ * `(allow default)`) is refused fail-closed before spawning `sandbox-exec`.
+ */
+export function verifyVfkitSeatbeltProfile(
+  plan,
+  { approvedRoots = [], vaultDir = null, requireExists = false } = {},
+) {
+  if (!plan || plan.backend !== 'vfkit') {
+    return { ok: true, error: null, profilePath: null };
+  }
+  const parsed = parseVfkitPlanPaths(plan);
+  if (!parsed.seatbeltProfile) {
+    return {
+      ok: false,
+      error: 'vfkit plan must declare a Seatbelt profile path',
+      profilePath: null,
+    };
+  }
+  const profilePath = parsed.seatbeltProfile;
+  const read = readSingleLinkFile(profilePath);
+  if (read.error) {
+    if (!requireExists && read.error === 'unreadable:ENOENT') {
+      return { ok: true, error: null, profilePath };
+    }
+    return {
+      ok: false,
+      error: `vfkit Seatbelt profile rejected (${read.error})`,
+      profilePath,
+    };
+  }
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
+  const realVault = canonicalizeVaultDir(vaultDir);
+  if (normalizedRoots.length > 0) {
+    try {
+      assertApprovedDestination(
+        'vfkit Seatbelt profile',
+        profilePath,
+        normalizedRoots,
+        realVault,
+      );
+    } catch (error) {
+      return { ok: false, error: error.message, profilePath };
+    }
+  }
+  let expectedProfile;
+  try {
+    expectedProfile = renderVfkitSeatbeltProfile({
+      vfkitBin: parsed.vfkitBin,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `vfkit Seatbelt profile render failed (${error.message})`,
+      profilePath,
+    };
+  }
+  if (read.text !== expectedProfile) {
+    return {
+      ok: false,
+      error: 'vfkit Seatbelt profile does not match the deny-default profile',
+      profilePath,
+    };
+  }
+  return { ok: true, error: null, profilePath };
+}
+
+/**
  * Stages per-round hardware VM assets (kernel, independent working disk,
  * Firecracker `config.json` / `console.log`, or macOS `vfkit` initramfs /
  * Seatbelt `.sb` profile and private directories) inside `approvedRoots`.
@@ -1192,24 +1304,37 @@ export function stageLocalVmRound({
   if (!Array.isArray(approvedRoots) || approvedRoots.length === 0) {
     throw new Error('stageLocalVmRound requires non-empty approvedRoots');
   }
-  const realVault = vaultDir
-    ? canonicalizePreservingLeaf(resolve(vaultDir))
-    : null;
+  const normalizedRoots = normalizeApprovedRoots(approvedRoots);
+  const realVault = canonicalizeVaultDir(vaultDir);
   const createdFiles = [];
   const createdDirs = [];
-  let firecrackerJailRoot = null;
+  const ownedRuntimeDirs = new Set();
 
-  const ensureApprovedDir = (label, dirPath, mode) =>
-    ensureApprovedDirHierarchy(label, dirPath, mode, {
-      approvedRoots,
+  const ensureApprovedDir = (
+    label,
+    dirPath,
+    mode,
+    { requirePrivateLeaf = false, trackOwnedRuntimeDir = false } = {},
+  ) => {
+    const abs = resolve(dirPath);
+    const existedBefore = existsSync(abs);
+    const realDir = ensureApprovedDirHierarchy(label, dirPath, mode, {
+      approvedRoots: normalizedRoots,
       realVault,
       createdDirs,
+      requirePrivateLeaf,
     });
+    if (trackOwnedRuntimeDir && !existedBefore) {
+      ownedRuntimeDirs.add(abs);
+    }
+    return realDir;
+  };
 
   const cleanup = () => {
+    const liveRoots = normalizeApprovedRoots(approvedRoots);
     for (let i = createdFiles.length - 1; i >= 0; i -= 1) {
       const target = createdFiles[i];
-      if (!isPathWithinApprovedRoots(target, approvedRoots)) continue;
+      if (!isPathWithinApprovedRoots(target, liveRoots)) continue;
       try {
         unlinkSync(target);
       } catch {
@@ -1221,13 +1346,14 @@ export function stageLocalVmRound({
       const dir = createdDirs[i];
       if (seen.has(dir)) continue;
       seen.add(dir);
-      if (!isPathWithinApprovedRoots(dir, approvedRoots)) continue;
+      if (!isPathWithinApprovedRoots(dir, liveRoots)) continue;
       if (realVault && withinDir(realVault, canonicalizePreservingLeaf(dir))) {
         continue;
       }
-      if (firecrackerJailRoot !== null && dir === firecrackerJailRoot) {
-        // Firecracker's jailer populates chroot device nodes and binary copies
-        // inside jailRoot; clear only the per-round jailRoot we created.
+      if (ownedRuntimeDirs.has(dir)) {
+        // Both Firecracker's jailer (chroot device nodes, binary copy, pid)
+        // and vfkit (guest.log, vfkit.pid, HOME/TMPDIR, vsock sockets) write
+        // runtime state inside directories created exclusively for this round.
         try {
           rmSync(dir, { recursive: true, force: true });
         } catch {
@@ -1255,18 +1381,15 @@ export function stageLocalVmRound({
       const uid = shouldChown ? plan.vmmUid : null;
       const gid = shouldChown ? plan.vmmGid : null;
 
-      const jailRootExisted = existsSync(resolve(plan.jailRoot));
       const jailRoot = ensureApprovedDir(
         'firecracker jailRoot',
         plan.jailRoot,
         0o750,
+        { trackOwnedRuntimeDir: true },
       );
-      if (!jailRootExisted) {
-        firecrackerJailRoot = resolve(plan.jailRoot);
-      }
       const kernel = copyIsolatedAsset(sourceKernelPath, plan.kernelPath, {
-        approvedRoots,
-        vaultDir,
+        approvedRoots: normalizedRoots,
+        vaultDir: realVault,
         mode: 0o640,
         chownUid: uid,
         chownGid: gid,
@@ -1278,8 +1401,8 @@ export function stageLocalVmRound({
         sourceRootfsPath,
         plan.ownershipTemplate.workDiskPath,
         {
-          approvedRoots,
-          vaultDir,
+          approvedRoots: normalizedRoots,
+          vaultDir: realVault,
           mode: 0o640,
           chownUid: uid,
           chownGid: gid,
@@ -1292,7 +1415,7 @@ export function stageLocalVmRound({
         join(jailRoot, 'config.json'),
         `${JSON.stringify(plan.vmConfig, null, 2)}\n`,
         {
-          approvedRoots,
+          approvedRoots: normalizedRoots,
           realVault,
           mode: 0o640,
           chownUid: uid,
@@ -1306,7 +1429,7 @@ export function stageLocalVmRound({
         join(jailRoot, 'console.log'),
         '',
         {
-          approvedRoots,
+          approvedRoots: normalizedRoots,
           realVault,
           mode: 0o640,
           chownUid: uid,
@@ -1346,18 +1469,34 @@ export function stageLocalVmRound({
     if (!parsed.seatbeltProfile) {
       throw new Error('vfkit plan must declare a Seatbelt profile path');
     }
-    if (parsed.pocDir) ensureApprovedDir('vfkit pocDir', parsed.pocDir, 0o700);
+    if (parsed.pocDir) {
+      ensureApprovedDir('vfkit pocDir', parsed.pocDir, 0o700, {
+        requirePrivateLeaf: true,
+        trackOwnedRuntimeDir: true,
+      });
+    }
     if (parsed.socketDir) {
-      ensureApprovedDir('vfkit socketDir', parsed.socketDir, 0o700);
+      ensureApprovedDir('vfkit socketDir', parsed.socketDir, 0o700, {
+        requirePrivateLeaf: true,
+        trackOwnedRuntimeDir: true,
+      });
     }
     if (parsed.homeDir) {
-      ensureApprovedDir('vfkit homeDir', parsed.homeDir, 0o700);
+      ensureApprovedDir('vfkit homeDir', parsed.homeDir, 0o700, {
+        requirePrivateLeaf: true,
+        trackOwnedRuntimeDir: true,
+      });
     }
-    if (parsed.tmpDir) ensureApprovedDir('vfkit tmpDir', parsed.tmpDir, 0o700);
+    if (parsed.tmpDir) {
+      ensureApprovedDir('vfkit tmpDir', parsed.tmpDir, 0o700, {
+        requirePrivateLeaf: true,
+        trackOwnedRuntimeDir: true,
+      });
+    }
 
     const kernel = copyIsolatedAsset(sourceKernelPath, plan.kernelPath, {
-      approvedRoots,
-      vaultDir,
+      approvedRoots: normalizedRoots,
+      vaultDir: realVault,
       mode: 0o600,
       createdDirs,
     });
@@ -1367,8 +1506,8 @@ export function stageLocalVmRound({
       sourceInitramfsPath,
       parsed.initramfsPath,
       {
-        approvedRoots,
-        vaultDir,
+        approvedRoots: normalizedRoots,
+        vaultDir: realVault,
         mode: 0o600,
         createdDirs,
       },
@@ -1379,8 +1518,8 @@ export function stageLocalVmRound({
       sourceRootfsPath,
       plan.ownershipTemplate.workDiskPath,
       {
-        approvedRoots,
-        vaultDir,
+        approvedRoots: normalizedRoots,
+        vaultDir: realVault,
         mode: 0o600,
         createdDirs,
       },
@@ -1405,7 +1544,7 @@ export function stageLocalVmRound({
       assertApprovedDestination(
         'vfkit Seatbelt profile',
         seatbeltProfilePath,
-        approvedRoots,
+        normalizedRoots,
         realVault,
       );
       const check = readSingleLinkFile(seatbeltProfilePath);
@@ -1435,9 +1574,9 @@ export function stageLocalVmRound({
         seatbeltProfilePath,
         expectedProfile,
         {
-          approvedRoots,
+          approvedRoots: normalizedRoots,
           realVault,
-          mode: 0o600,
+          mode: 0o400,
           createdDirs,
         },
       );

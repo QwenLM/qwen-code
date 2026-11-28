@@ -33,6 +33,7 @@ import {
   renderVfkitSeatbeltProfile,
   stageLocalVmRound,
   verifyFirecrackerDiskConfig,
+  verifyVfkitSeatbeltProfile,
 } from '../verify-pr-vm-host.mjs';
 import {
   buildFirecrackerLaunchPlan,
@@ -182,7 +183,11 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
     expect(profile).toContain('(subpath (param "POC_DIR"))');
     expect(profile).toContain('(subpath (param "POC_SOCKET_DIR"))');
     expect(profile).toContain('(literal "/usr/bin/true")');
+    expect(profile).not.toContain('(allow default)');
     expect(profile).not.toContain('/Users');
+    expect(profile).not.toContain('/private/tmp');
+    expect(profile).not.toContain('(subpath "/tmp")');
+    expect(profile).not.toContain('$HOME');
 
     expect(() =>
       renderVfkitSeatbeltProfile({ vfkitBin: 'relative/vfkit' }),
@@ -191,7 +196,13 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
       renderVfkitSeatbeltProfile({ vfkitBin: '/tmp/bad"quote/vfkit' }),
     ).toThrow(/invalid vfkitBin/);
     expect(() =>
+      renderVfkitSeatbeltProfile({ vfkitBin: '/tmp/bad\\slash/vfkit' }),
+    ).toThrow(/invalid vfkitBin/);
+    expect(() =>
       renderVfkitSeatbeltProfile({ vfkitBin: '/tmp/bad\nline/vfkit' }),
+    ).toThrow(/invalid vfkitBin/);
+    expect(() =>
+      renderVfkitSeatbeltProfile({ vfkitBin: '/tmp/bad\0nul/vfkit' }),
     ).toThrow(/invalid vfkitBin/);
   });
 
@@ -227,7 +238,7 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
         reasons: [],
       });
 
-      // 2. Permissive profile negative control must fail closed
+      // 2. Permissive profile negative control must fail closed specifically for not-denied controls
       const permissivePath = join(root, 'permissive.sb');
       writeFileSync(permissivePath, '(version 1)\n(allow default)\n', {
         mode: 0o600,
@@ -237,8 +248,14 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
         probeParentDir: root,
       });
       expect(permissive.enforcing).toBe(false);
+      expect(permissive.positiveReadOk).toBe(true);
+      expect(permissive.positiveWriteOk).toBe(true);
       expect(permissive.canaryReadDenied).toBe(false);
       expect(permissive.outsideWriteDenied).toBe(false);
+      expect(permissive.reasons).toEqual([
+        'canary-read-not-denied',
+        'outside-write-not-denied',
+      ]);
 
       // 3. Symlink and hardlink Seatbelt profile paths are refused
       const linkPath = join(root, 'link.sb');
@@ -277,11 +294,15 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
       const runAsync = (cmd, args, cwd) =>
         new Promise((resolveRun) => {
           const child = spawn(cmd, args, { cwd, stdio: 'pipe' });
+          let stdout = '';
           let stderr = '';
+          child.stdout.on('data', (d) => {
+            stdout += d.toString('utf8');
+          });
           child.stderr.on('data', (d) => {
             stderr += d.toString('utf8');
           });
-          child.on('close', (code) => resolveRun({ code, stderr }));
+          child.on('close', (code) => resolveRun({ code, stdout, stderr }));
         });
 
       const positiveTcp = await runAsync(
@@ -299,6 +320,25 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
       const sbFile = join(root, 'deny.sb');
       writeFileSync(sbFile, renderVfkitSeatbeltProfile(), { mode: 0o600 });
 
+      // Differential control: confirm sandboxed exec itself succeeds before testing nc TCP denial
+      const sandboxExecAlive = await runAsync(
+        '/usr/bin/sandbox-exec',
+        [
+          '-f',
+          sbFile,
+          '-D',
+          `POC_DIR=${pocDir}`,
+          '-D',
+          `POC_SOCKET_DIR=${sockDir}`,
+          '/bin/sh',
+          '-c',
+          'echo SANDBOX_EXEC_OK',
+        ],
+        pocDir,
+      );
+      expect(sandboxExecAlive.code).toBe(0);
+      expect(sandboxExecAlive.stdout.trim()).toBe('SANDBOX_EXEC_OK');
+
       const deniedTcp = await runAsync(
         '/usr/bin/sandbox-exec',
         [
@@ -309,6 +349,7 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
           '-D',
           `POC_SOCKET_DIR=${sockDir}`,
           '/usr/bin/nc',
+          '-v',
           '-z',
           '-w',
           '1',
@@ -318,6 +359,10 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
         pocDir,
       );
       expect(deniedTcp.code).not.toBe(0);
+      expect(deniedTcp.stderr).toMatch(
+        /connectx|connect.*failed: Operation not permitted/i,
+      );
+      expect(deniedTcp.stderr).toMatch(/Operation not permitted/i);
       expect(hits).toBe(1);
 
       // 5. Hollow vfkit binary (valid --version, no virtualization entitlement)
@@ -325,6 +370,7 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
       const hollowVfkit = join(root, 'fake-vfkit');
       writeExecutableScript(hollowVfkit, '#!/bin/sh\necho "vfkit 0.6.0"\n');
       const hollowCaps = probeHostCapabilities({
+        arch: 'arm64',
         vfkitBin: hollowVfkit,
         probeParentDir: root,
       });
@@ -344,6 +390,7 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
         '#!/bin/sh\necho "<key>com.apple.security.virtualization</key><true/>"\n',
       );
       const validCaps = probeHostCapabilities({
+        arch: 'arm64',
         vfkitBin: hollowVfkit,
         codesignBin: fakeCodesign,
         probeParentDir: root,
@@ -426,6 +473,52 @@ describe('verify-pr-vm-host Seatbelt profile and capability probes', () => {
         );
       } finally {
         process.env.PATH = savedPath;
+      }
+
+      // vfkit PATH discovery (regular file accepted, symlink refused identically to explicit flag)
+      const vfPathDir = join(root, 'vf-path');
+      const vfSymPathDir = join(root, 'vf-sym-path');
+      mkdirSync(vfPathDir, { mode: 0o700 });
+      mkdirSync(vfSymPathDir, { mode: 0o700 });
+      const plantedVfkit = join(vfPathDir, 'vfkit');
+      writeExecutableScript(plantedVfkit, '#!/bin/sh\necho "vfkit 0.6.0"\n');
+      symlinkSync(plantedVfkit, join(vfSymPathDir, 'vfkit'));
+      const stubCodesign = join(root, 'stub-codesign');
+      writeExecutableScript(
+        stubCodesign,
+        '#!/bin/sh\necho "<key>com.apple.security.virtualization</key><true/>"\n',
+      );
+      const stubSb = join(root, 'stub-sb');
+      writeExecutableScript(stubSb, '#!/bin/sh\nexit 0\n');
+      const savedPathForVf = process.env.PATH;
+      try {
+        process.env.PATH = vfPathDir;
+        const vfViaPath = probeHostCapabilities({
+          platform: 'darwin',
+          arch: 'arm64',
+          sandboxExecBin: stubSb,
+          codesignBin: stubCodesign,
+          probeParentDir: root,
+        });
+        expect(vfViaPath.vfkit.vfkitBin).toBe(plantedVfkit);
+        expect(vfViaPath.vfkit.vfkitVersion).toBe('vfkit 0.6.0');
+        expect(vfViaPath.vfkit.hasVirtualizationEntitlement).toBe(true);
+        expect(vfViaPath.vfkit.reasons).not.toContain('vfkit-binary-missing');
+
+        process.env.PATH = vfSymPathDir;
+        const vfSymViaPath = probeHostCapabilities({
+          platform: 'darwin',
+          arch: 'arm64',
+          sandboxExecBin: stubSb,
+          codesignBin: stubCodesign,
+          probeParentDir: root,
+        });
+        expect(vfSymViaPath.vfkit.vfkitVersion).toBeNull();
+        expect(vfSymViaPath.vfkit.reasons).toContain(
+          'vfkit-binary:symlink-refused',
+        );
+      } finally {
+        process.env.PATH = savedPathForVf;
       }
 
       // Relative vfkitBin fails closed even when invoked with mocked darwin sandboxExecBin
@@ -527,6 +620,40 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
           },
         ),
       ).toThrow(/must not reside inside vaultDir/);
+
+      // Symlinked vaultDir itself (vaultlink -> vault) must still exclude both source and destination under real vault
+      const vaultRealSrc = join(vault, 'in-vault-src.img');
+      writeFileSync(vaultRealSrc, 'vault-secret', { mode: 0o444 });
+      expect(() =>
+        copyIsolatedAsset(vaultRealSrc, join(approved, 'out-from-vault.img'), {
+          approvedRoots: [approved],
+          vaultDir: vaultLink,
+        }),
+      ).toThrow(/must not reside inside vaultDir/);
+      expect(() =>
+        copyIsolatedAsset(src, join(vault, 'write-via-link-vault.img'), {
+          approvedRoots: [approved],
+          vaultDir: vaultLink,
+        }),
+      ).toThrow(/must not reside inside vaultDir/);
+
+      // Not-yet-created approvedRoots entry reached through a symlinked ancestor (macOS /tmp/qc-vm shape)
+      const symParent = join(root, 'sym-parent');
+      const realParentTarget = join(root, 'real-parent-target');
+      mkdirSync(realParentTarget, { mode: 0o700 });
+      symlinkSync(realParentTarget, symParent);
+      const uncreatedRoot = join(symParent, 'not-yet-created-root');
+      const stagedUnderFreshRoot = copyIsolatedAsset(
+        src,
+        join(uncreatedRoot, 'poc', 'work.img'),
+        { approvedRoots: [uncreatedRoot] },
+      );
+      expect(existsSync(stagedUnderFreshRoot.path)).toBe(true);
+      expect(() =>
+        copyIsolatedAsset(src, join(symParent, 'outside-fresh', 'esc.img'), {
+          approvedRoots: [uncreatedRoot],
+        }),
+      ).toThrow(/outside approvedRoots/);
 
       // Refuses symlink and hardlink sources
       const symSrc = join(root, 'sym.img');
@@ -700,6 +827,13 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
       expect(existsSync(staged.initramfsPath)).toBe(true);
       expect(existsSync(staged.workDiskPath)).toBe(true);
       expect(existsSync(staged.seatbeltProfilePath)).toBe(true);
+      expect(lstatSync(staged.seatbeltProfilePath).mode & 0o777).toBe(0o400);
+      expect(
+        verifyVfkitSeatbeltProfile(plan, {
+          approvedRoots: [approved],
+          requireExists: true,
+        }).ok,
+      ).toBe(true);
 
       if (process.platform === 'darwin') {
         const live = probeSeatbeltEnforcement({
@@ -709,12 +843,49 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
         expect(live.enforcing).toBe(true);
       }
 
+      // Simulate runtime state written by vfkit (guest.log, vfkit.pid, vsock, HOME/TMPDIR)
+      writeFileSync(join(pocDir, 'guest.log'), 'booted\n');
+      writeFileSync(join(pocDir, 'vfkit.pid'), '12345\n');
+      writeFileSync(join(pocDir, 'home', '.state'), 'x');
+      writeFileSync(join(pocDir, 'tmp', 't.tmp'), 'y');
+      writeFileSync(join(sockDir, 'v.sock'), 's');
+
       staged.cleanup();
       expect(existsSync(staged.seatbeltProfilePath)).toBe(false);
       expect(existsSync(staged.workDiskPath)).toBe(false);
+      expect(existsSync(pocDir)).toBe(false);
+      expect(existsSync(sockDir)).toBe(false);
       // Newly created launcherSubdir must be pruned; pre-existing callerRound must NOT be deleted
       expect(existsSync(launcherSubdir)).toBe(false);
       expect(existsSync(callerRound)).toBe(true);
+
+      // Pre-existing group/world-accessible private vfkit directory (0o777) must be refused
+      const loosePoc = join(callerRound, 'loose-poc');
+      mkdirSync(loosePoc, { mode: 0o777 });
+      chmodSync(loosePoc, 0o777);
+      const loosePlan = buildVfkitLaunchPlan({
+        runId: 'vf-stg-loose',
+        vfkitBin: '/usr/bin/true',
+        seatbeltProfile: join(launcherSubdir, 'loose.sb'),
+        pocDir: loosePoc,
+        socketDir: join(callerRound, 'loose-s'),
+        kernelPath: join(loosePoc, 'vmlinuz'),
+        initramfsPath: join(loosePoc, 'initramfs.gz'),
+        rootfsPath: join(loosePoc, 'rootfs.ext4'),
+        guestLogPath: join(loosePoc, 'guest.log'),
+        pidFile: join(loosePoc, 'vfkit.pid'),
+        homeDir: join(loosePoc, 'home'),
+        tmpDir: join(loosePoc, 'tmp'),
+      });
+      expect(() =>
+        stageLocalVmRound({
+          plan: loosePlan,
+          sourceKernelPath: kernel,
+          sourceInitramfsPath: initrd,
+          sourceRootfsPath: rootfs,
+          approvedRoots: [approved],
+        }),
+      ).toThrow(/must not allow group\/other access/);
 
       // Pre-existing permissive Seatbelt profile inside approvedRoots must be refused
       mkdirSync(launcherSubdir, { mode: 0o700 });
@@ -995,6 +1166,212 @@ describe('verify-pr-vm-host asset staging, rollback, and runner integration', ()
           /disk config\.json does not match validated plan\.vmConfig/,
         );
       }
+
+      // 4. Default vfkit launch refuses a Seatbelt profile tampered to (allow default) before spawn
+      const goldenInitrd = join(root, 'golden-initrd.gz');
+      writeFileSync(goldenInitrd, 'golden-initrd-data', { mode: 0o444 });
+      const vfPoc = join(root, 'vf-tamper-poc');
+      const vfSock = join(root, 'vf-tamper-s');
+      const vfProfile = join(root, 'vf-tamper-sb', 'vfkit.sb');
+      const vfRecorderHit = join(root, 'vf-recorder-hit.txt');
+      const vfRecorder = join(root, 'vf-recorder.sh');
+      writeExecutableScript(
+        vfRecorder,
+        `#!/bin/sh\nprintf "spawned" > "${vfRecorderHit}"\nexit 0\n`,
+      );
+      const vfPlan = buildVfkitLaunchPlan({
+        runId: 'vf-tamper-1',
+        vfkitBin: '/usr/bin/true',
+        seatbeltProfile: vfProfile,
+        pocDir: vfPoc,
+        socketDir: vfSock,
+        kernelPath: join(vfPoc, 'vmlinuz'),
+        initramfsPath: join(vfPoc, 'initramfs.gz'),
+        rootfsPath: join(vfPoc, 'rootfs.ext4'),
+        guestLogPath: join(vfPoc, 'guest.log'),
+        pidFile: join(vfPoc, 'vfkit.pid'),
+        homeDir: join(vfPoc, 'home'),
+        tmpDir: join(vfPoc, 'tmp'),
+      });
+      const vfStaged = stageLocalVmRound({
+        plan: vfPlan,
+        sourceKernelPath: goldenKernel,
+        sourceInitramfsPath: goldenInitrd,
+        sourceRootfsPath: goldenRootfs,
+        approvedRoots: [root],
+      });
+      chmodSync(vfProfile, 0o600);
+      writeFileSync(vfProfile, '(version 1)\n(allow default)\n', {
+        mode: 0o600,
+      });
+      const vfTamperedPlan = {
+        ...vfPlan,
+        argv: [vfRecorder, ...vfPlan.argv.slice(1)],
+      };
+      const vfTamperedRun = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'launcher-vf-tamper'),
+        vaultDir: join(root, 'vault-vf-tamper'),
+        approvedRoots: [root],
+        plan: vfTamperedPlan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        trustedInputDigest: sha256Text('trusted-input'),
+      });
+      expect(vfTamperedRun.ok).toBe(false);
+      expect(vfTamperedRun.errors.join('\n')).toMatch(
+        /vfkit Seatbelt profile does not match the deny-default profile/,
+      );
+      expect(existsSync(vfRecorderHit)).toBe(false);
+      vfStaged.cleanup();
+
+      // 5. All four runHardwareRound image-identity guards reject swapped/aliased/hardlinked launch images
+      const makeManualPlan = (runId) =>
+        buildFirecrackerLaunchPlan({
+          runId,
+          jailBaseDir: join(root, 'j'),
+          firecrackerBin: '/opt/firecracker',
+          jailerBin: '/bin/sh',
+          vmmUid: currentUid,
+          vmmGid: currentGid,
+        });
+      // 5a. Swapped kernel digest
+      const badKernelPlan = makeManualPlan('id-bad-k');
+      mkdirSync(badKernelPlan.jailRoot, { recursive: true });
+      writeFileSync(badKernelPlan.kernelPath, 'swapped-kernel');
+      copyFileSync(goldenRootfs, badKernelPlan.ownershipTemplate.workDiskPath);
+      const badKernelRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-id-k'),
+        vaultDir: join(root, 'v-id-k'),
+        approvedRoots: [root],
+        plan: badKernelPlan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        trustedInputDigest: sha256Text('t'),
+      });
+      expect(badKernelRes.ok).toBe(false);
+      expect(badKernelRes.errors.join('\n')).toMatch(
+        /planned kernel must be a regular file matching sourceKernelPath/,
+      );
+
+      // 5b. Working disk path aliases sourceRootfsPath
+      const aliasDiskPlan = makeManualPlan('id-alias-d');
+      mkdirSync(aliasDiskPlan.jailRoot, { recursive: true });
+      copyFileSync(goldenKernel, aliasDiskPlan.kernelPath);
+      aliasDiskPlan.ownershipTemplate.workDiskPath = goldenRootfs;
+      const aliasDiskRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-id-a'),
+        vaultDir: join(root, 'v-id-a'),
+        approvedRoots: [root],
+        plan: aliasDiskPlan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        trustedInputDigest: sha256Text('t'),
+      });
+      expect(aliasDiskRes.ok).toBe(false);
+      expect(aliasDiskRes.errors.join('\n')).toMatch(
+        /working disk path must be a per-round copy distinct from sourceRootfsPath/,
+      );
+
+      // 5c. Swapped working disk bytes
+      const badDiskPlan = makeManualPlan('id-bad-d');
+      mkdirSync(badDiskPlan.jailRoot, { recursive: true });
+      copyFileSync(goldenKernel, badDiskPlan.kernelPath);
+      writeFileSync(
+        badDiskPlan.ownershipTemplate.workDiskPath,
+        'swapped-rootfs',
+      );
+      const badDiskRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-id-d'),
+        vaultDir: join(root, 'v-id-d'),
+        approvedRoots: [root],
+        plan: badDiskPlan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        trustedInputDigest: sha256Text('t'),
+      });
+      expect(badDiskRes.ok).toBe(false);
+      expect(badDiskRes.errors.join('\n')).toMatch(
+        /working disk must be a regular-file copy matching sourceRootfsPath/,
+      );
+
+      // 5d. Hardlinked working disk (shared inode with sourceRootfsPath)
+      const hardDiskPlan = makeManualPlan('id-hard-d');
+      mkdirSync(hardDiskPlan.jailRoot, { recursive: true });
+      copyFileSync(goldenKernel, hardDiskPlan.kernelPath);
+      const hardSource = join(root, 'hard-source-rootfs.ext4');
+      writeFileSync(hardSource, 'hard-source-bytes', { mode: 0o444 });
+      linkSync(hardSource, hardDiskPlan.ownershipTemplate.workDiskPath);
+      const hardDiskRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-id-h'),
+        vaultDir: join(root, 'v-id-h'),
+        approvedRoots: [root],
+        plan: hardDiskPlan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: hardSource,
+        trustedInputDigest: sha256Text('t'),
+      });
+      expect(hardDiskRes.ok).toBe(false);
+      expect(hardDiskRes.errors.join('\n')).toMatch(
+        /working disk must be independently owned storage, not a hardlink or shared inode/,
+      );
+    },
+  );
+
+  it.runIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+    'applies non-root vmmUid/vmmGid ownership and modes by default when staging Firecracker as root',
+    () => {
+      const root = makeTempDir('vh-root-chown-');
+      const kernel = join(root, 'vmlinuz');
+      const rootfs = join(root, 'rootfs.ext4');
+      writeFileSync(kernel, 'root-kernel', { mode: 0o444 });
+      writeFileSync(rootfs, 'root-rootfs', { mode: 0o444 });
+      const jailBase = join(root, 'j');
+      mkdirSync(jailBase, { mode: 0o755 });
+      const plan = buildFirecrackerLaunchPlan({
+        runId: 'fc-root-1',
+        jailBaseDir: jailBase,
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: 65534,
+        vmmGid: 65534,
+      });
+      // Omit applyChown to exercise the default null root-ownership branch
+      const staged = stageLocalVmRound({
+        plan,
+        sourceKernelPath: kernel,
+        sourceRootfsPath: rootfs,
+        approvedRoots: [root],
+      });
+      try {
+        const jailStat = lstatSync(staged.jailRoot);
+        expect(jailStat.uid).toBe(65534);
+        expect(jailStat.gid).toBe(65534);
+        expect(jailStat.mode & 0o777).toBe(0o750);
+        for (const p of [
+          staged.kernelPath,
+          staged.workDiskPath,
+          staged.configPath,
+          staged.consoleLogPath,
+        ]) {
+          const st = lstatSync(p);
+          expect(st.uid).toBe(65534);
+          expect(st.gid).toBe(65534);
+          expect(st.mode & 0o777).toBe(0o640);
+        }
+      } finally {
+        staged.cleanup();
+      }
+      expect(existsSync(staged.jailRoot)).toBe(false);
     },
   );
 
