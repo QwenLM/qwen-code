@@ -5,22 +5,27 @@
  */
 
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
 import { notificationExcerpt } from './notification-text';
-import { getTranslator, type WebShellLanguage } from './i18n';
+import { getTranslator, loadLanguage, type WebShellLanguage } from './i18n';
+import {
+  BrowserNotificationSettingsContext,
+  useBrowserNotificationSettings,
+  type BrowserNotificationPermissionState as Permission,
+} from './browser-notification-settings-context';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
   TurnNotificationNavigationContext,
   type TurnNotification,
 } from './daemon/session/turn-notification-context';
+
+export { useBrowserNotificationSettings };
 
 export const BROWSER_NOTIFICATIONS_STORAGE_KEY =
   'qwen-code-web-shell-browser-notifications';
@@ -47,28 +52,6 @@ interface BrowserTurnNotificationsProps {
   language: WebShellLanguage;
   options?: WebShellBrowserNotificationsOptions;
   active?: boolean;
-}
-
-type Permission = NotificationPermission | 'unavailable';
-
-interface BrowserNotificationSettings {
-  enabled: boolean;
-  permission: Permission;
-  pending: boolean;
-  persistent: boolean;
-  error: boolean;
-  setEnabled(enabled: boolean): Promise<void>;
-  requestPermissionOnce(): void;
-  refreshPermission(): void;
-  syncLanguage(language: WebShellLanguage): void;
-}
-
-const BrowserNotificationSettingsContext = createContext<
-  BrowserNotificationSettings | undefined
->(undefined);
-
-export function useBrowserNotificationSettings() {
-  return useContext(BrowserNotificationSettingsContext);
 }
 
 function permission(): Permission {
@@ -253,11 +236,15 @@ function StandaloneNotifications({
       (document.visibilityState !== 'visible' || !document.hasFocus());
     if (turn.outcome === 'cancelled' || !canShow()) return;
     const show = async () => {
+      const notificationLanguage = appLanguage ?? language;
+      const localeReady = loadLanguage(notificationLanguage);
       // Hash identities so notification tags and shared storage contain no paths.
       const digest = await crypto.subtle.digest(
         'SHA-256',
         new TextEncoder().encode(turn.key),
       );
+      if (localeReady) await localeReady;
+      if (!canShow()) return;
       const tag = `qwen-code-turn:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
       let attempted = false;
       const deliver = (shared: boolean) => {
@@ -282,7 +269,7 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(appLanguage ?? language);
+        const t = getTranslator(notificationLanguage);
         const appName = options?.appName?.trim() || 'QwenCode';
         const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
         const prompt = notificationExcerpt(turn.promptText ?? '', 80);

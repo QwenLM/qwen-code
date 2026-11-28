@@ -92,7 +92,7 @@ async function fixture(root) {
     'packages/cli/src/serve/managed-runtime-broker-client.ts':
       'export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 2 as const;\n',
     'packages/cli/src/serve/hosted-harness-contract.ts':
-      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n).split(',');\n",
+      "const profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??\n  'hosted-workspace-files/1,hosted-workspace-shell/1'\n).split(',');\n",
     'docs/users/managed-agent-reference-deployment.md': 'deploy\n',
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
@@ -579,7 +579,7 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   );
   assert.match(
     harness,
-    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   const paths = {
     databasePassword: secrets.databasePassword,
@@ -1061,7 +1061,7 @@ test('ships the Harness credential keys the control plane reads', async () => {
   // The tool path's pair ships commented, for the operator to enable together.
   assert.match(
     template,
-    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:8080$/m,
   );
   assert.match(
     template,
@@ -1107,9 +1107,9 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
       name: 'commented lifecycle v2 default',
       file: 'packages/cli/src/serve/hosted-harness-contract.ts',
       contents:
-        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
+        "/*\nprocess.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-files/1,hosted-workspace-shell/1'\n*/\nconst profiles = (\n  process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? ''\n).split(',');\n",
       error:
-        /Hosted lifecycle v2 profiles must default to canonical Shell only/,
+        /Hosted lifecycle v2 profiles must default to canonical files and Shell/,
     },
     {
       name: 'duplicate public Shell default',

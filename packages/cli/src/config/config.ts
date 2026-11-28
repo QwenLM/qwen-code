@@ -9,10 +9,6 @@ import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
-import {
-  isLoopProtectionMode,
-  type LoopProtectionMode,
-} from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   type ModelProposedGoalsMode,
@@ -1660,25 +1656,6 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
-// Reported once per value for the same reason as the output-style warnings.
-const loopProtectionWarningsShown = new Set<string>();
-
-/**
- * Resolves `model.loopProtection`. An invalid value (a typo or the wrong
- * case) falls back to the default with a warning, so a user who asked for
- * `stop` learns that the turn will not stop.
- */
-function resolveLoopProtection(value: unknown): LoopProtectionMode | undefined {
-  if (value === undefined || isLoopProtectionMode(value)) return value;
-  const warning = `Invalid model.loopProtection value ${JSON.stringify(value)}: expected "warn", "stop" or "off"; using the default "warn".`;
-  if (loopProtectionWarningsShown.has(warning)) return undefined;
-  loopProtectionWarningsShown.add(warning);
-  debugLogger.warn(warning);
-  // eslint-disable-next-line no-console
-  console.error(`WARNING: ${warning}`);
-  return undefined;
-}
-
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1742,6 +1719,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
+    modelPreferences?: ConfigParameters['modelPreferences'];
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1803,6 +1781,10 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const modelPreferences =
+    !bareMode && !sshWorkspace && !modelConfiguration
+      ? hostPolicy?.modelPreferences
+      : undefined;
   const executionSandboxSettings = agentHostReadOnly
     ? undefined
     : validateExecutionSandboxSelection(settings, argv);
@@ -2343,6 +2325,7 @@ export async function loadCliConfig(
           },
           settings,
           selectedAuthType,
+          deferReasoningEffort: modelPreferences !== undefined,
           env: process.env as Record<string, string | undefined>,
         });
 
@@ -2659,6 +2642,11 @@ export async function loadCliConfig(
 
   const configParams: ConfigParameters = {
     sessionId,
+    modelPreferences,
+    modelPreferenceDefaultEffort:
+      modelPreferences === undefined
+        ? undefined
+        : settings.model?.reasoningEffort,
     sessionData,
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
@@ -2757,17 +2745,23 @@ export async function loadCliConfig(
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: async (scope, ruleType, rule) => {
-      const currentSettings = loadSettings(cwd);
+    onPersistPermissionRule: async (scope, ruleType, rule, workspaceDir) => {
+      const currentSettings = loadSettings(workspaceDir, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: scope === 'user',
+      });
       const settingScope =
         scope === 'project' ? SettingScope.Workspace : SettingScope.User;
-      const key = `permissions.${ruleType}`;
-      const currentRules: string[] =
-        currentSettings.forScope(settingScope).settings.permissions?.[
-          ruleType
-        ] ?? [];
-      if (!currentRules.includes(rule)) {
-        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      const file = currentSettings.forScope(settingScope);
+      const rawRules = file.originalSettings.permissions?.[ruleType] ?? [];
+      if (
+        !rawRules.includes(rule) &&
+        !file.settings.permissions?.[ruleType]?.includes(rule)
+      ) {
+        currentSettings.setValue(settingScope, `permissions.${ruleType}`, [
+          ...rawRules,
+          rule,
+        ]);
       }
     },
     toolDiscoveryCommand:
@@ -2881,6 +2875,7 @@ export async function loadCliConfig(
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
     eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
+    modelAvailabilityTracking: settings.experimental?.modelAvailabilityTracking,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2986,8 +2981,6 @@ export async function loadCliConfig(
     preventSystemSleep: settings.general?.preventSystemSleep ?? true,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
-    skipLoopDetection: settings.model?.skipLoopDetection ?? true,
-    loopProtection: resolveLoopProtection(settings.model?.loopProtection),
     maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
@@ -3055,7 +3048,12 @@ export async function loadCliConfig(
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
-    channel: argv.channel,
+    // Synthesized ACP argv (the Hosted Harness per-turn configs) never passes
+    // through parseArguments, so resolve the same launcher-marker fallback
+    // here; an explicit --channel still wins. isAcpMode covers the deprecated
+    // experimentalAcp alias exactly like the parseArguments copy.
+    channel:
+      argv.channel ?? (isAcpMode ? resolveAcpChannelFallback() : undefined),
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
     // `--input-file` fall back to settings.dualOutput.* when the flag is

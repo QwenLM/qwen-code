@@ -66,7 +66,23 @@ and the resting-view guard are unchanged.
 
 ### Skill contract (`.qwen/skills/verify-pr/SKILL.md`)
 
-The watch prompt and the manual re-verification step both change to:
+**Current contract / migration note (later preflight):** the numbered commands
+below preserve the original proposal and its then-current CLI progression. When
+registration uses an explicit external/trusted `--state-root`, current recovery
+repeats that identical root on every later start, completion/replay, release and
+restart. Genuine older default trusted-clone/container invocations keep the same
+omission instead of acquiring a new required option. A nonce-bearing stored
+entry requires the exact matching `--registration-nonce`; an old bare prompt
+must recover the exact start output or read only the matching live/verified
+entry in that root and pass it explicitly, never infer it from current state.
+Only a genuinely legacy entry with no `registrationNonce` may omit the option
+for that same head/round/root. Comment approval still requires a legacy
+in-flight entry to be released/restarted for a new nonce and fresh marker.
+Successful withheld/no-publish rounds complete with no comment ID and retain
+`commentId: null` rather than being released.
+
+The watch prompt and the manual re-verification step both change to (historical
+proposal):
 
 1. **Register first**: `verify-pr-watch-state.mjs <n> --start --head <H> --round
 <r> --repo <owner>/<repo>` (no `--artifact-dir` — prepare has not run yet).
@@ -78,6 +94,14 @@ The watch prompt and the manual re-verification step both change to:
 <owner>/<repo>` — the directory is recorded here (optional: a replayed
    completion omits it to inherit the recorded directory).
 
+**Current-contract correction to the historical “never reads” clause below:**
+container-only prepare retains that original no-registration-read behavior, and
+local-trust does not take a registration lock. Coordinated comment-approved
+preparation now does perform a read-only live-registration check: after the
+final network responses it takes the state lock, rechecks the same explicit
+root's head/round/nonce, and refuses stale identity before any authority write.
+A transient retry therefore preserves, rather than bypasses, that registration.
+
 New responsibility: because the marker now exists before prepare, a **prepare
 failure after `--start`** is recovered according to the round's state. A
 _transient_ failure (the round still runs) leaves the marker intact — prepare
@@ -86,8 +110,10 @@ original round, with no release (round 7); releasing first would leave the head
 unregistered between the release and a restart, re-opening the silent drop if
 the round is killed in that window. A round that _died_ is recovered by
 `--release --head <H> --round <r> --repo <owner>/<repo>` **and then start the
-head again** (`--start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry
-prepare. A release alone is not a recovery: `releaseRound` files only a
+head again** (`--start --head <H> --round <r> --repo <owner>/<repo>`) and retry
+prepare. The restart keeps the same round number; its new registrationNonce is
+the freshness boundary. `<r+1>` remains an explicit alternative for comment
+approval, but it must be registered and marked at `<r+1>`. A release alone is not a recovery: `releaseRound` files only a
 `releasedHeads` push-order hint — explicitly not a deferral, and printed by no
 verb — so the head is left unregistered, and the probe cursor already advanced
 past it, so no fire delivers it again (R1-1 round 2). The release must be paired
@@ -97,7 +123,7 @@ omitted `--repo` against a recorded repo. Use `--release` + restart, **not**
 `--complete inconclusive`: inconclusive is the only verdict that increments the
 head's retry counter, and the counter's cap is the terminal not-covered state,
 so two transient prepare failures would retire a head no round ever examined
-(R1-5). The restarted round's number (`<r+1>`) becomes this round's number, and
+(R1-5). The restarted round's number (`<r>`) becomes this round's number, and
 `--complete` must repeat that value (R3-2). The recovery has a non-transient
 terminal case: if prepare refuses because the head it names is not the head
 this round registered — moved forward or force-pushed; prepare re-resolves
@@ -159,7 +185,7 @@ existing dead-round recovery (`--release` for a round that died after
   a **positional** pin asserts the registration sentence precedes the
   `Then run prepare` sentence in each section (watch `<headSha>`, manual `<H>`);
   the prepare-failure recovery pin asserts the full `--release` form carries
-  `--repo` **and the restart clause** (`--start … --round <r+1>`; removing
+  `--repo` **and the restart clause** (`--start … --round <r>`; removing
   either reds it); the watch prompt's exit-3 dead-marker bullet is pinned to the
   full `--release … --repo` form (R2-1). Round 6 adds slice-scoped pins so a
   shared sentence's copy in one section is not an alibi for the other: the
@@ -281,8 +307,8 @@ existing dead-round recovery (`--release` for a round that died after
   without releasing, but a dead round's recovery still carries that window. A
   watch only wakes on head moves, so a killed round on the
   _last_ head still awaits a new move, or a manual
-  `--release --head <H> --round <r> --repo <owner>/<repo>` **followed by a
-  restart** (`--start … --round <r+1>`) — a release alone leaves the head
+  `--release --head <H> [--round <r>] --repo <owner>/<repo>` **followed by a
+  restart** (`--start … --round <r>`) — a release alone leaves the head
   unregistered. `<r>` is the dead round's number, read from the state file's
   in-flight entry and passed (omit it only for a legacy marker that records no
   round), so a retried release cannot delete a newer round's live marker.

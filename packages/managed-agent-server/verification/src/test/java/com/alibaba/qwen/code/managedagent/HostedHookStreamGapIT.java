@@ -71,7 +71,7 @@ class HostedHookStreamGapIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "hook-stream-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure =
             new AtomicReference<>();
@@ -162,7 +162,7 @@ class HostedHookStreamGapIT {
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -407,8 +407,6 @@ class HostedHookStreamGapIT {
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port="
-                                + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -520,7 +518,7 @@ class HostedHookStreamGapIT {
                 + " event_type, gmt_create, data_json, is_terminal"
                 + " FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'SESSION' AND"
-                + " stream_id = X'' ORDER BY sequence_id", tenant, session);
+                + " stream_id = '' ORDER BY sequence_id", tenant, session);
     }
 
     /** One ledger row exactly as the surface serves it. */

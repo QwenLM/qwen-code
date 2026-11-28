@@ -1,6 +1,9 @@
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellComposerTag } from '../customization';
-import type { InlineTagPlacement } from './useComposerCore';
+import type {
+  InlineTagPlacement,
+  PendingComposerDraftReferences,
+} from './useComposerCore';
 import {
   mergeDraftAttachments,
   subtractDraftAttachments,
@@ -13,10 +16,15 @@ export interface ComposerDraftContent {
   inlineTags: InlineTagPlacement[];
   tags: WebShellComposerTag[];
   inputAnnotations: DaemonInputAnnotation[];
+  pendingCustomReferences?: PendingComposerDraftReferences;
 }
 
-type DraftChange = 'content' | 'attachments' | 'clear';
-type Listener = (change: DraftChange) => void;
+export type ComposerDraftChange =
+  | 'content'
+  | 'attachments'
+  | 'clear'
+  | { addedReferences: InlineTagPlacement[] };
+type Listener = (change: ComposerDraftChange) => void;
 
 const sessions = new Map<string, ComposerDraftSession>();
 
@@ -89,7 +97,7 @@ export class ComposerDraftSession {
       sessions.delete(this.key);
   }
 
-  private emit(change: DraftChange, source?: Listener) {
+  private emit(change: ComposerDraftChange, source?: Listener) {
     for (const listener of this.ingestionCounts.keys()) {
       if (listener !== source) listener(change);
     }
@@ -98,6 +106,13 @@ export class ComposerDraftSession {
   setContent(content: ComposerDraftContent, source?: Listener) {
     this.content = content;
     this.emit('content', source);
+  }
+
+  resolveCustomReferences(addedReferences: InlineTagPlacement[]) {
+    this.content.pendingCustomReferences = undefined;
+    if (addedReferences.length === 0) return;
+    this.content.inlineTags = [...this.content.inlineTags, ...addedReferences];
+    this.emit({ addedReferences });
   }
 
   private persist(attachments: ComposerDraftAttachments) {

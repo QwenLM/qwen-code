@@ -25,6 +25,7 @@ import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
 import genericWebhookConfig from '../../packages/channels/generic-webhook/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
+import msteamsConfig from '../../packages/channels/msteams/vitest.config.js';
 import qqbotConfig from '../../packages/channels/qqbot/vitest.config.js';
 import telegramConfig from '../../packages/channels/telegram/vitest.config.js';
 import wecomConfig from '../../packages/channels/wecom/vitest.config.js';
@@ -34,6 +35,7 @@ import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
 import networkPolicyConfig from '../../packages/network-policy/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
+import qwenConfig from '../../packages/qwen/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
@@ -116,6 +118,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/channels/generic-webhook': genericWebhookConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
+  'packages/channels/msteams': msteamsConfig,
   'packages/channels/qqbot': qqbotConfig,
   'packages/channels/telegram': telegramConfig,
   'packages/channels/wecom': wecomConfig,
@@ -125,6 +128,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/core': coreConfig,
   'packages/network-policy': networkPolicyConfig,
   'packages/node-repl': nodeReplConfig,
+  'packages/qwen': qwenConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
   'packages/web-shell': webShellConfig,
@@ -234,7 +238,11 @@ describe('JUnit report upload paths', () => {
     const laneWorkspaces = Object.keys(configModules).filter(
       (name) => name !== 'scripts/tests',
     );
-    const declared = declaredWorkspaceDirs(repoRoot);
+    // packages/harness/* rename test:ci to test:harness:ci, so the lane never
+    // runs them and they write no report for the publisher to reach.
+    const declared = declaredWorkspaceDirs(repoRoot).filter(
+      (dir) => !dir.startsWith('packages/harness/'),
+    );
     expect(
       laneWorkspaces.filter((name) => !declared.includes(name)),
       'lane workspace missing from pnpm-workspace.yaml/package.json',
@@ -320,6 +328,8 @@ const configModules: Record<
     import('../../packages/channels/github/vitest.config.js'),
   'packages/channels/gitlab': () =>
     import('../../packages/channels/gitlab/vitest.config.js'),
+  'packages/channels/msteams': () =>
+    import('../../packages/channels/msteams/vitest.config.js'),
   'packages/channels/qqbot': () =>
     import('../../packages/channels/qqbot/vitest.config.js'),
   'packages/channels/telegram': () =>
@@ -336,6 +346,7 @@ const configModules: Record<
     import('../../packages/network-policy/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
+  'packages/qwen': () => import('../../packages/qwen/vitest.config.js'),
   // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
   // it passes the on-pool floor from any runner name and stays out of the
   // off-pool sample below.
@@ -410,11 +421,13 @@ describe('shared-pool test timeout', () => {
     'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
+    'packages/channels/msteams',
     'packages/channels/qqbot',
     'packages/channels/telegram',
     'packages/channels/wecom',
     'packages/channels/weixin',
     'packages/chrome-extension',
+    'packages/qwen',
     'packages/web-shell',
   ] as const;
 

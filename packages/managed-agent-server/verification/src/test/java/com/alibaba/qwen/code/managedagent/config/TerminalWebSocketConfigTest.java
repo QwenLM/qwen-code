@@ -8,10 +8,10 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import jakarta.websocket.server.ServerContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.env.MapPropertySource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockServletContext;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 
-import java.time.Clock;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,7 +47,7 @@ class TerminalWebSocketConfigTest {
                     mock(ManagedAgentService.class));
             factory.registerSingleton("managedAgentSettings",
                     mock(ManagedAgentSettings.class));
-            factory.registerSingleton("managedAgentClock", Clock.systemUTC());
+            factory.registerSingleton("managedJdbcTemplate", mock(JdbcTemplate.class));
         });
         Class<?>[] configs = new Class<?>[extra.length + 1];
         configs[0] = TerminalWebSocketConfig.class;

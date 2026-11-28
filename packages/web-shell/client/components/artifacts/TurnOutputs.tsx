@@ -24,7 +24,8 @@ import {
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
 import { ArtifactIcon } from './ArtifactIcon';
-import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
+import { useOptionalWorkspaceRuntime } from '../../utils/workspace-context.js';
+import { useArtifactWorkspaceTargetFromRuntime } from './artifact-workspace-target.js';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -52,8 +53,17 @@ export interface TurnOutputScheduledTask {
   prompt: string;
   recurring: boolean;
   durable: boolean;
+  /**
+   * True when created via `cron_create(durable: true)` with default unbound
+   * `sessionMode` (not `'current'`). `qwen serve`'s keepalive adopts such
+   * tasks into their own dedicated `scheduled_task` session shortly after
+   * creation, so their runtime `sessionId` differs from the creating chat's
+   * `sourceSessionId`.
+   */
+  unboundCreation?: boolean;
   workspaceId?: string;
   display?: string;
+  liveStatus?: 'active' | 'paused';
 }
 
 export type TurnOutputKind = 'file' | 'artifact' | 'scheduled_task';
@@ -192,7 +202,12 @@ function TurnOutputsComponent({
         filterArtifact(artifact, { turnId, sourceSessionId }),
       )
     : allArtifacts;
-  const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspace = useOptionalWorkspaceRuntime();
+  const workspaceTarget = useArtifactWorkspaceTargetFromRuntime(
+    workspace,
+    workspace?.actions,
+    workspaceCwd,
+  );
   const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
   const [showAllArtifacts, setShowAllArtifacts] = useState(false);
@@ -588,8 +603,14 @@ function ScheduledTaskCard({
   onOpen: () => void;
 }) {
   const { t } = useI18n();
+  const statusLabel =
+    task.liveStatus === 'active'
+      ? t('environment.scheduledTasks.statusActive')
+      : task.liveStatus === 'paused'
+        ? t('environment.scheduledTasks.statusPaused')
+        : null;
   return (
-    <div className={styles.card}>
+    <div className={styles.card} data-scheduled-task-status={task.liveStatus}>
       <div className={styles.summary}>
         <span className={styles.icon} aria-hidden="true">
           <ClockIcon />
@@ -602,6 +623,7 @@ function ScheduledTaskCard({
               task.recurring
                 ? t('scheduledTasks.repeats')
                 : t('scheduledTasks.runsOnce'),
+              statusLabel,
             ]
               .filter(Boolean)
               .join(' · ')}

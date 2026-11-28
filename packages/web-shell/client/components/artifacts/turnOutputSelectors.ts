@@ -5,6 +5,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
+import { scheduledTaskRuntimeKey } from '../dialogs/scheduledTasksSchedule';
 import { isSamePath, normalizePath, stripWorkspacePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {
@@ -207,6 +208,47 @@ export function getFileChangesByTurn(
   return byTurn;
 }
 
+export interface SessionScheduledTaskLiveSnapshots {
+  taskStatusById: ReadonlyMap<string, 'active' | 'paused'>;
+  hasLiveDurableSnapshot: boolean;
+  hasLiveSessionSnapshot: boolean;
+}
+
+export function enrichScheduledTasksByTurn(
+  byTurn: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>,
+  live: SessionScheduledTaskLiveSnapshots,
+): ReadonlyMap<string, readonly TurnOutputScheduledTask[]> {
+  if (
+    byTurn.size === 0 ||
+    (!live.hasLiveDurableSnapshot && !live.hasLiveSessionSnapshot)
+  ) {
+    return byTurn;
+  }
+  const next = new Map<string, readonly TurnOutputScheduledTask[]>();
+  for (const [turnId, items] of byTurn) {
+    next.set(
+      turnId,
+      items.map((item) => {
+        const status = live.taskStatusById.get(
+          item.durable
+            ? item.id
+            : scheduledTaskRuntimeKey({
+                scope: 'session',
+                source: 'cron',
+                id: item.id,
+              }),
+        );
+        if (status) return { ...item, liveStatus: status };
+        // Absence is not a cancellation event: durable filtering, a consumed
+        // one-shot, an expired recurring job and task-owner changes all look
+        // identical in this list. Keep the historical creation snapshot.
+        return item;
+      }),
+    );
+  }
+  return next;
+}
+
 export function getScheduledTasksByTurn(
   messages: readonly Message[],
 ): ReadonlyMap<string, readonly TurnOutputScheduledTask[]> {
@@ -258,6 +300,8 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
     getStringField(raw, 'llmContent') ??
     (typeof tool.rawOutput === 'string' ? tool.rawOutput : undefined);
   const display = outputText ? getFirstLine(outputText) : undefined;
+  const durable = getBooleanField(tool.args, 'durable') ?? false;
+  const sessionMode = getStringField(tool.args, 'sessionMode');
   return {
     id: outputText ? (getCronTaskId(outputText) ?? tool.callId) : tool.callId,
     toolCallId: tool.callId,
@@ -265,7 +309,8 @@ function getScheduledTask(tool: ACPToolCall): TurnOutputScheduledTask | null {
     cron,
     prompt,
     recurring: getBooleanField(tool.args, 'recurring') ?? true,
-    durable: getBooleanField(tool.args, 'durable') ?? false,
+    durable,
+    ...(durable && sessionMode !== 'current' ? { unboundCreation: true } : {}),
     ...(display ? { display } : {}),
   };
 }

@@ -21,16 +21,48 @@
  * path can produce a clean verdict from an unanswered question.
  *
  * Usage:
- *   node verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file>
- *   node verify-pr-guard.mjs --compare --start <file> --now <file>
+ *   node verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file> [--no-clobber]
+ *   node verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
  *
  * Exit codes: 0 clean / snapshot written, 1 dirty or fetch failed, 2 usage.
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import {
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
+import { GUARD_VERDICT_SCHEMA } from './verify-pr-check.mjs';
+
+export { GUARD_VERDICT_SCHEMA };
+
+// Checked against live GitHub PRs (#18549, #18494, #18522, #17372 with 117
+// reviews): closing GraphQL probe run after all REST paginated/since fetches
+// finish. Single request for PRs with <= 100 formal reviews; paginates backward
+// via `before` cursor when > 100 reviews exist so every formal review (1..N)
+// is checked alongside head, PR state, top-level comment count/latest created
+// comment, and most-recently-updated top-level comment.
+export const GUARD_CONFIRM_QUERY =
+  'query($owner: String!, $name: String!, $number: Int!, $before: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 100, before: $before) { totalCount pageInfo { hasPreviousPage startCursor } nodes { databaseId state submittedAt body } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } latestEditedComment: comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { databaseId updatedAt body } } } } }';
+
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
+
+function isIsoUtcTimestamp(value) {
+  if (typeof value !== 'string' || !ISO_UTC_RE.test(value)) return false;
+  const ms = Date.parse(value);
+  return (
+    Number.isFinite(ms) &&
+    new Date(ms).toISOString().startsWith(value.slice(0, 19))
+  );
+}
 
 /**
  * The three lists the guard covers; `--paginate` or only the first 30 arrive.
@@ -44,19 +76,41 @@ const LISTS = [
 ];
 
 const HELP = `Usage:
-  node scripts/verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file>
-  node scripts/verify-pr-guard.mjs --compare --start <file> --now <file>
+  node scripts/verify-pr-guard.mjs --pr <n> --repo <owner>/<repo> --snapshot <file> [--no-clobber]
+  node scripts/verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
 
---snapshot fetches the head, the PR state and all three comment lists with
---paginate, and writes them only when every call succeeded. A failed call exits
-1 and leaves no file, so a retry cannot be mistaken for a snapshot.
+--snapshot fetches the head and PR state, paginates all three comment lists,
+re-checks the earlier review/review-comment lists plus incremental ?since=
+probes for inline review comments and top-level comments (catching edits to
+already-read pages and same-second updatedAt ties), then runs a closing GraphQL
+probe (paginating backward when > 100 formal reviews exist) to confirm head,
+PR state, every formal review (state, submittedAt, and body), top-level comment
+count/latest created comment, and most-recently-updated top-level comment all
+remained unchanged. It writes the file only when every call succeeded with
+valid JSON objects/arrays and the opening and closing reads match. A failed
+fetch or failed write exits 1 and leaves no stale regular snapshot behind
+(removing any stale regular snapshot already at that path while refusing to
+touch symlinks, hardlinks, or non-regular files), so a retry after a failed
+refresh cannot be mistaken for a fresh snapshot.
+
+With --no-clobber (for round-start snapshots in a per-round host directory),
+--snapshot creates the file exclusively (O_EXCL) and exits 1 without touching
+or deleting an existing file, preventing concurrent rounds from overwriting
+each other's start snapshot.
 
 --compare is fail-closed: a malformed snapshot, a moved head, a changed state, a
 new or edited item, a vanished item, or a list shorter than the start snapshot
 all report dirty. A short list is a failed fetch, not a quiet PR. Edits are read
 from the body and the review state as well as the timestamp, because neither
-editing nor dismissing a review moves a timestamp. Passing the same file as both
-sides is a usage error, not a clean round.
+editing nor dismissing a review moves a timestamp. Passing the same file (or an
+alias to it) as both sides is a usage error, not a clean round.
+
+With --out <verdict-file>, --compare writes a structured ${GUARD_VERDICT_SCHEMA}
+record (both on clean and on dirty, so a stale clean record at the same path
+cannot survive a dirty re-check; a write failure also invalidates any stale
+regular verdict at that path). On a clean round it prints \`guard-sha256\` so
+verify-pr-check.mjs --require-guard --guard <file> --guard-sha256 <digest> can
+bind the verdict before posting.
 
 Exit codes: 0 clean / written, 1 dirty or fetch failed, 2 usage.
 `;
@@ -88,7 +142,7 @@ function normalize(items, carriesState) {
  * Fetches every list. `run` is injected so tests can drive the failure paths
  * without a network; it returns a spawnSync-shaped result.
  */
-export function fetchSnapshot({ pr, repo, run }) {
+export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
   const errors = [];
   const call = (args, label) => {
     const result = run(args);
@@ -96,41 +150,64 @@ export function fetchSnapshot({ pr, repo, run }) {
       errors.push(
         `${label}: gh exited ${result.status ?? 'null'}${result.stderr ? ` — ${result.stderr.trim().split('\n')[0]}` : ''}`,
       );
-      return null;
+      return { ok: false, value: null };
     }
     try {
-      return JSON.parse(result.stdout);
+      return { ok: true, value: JSON.parse(result.stdout) };
     } catch {
       errors.push(`${label}: response was not JSON`);
-      return null;
+      return { ok: false, value: null };
     }
   };
 
-  const meta = call(
+  const isPlainObject = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  const describeType = (value) =>
+    value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+
+  const capturedAt = now().toISOString();
+  const metaRes = call(
     ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
     'pr view',
   );
+  if (metaRes.ok && !isPlainObject(metaRes.value)) {
+    errors.push(
+      `pr view: expected an object, got ${describeType(metaRes.value)}`,
+    );
+  }
+  const metaObj =
+    metaRes.ok && isPlainObject(metaRes.value) ? metaRes.value : null;
   const snapshot = {
     pr,
     repo,
-    headRefOid: meta?.headRefOid ?? null,
-    state: meta?.state ?? null,
+    headRefOid: metaObj?.headRefOid ?? null,
+    state: metaObj?.state ?? null,
+    capturedAt,
   };
+
+  const canonicalListKey = (list) =>
+    JSON.stringify([...list].sort((a, b) => (a.id ?? 0) - (b.id ?? 0)));
 
   for (const [key, path, carriesState] of LISTS) {
     // `--paginate` merges array pages into one JSON array (verified on gh
     // 2.103.0: 17 comments over 4 pages parsed as a single array). `--slurp`
     // would instead nest one array per page and break the normalize below.
-    const items = call(
+    const itemsRes = call(
       ['api', '--paginate', path(pr).replace('{repo}', repo)],
       key,
     );
-    if (items === null) continue;
-    if (!Array.isArray(items)) {
-      errors.push(`${key}: expected an array, got ${typeof items}`);
+    if (!itemsRes.ok) continue;
+    if (!Array.isArray(itemsRes.value)) {
+      errors.push(
+        `${key}: expected an array, got ${describeType(itemsRes.value)}`,
+      );
       continue;
     }
-    snapshot[key] = normalize(items, carriesState);
+    if (!itemsRes.value.every(isPlainObject)) {
+      errors.push(`${key}: expected an array of objects`);
+      continue;
+    }
+    snapshot[key] = normalize(itemsRes.value, carriesState);
   }
 
   if (errors.length > 0) return { ok: false, errors, snapshot: null };
@@ -143,6 +220,365 @@ export function fetchSnapshot({ pr, repo, run }) {
       snapshot: null,
     };
   }
+
+  // 1. Re-check earlier paginated lists (`reviews` and `reviewComments`).
+  for (const [key, path, carriesState] of LISTS.slice(0, -1)) {
+    const confirmListRes = call(
+      ['api', '--paginate', path(pr).replace('{repo}', repo)],
+      `${key} (confirm)`,
+    );
+    if (!confirmListRes.ok) continue;
+    if (!Array.isArray(confirmListRes.value)) {
+      errors.push(
+        `${key} (confirm): expected an array, got ${describeType(confirmListRes.value)}`,
+      );
+      continue;
+    }
+    if (!confirmListRes.value.every(isPlainObject)) {
+      errors.push(`${key} (confirm): expected an array of objects`);
+      continue;
+    }
+    const confirmed = normalize(confirmListRes.value, carriesState);
+    if (canonicalListKey(confirmed) !== canonicalListKey(snapshot[key])) {
+      errors.push(
+        `${key} changed during snapshot fetch; re-fetch before comparing`,
+      );
+    }
+  }
+
+  // 2. Incremental `?since=` probes for inline review comments and top-level
+  // comments: catches edits to already-read pages during multi-page REST
+  // pagination (e.g., 169 reviewComments) and same-second updatedAt ties on
+  // top-level comments where GraphQL `first: 1` may return the unedited peer.
+  const normalizeNewlines = (text) => text.replace(/\r\n/g, '\n');
+  const maxStampOf = (list) => {
+    let maxMs = -Infinity;
+    let maxStamp = null;
+    for (const item of list) {
+      if (item.stamp === null) continue;
+      const ms = Date.parse(item.stamp);
+      if (Number.isFinite(ms) && ms > maxMs) {
+        maxMs = ms;
+        maxStamp = item.stamp;
+      }
+    }
+    return { maxStamp, maxMs: Number.isFinite(maxMs) ? maxMs : null };
+  };
+  const EPOCH_SINCE_ISO = '1970-01-01T00:00:00Z';
+
+  if (errors.length === 0) {
+    for (const [key, path] of LISTS.slice(1)) {
+      const list = snapshot[key];
+      const { maxStamp } = maxStampOf(list);
+      const sinceIso = maxStamp ?? EPOCH_SINCE_ISO;
+      const sinceMs = Date.parse(sinceIso);
+      const url = `${path(pr).replace('{repo}', repo)}?since=${encodeURIComponent(sinceIso)}`;
+      const deltaRes = call(['api', '--paginate', url], `${key} (since)`);
+      if (!deltaRes.ok) continue;
+      if (!Array.isArray(deltaRes.value)) {
+        errors.push(
+          `${key} (since): expected an array, got ${describeType(deltaRes.value)}`,
+        );
+        continue;
+      }
+      if (!deltaRes.value.every(isPlainObject)) {
+        errors.push(`${key} (since): expected an array of objects`);
+        continue;
+      }
+      const deltaItems = normalize(deltaRes.value, false);
+      const byId = new Map(list.map((item) => [item.id, item]));
+      const seenIds = new Set();
+      let changed = false;
+      for (const item of deltaItems) {
+        if (typeof item.body !== 'string' || !Number.isInteger(item.id)) {
+          changed = true;
+          break;
+        }
+        seenIds.add(item.id);
+        const matched = byId.get(item.id);
+        if (
+          !matched ||
+          item.stamp !== matched.stamp ||
+          normalizeNewlines(item.body) !== normalizeNewlines(matched.body)
+        ) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed && maxStamp !== null) {
+        for (const existing of list) {
+          if (existing.stamp === null) continue;
+          const ms = Date.parse(existing.stamp);
+          if (
+            Number.isFinite(ms) &&
+            ms >= sinceMs &&
+            !seenIds.has(existing.id)
+          ) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (changed) {
+        errors.push(
+          `${key} changed during snapshot fetch; re-fetch before comparing`,
+        );
+      }
+    }
+  }
+
+  // 3. Closing GraphQL probe after all REST fetches finish. Single request for
+  // <= 100 formal reviews; paginates backward via `before` cursor when > 100
+  // formal reviews exist so every review (1..N) is verified alongside head,
+  // PR state, and top-level comment markers.
+  if (errors.length === 0) {
+    const [owner, name] = repo.split('/');
+    const reviewsById = new Map(
+      snapshot.reviews.map((item) => [item.id, item]),
+    );
+    const seenReviewIds = new Set();
+    const seenCursors = new Set();
+    let beforeCursor = null;
+    const maxReviewPages = Math.ceil(snapshot.reviews.length / 100) + 2;
+
+    const latestById = (list) =>
+      list.length === 0
+        ? null
+        : list.reduce((max, item) => (item.id > max.id ? item : max));
+
+    const checkConnection = (conn, list, label, extraFields) => {
+      if (
+        !isPlainObject(conn) ||
+        !Number.isInteger(conn.totalCount) ||
+        conn.totalCount < 0 ||
+        !Array.isArray(conn.nodes) ||
+        !conn.nodes.every(isPlainObject)
+      ) {
+        errors.push(
+          `guard confirm: malformed ${label} summary in closing probe`,
+        );
+        return;
+      }
+      if (conn.totalCount !== list.length) {
+        errors.push(
+          `${label} changed during snapshot fetch (${list.length} -> ${conn.totalCount}); re-fetch before comparing`,
+        );
+        return;
+      }
+      if (conn.totalCount === 0) {
+        if (conn.nodes.length !== 0) {
+          errors.push(
+            `guard confirm: malformed ${label} summary in closing probe`,
+          );
+        }
+        return;
+      }
+      if (conn.nodes.length !== 1) {
+        errors.push(
+          `guard confirm: missing latest ${label} node in closing probe`,
+        );
+        return;
+      }
+      const latest = latestById(list);
+      const node = conn.nodes[0];
+      if (node.databaseId !== latest.id || !extraFields(node, latest)) {
+        errors.push(
+          `${label} changed during snapshot fetch; re-fetch before comparing`,
+        );
+      }
+    };
+
+    const { maxMs: maxIssueStampMs } = maxStampOf(snapshot.issueComments);
+
+    for (let page = 0; page < maxReviewPages; page++) {
+      const gqlArgs = [
+        'api',
+        'graphql',
+        '-f',
+        `owner=${owner}`,
+        '-f',
+        `name=${name}`,
+        '-F',
+        `number=${pr}`,
+        '-f',
+        `query=${GUARD_CONFIRM_QUERY}`,
+      ];
+      if (beforeCursor !== null) {
+        gqlArgs.push('-f', `before=${beforeCursor}`);
+      }
+      const confirmRes = call(gqlArgs, 'guard confirm');
+      if (!confirmRes.ok) break;
+      if (
+        isPlainObject(confirmRes.value) &&
+        Array.isArray(confirmRes.value.errors) &&
+        confirmRes.value.errors.length > 0
+      ) {
+        errors.push('guard confirm: GraphQL response returned errors');
+        break;
+      }
+      const pull = isPlainObject(confirmRes.value)
+        ? confirmRes.value?.data?.repository?.pullRequest
+        : undefined;
+      if (!isPlainObject(pull)) {
+        errors.push(
+          `guard confirm: expected pullRequest object, got ${describeType(pull ?? confirmRes.value)}`,
+        );
+        break;
+      }
+
+      if (pull.headRefOid !== metaObj.headRefOid) {
+        errors.push(
+          `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${pull.headRefOid}); re-fetch before comparing`,
+        );
+      }
+      if (pull.state !== metaObj.state) {
+        errors.push(
+          `PR state changed during snapshot fetch (${metaObj.state} -> ${pull.state}); re-fetch before comparing`,
+        );
+      }
+
+      checkConnection(
+        pull.comments,
+        snapshot.issueComments,
+        'issueComments',
+        (node, latest) => (node.updatedAt ?? null) === latest.stamp,
+      );
+
+      const editedConn = pull.latestEditedComment;
+      if (
+        !isPlainObject(editedConn) ||
+        !Array.isArray(editedConn.nodes) ||
+        !editedConn.nodes.every(isPlainObject)
+      ) {
+        errors.push(
+          'guard confirm: malformed latestEditedComment summary in closing probe',
+        );
+      } else if (snapshot.issueComments.length === 0) {
+        if (editedConn.nodes.length !== 0) {
+          errors.push(
+            'issueComments changed during snapshot fetch; re-fetch before comparing',
+          );
+        }
+      } else if (editedConn.nodes.length !== 1) {
+        errors.push(
+          'guard confirm: missing latestEditedComment node in closing probe',
+        );
+      } else {
+        const editedNode = editedConn.nodes[0];
+        if (typeof editedNode.body !== 'string') {
+          errors.push(
+            'guard confirm: malformed latestEditedComment body in closing probe',
+          );
+        } else {
+          const matched = snapshot.issueComments.find(
+            (comment) => comment.id === editedNode.databaseId,
+          );
+          const editedStamp = editedNode.updatedAt ?? null;
+          const editedStampMs =
+            editedStamp === null ? NaN : Date.parse(editedStamp);
+          if (
+            !matched ||
+            editedStamp !== matched.stamp ||
+            normalizeNewlines(editedNode.body) !==
+              normalizeNewlines(matched.body) ||
+            (maxIssueStampMs !== null &&
+              (!Number.isFinite(editedStampMs) ||
+                editedStampMs !== maxIssueStampMs))
+          ) {
+            errors.push(
+              'issueComments changed during snapshot fetch; re-fetch before comparing',
+            );
+          }
+        }
+      }
+
+      const reviewsConn = pull.reviews;
+      if (
+        !isPlainObject(reviewsConn) ||
+        !Number.isInteger(reviewsConn.totalCount) ||
+        reviewsConn.totalCount < 0 ||
+        !Array.isArray(reviewsConn.nodes) ||
+        !reviewsConn.nodes.every(isPlainObject) ||
+        !isPlainObject(reviewsConn.pageInfo) ||
+        typeof reviewsConn.pageInfo.hasPreviousPage !== 'boolean'
+      ) {
+        errors.push(
+          'guard confirm: malformed reviews summary in closing probe',
+        );
+        break;
+      }
+      if (reviewsConn.totalCount !== snapshot.reviews.length) {
+        errors.push(
+          `reviews changed during snapshot fetch (${snapshot.reviews.length} -> ${reviewsConn.totalCount}); re-fetch before comparing`,
+        );
+        break;
+      }
+      let reviewChanged = false;
+      let malformedReviewBody = false;
+      for (const node of reviewsConn.nodes) {
+        if (typeof node.body !== 'string') {
+          malformedReviewBody = true;
+          break;
+        }
+        if (seenReviewIds.has(node.databaseId)) {
+          reviewChanged = true;
+          break;
+        }
+        seenReviewIds.add(node.databaseId);
+        const matched = reviewsById.get(node.databaseId);
+        if (
+          !matched ||
+          node.state !== matched.state ||
+          (node.submittedAt ?? null) !== matched.stamp ||
+          normalizeNewlines(node.body) !== normalizeNewlines(matched.body)
+        ) {
+          reviewChanged = true;
+          break;
+        }
+      }
+      if (malformedReviewBody) {
+        errors.push('guard confirm: malformed review body in closing probe');
+        break;
+      }
+      if (reviewChanged) {
+        errors.push(
+          'reviews changed during snapshot fetch; re-fetch before comparing',
+        );
+        break;
+      }
+      if (errors.length > 0) break;
+
+      if (!reviewsConn.pageInfo.hasPreviousPage) {
+        if (seenReviewIds.size !== snapshot.reviews.length) {
+          errors.push(
+            `guard confirm: expected ${snapshot.reviews.length} review node(s) in closing probe, got ${seenReviewIds.size}`,
+          );
+        }
+        break;
+      }
+      const nextCursor = reviewsConn.pageInfo.startCursor;
+      if (
+        typeof nextCursor !== 'string' ||
+        nextCursor === '' ||
+        seenCursors.has(nextCursor)
+      ) {
+        errors.push(
+          'guard confirm: malformed review pagination cursor in closing probe',
+        );
+        break;
+      }
+      if (page + 1 >= maxReviewPages) {
+        errors.push(
+          'guard confirm: review pagination exceeded expected page count in closing probe',
+        );
+        break;
+      }
+      seenCursors.add(nextCursor);
+      beforeCursor = nextCursor;
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors, snapshot: null };
   return { ok: true, errors: [], snapshot };
 }
 
@@ -152,9 +588,14 @@ export function isSnapshot(value) {
     return false;
   }
   if (!Number.isInteger(value.pr) || value.pr <= 0) return false;
-  if (typeof value.repo !== 'string' || !value.repo.includes('/')) return false;
+  if (typeof value.repo !== 'string' || !REPO_SLUG_RE.test(value.repo)) {
+    return false;
+  }
   if (!/^[0-9a-f]{40}$/.test(value.headRefOid ?? '')) return false;
   if (typeof value.state !== 'string' || value.state === '') return false;
+  if (value.capturedAt !== undefined && !isIsoUtcTimestamp(value.capturedAt)) {
+    return false;
+  }
   return LISTS.every(([key, , carriesState]) => {
     const list = value[key];
     return (
@@ -195,6 +636,15 @@ export function compareSnapshots(start, now) {
   if (start.pr !== now.pr || start.repo !== now.repo) {
     reasons.push(
       `snapshots describe different PRs: ${start.repo}#${start.pr} vs ${now.repo}#${now.pr}`,
+    );
+  }
+  if (
+    start.capturedAt !== undefined &&
+    now.capturedAt !== undefined &&
+    Date.parse(now.capturedAt) < Date.parse(start.capturedAt)
+  ) {
+    reasons.push(
+      `now snapshot (${now.capturedAt}) is older than start snapshot (${start.capturedAt})`,
     );
   }
   if (start.headRefOid !== now.headRefOid) {
@@ -248,25 +698,231 @@ export function compareSnapshots(start, now) {
   return { clean: reasons.length === 0, reasons };
 }
 
+/**
+ * Builds the machine-readable verdict record written by `--compare --out`.
+ * `verify-pr-check.mjs --guard` verifies this record's schema, PR coordinates,
+ * head OID, OPEN state, clean status, and snapshot freshness before posting.
+ */
+export function buildGuardVerdict({
+  start,
+  now,
+  result,
+  comparedAt = new Date().toISOString(),
+}) {
+  const validStart = isSnapshot(start);
+  const validNow = isSnapshot(now);
+  return {
+    schema: GUARD_VERDICT_SCHEMA,
+    clean: Boolean(result?.clean),
+    repo: (validNow ? now.repo : validStart ? start.repo : null) ?? null,
+    pr: (validNow ? now.pr : validStart ? start.pr : null) ?? null,
+    startHeadRefOid: validStart ? start.headRefOid : null,
+    nowHeadRefOid: validNow ? now.headRefOid : null,
+    startState: validStart ? start.state : null,
+    nowState: validNow ? now.state : null,
+    startCapturedAt: validStart ? (start.capturedAt ?? null) : null,
+    nowCapturedAt: validNow ? (now.capturedAt ?? null) : null,
+    comparedAt,
+    reasons: Array.isArray(result?.reasons) ? [...result.reasons] : [],
+  };
+}
+
 function parseArgs(argv) {
   const out = {
     pr: null,
     repo: null,
     snapshot: null,
+    noClobber: false,
     compare: false,
     start: null,
     now: null,
+    out: null,
+    unknown: null,
+    missingValue: null,
+  };
+  const nextVal = (flag, i) => {
+    if (i + 1 >= argv.length || argv[i + 1] === '') {
+      out.missingValue = flag;
+      return null;
+    }
+    return argv[i + 1];
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--compare') out.compare = true;
-    else if (arg === '--pr') out.pr = Number(argv[++i]);
-    else if (arg === '--repo') out.repo = argv[++i];
-    else if (arg === '--snapshot') out.snapshot = argv[++i];
-    else if (arg === '--start') out.start = argv[++i];
-    else if (arg === '--now') out.now = argv[++i];
+    else if (arg === '--no-clobber') out.noClobber = true;
+    else if (arg === '--pr') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.pr = Number(val);
+      i++;
+    } else if (arg === '--repo') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.repo = val;
+      i++;
+    } else if (arg === '--snapshot') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.snapshot = val;
+      i++;
+    } else if (arg === '--start') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.start = val;
+      i++;
+    } else if (arg === '--now') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.now = val;
+      i++;
+    } else if (arg === '--out') {
+      const val = nextVal(arg, i);
+      if (val === null) break;
+      out.out = val;
+      i++;
+    } else if (arg.startsWith('-')) {
+      out.unknown = arg;
+      break;
+    } else {
+      out.unknown = arg;
+      break;
+    }
   }
   return out;
+}
+
+function canonicalizeForIdentity(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    try {
+      return join(realpathSync(dirname(p)), basename(p));
+    } catch {
+      return resolve(p);
+    }
+  }
+}
+
+function sameFilePath(a, b) {
+  if (resolve(a) === resolve(b)) return true;
+  if (canonicalizeForIdentity(a) === canonicalizeForIdentity(b)) return true;
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    if (
+      sa.ino !== 0 &&
+      sb.ino !== 0 &&
+      sa.dev === sb.dev &&
+      sa.ino === sb.ino
+    ) {
+      return true;
+    }
+  } catch {
+    // Missing files cannot share an inode.
+  }
+  return false;
+}
+
+function inspectWritableTarget(filePath, { noClobber = false } = {}) {
+  try {
+    const st = lstatSync(filePath);
+    if (noClobber) {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `refusing to overwrite existing snapshot ${filePath} (--no-clobber); use a dedicated per-round host directory`,
+      };
+    }
+    if (st.isSymbolicLink()) {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `refusing to write through symbolic link ${filePath}`,
+      };
+    }
+    if (!st.isFile()) {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `refusing to write to non-regular file ${filePath}`,
+      };
+    }
+    if (st.nlink !== 1) {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `refusing to write through hard link ${filePath} (${st.nlink} names)`,
+      };
+    }
+    return { ok: true, existedRegular: true };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return {
+        ok: false,
+        existedRegular: false,
+        error: `cannot inspect output path ${filePath}: ${error.message}`,
+      };
+    }
+    return { ok: true, existedRegular: false };
+  }
+}
+
+function removeStaleSnapshot(filePath) {
+  const checked = inspectWritableTarget(filePath);
+  if (!checked.ok) return { removed: false, error: checked.error };
+  if (!checked.existedRegular) return { removed: false, error: null };
+  try {
+    unlinkSync(filePath);
+    return { removed: true, error: null };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { removed: false, error: null };
+    return {
+      removed: false,
+      error: `could not remove stale snapshot ${filePath}: ${error.message}`,
+    };
+  }
+}
+
+function safeWriteFile(filePath, content, { noClobber = false } = {}) {
+  const checked = inspectWritableTarget(filePath, { noClobber });
+  if (!checked.ok) {
+    return { ok: false, error: checked.error };
+  }
+  try {
+    writeFileSync(filePath, content, noClobber ? { flag: 'wx' } : undefined);
+    const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+    return { ok: true, sha256 };
+  } catch (error) {
+    if (noClobber && error?.code === 'EEXIST') {
+      return {
+        ok: false,
+        error: `refusing to overwrite existing snapshot ${filePath} (--no-clobber); use a dedicated per-round host directory`,
+      };
+    }
+    // On refresh/verdict overwrites, invalidate any stale regular file left
+    // behind (for example a chmod-444 snapshot in a writable directory, or a
+    // partial write on ENOSPC) so subsequent compares cannot pass on old data.
+    if (!noClobber) {
+      const cleaned = removeStaleSnapshot(filePath);
+      if (cleaned.removed) {
+        return {
+          ok: false,
+          error: `cannot write ${filePath}: ${error.message} (removed stale ${filePath})`,
+        };
+      }
+      if (cleaned.error) {
+        return {
+          ok: false,
+          error: `cannot write ${filePath}: ${error.message}; ${cleaned.error}`,
+        };
+      }
+    }
+    return {
+      ok: false,
+      error: `cannot write ${filePath}: ${error.message}`,
+    };
+  }
 }
 
 function readSnapshot(path) {
@@ -283,27 +939,74 @@ function main(argv) {
     return 0;
   }
   const args = parseArgs(argv);
+  if (args.missingValue) {
+    process.stderr.write(
+      `verify-pr guard: ${args.missingValue} requires a value\n\n${HELP}`,
+    );
+    return 2;
+  }
+  if (args.unknown) {
+    process.stderr.write(
+      `verify-pr guard: unknown option ${args.unknown}\n\n${HELP}`,
+    );
+    return 2;
+  }
 
   if (args.compare) {
+    if (args.noClobber) {
+      process.stderr.write(
+        `verify-pr guard: --no-clobber is only valid with --snapshot\n\n${HELP}`,
+      );
+      return 2;
+    }
     if (!args.start || !args.now) {
       process.stderr.write(
         `verify-pr guard: --compare needs --start and --now\n\n${HELP}`,
       );
       return 2;
     }
-    // Comparing a snapshot with itself answers nothing about what landed, and
-    // a copy-pasted path would otherwise report the cleanest possible round.
-    if (resolve(args.start) === resolve(args.now)) {
+    // Comparing a snapshot with itself (directly or via a symlink/hardlink)
+    // answers nothing about what landed, and a copy-pasted path would
+    // otherwise report the cleanest possible round.
+    if (sameFilePath(args.start, args.now)) {
       process.stderr.write(
         'verify-pr guard: --start and --now are the same file; re-fetch into a second path before comparing\n',
       );
       return 2;
     }
-    const { clean, reasons } = compareSnapshots(
-      readSnapshot(args.start),
-      readSnapshot(args.now),
-    );
+    if (
+      args.out &&
+      (sameFilePath(args.out, args.start) || sameFilePath(args.out, args.now))
+    ) {
+      process.stderr.write(
+        'verify-pr guard: --out must not point to the --start or --now snapshot file\n',
+      );
+      return 2;
+    }
+    const startSnap = readSnapshot(args.start);
+    const nowSnap = readSnapshot(args.now);
+    const result = compareSnapshots(startSnap, nowSnap);
+    const { clean, reasons } = result;
+    let verdictSha256 = null;
+    if (args.out) {
+      const verdict = buildGuardVerdict({
+        start: startSnap,
+        now: nowSnap,
+        result,
+      });
+      const serialized = `${JSON.stringify(verdict, null, 2)}\n`;
+      const written = safeWriteFile(args.out, serialized);
+      if (!written.ok) {
+        process.stderr.write(`verify-pr guard: ${written.error}\n`);
+        return 1;
+      }
+      verdictSha256 = written.sha256;
+    }
     const lines = [`verify-pr guard: ${clean ? 'clean' : 'dirty'}`];
+    if (clean && args.out && verdictSha256) {
+      lines.push(`  guard-verdict  ${args.out}`);
+      lines.push(`  guard-sha256  ${verdictSha256}`);
+    }
     for (const reason of reasons) lines.push(`  ${reason}`);
     if (!clean) {
       lines.push(
@@ -314,16 +1017,31 @@ function main(argv) {
     return clean ? 0 : 1;
   }
 
+  if (args.out) {
+    process.stderr.write(
+      `verify-pr guard: --out is only valid with --compare\n\n${HELP}`,
+    );
+    return 2;
+  }
+
   if (
     !Number.isInteger(args.pr) ||
     args.pr <= 0 ||
     !args.repo ||
+    !REPO_SLUG_RE.test(args.repo) ||
     !args.snapshot
   ) {
     process.stderr.write(
-      `verify-pr guard: --pr, --repo and --snapshot are required\n\n${HELP}`,
+      `verify-pr guard: --pr, --repo (<owner>/<repo>) and --snapshot are required\n\n${HELP}`,
     );
     return 2;
+  }
+  const targetCheck = inspectWritableTarget(args.snapshot, {
+    noClobber: args.noClobber,
+  });
+  if (!targetCheck.ok) {
+    process.stderr.write(`verify-pr guard: ${targetCheck.error}\n`);
+    return 1;
   }
   const run = (ghArgs) =>
     spawnSync('gh', ghArgs, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -333,12 +1051,27 @@ function main(argv) {
     run,
   });
   if (!ok) {
+    const cleaned = args.noClobber
+      ? { removed: false, error: null }
+      : removeStaleSnapshot(args.snapshot);
+    const statusNote = cleaned.removed
+      ? `removed stale ${args.snapshot}`
+      : 'nothing written';
+    const extra = cleaned.error ? `  ${cleaned.error}\n` : '';
     process.stderr.write(
-      `verify-pr guard: snapshot refused, nothing written\n${errors.map((e) => `  ${e}\n`).join('')}`,
+      `verify-pr guard: snapshot refused, ${statusNote}\n${errors.map((e) => `  ${e}\n`).join('')}${extra}`,
     );
     return 1;
   }
-  writeFileSync(args.snapshot, `${JSON.stringify(snapshot, null, 2)}\n`);
+  const written = safeWriteFile(
+    args.snapshot,
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    { noClobber: args.noClobber },
+  );
+  if (!written.ok) {
+    process.stderr.write(`verify-pr guard: ${written.error}\n`);
+    return 1;
+  }
   const counts = LISTS.map(([key]) => `${key} ${snapshot[key].length}`).join(
     ', ',
   );

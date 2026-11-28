@@ -2,8 +2,16 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it } from 'vitest';
+import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
-import { GoalStatusMessage } from './GoalStatusMessage';
+import {
+  GOAL_STATUS_SENTINEL_PREFIX,
+  GoalStatusMessage,
+} from './GoalStatusMessage';
+
+it('matches the daemon SDK goal status sentinel prefix', () => {
+  expect(GOAL_STATUS_SENTINEL_PREFIX).toBe(DAEMON_GOAL_STATUS_SENTINEL_PREFIX);
+});
 
 it('starts compact and toggles the complete objective and check reason', () => {
   const container = document.createElement('div');

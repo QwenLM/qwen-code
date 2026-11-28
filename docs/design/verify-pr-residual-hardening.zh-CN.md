@@ -171,7 +171,7 @@ bullet above」，与 VM 条目一致。attestation 注解点名操作者已确�
 - 单记录/单 nonce 绑定约束多容器 Java 配方（R1-10、R3-6）：checker 只读一份记录与一个
   哈希，`container-nonce:` 行必须由跑电池的容器 echo。电池跑在与门禁不同容器的轮次读不到
   门禁的明文，故按 skill 的 step 5 经维护者批准声明 `mode:"waived"`；门禁容器的佐证不能
-  替代。该配方在 step 1（nonce 绑定）与 step 4（`mode:"waived"` 声明示例）双语记录此约束；
+  替代。该配方在 step 1（nonce 绑定）与 step 5（`mode:"waived"` 声明示例）双语记录此约束；
   它是提案，非已发布代码。
 
 ## 待决问题

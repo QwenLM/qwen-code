@@ -44,7 +44,12 @@ export const managedGithubCommand = createManagedChannelCommand({
       // raw entry, not the fully-defaulted parse result.
       rawConfig: channel.rawConfig,
       controlPlane,
-      deps: createManagedGithubDeps(proxy),
+      deps: {
+        ...createManagedGithubDeps(proxy),
+        // PR-watch rides the same trusted channel surface; the client's
+        // list/inject methods drive the bound-session proactive delivery.
+        prWatchControlPlane: controlPlane,
+      },
     });
   },
 });

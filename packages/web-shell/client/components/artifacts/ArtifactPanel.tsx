@@ -2,6 +2,7 @@ import { useDaemonTargetOptional } from '../../config/daemon-target';
 import { hasReloadSurvivableDaemonToken } from '../../config/daemon';
 import type {
   DaemonSessionArtifact,
+  DaemonSessionScheduledTaskStatus,
   SessionSource,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -14,10 +15,15 @@ import {
   useConnection,
   useWorkspace,
   type DaemonContextMemoryDetail,
+  type DaemonFileStat,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  scheduledTaskRuntimeKey,
+  type SessionDurableScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';
@@ -39,6 +45,7 @@ import {
   WrenchIcon,
   ListTreeIcon,
   MessageCirclePlusIcon,
+  PackageIcon,
   PanelRightIcon,
   PlusIcon,
   ShrinkIcon,
@@ -95,6 +102,7 @@ import {
 import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
 import {
   artifactKindLabel,
+  canPreviewWorkspaceArtifact,
   downloadWorkspaceFile,
   formatArtifactSize,
   getArtifactFreshnessKey,
@@ -102,10 +110,14 @@ import {
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
+  isAutomationSnapshotArtifact,
+  isCodeReviewArtifact,
   isDownloadOnlyWorkspaceArtifact,
   isDocxFile,
   isExcelFile,
   isPdfArtifact,
+  isWebPreviewSnapshotArtifact,
+  MAX_WORKSPACE_FILE_BLOB_BYTES,
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -144,6 +156,7 @@ import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ArtifactsListPanel } from './ArtifactsListPanel';
 import { ChangeOverviewPanel } from './ChangeOverviewPanel';
 import { TrajectoryPanel } from './TrajectoryPanel';
 import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
@@ -174,8 +187,12 @@ const loadWorkspaceFileBrowser = () =>
 const loadPierreFilePreview = () =>
   import('./PierreFilePreview').catch(fileImportFailed);
 const SpreadsheetPreview = lazy(() => import('./SpreadsheetPreview'));
+const WorkspacePdfRangePreview = lazy(
+  () => import('./WorkspacePdfRangePreview'),
+);
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
+const MIN_PDF_RANGE_PREVIEW_BYTES = 4 * 1024 * 1024;
 const FREQUENCIES: Frequency[] = [
   'daily',
   'weekdays',
@@ -394,6 +411,12 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'artifacts';
+      title: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'change_overview';
       title: string;
       workspaceCwd: string;
@@ -466,6 +489,14 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
 interface ArtifactPanelProps {
   contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
   artifacts: readonly DaemonSessionArtifact[];
+  /**
+   * The session's own artifacts, matching the header count badge. The list tab
+   * renders these rather than the panel-wide merged collection (which also
+   * carries pane/open-time extras used for preview-tab icon lookup).
+   */
+  sessionArtifacts?: readonly DaemonSessionArtifact[];
+  /** Open an artifact preview tab from the artifacts list tab. */
+  onOpenArtifact?: (artifactId: string) => void;
   tabs: readonly ArtifactPanelTab[];
   activeTabId: string | null;
   reviewChanges: readonly TurnOutputFileChange[];
@@ -495,7 +526,11 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
-  /** Open the delivery-unit change overview tab (git workspaces only). */
+  /**
+   * Offer the delivery-unit change overview tab. Gated on an active workspace
+   * (a cwd to scope it to), not on git-ness: a non-git workspace still opens
+   * the tab, which reports that it is not a git repository.
+   */
   changeOverviewAvailable?: boolean;
   onOpenChangeOverview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
@@ -518,6 +553,8 @@ interface ArtifactPanelProps {
   sideTasks?: readonly SideTaskListItem[];
   archivedSideTasks?: readonly SideTaskListItem[];
   sideTasksLoading?: boolean;
+  /** Disables New side task controls while daemon load admission is paused. */
+  overloadPaused?: boolean;
   onCreateSideTask?: () => void;
   onOpenSideTask?: (sideTask: SideTaskListItem) => void;
   onArchiveSideTasks?: (
@@ -584,6 +621,34 @@ interface ArtifactPanelProps {
     canvasMode?: boolean;
   };
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  liveSessionScheduledTasks?: ReadonlyMap<
+    string,
+    DaemonSessionScheduledTaskStatus
+  >;
+  /** Owner of the live snapshot; other sessions must not borrow it. */
+  liveSessionScheduledTasksOwnerSessionId?: string;
+  liveDurableScheduledTasks?: readonly SessionDurableScheduledTask[];
+  /** Workspace covered by `hasLiveDurableScheduledSnapshot` (`null` = primary). */
+  liveDurableScheduledTasksWorkspaceId?: string | null;
+  confirmedDeletedDurableTaskKeys?: ReadonlySet<string>;
+  confirmedCancelledSessionTaskIds?: ReadonlySet<string>;
+  hasLiveDurableScheduledSnapshot?: boolean;
+  hasLiveSessionScheduledSnapshot?: boolean;
+  onCancelSessionScheduledTask?: (
+    taskId: string,
+    source?: 'cron' | 'wakeup',
+  ) => Promise<boolean>;
+  onSessionScheduledTaskStopped?: (
+    taskId: string,
+    sourceSessionId?: string,
+    source?: 'cron' | 'wakeup',
+  ) => void;
+  onDurableScheduledTaskDeleted?: (
+    id: string,
+    workspaceId: string | undefined,
+    sourceSessionId: string | undefined,
+  ) => void;
+  onScheduledTasksMutated?: () => void;
   deferSubagentMount?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
@@ -705,6 +770,8 @@ function WorkspaceFilesPane({
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
+  sessionArtifacts,
+  onOpenArtifact,
   tabs,
   activeTabId,
   reviewChanges,
@@ -735,6 +802,7 @@ export function ArtifactPanel({
   sideTasks = [],
   archivedSideTasks = [],
   sideTasksLoading = false,
+  overloadPaused = false,
   onCreateSideTask,
   onOpenSideTask,
   onArchiveSideTasks,
@@ -761,6 +829,18 @@ export function ArtifactPanel({
   mountUnavailableModelTooltip,
   workflow,
   onImageIngestionNotice,
+  liveSessionScheduledTasks,
+  liveSessionScheduledTasksOwnerSessionId,
+  liveDurableScheduledTasks,
+  liveDurableScheduledTasksWorkspaceId,
+  confirmedDeletedDurableTaskKeys,
+  confirmedCancelledSessionTaskIds,
+  hasLiveDurableScheduledSnapshot = false,
+  hasLiveSessionScheduledSnapshot = false,
+  onCancelSessionScheduledTask,
+  onSessionScheduledTaskStopped,
+  onDurableScheduledTaskDeleted,
+  onScheduledTasksMutated,
   deferSubagentMount = false,
   onClose,
   variant = 'docked',
@@ -806,6 +886,11 @@ export function ArtifactPanel({
     [],
   );
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const liveSnapshotBelongsToActiveTask =
+    activeTab?.kind !== 'scheduled_task' ||
+    !activeTab.sourceSessionId ||
+    !liveSessionScheduledTasksOwnerSessionId ||
+    activeTab.sourceSessionId === liveSessionScheduledTasksOwnerSessionId;
   const sourceHtmlPreview =
     activeTab?.kind === 'file' &&
     activeTab.sourcePreview &&
@@ -878,7 +963,11 @@ export function ArtifactPanel({
     activeWorkspaceIdentity?.workspaceCwd,
   );
   const activeWorkspaceActions =
-    activeWorkspaceTarget?.workspaceId === activeWorkspaceIdentity?.workspaceId
+    activeWorkspaceTarget?.workspaceId ===
+      activeWorkspaceIdentity?.workspaceId ||
+    (activeTab?.kind === 'scheduled_task' &&
+      activeWorkspaceTarget?.primary === true &&
+      activeWorkspaceIdentity?.workspaceId === undefined)
       ? activeWorkspaceTarget?.actions
       : undefined;
   const activeTabArtifact =
@@ -994,6 +1083,11 @@ export function ArtifactPanel({
                           className={styles.tabIconSvg}
                           strokeWidth={1.6}
                         />
+                      ) : tab.kind === 'artifacts' ? (
+                        <PackageIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
                       ) : tab.kind === 'turn_calls' ? (
                         <WrenchIcon
                           className={styles.tabIconSvg}
@@ -1101,7 +1195,7 @@ export function ArtifactPanel({
                   showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
-                    disabled={sideTasksLoading}
+                    disabled={sideTasksLoading || overloadPaused}
                     onSelect={onCreateSideTask}
                   >
                     <MessageCirclePlusIcon
@@ -1381,7 +1475,7 @@ export function ArtifactPanel({
                 <button
                   type="button"
                   className={styles.emptyAction}
-                  disabled={sideTasksLoading}
+                  disabled={sideTasksLoading || overloadPaused}
                   aria-busy={sideTasksLoading}
                   onClick={onCreateSideTask}
                 >
@@ -1548,7 +1642,10 @@ export function ArtifactPanel({
                       </>
                     )}
                     {sideTasks.length > 0 && <DropdownMenuSeparator />}
-                    <DropdownMenuItem onSelect={onCreateSideTask}>
+                    <DropdownMenuItem
+                      disabled={sideTasksLoading || overloadPaused}
+                      onSelect={onCreateSideTask}
+                    >
                       <CirclePlusIcon
                         className={styles.sideTaskNewIcon}
                         strokeWidth={1.6}
@@ -1874,6 +1971,13 @@ export function ArtifactPanel({
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
           />
+        ) : activeTab.kind === 'artifacts' ? (
+          <ArtifactsListPanel
+            key={activeTab.id}
+            artifacts={sessionArtifacts ?? artifacts}
+            loading={loading}
+            onOpenArtifact={onOpenArtifact}
+          />
         ) : activeTab.kind === 'change_overview' ? (
           <ChangeOverviewPanel
             key={activeTab.id}
@@ -1898,6 +2002,67 @@ export function ArtifactPanel({
             key={activeTab.id}
             task={activeTab.task}
             actions={activeWorkspaceActions}
+            liveSessionTask={
+              liveSnapshotBelongsToActiveTask
+                ? liveSessionScheduledTasks?.get(
+                    scheduledTaskRuntimeKey({
+                      scope: 'session',
+                      source:
+                        activeTab.task.cron === '@wakeup' ? 'wakeup' : 'cron',
+                      id: activeTab.task.id,
+                    }),
+                  )
+                : undefined
+            }
+            hasLiveSessionSnapshot={
+              hasLiveSessionScheduledSnapshot && liveSnapshotBelongsToActiveTask
+            }
+            hasLiveDurableScheduledSnapshot={
+              hasLiveDurableScheduledSnapshot &&
+              liveSnapshotBelongsToActiveTask &&
+              (liveDurableScheduledTasksWorkspaceId === undefined ||
+                (activeTab.task.workspaceId ?? null) ===
+                  liveDurableScheduledTasksWorkspaceId)
+            }
+            liveDurableTask={
+              activeTab.task.durable && liveSnapshotBelongsToActiveTask
+                ? liveDurableScheduledTasks?.find(
+                    (entry) =>
+                      entry.id === activeTab.task.id &&
+                      entry.workspaceId === activeTab.task.workspaceId &&
+                      entry.task.sessionId === activeTab.sourceSessionId,
+                  )?.task
+                : undefined
+            }
+            confirmedDurableDeletion={
+              activeTab.task.durable &&
+              liveSnapshotBelongsToActiveTask &&
+              confirmedDeletedDurableTaskKeys?.has(
+                JSON.stringify([
+                  activeTab.task.workspaceId ?? null,
+                  activeTab.task.id,
+                ]),
+              )
+            }
+            confirmedSessionCancellation={
+              !activeTab.task.durable &&
+              liveSnapshotBelongsToActiveTask &&
+              Boolean(
+                confirmedCancelledSessionTaskIds?.has(
+                  scheduledTaskRuntimeKey({
+                    scope: 'session',
+                    source:
+                      activeTab.task.cron === '@wakeup' ? 'wakeup' : 'cron',
+                    id: activeTab.task.id,
+                  }),
+                ),
+              )
+            }
+            sourceSessionId={activeTab.sourceSessionId}
+            onCancelSessionTask={onCancelSessionScheduledTask}
+            onSessionTaskStopped={onSessionScheduledTaskStopped}
+            onDurableTaskDeleted={onDurableScheduledTaskDeleted}
+            onMutated={onScheduledTasksMutated}
           />
         )}
       </div>
@@ -2042,12 +2207,105 @@ function ArtifactDetailTab({
   return <div className={styles.empty}>Artifact not found.</div>;
 }
 
+function matchesScheduledTaskScope(
+  candidate: DaemonScheduledTask,
+  id: string,
+  workspaceId: string | undefined,
+  sourceSessionId: string | undefined,
+  unboundCreation = false,
+): boolean {
+  if (
+    candidate.id !== id ||
+    (candidate.workspaceId !== undefined &&
+      candidate.workspaceId !== workspaceId)
+  ) {
+    return false;
+  }
+  if (unboundCreation) return true;
+  return candidate.sessionId == null || candidate.sessionId === sourceSessionId;
+}
+
+function findScopedDurableTask(
+  tasks: readonly DaemonScheduledTask[],
+  id: string,
+  workspaceId: string | undefined,
+  sourceSessionId: string | undefined,
+  unboundCreation: boolean,
+): DaemonScheduledTask | null {
+  if (unboundCreation) {
+    const matches = tasks.filter((item) =>
+      matchesScheduledTaskScope(item, id, workspaceId, sourceSessionId, true),
+    );
+    if (matches.length === 1) return matches[0]!;
+    return matches.find((item) => item.sessionId == null) ?? null;
+  }
+  return (
+    tasks.find(
+      (item) =>
+        item.id === id &&
+        item.sessionId === sourceSessionId &&
+        (item.workspaceId === undefined || item.workspaceId === workspaceId),
+    ) ??
+    tasks.find((item) =>
+      matchesScheduledTaskScope(item, id, workspaceId, sourceSessionId, false),
+    ) ??
+    null
+  );
+}
+
+function isTaskNotFoundError(err: unknown): boolean {
+  if (err && typeof err === 'object') {
+    const candidate = err as { status?: unknown; code?: unknown };
+    if (candidate.status === 404 || candidate.code === 'task_not_found') {
+      return true;
+    }
+  }
+  return (
+    err instanceof Error &&
+    (err.message.includes('task_not_found') ||
+      err.message.includes('Task not found'))
+  );
+}
+
 function ScheduledTaskDetail({
   task,
+  sourceSessionId,
   actions,
+  liveSessionTask,
+  hasLiveSessionSnapshot = false,
+  hasLiveDurableScheduledSnapshot = false,
+  liveDurableTask,
+  confirmedDurableDeletion = false,
+  confirmedSessionCancellation = false,
+  onCancelSessionTask,
+  onSessionTaskStopped,
+  onDurableTaskDeleted,
+  onMutated,
 }: {
   task: TurnOutputScheduledTask;
+  sourceSessionId?: string;
   actions: ArtifactWorkspaceActions | undefined;
+  liveSessionTask?: DaemonSessionScheduledTaskStatus;
+  hasLiveSessionSnapshot?: boolean;
+  hasLiveDurableScheduledSnapshot?: boolean;
+  liveDurableTask?: DaemonScheduledTask;
+  confirmedDurableDeletion?: boolean;
+  confirmedSessionCancellation?: boolean;
+  onCancelSessionTask?: (
+    taskId: string,
+    source?: 'cron' | 'wakeup',
+  ) => Promise<boolean>;
+  onSessionTaskStopped?: (
+    taskId: string,
+    sourceSessionId?: string,
+    source?: 'cron' | 'wakeup',
+  ) => void;
+  onDurableTaskDeleted?: (
+    id: string,
+    workspaceId: string | undefined,
+    sourceSessionId: string | undefined,
+  ) => void;
+  onMutated?: () => void;
 }) {
   const { t } = useI18n();
   const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
@@ -2065,17 +2323,34 @@ function ScheduledTaskDetail({
   const [busy, setBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [stopConfirmed, setStopConfirmed] = useState(false);
+  const [durableDeletionConfirmed, setDurableDeletionConfirmed] =
+    useState(false);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const showFormRef = useRef(showForm);
+  showFormRef.current = showForm;
+  const liveDurableSnapshotRef = useRef({
+    hasLiveDurableScheduledSnapshot,
+    liveDurableTask,
+  });
+  liveDurableSnapshotRef.current = {
+    hasLiveDurableScheduledSnapshot,
+    liveDurableTask,
+  };
   const requestRef = useRef(0);
   const loadRequestRef = useRef(0);
+  const pendingLoadRequestsRef = useRef(new Set<number>());
   const requestScopeRef = useRef({
     actions,
     taskId: task.id,
     workspaceId: task.workspaceId,
+    sourceSessionId,
   });
   requestScopeRef.current = {
     actions,
     taskId: task.id,
     workspaceId: task.workspaceId,
+    sourceSessionId,
   };
   const isCurrentRequest = useCallback(
     (
@@ -2083,13 +2358,15 @@ function ScheduledTaskDetail({
       requestActions: ArtifactWorkspaceActions,
       taskId: string,
       workspaceId: string | undefined,
+      sourceSessionId: string | undefined,
     ) => {
       const scope = requestScopeRef.current;
       return (
         request === requestRef.current &&
         scope.actions === requestActions &&
         scope.taskId === taskId &&
-        scope.workspaceId === workspaceId
+        scope.workspaceId === workspaceId &&
+        scope.sourceSessionId === sourceSessionId
       );
     },
     [],
@@ -2100,13 +2377,15 @@ function ScheduledTaskDetail({
       requestActions: ArtifactWorkspaceActions,
       taskId: string,
       workspaceId: string | undefined,
+      sourceSessionId: string | undefined,
     ) => {
       const scope = requestScopeRef.current;
       return (
         request === loadRequestRef.current &&
         scope.actions === requestActions &&
         scope.taskId === taskId &&
-        scope.workspaceId === workspaceId
+        scope.workspaceId === workspaceId &&
+        scope.sourceSessionId === sourceSessionId
       );
     },
     [],
@@ -2119,17 +2398,24 @@ function ScheduledTaskDetail({
     [],
   );
   useEffect(() => {
+    pendingLoadRequestsRef.current.clear();
+    setLoading(false);
     setBusy(false);
     setSubmitting(false);
     setFormError(null);
-  }, [actions, task.id, task.workspaceId]);
+  }, [actions, task.id, task.workspaceId, sourceSessionId]);
+  useEffect(() => {
+    setStopConfirmed(false);
+    setDurableDeletionConfirmed(false);
+  }, [task.id, task.workspaceId, sourceSessionId]);
 
+  const hasKnownTaskId = task.id !== task.toolCallId;
+  const isUnboundCreation = task.durable && task.unboundCreation === true;
   const loadTask = useCallback(async () => {
-    const request = ++requestRef.current;
     const loadRequest = ++loadRequestRef.current;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
-    if (!task.durable || !actions) {
+    if (!task.durable || !actions || !hasKnownTaskId || !sourceSessionId) {
       setLoadedTask(null);
       setName('');
       setPrompt(task.prompt);
@@ -2138,13 +2424,40 @@ function ScheduledTaskDetail({
       setLoading(false);
       return;
     }
+    pendingLoadRequestsRef.current.add(loadRequest);
     setLoading(true);
     setLoadError(null);
     try {
       const tasks = await actions.listScheduledTasks(workspaceId);
-      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
-      const match = tasks.find((item) => item.id === task.id) ?? null;
+      if (
+        !isCurrentLoad(
+          loadRequest,
+          actions,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+        )
+      )
+        return;
+      const candidate = findScopedDurableTask(
+        tasks,
+        task.id,
+        workspaceId,
+        sourceSessionId,
+        isUnboundCreation,
+      );
+      const snapshot = liveDurableSnapshotRef.current;
+      const match =
+        !isUnboundCreation &&
+        candidate &&
+        candidate.sessionId === sourceSessionId &&
+        sourceSessionId !== undefined &&
+        snapshot.hasLiveDurableScheduledSnapshot &&
+        !snapshot.liveDurableTask
+          ? null
+          : candidate;
       setLoadedTask(match);
+      if (showFormRef.current) return;
       if (match) {
         setName(match.name ?? '');
         setPrompt(match.prompt);
@@ -2155,36 +2468,111 @@ function ScheduledTaskDetail({
         setBuilder(parseCronToBuilder(task.cron));
       }
     } catch (err) {
-      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
+      if (
+        isCurrentLoad(
+          loadRequest,
+          actions,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+        )
+      ) {
         setLoadError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
-        setLoading(false);
-      }
+      pendingLoadRequestsRef.current.delete(loadRequest);
+      setLoading(pendingLoadRequestsRef.current.size > 0);
     }
   }, [
     actions,
+    hasKnownTaskId,
     isCurrentLoad,
-    isCurrentRequest,
+    isUnboundCreation,
     task.cron,
     task.durable,
     task.id,
     task.prompt,
     task.workspaceId,
+    sourceSessionId,
   ]);
 
   useEffect(() => {
     void loadTask();
   }, [loadTask]);
 
+  useEffect(() => {
+    if (confirmedDurableDeletion) {
+      loadRequestRef.current += 1;
+      setLoadedTask(null);
+      setLoading(false);
+      setLoadError(null);
+      setShowForm(false);
+      setShowDeleteConfirm(false);
+      return;
+    }
+    if (liveDurableTask) {
+      loadRequestRef.current += 1;
+      setLoadedTask(liveDurableTask);
+      setLoading(false);
+      setLoadError(null);
+      // External updates must not replace a draft the user is still editing.
+      if (showFormRef.current) return;
+      setName(liveDurableTask.name ?? '');
+      setPrompt(liveDurableTask.prompt);
+      setBuilder(parseCronToBuilder(liveDurableTask.cron));
+      return;
+    }
+    if (hasLiveDurableScheduledSnapshot && sourceSessionId) {
+      // The session-filtered snapshot only lists tasks bound to
+      // sourceSessionId; an unbound-created task (whether still null or adopted
+      // into its own dedicated task session by keepalive) is legitimately
+      // absent from it and keeps its workspace-list hydration.
+      setLoadedTask((previous) =>
+        previous && (isUnboundCreation || previous.sessionId == null)
+          ? previous
+          : null,
+      );
+    }
+  }, [
+    confirmedDurableDeletion,
+    hasLiveDurableScheduledSnapshot,
+    isUnboundCreation,
+    liveDurableTask,
+    sourceSessionId,
+  ]);
+
+  useEffect(() => {
+    if (stopConfirmed) detailRef.current?.focus();
+  }, [stopConfirmed]);
+
   const isSessionScoped = !task.durable;
-  const isDeleted = task.durable && !loading && !loadError && !loadedTask;
-  const canEdit = Boolean(loadedTask);
+  const sessionCancellationConfirmed =
+    isSessionScoped && (stopConfirmed || confirmedSessionCancellation);
+  const hasSessionScopedLiveTask = isSessionScoped && Boolean(liveSessionTask);
+  const isSessionScopedPaused =
+    hasSessionScopedLiveTask &&
+    !sessionCancellationConfirmed &&
+    liveSessionTask?.enabled === false;
+  const isSessionScopedCancelled =
+    isSessionScoped && hasLiveSessionSnapshot && sessionCancellationConfirmed;
+  const isDeleted =
+    task.durable &&
+    hasKnownTaskId &&
+    (confirmedDurableDeletion || durableDeletionConfirmed);
+  const hasUnavailableDurableLiveState =
+    task.durable && !isDeleted && !loading && !loadError && !loadedTask;
+  const canEdit =
+    Boolean(loadedTask && actions && sourceSessionId) && !isDeleted;
+  const canCancelSession =
+    hasSessionScopedLiveTask &&
+    !sessionCancellationConfirmed &&
+    Boolean(onCancelSessionTask);
   const detailTitle = loadedTask?.name || loadedTask?.prompt || task.title;
-  const detailPrompt = loadedTask?.prompt ?? task.prompt;
-  const detailCron = loadedTask?.cron ?? task.cron;
-  const detailRecurring = loadedTask?.recurring ?? task.recurring;
+  const detailPrompt =
+    loadedTask?.prompt ?? liveSessionTask?.prompt ?? task.prompt;
+  const detailCron = loadedTask?.cron ?? liveSessionTask?.cronExpr ?? task.cron;
+  const detailRecurring =
+    loadedTask?.recurring ?? liveSessionTask?.recurring ?? task.recurring;
   const detailEnabled = loadedTask?.enabled;
 
   const openEdit = useCallback(() => {
@@ -2205,8 +2593,88 @@ function ScheduledTaskDetail({
     setBuilder(parseCronToBuilder(loadedTask.cron));
   }, [loadedTask]);
 
+  const runWithCurrentTaskOwner = useCallback(
+    async <T,>(
+      request: number,
+      currentTask: DaemonScheduledTask,
+      mutate: (expectedOwner: string | null) => Promise<T>,
+    ): Promise<T> => {
+      const workspaceId = task.workspaceId;
+      let expectedOwner: string | null = currentTask.sessionId ?? null;
+      if (isUnboundCreation && expectedOwner === null) {
+        const refreshed = findScopedDurableTask(
+          await actions!.listScheduledTasks(workspaceId),
+          task.id,
+          workspaceId,
+          sourceSessionId,
+          true,
+        );
+        if (
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          )
+        ) {
+          throw new DOMException('Request superseded', 'AbortError');
+        }
+        if (refreshed?.sessionId) {
+          expectedOwner = refreshed.sessionId;
+        }
+      }
+      try {
+        return await mutate(expectedOwner);
+      } catch (err) {
+        if (
+          !isUnboundCreation ||
+          expectedOwner !== null ||
+          !isTaskNotFoundError(err) ||
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          )
+        ) {
+          throw err;
+        }
+        const refreshed = findScopedDurableTask(
+          await actions!.listScheduledTasks(workspaceId),
+          task.id,
+          workspaceId,
+          sourceSessionId,
+          true,
+        );
+        if (
+          !isCurrentRequest(
+            request,
+            actions!,
+            task.id,
+            workspaceId,
+            sourceSessionId,
+          ) ||
+          !refreshed?.sessionId
+        ) {
+          throw err;
+        }
+        return mutate(refreshed.sessionId);
+      }
+    },
+    [
+      actions,
+      isCurrentRequest,
+      isUnboundCreation,
+      sourceSessionId,
+      task.id,
+      task.workspaceId,
+    ],
+  );
+
   const handleSave = useCallback(async () => {
-    if (!loadedTask || !actions) return;
+    if (!loadedTask || !actions || !sourceSessionId) return;
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -2217,32 +2685,64 @@ function ScheduledTaskDetail({
       return;
     }
     const request = ++requestRef.current;
+    loadRequestRef.current += 1;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
     setSubmitting(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(
-        loadedTask.id,
-        {
-          cron,
-          prompt: prompt.trim(),
-          name: name.trim() || null,
-        },
-        workspaceId,
+      const updated = await runWithCurrentTaskOwner(
+        request,
+        loadedTask,
+        (expectedOwner) =>
+          actions.updateScheduledTask(
+            loadedTask.id,
+            {
+              cron,
+              prompt: prompt.trim(),
+              name: name.trim() || null,
+            },
+            workspaceId,
+            expectedOwner,
+          ),
       );
-      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      if (
+        !isCurrentRequest(
+          request,
+          actions,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+        )
+      )
+        return;
+      if (
+        !matchesScheduledTaskScope(
+          updated,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+          isUnboundCreation,
+        )
+      ) {
+        throw new Error(t('scheduledTasks.error.workspaceUnavailable'));
+      }
       setLoadedTask(updated);
       setName(updated.name ?? '');
       setPrompt(updated.prompt);
       setBuilder(parseCronToBuilder(updated.cron));
       setShowForm(false);
+      onMutated?.();
     } catch (err) {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setFormError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setSubmitting(false);
       }
     }
@@ -2250,70 +2750,194 @@ function ScheduledTaskDetail({
     actions,
     builder,
     isCurrentRequest,
+    isUnboundCreation,
     loadedTask,
     name,
+    onMutated,
     prompt,
+    runWithCurrentTaskOwner,
+    sourceSessionId,
     t,
     task.id,
     task.workspaceId,
   ]);
 
   const handleToggle = useCallback(async () => {
-    if (!loadedTask || !actions) return;
+    if (!loadedTask || !actions || !sourceSessionId) return;
     const request = ++requestRef.current;
+    loadRequestRef.current += 1;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
     setBusy(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(
-        loadedTask.id,
-        {
-          enabled: !loadedTask.enabled,
-        },
-        workspaceId,
+      const updated = await runWithCurrentTaskOwner(
+        request,
+        loadedTask,
+        (expectedOwner) =>
+          actions.updateScheduledTask(
+            loadedTask.id,
+            {
+              enabled: !loadedTask.enabled,
+            },
+            workspaceId,
+            expectedOwner,
+          ),
       );
-      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      if (
+        !isCurrentRequest(
+          request,
+          actions,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+        )
+      )
+        return;
+      if (
+        !matchesScheduledTaskScope(
+          updated,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+          isUnboundCreation,
+        )
+      ) {
+        throw new Error(t('scheduledTasks.error.workspaceUnavailable'));
+      }
       setLoadedTask(updated);
+      onMutated?.();
     } catch (err) {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setFormError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setBusy(false);
       }
     }
-  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+  }, [
+    actions,
+    isCurrentRequest,
+    isUnboundCreation,
+    loadedTask,
+    onMutated,
+    runWithCurrentTaskOwner,
+    sourceSessionId,
+    t,
+    task.id,
+    task.workspaceId,
+  ]);
 
   const handleDelete = useCallback(async () => {
-    if (!loadedTask || !actions) return;
+    if (!loadedTask || !actions || !sourceSessionId) return;
     const request = ++requestRef.current;
+    loadRequestRef.current += 1;
     const taskId = task.id;
     const workspaceId = task.workspaceId;
     setBusy(true);
     setFormError(null);
     try {
-      await actions.deleteScheduledTask(loadedTask.id, workspaceId);
-      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
+      let deletedOwner: string | null = loadedTask.sessionId ?? null;
+      await runWithCurrentTaskOwner(request, loadedTask, (expectedOwner) => {
+        deletedOwner = expectedOwner;
+        return actions.deleteScheduledTask(
+          loadedTask.id,
+          workspaceId,
+          expectedOwner,
+        );
+      });
+      if (
+        !isCurrentRequest(
+          request,
+          actions,
+          taskId,
+          workspaceId,
+          sourceSessionId,
+        )
+      )
+        return;
       setLoadedTask(null);
+      setDurableDeletionConfirmed(true);
       setShowDeleteConfirm(false);
+      onDurableTaskDeleted?.(
+        loadedTask.id,
+        task.workspaceId,
+        deletedOwner ?? undefined,
+      );
+      onMutated?.();
     } catch (err) {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setFormError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+      if (
+        isCurrentRequest(request, actions, taskId, workspaceId, sourceSessionId)
+      ) {
         setBusy(false);
       }
     }
-  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+  }, [
+    actions,
+    isCurrentRequest,
+    loadedTask,
+    onDurableTaskDeleted,
+    onMutated,
+    runWithCurrentTaskOwner,
+    sourceSessionId,
+    task.id,
+    task.workspaceId,
+  ]);
+
+  const handleCancelSessionTask = useCallback(async () => {
+    if (!onCancelSessionTask || !liveSessionTask) return;
+    setBusy(true);
+    setFormError(null);
+    try {
+      const cancelled = await onCancelSessionTask(
+        liveSessionTask.id,
+        liveSessionTask.source,
+      );
+      if (!cancelled) {
+        setFormError(t('scheduledTasks.error.cancelFailed'));
+        return;
+      }
+      onSessionTaskStopped?.(
+        liveSessionTask.id,
+        sourceSessionId,
+        liveSessionTask.source,
+      );
+      setStopConfirmed(true);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    liveSessionTask,
+    onCancelSessionTask,
+    onSessionTaskStopped,
+    sourceSessionId,
+    t,
+  ]);
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
 
   return (
-    <div className={styles.detail}>
+    <div
+      ref={detailRef}
+      className={styles.detail}
+      role="group"
+      aria-label={t('environment.scheduledTasks')}
+      tabIndex={-1}
+    >
       {loading && (
         <div className={styles.empty}>{t('scheduledTasks.loading')}</div>
       )}
@@ -2323,90 +2947,108 @@ function ScheduledTaskDetail({
           {t('scheduledTasks.deletedSnapshot')}
         </div>
       )}
+      {hasUnavailableDurableLiveState && (
+        <div className={styles.empty}>
+          {t('scheduledTasks.durableHistoricalSnapshot')}
+        </div>
+      )}
       {isSessionScoped && (
         <div className={styles.empty}>
-          {t('scheduledTasks.sessionScopedSnapshot')}
+          {isSessionScopedCancelled
+            ? t('scheduledTasks.sessionScopedCancelled')
+            : hasSessionScopedLiveTask
+              ? isSessionScopedPaused
+                ? t('scheduledTasks.sessionScopedPaused')
+                : t('scheduledTasks.sessionScopedActive')
+              : t('scheduledTasks.sessionScopedSnapshot')}
         </div>
       )}
-      {!isDeleted && (
-        <div className={styles.section}>
-          <div className={styles.fieldGrid}>
-            <span className={styles.fieldLabel}>
-              {t('scheduledTasks.name')}
-            </span>
-            <span className={styles.fieldValue}>{detailTitle}</span>
-            <span className={styles.fieldLabel}>
-              {t('scheduledTasks.taskId')}
-            </span>
-            <span className={styles.fieldValue}>{task.id}</span>
-            <span className={styles.fieldLabel}>
-              {t('scheduledTasks.schedule')}
-            </span>
-            <span className={styles.fieldValue}>
-              {describeCron(detailCron, t)}
-            </span>
-            <span className={styles.fieldLabel}>Cron</span>
-            <span className={styles.fieldValue}>{detailCron}</span>
-            <span className={styles.fieldLabel}>
-              {t('scheduledTasks.type')}
-            </span>
-            <span className={styles.fieldValue}>
-              {detailRecurring
-                ? t('scheduledTasks.repeats')
-                : t('scheduledTasks.runsOnce')}
-            </span>
-            {detailEnabled !== undefined && (
-              <>
-                <span className={styles.fieldLabel}>
-                  {t('scheduledTasks.status')}
-                </span>
-                <span className={styles.fieldValue}>
-                  {detailEnabled
-                    ? t('scheduledTasks.enable')
-                    : t('scheduledTasks.disable')}
-                </span>
-              </>
-            )}
-          </div>
+      <div className={styles.section}>
+        <div className={styles.fieldGrid}>
+          <span className={styles.fieldLabel}>{t('scheduledTasks.name')}</span>
+          <span className={styles.fieldValue}>{detailTitle}</span>
+          <span className={styles.fieldLabel}>
+            {t('scheduledTasks.taskId')}
+          </span>
+          <span className={styles.fieldValue}>{task.id}</span>
+          <span className={styles.fieldLabel}>
+            {t('scheduledTasks.schedule')}
+          </span>
+          <span className={styles.fieldValue}>
+            {detailCron === '@wakeup'
+              ? t('environment.scheduledTasks.scopeWakeup')
+              : describeCron(detailCron, t)}
+          </span>
+          <span className={styles.fieldLabel}>Cron</span>
+          <span className={styles.fieldValue}>{detailCron}</span>
+          <span className={styles.fieldLabel}>{t('scheduledTasks.type')}</span>
+          <span className={styles.fieldValue}>
+            {detailRecurring
+              ? t('scheduledTasks.repeats')
+              : t('scheduledTasks.runsOnce')}
+          </span>
+          {detailEnabled !== undefined && (
+            <>
+              <span className={styles.fieldLabel}>
+                {t('scheduledTasks.status')}
+              </span>
+              <span className={styles.fieldValue}>
+                {detailEnabled
+                  ? t('scheduledTasks.enable')
+                  : t('scheduledTasks.disable')}
+              </span>
+            </>
+          )}
         </div>
-      )}
+      </div>
 
-      {!isDeleted && (
-        <div className={styles.section}>
-          <div className={styles.sectionTitle}>Prompt</div>
-          <div className={styles.description}>{detailPrompt}</div>
-        </div>
-      )}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>Prompt</div>
+        <div className={styles.description}>{detailPrompt}</div>
+      </div>
 
       {formError && <div className={taskStyles.formError}>{formError}</div>}
 
       <div className={styles.actionsRow}>
-        <button
-          type="button"
-          className={taskStyles.primaryButton}
-          disabled={!canEdit || busy}
-          onClick={openEdit}
-        >
-          {t('scheduledTasks.edit')}
-        </button>
-        <button
-          type="button"
-          className={taskStyles.secondaryButton}
-          disabled={!canEdit || busy}
-          onClick={() => void handleToggle()}
-        >
-          {loadedTask?.enabled
-            ? t('scheduledTasks.disable')
-            : t('scheduledTasks.enable')}
-        </button>
-        <button
-          type="button"
-          className={taskStyles.secondaryButton}
-          disabled={!canEdit || busy}
-          onClick={() => setShowDeleteConfirm(true)}
-        >
-          {t('scheduledTasks.delete')}
-        </button>
+        {isSessionScoped && canCancelSession ? (
+          <button
+            type="button"
+            className={taskStyles.secondaryButton}
+            disabled={busy}
+            onClick={() => void handleCancelSessionTask()}
+          >
+            {t('scheduledTasks.stopSessionTask')}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={taskStyles.primaryButton}
+              disabled={!canEdit || busy}
+              onClick={openEdit}
+            >
+              {t('scheduledTasks.edit')}
+            </button>
+            <button
+              type="button"
+              className={taskStyles.secondaryButton}
+              disabled={!canEdit || busy}
+              onClick={() => void handleToggle()}
+            >
+              {loadedTask?.enabled
+                ? t('scheduledTasks.disable')
+                : t('scheduledTasks.enable')}
+            </button>
+            <button
+              type="button"
+              className={taskStyles.secondaryButton}
+              disabled={!canEdit || busy}
+              onClick={() => setShowDeleteConfirm(true)}
+            >
+              {t('scheduledTasks.delete')}
+            </button>
+          </>
+        )}
       </div>
 
       {showDeleteConfirm && loadedTask && (
@@ -2634,7 +3276,12 @@ function ScheduledTaskDetail({
                 type="button"
                 className={taskStyles.primaryButton}
                 onClick={() => void handleSave()}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  hasUnavailableDurableLiveState ||
+                  isDeleted ||
+                  !sourceSessionId
+                }
               >
                 {submitting
                   ? t('scheduledTasks.saving')
@@ -3442,31 +4089,35 @@ function fileExtensionLabel(value: string) {
   return labels[extension] ?? extension.slice(0, 3).toUpperCase();
 }
 
-function ArtifactDetail({
+export function ArtifactDetail({
   artifact,
   sourceSessionId,
   workspaceActions,
   previewContent,
+  onSnapshotSessionNotFound,
 }: {
   artifact: DaemonSessionArtifact;
   sourceSessionId?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  onSnapshotSessionNotFound?: () => void;
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
-  const isAutomationSnapshot =
-    artifact.metadata?.['artifactType'] === 'automation_snapshot';
-  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
-  const canPreviewWorkspaceFile =
-    artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+  const isAutomationSnapshot = isAutomationSnapshotArtifact(artifact);
+  const isCodeReview = isCodeReviewArtifact(artifact);
+  const canPreviewWorkspaceFile = canPreviewWorkspaceArtifact(artifact);
   const imageMimeType = getArtifactImageMimeType(artifact);
 
-  if (artifact.metadata?.['artifactType'] === 'web_preview_snapshot') {
+  if (isWebPreviewSnapshotArtifact(artifact)) {
     return (
-      <SavedWebPreview artifact={artifact} sourceSessionId={sourceSessionId} />
+      <SavedWebPreview
+        artifact={artifact}
+        sourceSessionId={sourceSessionId}
+        onSessionNotFound={onSnapshotSessionNotFound}
+      />
     );
   }
 
@@ -3757,52 +4408,53 @@ function SourceDetail({
         ? locator.attachmentId
         : '';
   const isPdf = isPdfArtifact({ workspacePath: path });
+  const owner = tab.owner;
+  const handlePreviewError = useCallback(
+    (error: string) => {
+      if (owner.isCurrent()) setError(error);
+    },
+    [owner],
+  );
+  const previewWorkspaceActions = useMemo(() => {
+    if (!workspaceActions || !isPdf || locator.type !== 'workspace_file')
+      return workspaceActions;
+    const readWithOwner = async <T,>(read: () => Promise<T>): Promise<T> => {
+      if (!owner.isCurrent()) throw new Error(t('sources.unavailable'));
+      const result = await read();
+      if (!owner.isCurrent()) throw new Error(t('sources.unavailable'));
+      return result;
+    };
+    return {
+      ...workspaceActions,
+      stat: (path: string) => readWithOwner(() => workspaceActions.stat(path)),
+      readFileBytes: (
+        ...args: Parameters<ArtifactWorkspaceActions['readFileBytes']>
+      ) => readWithOwner(() => workspaceActions.readFileBytes(...args)),
+    };
+  }, [workspaceActions, isPdf, locator.type, owner, t]);
   useEffect(() => {
     let cancelled = false;
     setData(undefined);
     setError(undefined);
     setDownloadUrl(undefined);
-    if (!valid || locator.type === 'url') return;
+    if (!valid || locator.type !== 'attachment') return;
     const load = async () => {
-      if (locator.type === 'attachment') {
-        const attachment = await tab.sessionActions.readAttachment(
-          locator.attachmentId,
-        );
-        if (cancelled || !tab.owner.isCurrent()) return;
-        const bytes = Uint8Array.from(atob(attachment.data), (character) =>
-          character.charCodeAt(0),
-        );
-        setData(new Blob([bytes], { type: attachment.mimeType }));
-      } else if (isPdf && workspaceActions) {
-        const blob = await readWorkspaceFileAsBlob(
-          workspaceActions.readFileBytes,
-          path,
-          'application/pdf',
-          {
-            statFile: workspaceActions.stat,
-            isCancelled: () => cancelled || !tab.owner.isCurrent(),
-          },
-        );
-        if (!cancelled && tab.owner.isCurrent()) setData(blob);
-      }
+      const attachment = await tab.sessionActions.readAttachment(
+        locator.attachmentId,
+      );
+      if (cancelled || !owner.isCurrent()) return;
+      const bytes = Uint8Array.from(atob(attachment.data), (character) =>
+        character.charCodeAt(0),
+      );
+      setData(new Blob([bytes], { type: attachment.mimeType }));
     };
     void load().catch((err: unknown) => {
-      if (!cancelled && tab.owner.isCurrent())
-        setError(extractErrorDetail(err));
+      if (!cancelled && owner.isCurrent()) setError(extractErrorDetail(err));
     });
     return () => {
       cancelled = true;
     };
-  }, [
-    attempt,
-    valid,
-    locator,
-    path,
-    isPdf,
-    tab.owner,
-    tab.sessionActions,
-    workspaceActions,
-  ]);
+  }, [attempt, valid, locator, owner, tab.sessionActions]);
   if (valid && locator.type === 'url')
     return (
       <div className="flex flex-col gap-3 p-4">
@@ -3884,7 +4536,7 @@ function SourceDetail({
             {t('common.download')}
           </Button>
         </div>
-      ) : (locator.type === 'attachment' || isPdf) && !data ? (
+      ) : locator.type === 'attachment' && !data ? (
         <div className={styles.empty} role="status">
           {t('common.loading')}
         </div>
@@ -3908,8 +4560,8 @@ function SourceDetail({
           <WorkspaceFilePreview
             key={attempt}
             workspacePath={path}
-            workspaceActions={workspaceActions!}
-            onLoadError={setError}
+            workspaceActions={previewWorkspaceActions!}
+            onLoadError={handlePreviewError}
             previewData={data}
             previewOnly={locator.type === 'attachment'}
             downloadName={
@@ -4253,38 +4905,65 @@ function WorkspacePdfPreview({
   onLoadError?: (error: string) => void;
 }) {
   const { t } = useI18n();
-  const [data, setData] = useState<Blob>();
-  const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
+  const request = useMemo(
+    () => ({ workspacePath, workspaceActions, artifactVersion, attempt }),
+    [workspacePath, workspaceActions, artifactVersion, attempt],
+  );
+  const [fullPreviewRequest, setFullPreviewRequest] =
+    useState<typeof request>();
+  const [result, setResult] = useState<
+    { request: typeof request } & (
+      | { kind: 'range'; initialStat: DaemonFileStat }
+      | { kind: 'native'; data: Blob }
+      | { kind: 'error'; message: string }
+    )
+  >();
+  const fullPreviewRequested = fullPreviewRequest === request;
   useEffect(() => {
     let cancelled = false;
-    setData(undefined);
-    setError(undefined);
-    void readWorkspaceFileAsBlob(
-      workspaceActions.readFileBytes,
-      workspacePath,
-      'application/pdf',
-      { statFile: workspaceActions.stat, isCancelled: () => cancelled },
-    ).then(
-      (blob) => {
-        if (!cancelled) setData(blob);
-      },
-      (err: unknown) => {
-        if (cancelled) return;
-        const message = extractErrorDetail(err);
-        setError(message);
-        onLoadError?.(message);
-      },
-    );
+    setResult(undefined);
+    const { workspacePath, workspaceActions } = request;
+    const load = async () => {
+      const initialStat = await workspaceActions.stat(workspacePath);
+      if (cancelled) return;
+      if (
+        !fullPreviewRequested &&
+        initialStat.type === 'file' &&
+        initialStat.sizeBytes >= MIN_PDF_RANGE_PREVIEW_BYTES &&
+        initialStat.sizeBytes <= MAX_WORKSPACE_FILE_BLOB_BYTES
+      ) {
+        setResult({ request, kind: 'range', initialStat });
+        return;
+      }
+      const data = await readWorkspaceFileAsBlob(
+        workspaceActions.readFileBytes,
+        workspacePath,
+        'application/pdf',
+        {
+          statFile: workspaceActions.stat,
+          initialStat,
+          isCancelled: () => cancelled,
+        },
+      );
+      if (!cancelled) setResult({ request, kind: 'native', data });
+    };
+    void load().catch((err: unknown) => {
+      if (cancelled) return;
+      const message = extractErrorDetail(err);
+      setResult({ request, kind: 'error', message });
+      onLoadError?.(message);
+    });
     return () => {
       cancelled = true;
     };
-  }, [workspacePath, workspaceActions, artifactVersion, attempt, onLoadError]);
-  if (error) {
+  }, [request, fullPreviewRequested, onLoadError]);
+  const preview = result?.request === request ? result : undefined;
+  if (preview?.kind === 'error') {
     return (
       <div className={styles.empty}>
         <div role="alert" className={styles.previewError}>
-          {error}
+          {preview.message}
         </div>
         <Button onClick={() => setAttempt((value) => value + 1)}>
           {t('common.retry')}
@@ -4292,16 +4971,46 @@ function WorkspacePdfPreview({
       </div>
     );
   }
-  return data ? (
+  const loading = (
+    <div className={styles.empty} role="status">
+      {t('attachment.loadingPreview')}
+    </div>
+  );
+  if (preview?.kind === 'range' && !fullPreviewRequested) {
+    const openFull = () => setFullPreviewRequest(request);
+    return (
+      <ErrorBoundary
+        label="workspace PDF preview"
+        fallback={(error) => (
+          <div className={styles.empty}>
+            <div role="alert" className={styles.previewError}>
+              {t('artifact.previewFailed', {
+                message: extractErrorDetail(error),
+              })}
+            </div>
+            <Button onClick={openFull}>{t('pdf.openFull')}</Button>
+          </div>
+        )}
+      >
+        <Suspense fallback={loading}>
+          <WorkspacePdfRangePreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            initialStat={preview.initialStat}
+            onOpenFull={openFull}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+  return preview?.kind === 'native' ? (
     <PdfAttachmentPreview
-      data={data}
+      data={preview.data}
       mimeType="application/pdf"
       title={workspacePath}
     />
   ) : (
-    <div className={styles.empty} role="status">
-      {t('attachment.loadingPreview')}
-    </div>
+    loading
   );
 }
 

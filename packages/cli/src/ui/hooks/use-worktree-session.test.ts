@@ -79,9 +79,16 @@ describe('useWorktreeSession session ownership', () => {
       '/sessions/second.worktree.json',
     );
     const next = { ...worktree, slug: 'two', worktreeBranch: 'worktree/two' };
+    // The post-watcher reread must receive this fresh value too.
+    mocks.read.mockResolvedValue(next);
     await act(async () => resolveSecond(next));
-    expect(result.current).toBe(next);
+    await waitFor(() => expect(result.current).toBe(next));
     await waitFor(() => expect(watchers).toHaveLength(2));
+    expect(
+      mocks.read.mock.calls.filter(
+        ([filePath]) => filePath === '/sessions/second.worktree.json',
+      ),
+    ).toHaveLength(2);
     unmount();
     expect(watchers[1].close).toHaveBeenCalledOnce();
   });
@@ -126,14 +133,16 @@ describe('useWorktreeSession session ownership', () => {
     const { result } = renderHook(() => useWorktreeSession(config));
     await waitFor(() => expect(watchers).toHaveLength(1));
     await waitFor(() => expect(result.current).toBe(worktree));
+    const readsBeforeUnrelated = mocks.read.mock.calls.length;
+    // Unrelated events must not add reads beyond the initial watcher reload.
     act(() => watchers[0].notify('rename', 'unrelated.worktree.json'));
-    expect(mocks.read).toHaveBeenCalledTimes(1);
+    expect(mocks.read).toHaveBeenCalledTimes(readsBeforeUnrelated);
     mocks.read.mockResolvedValueOnce(null);
     await act(async () => watchers[0].notify('rename', 'first.worktree.json'));
     expect(result.current).toBeNull();
     await act(async () => watchers[0].notify('change', null));
     expect(result.current).toBe(worktree);
-    expect(mocks.read).toHaveBeenCalledTimes(3);
+    expect(mocks.read).toHaveBeenCalledTimes(readsBeforeUnrelated + 2);
   });
 
   it('does not access host sidecars while tool sandboxing is active', async () => {

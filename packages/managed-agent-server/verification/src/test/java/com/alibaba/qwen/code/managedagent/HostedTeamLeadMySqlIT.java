@@ -85,7 +85,7 @@ class HostedTeamLeadMySqlIT {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "h4eb1-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
     // WAIT replies after release; HOLD ends after cancellation without replying.
@@ -595,7 +595,7 @@ class HostedTeamLeadMySqlIT {
     private List<Map<String, Object>> rows(String session, String domain) {
         return jdbc.queryForList("SELECT r.record_id, r.revision, CAST(res.inline_bytes AS CHAR) AS body"
                 + " FROM ma_session_record r JOIN ma_resource res"
-                + " ON res.session_scope_key = r.session_scope_key AND res.resource_id = r.record_resource_id"
+                + " ON res.tenant_id = r.tenant_id AND res.session_id = r.session_id AND res.resource_id = r.record_resource_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? ORDER BY r.record_id",
                 tenant, session, domain);
     }
@@ -770,7 +770,6 @@ class HostedTeamLeadMySqlIT {
         // Keep initialized-root mtime distinct from birth time without relying on sleeps.
         Files.setLastModifiedTime(workspace, FileTime.fromMillis(1));
         int harnessPort;
-        int brokerPort;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         // Held member replies must not block the lead's requests.
         modelThreads = Executors.newCachedThreadPool();
@@ -787,16 +786,15 @@ class HostedTeamLeadMySqlIT {
         for (int attempt = 0; ; attempt++) {
             port = reservePort();
             harnessPort = reservePort();
-            brokerPort = reservePort();
             try {
-                startSpring(cli, node, decoy, workspace, harnessPort, brokerPort, storageOperation);
+                startSpring(cli, node, decoy, workspace, harnessPort, storageOperation);
                 jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                         + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-0', 1,"
                         + " 'storage-0', 'H4e-b1', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                         WorkspaceExecutionProfile.POLICY_REF);
                 jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, 'workspace-0', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-                startHarness(cli, node, decoy, harnessPort, brokerPort);
+                startHarness(cli, node, decoy, harnessPort, port);
                 break;
             } catch (RuntimeException error) {
                 try {
@@ -812,7 +810,7 @@ class HostedTeamLeadMySqlIT {
         }
     }
 
-    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort,
+    private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort,
             String storageOperation) throws IOException {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
@@ -828,7 +826,6 @@ class HostedTeamLeadMySqlIT {
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,

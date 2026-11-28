@@ -291,6 +291,7 @@ export const RU_PART3: Record<
   'scheduledTasks.error.goalActive':
     'Нельзя запустить задачу по расписанию, пока активна цель.',
   'scheduledTasks.error.toggleFailed': 'Не удалось обновить задачу',
+  'scheduledTasks.error.cancelFailed': 'Не удалось остановить задачу',
   'scheduledTasks.error.deleteFailed': 'Не удалось удалить задачу',
   'scheduledTasks.edit': 'Изменить',
   'scheduledTasks.editTitle': 'Изменить задачу по расписанию',
@@ -334,6 +335,15 @@ export const RU_PART3: Record<
   'scheduledTasks.model': 'Модель',
   'scheduledTasks.model.workspaceDefault':
     'Модель рабочей области по умолчанию',
+  'scheduledTasks.sessionScopedActive':
+    'Активна в этой сессии. Остановка немедленно отменяет будущие запуски.',
+  'scheduledTasks.sessionScopedPaused':
+    'Приостановлена в этой сессии. Остановка удалит оставшееся расписание.',
+  'scheduledTasks.sessionScopedCancelled':
+    'Задача в рамках сессии больше не активна.',
+  'scheduledTasks.stopSessionTask': 'Остановить задачу',
+  'tasks.pill.scheduled': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'задача по расписанию', 'задачи по расписанию', 'задач по расписанию')}`,
   'scheduledTasks.model.hint':
     'Выбранная модель применяется при создании каждой новой сессии запуска.',
   'scheduledTasks.group': 'Группа сессий',
@@ -348,6 +358,9 @@ export const RU_PART3: Record<
   'scheduledTasks.delivery.channel': 'Канал доставки',
   'scheduledTasks.delivery.configuredGroupHint':
     'Сообщения отправляются в группу, заданную для этого канала.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Сообщения отправляются на конечную точку, заданную для этого канала.',
+  'scheduledTasks.delivery.endpoint': 'Конечная точка',
   'scheduledTasks.delivery.configuredHint':
     'Сообщения отправляются по адресу, заданному для этого канала.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -616,6 +629,9 @@ export const RU_PART3: Record<
   'sidebar.toggleMenu': 'Переключить меню',
   'sidebar.newChat': 'Новый чат',
   'sidebar.newTask': 'Новая сессия',
+  'sidebar.overloadPaused': 'Система перегружена — новые задачи приостановлены',
+  'sidebar.overloadDetail': (v) =>
+    `Коэффициент нагрузки хоста ${v?.['ratio'] ?? '?'}, p99 цикла событий ${v?.['lag'] ?? '?'} мс (${v?.['reason'] ?? 'unknown'}). Новые задачи возобновятся после спада нагрузки.`,
   'sidebar.newWorktreeTask': 'Новая сессия worktree',
   'sidebar.moveWorkspaceUp': 'Выше',
   'sidebar.moveWorkspaceDown': 'Ниже',
@@ -785,6 +801,8 @@ export const RU_PART3: Record<
   'sidebar.openWorkspaceTerminalFailed': 'Не удалось открыть терминал',
   'sidebar.openWorkspaceTerminalOpened': 'Терминал открыт в рабочей области',
   'sidebar.manageWorkspace': 'Управление',
+  'sidebar.trustWorkspace': 'Доверять рабочей области',
+  'sidebar.trustingWorkspace': 'Установка доверия…',
   'sidebar.reloadWorkspace': 'Перезагрузить среду',
   'sidebar.reloadWorkspaceFailed':
     'Не удалось перезагрузить среду рабочей области',
@@ -828,6 +846,13 @@ export const RU_PART3: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')} (отключено)`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'хук', 'хука', 'хуков')}, ${v?.untrusted ?? 0} не загружено (папка без доверия). Включите security.folderTrust.enabled и доверьтесь папке или запустите qwen интерактивно для проверки.`,
+  'sidebar.overview.openFacet': (v) =>
+    `Управление «${v?.facet ?? ''}» для ${v?.workspace ?? ''}: ${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': 'Загрузка хуков…',
+  'workspaceHooks.empty': 'Для этой рабочей области хуки не настроены.',
+  'workspaceHooks.enabled': 'Включено',
+  'workspaceHooks.disabled': 'Отключено',
   'sidebar.forceRemoveWorkspace': 'Принудительно удалить',
   'sidebar.removeWorkspaceTitle': 'Удалить рабочую область',
   'sidebar.removeWorkspaceConfirm': (v) =>
@@ -874,6 +899,8 @@ export const RU_PART3: Record<
   'sidebar.scheduledTasks': 'Задачи по расписанию',
   'sidebar.workflows': 'Воркфлоу',
   'sidebar.goals': 'Цели',
+  'sidebar.sessionGoal': (v) =>
+    `Цель: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.prWatches': 'Наблюдение за PR',
   'sidebar.themeLight': 'Переключить на светлую тему',
   'sidebar.themeDark': 'Переключить на тёмную тему',

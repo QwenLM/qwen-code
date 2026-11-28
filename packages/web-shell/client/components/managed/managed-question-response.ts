@@ -5,6 +5,45 @@ import type {
 } from './managed-agent-provider';
 
 export const MAX_MANAGED_QUESTION_ANSWER_BYTES = 32 * 1024;
+export const MAX_MANAGED_QUESTION_TEXT_LENGTH = 8192;
+
+export type ManagedQuestionDraft = Record<
+  string,
+  { optionIds: string[]; text: string }
+>;
+
+export function managedQuestionAnswersFromDraft(
+  action: ManagedAgentPendingQuestionAction,
+  draft: ManagedQuestionDraft,
+): ManagedAgentQuestionAnswer[] {
+  return action.questions.flatMap((question) => {
+    const entry = draft[question.id];
+    const optionIds = question.options
+      .filter((option) => entry?.optionIds.includes(option.id))
+      .map((option) => option.id);
+    const text = entry?.text;
+    if (!optionIds.length && !text?.trim()) return [];
+    return [
+      {
+        questionId: question.id,
+        ...(optionIds.length ? { optionIds } : {}),
+        ...(text?.trim() ? { text } : {}),
+      },
+    ];
+  });
+}
+
+export function exceedsManagedQuestionAnswerLimits(
+  answers: readonly ManagedAgentQuestionAnswer[],
+): boolean {
+  return (
+    answers.some(
+      (answer) => (answer.text?.length ?? 0) > MAX_MANAGED_QUESTION_TEXT_LENGTH,
+    ) ||
+    new TextEncoder().encode(JSON.stringify(answers)).byteLength >
+      MAX_MANAGED_QUESTION_ANSWER_BYTES
+  );
+}
 
 export function canonicalQuestionAnswers(
   action: ManagedAgentPendingQuestionAction,

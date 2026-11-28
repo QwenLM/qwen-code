@@ -1323,7 +1323,7 @@ class HostedAutomationFaultGatesIT {
     private List<String> sessionLedger(String session) {
         return jdbc.queryForList("SELECT CONCAT(sequence_id, ' ', CAST(event_id AS CHAR), ' ', event_type) FROM"
                 + " ma_public_event WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
-                + " stream_id = X'' ORDER BY sequence_id", String.class, tenant, session);
+                + " stream_id = '' ORDER BY sequence_id", String.class, tenant, session);
     }
 
     // The ledger once every Runtime warm a Turn started has reported: the
@@ -2270,7 +2270,7 @@ class HostedAutomationFaultGatesIT {
         Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
@@ -2304,7 +2304,7 @@ class HostedAutomationFaultGatesIT {
                 }
             });
         }
-        startSpring(cli, root, brokerPort);
+        startSpring(cli, root);
         harnessCli = cli;
         startHarness();
         register(root);
@@ -2394,7 +2394,7 @@ class HostedAutomationFaultGatesIT {
         return !drop;
     }
 
-    private void startSpring(Path cli, Path root, int brokerPort) {
+    private void startSpring(Path cli, Path root) {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -2412,7 +2412,6 @@ class HostedAutomationFaultGatesIT {
                 "--qwen.managed-agent.automation.enabled=true",
                 "--qwen.managed-agent.automation.scan-delay=1s",
                 "--qwen.managed-agent.runtime-broker.enabled=true",
-                "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="
@@ -2675,7 +2674,7 @@ class HostedAutomationFaultGatesIT {
                             + " FROM ma_resource WHERE tenant_id = ? AND kind = 'managed-tool-outcome' ORDER BY resource_id LIMIT 16", tenant),
                     "publications", jdbc.queryForList("SELECT session_id, publication_id, producer_phase, is_quarantined, admission_resource_id"
                             + " FROM ma_output_capture WHERE tenant_id = ? ORDER BY publication_id LIMIT 16", tenant),
-                    "heads", jdbc.queryForList("SELECT session_id, storage_version, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
+                    "heads", jdbc.queryForList("SELECT session_id, has_activity_diagnostics, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
                             + " FROM ma_session_head WHERE tenant_id = ? AND head_kind = 'MANAGED_SESSION' ORDER BY session_id LIMIT 16", tenant))));
         }
     }

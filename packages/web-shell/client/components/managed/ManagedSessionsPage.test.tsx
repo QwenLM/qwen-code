@@ -375,7 +375,7 @@ describe('ManagedSessionsPage', () => {
 
   async function render(
     sessionId?: string,
-    language: 'en' | 'zh-CN' = 'en',
+    language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
@@ -400,6 +400,91 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
   }
+
+  it.each([undefined, 's1'] as const)(
+    'opens the static Managed capability inventory from session %s without new requests',
+    async (sessionId) => {
+      await render(sessionId);
+      const calls = Object.values(mocks.client).map(
+        (method) => method.mock.calls.length,
+      );
+      const trigger = [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Managed capabilities',
+      );
+      expect(trigger).toBeDefined();
+      await act(async () => trigger!.click());
+      expect(document.querySelectorAll('[data-managed-surface]')).toHaveLength(
+        35,
+      );
+      expect(
+        Object.values(mocks.client).map((method) => method.mock.calls.length),
+      ).toEqual(calls);
+    },
+  );
+
+  it.each([undefined, 's1'])(
+    'opens the same static inventory in the full-shell home layout from session %s without new requests',
+    async (sessionId) => {
+      const navigationTarget = document.createElement('div');
+      document.body.appendChild(navigationTarget);
+      try {
+        await render(sessionId, 'en', provider, navigationTarget);
+        const calls = Object.values(mocks.client).map(
+          (method) => method.mock.calls.length,
+        );
+        const trigger = [...container.querySelectorAll('button')].find(
+          (button) => button.textContent === 'Managed capabilities',
+        );
+        expect(trigger).toBeDefined();
+        await act(async () => trigger!.click());
+        expect(
+          document.querySelectorAll('[data-managed-surface]'),
+        ).toHaveLength(35);
+        expect(
+          Object.values(mocks.client).map((method) => method.mock.calls.length),
+        ).toEqual(calls);
+      } finally {
+        navigationTarget.remove();
+      }
+    },
+  );
+
+  it('exposes the static inventory to an existing host-only Session without catalog or creation requests', async () => {
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    const calls = Object.values(mocks.client).map(
+      (method) => method.mock.calls.length,
+    );
+    const trigger = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Managed capabilities',
+    );
+    expect(trigger).toBeDefined();
+    await act(async () => trigger!.click());
+    expect(document.querySelectorAll('[data-managed-surface]')).toHaveLength(
+      35,
+    );
+    expect(
+      Object.values(mocks.client).map((method) => method.mock.calls.length),
+    ).toEqual(calls);
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps all toolbar actions wrappable when narrow layouts use long translations', async () => {
+    await render('s1', 'ru');
+    const newButton = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Новая управляемая задача',
+    );
+    const actions = container.querySelector(
+      '[data-managed-surface-decisions-trigger]',
+    );
+    expect(newButton).toBeDefined();
+    expect(actions).not.toBeNull();
+    expect(actions!.textContent).toBe('Возможности Managed');
+    expect(newButton!.parentElement!.className).toContain('flex-wrap');
+    expect(actions!.parentElement!.className).toContain('flex-wrap');
+  });
 
   it('intercepts BTW and recap before main-task busy and queue admission', async () => {
     const create = vi.fn().mockImplementation(async (_sessionId, request) => ({
@@ -471,9 +556,14 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.cancel).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])(
-    'opens diagnostics in a read-only Session and closes them on owner change (home: %s)',
-    async (home) => {
+  it.each([
+    { home: false, language: 'en', title: 'Session diagnostics' },
+    { home: true, language: 'zh-CN', title: '会话诊断' },
+    { home: false, language: 'zh-TW', title: '會話診斷' },
+    { home: true, language: 'ru', title: 'Диагностика сессии' },
+  ] as const)(
+    'opens $language diagnostics in a read-only Session and closes them on owner change (home: $home)',
+    async ({ home, language, title }) => {
       const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
       provider = {
         ...provider,
@@ -491,10 +581,10 @@ describe('ManagedSessionsPage', () => {
         }),
       );
       const navigation = home ? null : undefined;
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(getContextUsage).not.toHaveBeenCalled();
       const button = [...container.querySelectorAll('button')].find(
-        (item) => item.textContent === 'Session diagnostics',
+        (item) => item.textContent === title,
       );
       expect(button).toBeDefined();
       await act(async () => button!.click());
@@ -502,10 +592,10 @@ describe('ManagedSessionsPage', () => {
         'model-a',
       );
       const signal = getContextUsage.mock.calls[0][1].signal as AbortSignal;
-      await render('s2', 'en', provider, navigation, false);
+      await render('s2', language, provider, navigation, false);
       expect(signal.aborted).toBe(true);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(getContextUsage).toHaveBeenCalledTimes(1);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
@@ -639,6 +729,7 @@ describe('ManagedSessionsPage', () => {
       button!.click();
       await flush();
     });
+    await act(async () => vi.dynamicImportSettled());
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     // A side panel opens: interactive dips false, but the live terminal must
     // not unmount (that would send the release frame and SIGTERM the PTY).
@@ -1516,22 +1607,30 @@ describe('ManagedSessionsPage', () => {
   });
 
   it.each([
-    ['en', 'billing'],
-    ['zh-CN', '余额'],
+    ['en', 'model_payment_required', 'HTTP 402', 'billing'],
+    ['zh-CN', 'model_payment_required', 'HTTP 402', '余额'],
+    ['zh-TW', 'model_payment_required', 'HTTP 402', '餘額'],
+    ['ru', 'model_payment_required', 'HTTP 402', 'баланс'],
+    ['zh-CN', 'model_authentication_failed', 'HTTP 401', '鉴权'],
+    ['zh-TW', 'model_authentication_failed', 'HTTP 401', '鑑權'],
+    ['zh-TW', 'model_access_denied', 'HTTP 403', '拒絕訪問'],
+    ['zh-TW', 'model_request_timeout', '模型介面', '請求超時'],
+    ['zh-TW', 'model_rate_limited', 'HTTP 429', '觸發限流'],
+    ['zh-TW', 'model_request_rejected', '模型介面', '拒絕了請求'],
+    ['zh-TW', 'model_service_unavailable', '模型介面', '服務暫不可用'],
+    ['zh-TW', 'model_request_failed', '模型介面', '檢查服務日誌'],
+    ['zh-TW', 'hosted_turn_failed', '本輪執行失敗', '定位具體原因'],
   ] as const)(
-    'explains a payment failure in %s without submitting another prompt',
-    async (language, guidance) => {
+    '%s: explains a %s failure without submitting another prompt',
+    async (language, code, status, guidance) => {
       mocks.client.getSession.mockResolvedValue(
         summary('s1', {
           phase: 'failed',
-          failure: {
-            code: 'model_payment_required',
-            message: 'model_payment_required',
-          },
+          failure: { code, message: code },
         }),
       );
       await render('s1', language);
-      expect(container.textContent).toContain('HTTP 402');
+      expect(container.textContent).toContain(status);
       expect(container.textContent).toContain(guidance);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     },
@@ -2150,6 +2249,23 @@ describe('ManagedSessionsPage', () => {
       ],
     });
     expect(provider.workspaceFiles!.read).not.toHaveBeenCalled();
+  });
+
+  it('enables inline attachments on an unbound Session without Workspace upload', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: false,
+        },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.fileUploadTarget).toBeUndefined();
   });
 
   it.each(['default', 'auto-edit', 'yolo'] as const)(
@@ -3699,6 +3815,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('hides the composer stop action while a submit is in flight so it matches canCancel authority', async () => {
+    mocks.client.getSession.mockImplementation(async () =>
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: { canSend: true, canCancel: true },
+      }),
+    );
+    let finishSubmit!: (value: { sessionId: string; turnId: string }) => void;
+    mocks.client.submitPrompt.mockImplementationOnce(
+      () =>
+        new Promise<{ sessionId: string; turnId: string }>((resolve) => {
+          finishSubmit = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, null);
+    const findStop = () =>
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop managed task',
+      );
+    expect(findStop()).toBeDefined();
+
+    await input('Steer while running');
+    await click('Send');
+    expect(findStop()).toBeUndefined();
+
+    await act(async () => {
+      finishSubmit({ sessionId: 's1', turnId: 'p1' });
+      await flush();
+    });
+    expect(findStop()).toBeDefined();
+  });
+
   it('handles Escape only for the visible Managed conversation after composition and other controls', async () => {
     mocks.client.getSession.mockImplementation(async () =>
       summary('s1', {
@@ -4214,10 +4362,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenCalledWith(action, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledWith(
+      action,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
@@ -4265,10 +4417,14 @@ describe('ManagedSessionsPage', () => {
       allow().click();
       await flush();
     });
-    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(
+      first,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]')?.textContent,
     ).toContain('Child session request · child-b');
@@ -4277,13 +4433,89 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
-      clientId: expect.any(String),
-      idempotencyKey: 'tool_approval_1:allow',
-    });
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      'allow',
+      expect.objectContaining({
+        clientId: expect.any(String),
+        idempotencyKey: 'tool_approval_1:allow',
+      }),
+    );
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('disables an expired permission card with an expired status notice on mount and on live expiry', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let currentPerm = {
+      ...pendingAction,
+      actionId: 'perm-expired-1',
+      sessionId: 's1',
+      expiresAt: Date.now() - 1,
+    };
+    const listPending = vi.fn(async () => [currentPerm]);
+    const respond = vi.fn(async () => undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const allowButton = () =>
+      [
+        ...card().querySelectorAll<HTMLButtonElement>(
+          '[data-testid="approval-overlay"] button',
+        ),
+      ].find((button) => button.textContent?.includes('Yes, allow once'))!;
+    expect(allowButton().disabled).toBe(true);
+    expect(
+      [...card().querySelectorAll('[role="status"]')].some((node) =>
+        node.textContent?.includes('Expired'),
+      ),
+    ).toBe(true);
+    await act(async () => {
+      allowButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open permission card to disabled + Expired status.
+    vi.useFakeTimers();
+    try {
+      currentPerm = {
+        ...pendingAction,
+        actionId: 'perm-live-expiring',
+        sessionId: 's2',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s2');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(allowButton().disabled).toBe(false);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(allowButton().disabled).toBe(true);
+      expect(
+        [...card().querySelectorAll('[role="status"]')].some((node) =>
+          node.textContent?.includes('Expired'),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
@@ -4304,41 +4536,79 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await act(async () => flush());
     const card = container.querySelector('[data-testid="managed-approval"]')!;
+    expect(
+      container.querySelector('[data-testid="chat-surface"]'),
+    ).not.toBeNull();
+    expect(mocks.client.getSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledTimes(1);
+    expect(listPending).toHaveBeenCalledTimes(1);
     expect(card.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(card.querySelector('[data-web-shell-ask-panel]')).not.toBeNull();
+    expect(card.querySelector('form')).toBeNull();
     expect(card.textContent).not.toContain('Yes, allow once');
     expect(card.textContent).not.toContain('Tool arguments are unavailable');
-    await act(async () => {
-      for (const [index, input] of card
-        .querySelectorAll('textarea')
-        .entries()) {
+    expect(
+      Array.from(card.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Ignore',
+      ),
+    ).toBeUndefined();
+    const askOptions = () =>
+      card.querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card.querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card.querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
           HTMLTextAreaElement.prototype,
           'value',
-        )!.set!.call(input, `Custom answer ${index}`);
+        )!.set!.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-    const submitQuestion = () =>
-      card
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      });
+    };
+    await fillCustom('Custom answer 0');
     await act(async () => {
-      submitQuestion();
+      nextQuestion().click();
+    });
+    await fillCustom('Custom answer 1');
+    await act(async () => {
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     await act(async () => flush());
-    expect(card.querySelector('textarea')?.value).toBe('Custom answer 0');
+    expect(
+      card.querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
+    ).toBe('Custom answer 1');
     expect(container.textContent).toContain('Retry the same answers');
     await act(async () => {
-      submitQuestion();
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
     await act(async () => flush());
-    expect(respond.mock.calls[0]).toEqual(respond.mock.calls[1]);
+    expect(respond.mock.calls[0][0]).toEqual(respond.mock.calls[1][0]);
+    expect(respond.mock.calls[0][1]).toEqual(respond.mock.calls[1][1]);
+    expect({
+      clientId: respond.mock.calls[0][2]?.clientId,
+      idempotencyKey: respond.mock.calls[0][2]?.idempotencyKey,
+    }).toEqual({
+      clientId: respond.mock.calls[1][2]?.clientId,
+      idempotencyKey: respond.mock.calls[1][2]?.idempotencyKey,
+    });
     expect(respond.mock.calls[0][1]).toEqual({
       kind: 'question',
       answers: [
@@ -4380,6 +4650,16 @@ describe('ManagedSessionsPage', () => {
       container.querySelector('[data-testid="managed-approval"]')!;
     const selector = () =>
       card().querySelector('[aria-label="Pending requests"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
     const choose = async (text: string) => {
       await act(async () => {
         [...selector().querySelectorAll('button')]
@@ -4387,9 +4667,14 @@ describe('ManagedSessionsPage', () => {
           .click();
       });
     };
-    const fill = async (index: number, text: string) => {
+    const fillCustom = async (text: string) => {
       await act(async () => {
-        const input = card().querySelectorAll('textarea')[index]!;
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      await act(async () => {
         Object.getOwnPropertyDescriptor(
           HTMLTextAreaElement.prototype,
           'value',
@@ -4407,23 +4692,30 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    await fill(0, 'Keep child A');
+    await fillCustom('Keep child A\nline 2');
     await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('');
-    await fill(0, 'Child B answer');
-    await fill(1, 'Child B details');
+    expect(askOptions()[2]!.textContent).toBe('Other answer');
+    await fillCustom('Child B answer');
+    await act(async () => {
+      nextQuestion().click();
+    });
+    await fillCustom('Child B details');
     await choose('This session');
     expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
     await choose('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
-    await choose('child-b');
-    expect(card().querySelector('textarea')?.value).toBe('Child B answer');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
     await act(async () => {
-      card()
-        .querySelector('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
+      askOptions()[2]!.click();
+    });
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value,
+    ).toBe('Keep child A\nline 2');
+    await choose('child-b');
+    expect(askOptions()[2]!.textContent).toBe('Child B answer');
+    await act(async () => {
+      submitButton().click();
       await flush();
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
@@ -4445,7 +4737,260 @@ describe('ManagedSessionsPage', () => {
     expect(
       selector().querySelector('[aria-pressed="true"]')?.textContent,
     ).toContain('child-a');
-    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    expect(askOptions()[2]!.textContent).toBe('Keep child A\nline 2');
+  });
+
+  it('preserves option order, untrimmed text, draft across cloned refreshes, 32 KiB guard, duplicate-submit fencing, and live expiry on shared AskUserQuestion', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
+    );
+    let triggerActionUpdate!: () => void;
+    const actionUpdated = new Promise<void>((resolve) => {
+      triggerActionUpdate = resolve;
+    });
+    mocks.client.subscribeEvents.mockImplementation(async function* (
+      id: string,
+      opts: { signal: AbortSignal },
+    ) {
+      if (id === 's1') {
+        await actionUpdated;
+        if (opts.signal.aborted) return;
+        yield event(4, 'Streamed message delta');
+        yield {
+          id: 5,
+          at: 5,
+          type: 'action_updated',
+          sessionId: 's1',
+          data: {},
+        };
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal.aborted) resolve();
+        else
+          opts.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+      });
+    });
+    let currentQuestion = { ...pendingQuestion(), sessionId: 's1' };
+    let resolveRespond!: () => void;
+    const respond = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRespond = resolve;
+        }),
+    );
+    const listPending = vi.fn().mockImplementation(async () => [
+      {
+        ...currentQuestion,
+        questions: structuredClone(currentQuestion.questions),
+      },
+    ]);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const askOptions = () =>
+      card().querySelectorAll<HTMLButtonElement>('[data-web-shell-ask-option]');
+    const nextQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'next',
+      )!;
+    const prevQuestion = () =>
+      Array.from(card().querySelectorAll<HTMLButtonElement>('button')).find(
+        (button) => button.textContent === 'previous',
+      )!;
+    const submitButton = () =>
+      card().querySelector<HTMLButtonElement>(
+        '[aria-keyshortcuts="Control+Enter Meta+Enter"]',
+      )!;
+    const fillCustom = async (value: string) => {
+      await act(async () => {
+        askOptions()[2]!.click();
+      });
+      const input = card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!;
+      expect(input.maxLength).toBe(8192);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+
+    // 32 KiB UTF-8 byte cap disables Submit while keeping input editable.
+    await fillCustom('界'.repeat(8192));
+    await act(async () => nextQuestion().click());
+    await fillCustom('界'.repeat(8192));
+    expect(card().querySelector('[role="alert"]')?.textContent).toContain(
+      '32 KiB',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )!.disabled,
+    ).toBe(false);
+
+    // Replace with valid multi-select (clicked in reverse order) + untrimmed multi-line text.
+    await act(async () => {
+      askOptions()[1]!.click();
+      askOptions()[0]!.click();
+    });
+    const q2Input = card().querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-ask-panel] textarea',
+    );
+    if (q2Input) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(q2Input, '  also: review\npublish  ');
+        q2Input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    } else {
+      await fillCustom('  also: review\npublish  ');
+    }
+    // Streaming message delta + sliding expiresAt + cloned questions refresh while on Q2
+    // must NOT reset step or draft.
+    const readsBefore = listPending.mock.calls.length;
+    currentQuestion = {
+      ...currentQuestion,
+      expiresAt: currentQuestion.expiresAt + 120_000,
+    };
+    await act(async () => {
+      triggerActionUpdate();
+      await flush();
+    });
+    await vi.waitFor(() =>
+      expect(listPending.mock.calls.length).toBeGreaterThan(readsBefore),
+    );
+    await act(async () => flush());
+    expect(
+      mocks.messageListProps?.messages.some((message) =>
+        message.content.includes('Streamed message delta'),
+      ),
+    ).toBe(true);
+    expect(card().textContent).toContain('2/2 questions');
+    expect(
+      card().querySelector<HTMLTextAreaElement>(
+        '[data-web-shell-ask-panel] textarea',
+      )?.value ?? askOptions()[2]?.textContent,
+    ).toBe('  also: review\npublish  ');
+    await act(async () => prevQuestion().click());
+    // Selecting duplicate-label option 1 on Q1 clears custom text.
+    await act(async () => askOptions()[1]!.click());
+    expect(card().querySelector('[role="alert"]')).toBeNull();
+    expect(submitButton().disabled).toBe(false);
+
+    // Trigger duplicate submit while in flight: fenced to 1 call, canonicalized option order.
+    await act(async () => {
+      submitButton().click();
+      submitButton().click();
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(submitButton().disabled).toBe(true);
+    expect(respond.mock.calls[0][1]).toEqual({
+      kind: 'question',
+      answers: [
+        { questionId: 'q1', optionIds: ['q1o2'] },
+        {
+          questionId: 'q2',
+          optionIds: ['q2o1', 'q2o2'],
+          text: '  also: review\npublish  ',
+        },
+      ],
+    });
+    await act(async () => {
+      resolveRespond();
+      await flush();
+    });
+
+    // Expired question shows role="status" expired notice and disables controls.
+    currentQuestion = {
+      ...pendingQuestion(),
+      actionId: 'expired-q',
+      sessionId: 's2',
+      expiresAt: Date.now() - 1,
+    };
+    respond.mockClear();
+    await render('s2');
+    await act(async () => flush());
+    expect(card().querySelector('[role="status"]')?.textContent).toContain(
+      'expired',
+    );
+    expect(submitButton().disabled).toBe(true);
+    expect(askOptions()[0]!.disabled).toBe(true);
+    await act(async () => {
+      submitButton().click();
+      await flush();
+    });
+    expect(respond).not.toHaveBeenCalled();
+
+    // Live expiry timer flips an open question to expired without a reload;
+    // submit-time clock check also blocks submission if wall clock passes expiresAt
+    // before the timer fires.
+    vi.useFakeTimers();
+    try {
+      const baseNow = Date.now();
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'clock-jump-q',
+        sessionId: 's3',
+        expiresAt: baseNow + 60_000,
+      };
+      await render('s3');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => nextQuestion().click());
+      await act(async () => askOptions()[0]!.click());
+      expect(submitButton().disabled).toBe(false);
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(currentQuestion.expiresAt + 1);
+      await act(async () => {
+        submitButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(respond).not.toHaveBeenCalled();
+      nowSpy.mockRestore();
+
+      currentQuestion = {
+        ...pendingQuestion(),
+        actionId: 'live-expiring-q',
+        sessionId: 's4',
+        expiresAt: Date.now() + 250,
+      };
+      await render('s4');
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(card().querySelector('[role="status"]')).toBeNull();
+      expect(askOptions()[0]!.disabled).toBe(false);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(card().querySelector('[role="status"]')?.textContent).toContain(
+        'expired',
+      );
+      expect(askOptions()[0]!.disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -4998,6 +5543,357 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
     );
     expect(provider.toolResults!.readRange).not.toHaveBeenCalled();
+  });
+
+  it('opens the workspace artifact library from the workspace group header', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    expect(entry).toBeTruthy();
+    expect(listWorkspaceArtifacts).not.toHaveBeenCalled();
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(listWorkspaceArtifacts).toHaveBeenCalledWith(
+      'ws-a',
+      expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
+    );
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    const close = [...document.body.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Close',
+    );
+    expect(close).toBeTruthy();
+    await act(async () => {
+      close!.click();
+      await flush();
+    });
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+  });
+
+  it('hides the artifact library entry while the page is not interactive', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot, false);
+    expect(
+      slot.querySelector('button[aria-label="Artifact library: Project"]'),
+    ).toBeNull();
+    expect(listWorkspaceArtifacts).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, slot, true);
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    expect(entry).toBeTruthy();
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+  });
+
+  it('keeps the workspace library open across session selection', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = (id: string) =>
+      summary(id, {
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      });
+    mocks.client.getSession.mockResolvedValue(bound('s1'));
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [bound('s1'), bound('s2')],
+    });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    expect(listWorkspaceArtifacts).toHaveBeenCalledTimes(1);
+    const sessionRow = slot.querySelector<HTMLElement>(
+      '[data-managed-session-id="s2"]',
+    );
+    expect(sessionRow).toBeTruthy();
+    await act(async () => {
+      sessionRow!.click();
+      await flush();
+    });
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-a');
+    // Feed the selection back into the page: the content is keyed by
+    // provider identity alone, so this re-render changes sessionId without
+    // remounting — only a sessionId-sensitive clear would close the dialog.
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's2' ? bound('s2') : bound('s1'),
+    );
+    await render('s2', 'en', provider, slot);
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    expect(listWorkspaceArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the workspace library when the provider identity changes', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    // A fresh provider object with the SAME storageKey: the content key does
+    // not remount, so only the [provider] effect can clear the dialog.
+    const otherProvider = { ...provider };
+    await render('s1', 'en', otherProvider, slot);
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+  });
+
+  it('resolves library row titles beyond the loaded session list', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    // The artifact fixture belongs to session-1, which only the archived
+    // list knows: the active list is empty and no session is open, so the
+    // page list alone would fall back to the shortened id.
+    const archived = summary('session-1', {
+      lifecycleStatus: 'archived',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    mocks.client.listSessions.mockImplementation(
+      async (options: { archiveState?: string }) => ({
+        sessions: options.archiveState === 'archived' ? [archived] : [],
+      }),
+    );
+    provider = {
+      ...provider,
+      lifecycle: { submit: vi.fn(), unarchive: vi.fn(), query: vi.fn() },
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    const archiveSlot = document.createElement('aside');
+    container.appendChild(archiveSlot);
+    await render(undefined, 'en', provider, slot, true, {
+      archivedNavigationTarget: archiveSlot,
+    });
+    expect(archiveSlot.textContent).toContain('Task session-1');
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Artifact library · Project');
+    const row = dialog?.querySelector('button[aria-pressed]');
+    expect(row?.textContent).toContain('Task session-1');
+    expect(row?.textContent).not.toContain('Session session-');
   });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
@@ -7828,5 +8724,103 @@ describe('ManagedSessionsPage', () => {
       'item-1',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it('gates ComposerUsageStats and onOpenContextUsage on diagnostics capability, opens the matching tab, and aborts in-flight reads on session switch', async () => {
+    // 1) Without capabilities.diagnostics: neither usage bar nor context opener mounts.
+    const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
+    const getStatistics = vi.fn().mockResolvedValue(diagnosticStats);
+    provider = {
+      ...provider,
+      diagnostics: {
+        getContextUsage,
+        getStatistics,
+        getResources: vi.fn().mockResolvedValue(diagnosticResources),
+        listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s0', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: false },
+      }),
+    );
+    await render('s0');
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
+    expect(getStatistics).not.toHaveBeenCalled();
+
+    // 2) With capabilities.diagnostics=true: ComposerUsageStats renders real
+    // usage and opens Statistics tab; onOpenContextUsage opens Context tab.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, diagnostics: true },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    const usageBar = container.querySelector('[data-web-shell-composer-usage]');
+    expect(usageBar).not.toBeNull();
+    expect(usageBar?.textContent).toContain('110 tok');
+    expect(usageBar?.textContent).toContain('20% cache hit');
+    expect(usageBar?.textContent).toContain('11 tok/s');
+    expect(usageBar?.textContent).not.toContain('turn');
+    expect(mocks.editorProps?.onOpenContextUsage).toBeTypeOf('function');
+
+    await act(async () => {
+      usageBar!.querySelector('button')!.click();
+      await flush();
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const statsTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Statistics');
+    expect(statsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).not.toHaveBeenCalled();
+
+    // Close dialog via Escape, then open via onOpenContextUsage -> Context tab.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await flush();
+    });
+    await act(async () => {
+      mocks.editorProps?.onOpenContextUsage?.();
+      await flush();
+    });
+    const contextTab = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent === 'Context');
+    expect(contextTab?.getAttribute('aria-selected')).toBe('true');
+    expect(getContextUsage).toHaveBeenCalledTimes(1);
+
+    // 3) Switching sessions aborts an in-flight getStatistics request and hides
+    // the usage bar when the target session does not advertise diagnostics.
+    let capturedSignal: AbortSignal | undefined;
+    getStatistics.mockImplementationOnce((_id, options) => {
+      capturedSignal = options.signal;
+      return new Promise(() => {});
+    });
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          diagnostics: id === 's2',
+        },
+      }),
+    );
+    await render('s2');
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(false);
+    await render('s3');
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-composer-usage]'),
+    ).toBeNull();
+    expect(mocks.editorProps?.onOpenContextUsage).toBeUndefined();
   });
 });
