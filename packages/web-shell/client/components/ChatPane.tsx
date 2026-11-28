@@ -1547,14 +1547,19 @@ export function ChatPane({
   }, [blocks, connection.sessionId, failedPrompt]);
 
   // Carries the specific host diagnostic across ChatSurface's generic
-  // approval-rejection error sink so transport errors and mode-lock refusals
-  // preserve their cause without double-reporting.
+  // approval-rejection and stop-failure error sinks so transport errors and
+  // mode-lock refusals preserve their cause without double-reporting.
   const pendingPermissionFailureRef = useRef<{
+    error: unknown;
+    fallback: string;
+  } | null>(null);
+  const pendingCancelFailureRef = useRef<{
     error: unknown;
     fallback: string;
   } | null>(null);
   useEffect(() => {
     pendingPermissionFailureRef.current = null;
+    pendingCancelFailureRef.current = null;
   }, [connection.sessionId]);
 
   const handleSurfaceError = useCallback(
@@ -1567,6 +1572,12 @@ export function ChatPane({
       ) {
         pendingPermissionFailureRef.current = null;
         reportError(pending.error, pending.fallback);
+        return;
+      }
+      const pendingCancel = pendingCancelFailureRef.current;
+      if (pendingCancel && fallback === t('chat.stopNotConfirmed')) {
+        pendingCancelFailureRef.current = null;
+        reportError(pendingCancel.error, pendingCancel.fallback);
         return;
       }
       reportError(error, fallback);
@@ -1643,13 +1654,22 @@ export function ChatPane({
     ],
   );
 
-  const handleCancel = useCallback(() => {
-    actions
-      .cancel()
-      .catch((error: unknown) =>
-        reportError(error, 'Failed to cancel request'),
-      );
-  }, [actions, reportError]);
+  const cancelPanePrompt = useCallback(async (): Promise<Admission> => {
+    pendingCancelFailureRef.current = null;
+    const owner = sessionOwnerGuard.capture();
+    try {
+      await actions.cancel();
+      return 'accepted';
+    } catch (error) {
+      if (owner.isCurrent()) {
+        pendingCancelFailureRef.current = {
+          error,
+          fallback: 'Failed to cancel request',
+        };
+      }
+      return 'unknown';
+    }
+  }, [actions, sessionOwnerGuard]);
 
   const pendingApprovals = useMemo<readonly PendingApproval[]>(
     () =>
@@ -1685,6 +1705,8 @@ export function ChatPane({
     pendingQuestions,
     pendingSignature,
     transcriptState: connection.loadingTranscript ? 'loading' : 'ready',
+    responding: isResponding,
+    cancelPrompt: cancelPanePrompt,
     submitPermission: submitPanePermission,
   });
 
@@ -2251,7 +2273,6 @@ export function ChatPane({
                       onReloadTranscript: transcriptReloadSupported
                         ? reloadTranscript
                         : undefined,
-                      isResponding,
                       workspaceCwd: connection.workspaceCwd || '',
                       hideSessionTimeline: true,
                       turnFileChanges: visibleTurnOutputKinds.has('file')
@@ -2396,7 +2417,6 @@ export function ChatPane({
                     }
                     composerEditorVisible={!readOnly}
                     composerRef={editorRef}
-                    onComposerCancel={handleCancel}
                     onComposerSubmit={handleSubmit}
                     composerProps={{
                       sessionId: connection.sessionId,

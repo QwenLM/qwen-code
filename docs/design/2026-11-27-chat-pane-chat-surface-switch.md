@@ -3,10 +3,13 @@
 [English](2026-11-27-chat-pane-chat-surface-switch.md) |
 [简体中文](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)
 
-Status: implemented (Slice 4a of
-[Unified Chat Surface](2026-11-16-unified-chat-surface.md) — `ChatPane`
-rendering plus approval/question routing; remaining submit/cancel/status
-convergence is tracked as Slice 4b in the parent design). Date: 2026-11-27.
+Status: implemented (Slice 4a landed in #18476; Slice 4b completed 2026-11-28,
+retiring `ChatPane`'s temporary `onComposerCancel` and
+`transcriptProps.isResponding` overrides via `responding` and `cancelPrompt` on
+`useDaemonChatControllerFromState` while keeping daemon-only slash/queue
+`onComposerSubmit` and `composerStatus` as host-owned slots; see
+[Unified Chat Surface](2026-11-16-unified-chat-surface.md)). Date: 2026-11-27
+(updated 2026-11-28).
 
 ## Problem
 

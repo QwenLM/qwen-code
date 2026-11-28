@@ -3,9 +3,12 @@
 [English](2026-11-27-chat-pane-chat-surface-switch.md) |
 [简体中文](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)
 
-状态：已实现（[统一聊天界面](2026-11-16-unified-chat-surface.zh-CN.md)
-切片 4a —— `ChatPane` 渲染及审批/提问路由；剩余提交/取消/状态编排收敛在父设计
-文档中登记为切片 4b）。日期：2026-11-27。
+状态：已实现（切片 4a 已于 #18476 合入；切片 4b 于 2026-11-28 收口，通过
+`useDaemonChatControllerFromState` 的 `responding` 与 `cancelPrompt` 退场
+`ChatPane` 临时的 `onComposerCancel` 与 `transcriptProps.isResponding` 覆写，
+保留 daemon 专属斜杠/排队 `onComposerSubmit` 与 `composerStatus` 宿主插槽；见
+[统一聊天界面](2026-11-16-unified-chat-surface.zh-CN.md)）。日期：2026-11-27
+（2026-11-28 更新）。
 
 ## 背景与问题
 

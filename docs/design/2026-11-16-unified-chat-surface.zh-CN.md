@@ -3,11 +3,10 @@
 [English](2026-11-16-unified-chat-surface.md) |
 [简体中文](2026-11-16-unified-chat-surface.zh-CN.md)
 
-状态：提案。日期：2026-11-16。2026-11-16 评审后修订：ChatPane 聊天列纳入
-范围，契约区分受理与结果确立，并修正若干现状主张。第二次修订收紧契约
-（可观察操作状态、关联身份、编译期能力映射守卫），并修正 daemon 导入
-例外范围与守卫车道。本文档所有内容均未实现；下文「现状」描述的是提案
-之日的代码。
+状态：已实现（切片 1–6 已全部落地 `main`，完成于 2026-11-28）。原提案日期：
+2026-11-16（2026-11-16 评审后修订：纳入 `ChatPane`、区分受理与结果确立、收紧
+契约不变量并明确守卫车道）。下文「现状」章节保留为 2026-11-16 提案基线记录；
+全部已合入 PR 与子设计文档见 **迁移切片** 下的已落地台账。
 
 ## 问题
 
@@ -350,10 +349,12 @@ managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复�
      （`SessionPanel`）经 daemon 适配器渲染 `ChatSurface`；面板 chrome（标题、
      最大化/关闭、头部操作）以插槽保留；删除 `ChatPane` 内联的转录、工具审批、
      提问、编辑器渲染及重复提问处理函数。
-   - **切片 4b（提交/取消/状态后续收口）：** 将 `ChatPane` 剩余由宿主承接的提
-     交（`onComposerSubmit`）、取消（`onComposerCancel`）与 `composerStatus`
-     编排收敛进共享控制器/界面管线，并退场临时的宿主取消与
-     `transcriptProps.isResponding` 覆盖缝隙。
+   - **切片 4b（取消与响应态收口）：** 通过向 `useDaemonChatControllerFromState`
+     注入实时 `responding` 状态与 `cancelPrompt`，退场 `ChatPane` 临时的
+     `onComposerCancel` 与 `transcriptProps.isResponding` 覆写（将 `'isResponding'`
+     收回 `ChatSurface` 自管转录键）。Daemon 专属斜杠/计划/目标/排队提交
+     （`onComposerSubmit`）与状态栏（`composerStatus`）与 `App.tsx` 一致，继续作为
+     宿主插槽保留。
 5. **按能力门控的一致性。** 在后端事实存在的范围内统一两侧的状态栈、
    用量统计与上下文用量/压缩展示。会话内搜索与目标展示在下文未决问题
    解决前保持门控。
@@ -365,6 +366,18 @@ managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复�
    `dist-managed-host/index.js` 做产物 grep，因为默认 `build` 不产出
    managed-only 产物，且该车道今天不跑任何测试。删除死掉的编排与
    陈旧导入。
+
+### 已落地切片台账
+
+| 切片      | 范围                                                                                                        | 已合入 PR 与子设计文档                                                                                                                                                                                            |
+| --------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1–2a      | `chat-core` 契约/守卫、共享 `ComposerStatusStack`                                                           | #17684                                                                                                                                                                                                            |
+| 2b–2e     | Daemon 意图引擎、控制器、绑定 hook、`ChatSurface`                                                           | #17709、#17794、#17895、#17952（[Daemon 控制器](2026-11-19-daemon-chat-controller.zh-CN.md)）                                                                                                                     |
+| 2f.1–2f.3 | 会话作用域准入锁、历史/取消守卫、`App.tsx` 主列切换                                                         | #18066、#18091、#18505（[会话准入锁](2026-11-22-chat-surface-session-locks.zh-CN.md)）                                                                                                                            |
+| 3a–3c.3   | Managed 适配器核心与 hook、Managed 就绪解耦、`AskUserQuestion` 与 `ManagedSessionsPage` 切换                | #18117、#18205、#18246、#18273、#18376（[Managed 控制器](2026-11-22-managed-chat-controller.zh-CN.md)、[就绪解耦](2026-11-24-chat-surface-managed-readiness.zh-CN.md)）                                           |
+| 4a–4b     | `ChatPane` 收敛至 `ChatSurface` + 退场临时取消/`isResponding` 覆写                                          | #18476 + Slice 4b 收尾（[ChatPane 切换](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)）                                                                                                                      |
+| 5         | Managed 会话能力门控 `ComposerUsageStats` 与上下文入口对等                                                  | #18518（[用量与上下文对等](2026-11-27-managed-usage-stats-and-context-parity.zh-CN.md)）                                                                                                                          |
+| 6a–6c     | Fail-closed AST/编译器边界守卫、`managed-host` daemon 值导入清零（47 → 31 → 16 → 0）、CI 零 daemon 产物门禁 | #18532、#18543、#18582（[6a](2026-11-27-managed-host-boundary-guards-and-cleanup.zh-CN.md)、[6b](2026-11-27-chat-editor-daemon-decoupling.zh-CN.md)、[6c](2026-11-28-managed-host-zero-daemon-cleanup.zh-CN.md)） |
 
 切片 2–5 期间，已迁移区域的新聊天功能只允许落在 `chat-core`，避免迁移
 与功能开发竞跑。

@@ -130,6 +130,11 @@ export interface DaemonChatControllerDeps {
   // populates it from the session's settled state (e.g. a failed session).
   readonly settledPhase?: 'idle' | 'failed';
 
+  // True while the host observes an active streaming/responding turn (for
+  // example when reopening onto an already-admitted turn or submitting via a
+  // host-owned slash/queue pipeline). Prioritized below an active cancel.
+  readonly responding?: boolean;
+
   // When aborted, the evidence subscriptions are released. The binding hook
   // ties this to the controller's mounted lifetime.
   readonly signal?: AbortSignal;
@@ -360,7 +365,10 @@ export function createDaemonChatController(
     },
     loadOlder: deps.loadOlder?.bind(deps),
     get phase(): ChatPhase {
-      return intents.phase(deps.settledPhase ?? 'idle');
+      const derived = intents.phase(deps.settledPhase ?? 'idle');
+      if (derived === 'cancelling') return 'cancelling';
+      if (deps.responding) return 'running';
+      return derived;
     },
     get pendingApprovals() {
       return deps.pendingApprovals;

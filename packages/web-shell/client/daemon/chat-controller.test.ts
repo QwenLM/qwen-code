@@ -493,6 +493,31 @@ describe('daemon controller: pass-through facts and lifecycle', () => {
     expect(h.controller.phase).toBe('failed');
   });
 
+  it('reports running while deps.responding is true and prioritizes cancelling over responding', async () => {
+    let responding = true;
+    let resolveCancel!: (value: Admission) => void;
+    const cancelPromise = new Promise<Admission>((resolve) => {
+      resolveCancel = resolve;
+    });
+    const h = harness({
+      get responding() {
+        return responding;
+      },
+      cancelPrompt: () => cancelPromise,
+    });
+    expect(h.controller.phase).toBe('running');
+
+    const pendingCancel = h.controller.cancel();
+    expect(h.controller.phase).toBe('cancelling');
+
+    resolveCancel('accepted');
+    await pendingCancel;
+    expect(h.controller.phase).toBe('running');
+
+    responding = false;
+    expect(h.controller.phase).toBe('idle');
+  });
+
   it('releases all three evidence subscriptions when the signal aborts', () => {
     const abort = new AbortController();
     const h = harness({ signal: abort.signal });

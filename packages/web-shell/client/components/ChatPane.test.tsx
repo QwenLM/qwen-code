@@ -4971,20 +4971,52 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     );
   });
 
-  it('wires onComposerCancel so a failed cancel reports the pane handler error instead of the surface fallback', async () => {
+  it('routes Stop through ChatSurface controller.cancel(), preserving the cancel cause once and suppressing late errors after unmount', async () => {
     const onError = vi.fn();
     streamingStateValue = 'responding';
     const cancelErr = new Error('daemon cancel boom');
     cancel.mockRejectedValueOnce(cancelErr);
     render({ onError });
+    expect(latestTranscriptViewportProps.isResponding).toBe(true);
+
     await act(async () => {
       testid('pane-cancel')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true }),
       );
       await Promise.resolve();
+      await Promise.resolve();
     });
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(cancelErr, 'Failed to cancel request');
+
+    // Controller phase returns to idle when streaming stops.
+    streamingStateValue = 'idle';
+    rerender({ onError });
+    expect(latestTranscriptViewportProps.isResponding).toBe(false);
+
+    // A late cancel failure settling after unmount must not report an error.
+    onError.mockClear();
+    streamingStateValue = 'responding';
+    rerender({ onError });
+    let rejectLateCancel!: (reason: unknown) => void;
+    cancel.mockReturnValueOnce(
+      new Promise<void>((_resolve, reject) => {
+        rejectLateCancel = reject;
+      }),
+    );
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    act(() => root!.unmount());
+    root = null;
+    await act(async () => {
+      rejectLateCancel(new Error('late cancel boom'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('resets viewport captures between tests and wires DaemonTranscriptViewport and DAEMON_STATUS_CARD_RENDERERS into TranscriptViewport', () => {
