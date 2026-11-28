@@ -91,7 +91,7 @@ export async function handleInstall(args: InstallArgs) {
     extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
-      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+      isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted === true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
       usageStatisticsEnabled: resolveUsageStatisticsEnabled(

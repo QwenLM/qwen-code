@@ -12,6 +12,9 @@ const mockRefreshCache = vi.hoisted(() => vi.fn());
 const mockUninstallExtension = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ warnings: [] }),
 );
+const mockUninstallExtensionById = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ warnings: [] }),
+);
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockLoadSettings = vi.hoisted(() => vi.fn());
@@ -24,6 +27,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ExtensionManager: vi.fn(() => ({
       refreshCache: mockRefreshCache,
       uninstallExtension: mockUninstallExtension,
+      getAllLoadedExtensions: () => [
+        { id: 'demo-id', name: 'demo', version: '2.0.0' },
+      ],
+      uninstallExtensionById: mockUninstallExtensionById,
     })),
   };
 });
@@ -57,6 +64,16 @@ describe('extensions uninstall command', () => {
     expect(() => validationParser.parse('uninstall')).toThrow(
       'Not enough non-option arguments: got 0, need at least 1',
     );
+  });
+
+  it('parses a version selector instead of the built-in version flag', async () => {
+    const parser = yargs([])
+      .strict()
+      .command(uninstallCommand)
+      .fail(false)
+      .locale('en');
+    await parser.parseAsync('uninstall demo --version 2.0.0');
+    expect(mockUninstallExtensionById).toHaveBeenCalledWith('demo-id', false);
   });
 
   it('prints committed uninstall warnings', async () => {

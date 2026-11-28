@@ -170,6 +170,27 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'extensions',
+        'uninstall',
+        'demo',
+        '--version',
+        '2.0.0',
+      ]),
+    ).toBe('default');
+    expect(resolveBootstrapRoute(['extensions', '--version'])).toBe('version');
+    expect(
+      resolveBootstrapRoute(['extensions', 'uninstall', '--version']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'extensions',
+        'uninstall',
+        'demo',
+        '--version=2.0.0',
+      ]),
+    ).toBe('default');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
     expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(

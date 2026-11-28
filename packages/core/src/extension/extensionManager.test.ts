@@ -160,6 +160,9 @@ type Writer = (destination: string) => unknown;
 type Consent = (options?: unknown) => Promise<void>;
 type LoaderInternals = {
   loadExtensionsFromExtensionsDir: (...args: unknown[]) => Promise<unknown>;
+  loadExtensionsFromVersionsDir: (
+    ...args: unknown[]
+  ) => Promise<Array<{ id: string } | null>>;
 };
 
 /** Writes each file (strings as-is, anything else as JSON) under `root`. */
@@ -2940,6 +2943,38 @@ describe('extension tests', () => {
 
       expect(extensions).toHaveLength(1);
       expect(extensions[0].name).toBe('ext2');
+    });
+
+    it('loads versioned extension slots in bounded batches', async () => {
+      const manager = createExtensionManager();
+      let active = 0;
+      let maximumActive = 0;
+      let completed = 0;
+      vi.spyOn(manager, 'loadExtension').mockImplementation(async (context) => {
+        active++;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        completed++;
+        return { id: context.extensionDir } as Awaited<
+          ReturnType<ExtensionManager['loadExtension']>
+        >;
+      });
+      const versionsDir = path.join(tempHomeDir, 'extension-versions', 'demo');
+      for (let index = 0; index < 9; index++) {
+        fs.mkdirSync(path.join(versionsDir, `slot-${index}`), {
+          recursive: true,
+        });
+      }
+      const internals = manager as unknown as LoaderInternals;
+      const loaded = await internals.loadExtensionsFromVersionsDir(
+        path.dirname(versionsDir),
+        tempHomeDir,
+      );
+      expect(completed).toBe(9);
+      expect(loaded).toHaveLength(9);
+      expect(maximumActive).toBeGreaterThan(1);
+      expect(maximumActive).toBeLessThanOrEqual(4);
     });
 
     it('keeps the previous cache when refreshCache fails before replacement', async () => {

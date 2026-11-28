@@ -11,3 +11,4 @@ export * from './npm.js';
 export * from './claude-converter.js';
 export * from './redaction.js';
 export * from './extension-store.js';
+export * from './extension-version-key.js';

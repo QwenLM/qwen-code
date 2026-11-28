@@ -118,8 +118,16 @@ import {
   type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
+  type PruneUnusedVersionsOptions,
+  type PruneUnusedVersionsResult,
   type WorkspaceActivation,
 } from './extension-store.js';
+import {
+  computeDirectoryContentHash,
+  computeVersionKey,
+  formatVersionSlot,
+  getVersionedExtensionId,
+} from './extension-version-key.js';
 import {
   AGENT_PLUGIN_MANIFEST,
   getAgentPluginSchemaStatus,
@@ -172,6 +180,10 @@ export interface ExtensionChannelConfig {
 export interface Extension {
   /** Revision of this installed artifact, independent of activation in other workspaces. */
   artifactGeneration?: number;
+  /** Version slot directory name when stored under `<QWEN_HOME>/extension-versions/<name>/<versionSlot>/`. */
+  versionSlot?: string;
+  /** Physical directory holding `.qwen-extension-install.json` (differs from `path` for linked extensions). */
+  installDir?: string;
   id: string;
   name: string;
   displayName?: string;
@@ -356,6 +368,10 @@ export interface PreparedExtensionMutation {
   /** @internal */
   readonly destinationDirectory: string;
   /** @internal */
+  readonly versionSlot?: string;
+  /** @internal */
+  readonly idempotentReuse?: boolean;
+  /** @internal */
   readonly currentDir: string;
   /** @internal */
   readonly cleanupPaths: readonly string[];
@@ -508,6 +524,17 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 // ============================================================================
 // ExtensionManager Class
 // ============================================================================
+
+/**
+ * The loaded-extension cache holds one row per identity, so its key cannot be
+ * the id alone: the id hashes the install source, and one repository installed
+ * two ways (git and github-release) legitimately yields a single id under two
+ * names. Name plus id is unique for both shapes — versioned siblings share a
+ * name but not an id, aliased sources share an id but not a name.
+ */
+function extensionCacheKey(extension: { id: string; name: string }): string {
+  return `${extension.name}\u0000${extension.id}`;
+}
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
@@ -760,9 +787,8 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
-    const extension = this.getLoadedExtensions().find(
-      (ext) => ext.name === name,
-    );
+    await this.refreshCache();
+    const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
@@ -812,9 +838,8 @@ export class ExtensionManager {
     ) {
       throw new Error('System and SystemDefaults scopes are not supported.');
     }
-    const extension = this.getLoadedExtensions().find(
-      (ext) => ext.name === name,
-    );
+    await this.refreshCache();
+    const extension = this.findExtensionForMutation(name, scope);
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
@@ -835,6 +860,19 @@ export class ExtensionManager {
           scopePath,
           'disabled',
         );
+        const extensions = this.getAllLoadedExtensions().filter(
+          (candidate) => candidate.name === name,
+        );
+        if (extension.versionSlot || extensions.length > 1) {
+          snapshot = await this.extensionStore.setWorkspaceActivations(
+            extensions.map((candidate) => ({
+              id: candidate.id,
+              name: candidate.name,
+            })),
+            currentDir,
+            'disabled',
+          );
+        }
       }
       onCommitted?.(snapshot.generation);
       logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
@@ -888,6 +926,34 @@ export class ExtensionManager {
 
   async getExtensionStoreSnapshot(): Promise<ExtensionStoreSnapshot> {
     return await this.extensionStore.readSnapshot();
+  }
+
+  getWorkspaceEnvFilePath(
+    extensionId: string,
+    workspacePath: string = this.workspaceDir,
+  ): string {
+    return this.extensionStore.workspaceEnvFilePath(extensionId, workspacePath);
+  }
+
+  async pruneUnusedVersions(
+    options: PruneUnusedVersionsOptions = {},
+  ): Promise<PruneUnusedVersionsResult> {
+    const endMutation = this.beginMutation('pruneUnusedVersions');
+    try {
+      const result = await this.extensionStore.pruneUnusedVersions(options);
+      if (
+        !options.dryRun &&
+        (result.pruned.length > 0 || result.removedWorkspaceRefs > 0)
+      ) {
+        for (const item of result.pruned) {
+          this.dropCachedExtension(item.id);
+        }
+        this.applyStoreActivation(result.snapshot);
+      }
+      return result;
+    } finally {
+      endMutation();
+    }
   }
 
   getExtensionSkillState(
@@ -1227,7 +1293,7 @@ export class ExtensionManager {
   }
 
   private findExtensionById(extensionId: string): Extension {
-    const extension = this.getLoadedExtensions().find(
+    const extension = this.getAllLoadedExtensions().find(
       (candidate) => candidate.id === extensionId,
     );
     if (!extension) {
@@ -1236,9 +1302,37 @@ export class ExtensionManager {
     return extension;
   }
 
+  private findExtensionForMutation(
+    name: string,
+    scope: SettingScope,
+  ): Extension | undefined {
+    const candidates = this.getAllLoadedExtensions().filter(
+      (extension) => extension.name === name,
+    );
+    if (scope !== SettingScope.Workspace) {
+      return (
+        candidates.find((extension) => !extension.versionSlot) ?? candidates[0]
+      );
+    }
+    if (this.storeSnapshot) {
+      const selectedId = this.extensionStore.getWorkspaceExtensionId(
+        this.storeSnapshot,
+        name,
+        this.workspaceDir,
+      );
+      if (selectedId) {
+        return candidates.find((extension) => extension.id === selectedId);
+      }
+    }
+    return (
+      candidates.find((extension) => extension.isActive) ??
+      candidates.findLast((extension) => extension.versionSlot)
+    );
+  }
+
   private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
     this.storeSnapshot = snapshot;
-    for (const extension of this.getLoadedExtensions()) {
+    for (const extension of this.getAllLoadedExtensions()) {
       extension.artifactGeneration =
         snapshot.extensions[extension.id]?.artifactGeneration;
       if (this.enabledExtensionNamesOverride.length > 0) {
@@ -1565,23 +1659,21 @@ export class ExtensionManager {
             )
           ).filter((extension): extension is Extension => extension !== null);
         } else {
-          // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-          loaded = await this.loadExtensionsFromExtensionsDir(
-            this.configDir,
-            this.workspaceDir,
-          );
+          // Default: load all extensions from primary dir and versioned dir.
+          loaded = await this.loadAllInstalledExtensions(this.workspaceDir);
         }
         return {
           value: loaded,
           extensions: loaded.map((extension) => ({
             id: extension.id,
             name: extension.name,
+            versionSlot: extension.versionSlot,
           })),
         };
       });
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      nextCache.set(extension.name, extension);
+      nextCache.set(extensionCacheKey(extension), extension);
     });
     if (!this.cacheInitialized) {
       this.runtimeGeneration =
@@ -1630,8 +1722,7 @@ export class ExtensionManager {
         // Default: load all extensions from QWEN_HOME-aware user extensions
         // dir, then filter names from the manifest-only result so a filtered
         // catalog never falls back to a full subresource load.
-        const loadedAll = await this.loadExtensionsFromExtensionsDir(
-          this.configDir,
+        const loadedAll = await this.loadAllInstalledExtensions(
           this.workspaceDir,
           { manifestOnly: true },
         );
@@ -1648,6 +1739,7 @@ export class ExtensionManager {
           extensions: loaded.map((extension) => ({
             id: extension.id,
             name: extension.name,
+            versionSlot: extension.versionSlot,
           })),
         };
       });
@@ -1660,14 +1752,17 @@ export class ExtensionManager {
   }> {
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
-        const loaded = await this.loadExtensionsFromExtensionsDir(
-          this.configDir,
+        const loaded = await this.loadAllInstalledExtensions(
           this.workspaceDir,
           { detailName: name },
         );
         return {
           value: loaded,
-          extensions: loaded.map(({ id, name }) => ({ id, name })),
+          extensions: loaded.map(({ id, name, versionSlot }) => ({
+            id,
+            name,
+            versionSlot,
+          })),
         };
       });
     const extension =
@@ -1752,6 +1847,40 @@ export class ExtensionManager {
       if (stamp === '-') continue;
       parts.push(`ext:${entry}:${stamp}`);
     }
+    let versionedNames: string[] = [];
+    try {
+      versionedNames = fs.readdirSync(this.extensionStore.versionsDir);
+    } catch {
+      versionedNames = [];
+    }
+    for (const extName of versionedNames) {
+      const extDir = path.join(this.extensionStore.versionsDir, extName);
+      let slots: string[] = [];
+      try {
+        slots = fs.readdirSync(extDir);
+      } catch {
+        continue;
+      }
+      for (const slot of slots) {
+        const extensionRoot = path.join(extDir, slot);
+        const installMetadata = this.loadInstallMetadata(extensionRoot);
+        const effectiveRoot =
+          installMetadata?.type === 'link' &&
+          typeof installMetadata.source === 'string' &&
+          installMetadata.source.length > 0
+            ? installMetadata.source
+            : extensionRoot;
+        const manifestName =
+          getAgentPluginSchemaStatus(effectiveRoot) === 'unrelated'
+            ? EXTENSIONS_CONFIG_FILENAME
+            : AGENT_PLUGIN_MANIFEST;
+        const stamp = ExtensionManager.stampPath(
+          path.join(effectiveRoot, manifestName),
+        );
+        if (stamp === '-') continue;
+        parts.push(`ver:${extName}/${slot}:${stamp}`);
+      }
+    }
     // Sorted so directory iteration order cannot make an unchanged set look
     // moved.
     return parts.sort().join('|');
@@ -1815,11 +1944,129 @@ export class ExtensionManager {
     return await revalidation;
   }
 
+  /**
+   * Returns all installed extension instances across both the primary user
+   * directory and the versioned store (management view).
+   */
+  getAllLoadedExtensions(): Extension[] {
+    if (!this.extensionCache) {
+      return [];
+    }
+    return [...this.extensionCache.values()];
+  }
+
+  /** Drops every cached identity carrying this id (see `extensionCacheKey`). */
+  private dropCachedExtension(extensionId: string): void {
+    if (!this.extensionCache) return;
+    const suffix = `\u0000${extensionId}`;
+    for (const key of [...this.extensionCache.keys()]) {
+      if (key.endsWith(suffix)) this.extensionCache.delete(key);
+    }
+  }
+
+  /**
+   * Returns the workspace-scoped effective extension view: at most one entry
+   * per case-insensitive extension name, preferring the active version for the
+   * current workspace, then a non-versioned primary copy.
+   */
   getLoadedExtensions(): Extension[] {
     if (!this.extensionCache) {
       return [];
     }
-    return [...this.extensionCache!.values()];
+    const byName = new Map<string, Extension>();
+    for (const extension of this.extensionCache.values()) {
+      const key = extension.name.toLowerCase();
+      const existing = byName.get(key);
+      if (!existing) {
+        byName.set(key, extension);
+        continue;
+      }
+      if (extension.isActive && !existing.isActive) {
+        byName.set(key, extension);
+        continue;
+      }
+      if (!extension.isActive && existing.isActive) {
+        continue;
+      }
+      if (this.storeSnapshot) {
+        const selectedId = this.extensionStore.getWorkspaceExtensionId(
+          this.storeSnapshot,
+          extension.name,
+          this.workspaceDir,
+        );
+        if (selectedId === extension.id && selectedId !== existing.id) {
+          byName.set(key, extension);
+          continue;
+        }
+      }
+      if (!extension.versionSlot && existing.versionSlot) {
+        byName.set(key, extension);
+      }
+    }
+    return [...byName.values()];
+  }
+
+  private async loadAllInstalledExtensions(
+    workspaceDir: string,
+    options: { manifestOnly?: boolean; detailName?: string } = {},
+  ): Promise<Extension[]> {
+    const primary = await this.loadExtensionsFromExtensionsDir(
+      this.configDir,
+      workspaceDir,
+      options,
+    );
+    const versioned = await this.loadExtensionsFromVersionsDir(
+      this.extensionStore.versionsDir,
+      workspaceDir,
+      options,
+    );
+    return [...primary, ...versioned];
+  }
+
+  private async loadExtensionsFromVersionsDir(
+    versionsDir: string,
+    workspaceDir: string,
+    options: { manifestOnly?: boolean; detailName?: string } = {},
+  ): Promise<Extension[]> {
+    let extNames: string[];
+    try {
+      extNames = fs.readdirSync(versionsDir);
+    } catch {
+      return [];
+    }
+    const slots = extNames.flatMap((extName) => {
+      const extNameDir = path.join(versionsDir, extName);
+      try {
+        if (!fs.statSync(extNameDir).isDirectory()) return [];
+        return fs.readdirSync(extNameDir).map((slot) => ({
+          dir: path.join(extNameDir, slot),
+          name: slot,
+        }));
+      } catch {
+        return [];
+      }
+    });
+    const extensions: Extension[] = [];
+    const batchSize = 4;
+    for (let offset = 0; offset < slots.length; offset += batchSize) {
+      const results = await Promise.allSettled(
+        slots.slice(offset, offset + batchSize).map(async (slot) => {
+          const loaded = await this.loadExtension(
+            { extensionDir: slot.dir, workspaceDir },
+            options,
+          );
+          if (!loaded) return null;
+          loaded.versionSlot = slot.name;
+          loaded.installDir = slot.dir;
+          return loaded;
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
+      }
+    }
+    return extensions;
   }
 
   // ==========================================================================
@@ -1997,6 +2244,7 @@ export class ExtensionManager {
         installMetadata?.marketplaceConfig?.metadata?.version ||
         '1.0.0',
       path: effectiveExtensionPath,
+      installDir: context.extensionDir,
       format: loadedManifest.format,
       installMetadata,
       isActive: this.isEnabled(config.name, this.workspaceDir),
@@ -2666,6 +2914,23 @@ export class ExtensionManager {
           workspaceDir: currentDir,
         });
         const isAgentPlugin = originSource === 'AgentPlugins';
+        const useVersionedSlot =
+          !isUpdate && initialActivation.scope === 'workspace';
+        if (useVersionedSlot) {
+          const contentHash =
+            installMetadata.type === 'local' ||
+            installMetadata.type === 'archive-url'
+              ? await computeDirectoryContentHash(localSourcePath)
+              : undefined;
+          const versionKey = computeVersionKey(
+            newExtensionConfig,
+            installMetadata,
+            contentHash,
+          );
+          if (versionKey) {
+            installMetadata.versionKey = versionKey;
+          }
+        }
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);
         if (isAgentPlugin) {
           newExtensionConfig = {
@@ -2697,15 +2962,31 @@ export class ExtensionManager {
         }
 
         const newExtensionName = newExtensionConfig.name;
-        const previous = this.getLoadedExtensions().find(
-          (installed) =>
-            installed.name.toLowerCase() === newExtensionName.toLowerCase(),
-        );
+        if (useVersionedSlot) {
+          await this.refreshCache();
+        }
+        const allLoaded = this.getAllLoadedExtensions();
+        const previous = isUpdate
+          ? (allLoaded.find((installed) => installed.id === extensionId) ??
+            allLoaded.find(
+              (installed) =>
+                installed.name.toLowerCase() === newExtensionName.toLowerCase(),
+            ))
+          : useVersionedSlot
+            ? allLoaded.find((installed) => installed.id === extensionId)
+            : allLoaded.find(
+                (installed) =>
+                  !installed.versionSlot &&
+                  installed.name.toLowerCase() ===
+                    newExtensionName.toLowerCase(),
+              );
+        const isIdempotentReuse =
+          useVersionedSlot && !isUpdate && !!previous && !!previous.versionSlot;
         if (isUpdate && !previous) {
           throw new Error(
             `Extension "${newExtensionName}" was not already installed, cannot update it.`,
           );
-        } else if (!isUpdate && previous) {
+        } else if (!isUpdate && previous && !isIdempotentReuse) {
           throw new Error(
             `Extension "${newExtensionName}" is already installed. Please uninstall it first.`,
           );
@@ -2778,17 +3059,133 @@ export class ExtensionManager {
           });
         }
 
-        const destinationPath = path.join(this.configDir, newExtensionName);
+        let versionSlot: string | undefined;
+        let destinationPath: string;
+        if (isUpdate && previous?.versionSlot) {
+          versionSlot = previous.versionSlot;
+          destinationPath = this.extensionStore.resolveVersionedDirectory(
+            previous.name,
+            previous.versionSlot,
+          );
+        } else if (isIdempotentReuse && previous?.versionSlot) {
+          versionSlot = previous.versionSlot;
+          destinationPath = this.extensionStore.resolveVersionedDirectory(
+            previous.name,
+            previous.versionSlot,
+          );
+        } else if (useVersionedSlot) {
+          const currentSnapshot = await this.extensionStore.readSnapshot();
+          const occupiedSlots = new Set<string>();
+          for (const [id, policy] of Object.entries(
+            currentSnapshot.extensions,
+          )) {
+            if (
+              id !== extensionId &&
+              policy.versionSlot &&
+              policy.name.toLowerCase() === newExtensionName.toLowerCase()
+            ) {
+              occupiedSlots.add(policy.versionSlot.toLowerCase());
+            }
+          }
+          versionSlot = formatVersionSlot(
+            newExtensionConfig,
+            installMetadata,
+            extensionId,
+            occupiedSlots,
+          );
+          destinationPath = this.extensionStore.resolveVersionedDirectory(
+            newExtensionName,
+            versionSlot,
+          );
+        } else {
+          destinationPath = path.join(this.configDir, newExtensionName);
+        }
         if (isUpdate && previous?.id !== extensionId) {
           throw new Error(
             `Extension "${newExtensionName}" changed its stable id during update.`,
           );
+        }
+        if (isIdempotentReuse) {
+          signal?.throwIfAborted();
+          if (prepareOnly) {
+            const cleanupPaths = [
+              tempDir,
+              convertedSourcePath !== tempDir ? convertedSourcePath : undefined,
+              localSourcePath !== tempDir &&
+              localSourcePath !== convertedSourcePath &&
+              installMetadata.type !== 'link' &&
+              installMetadata.type !== 'local'
+                ? localSourcePath
+                : undefined,
+            ].filter((value): value is string => !!value);
+            const prepared: PreparedExtensionMutation = {
+              operation: 'install',
+              identity: { id: extensionId, name: newExtensionName },
+              version: previous!.version,
+              installMetadata,
+              config: newExtensionConfig,
+              initialActivation,
+              stagingDirectory: '',
+              destinationDirectory: destinationPath,
+              versionSlot,
+              idempotentReuse: true,
+              currentDir,
+              cleanupPaths,
+              settingsActivated: true,
+              gitCredentialActivated: true,
+              consumed: false,
+              disposed: false,
+            };
+            this.preparedMutations.add(prepared);
+            ownershipTransferred = true;
+            return prepared;
+          }
+          const snapshot = await this.extensionStore.commitArtifact({
+            operation: 'install',
+            identity: { id: extensionId, name: newExtensionName },
+            destinationDirectory: destinationPath,
+            versionSlot,
+            idempotent: true,
+            initialActivation,
+          });
+          await this.extensionStore.pruneUnusedVersions().catch((error) => {
+            debugLogger.warn(
+              `Post-install version prune failed: ${getErrorMessage(error)}`,
+            );
+          });
+          const refreshedSnapshot = await this.extensionStore.readSnapshot();
+          extension = previous!;
+          extension.versionSlot = previous.versionSlot ?? versionSlot;
+          extension.installDir = destinationPath;
+          if (this.extensionCache) {
+            this.extensionCache.set(extensionCacheKey(extension), extension);
+            this.applyStoreActivation(refreshedSnapshot ?? snapshot);
+          }
+          await this.refreshTools().catch((error) => {
+            debugLogger.warn(
+              `Extension "${newExtensionName}" was activated, but runtime refresh failed: ${getErrorMessage(error)}`,
+            );
+          });
+          return extension;
         }
         let previousSettings: Record<string, string> | undefined;
         if (isUpdate) {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
             extensionId,
+            {
+              workspaceDir: currentDir,
+              extensionDir: previous?.installDir ?? destinationPath,
+              ...(previous?.versionSlot
+                ? {
+                    workspaceEnvFilePath:
+                      this.extensionStore.workspaceEnvFilePath(
+                        extensionId,
+                        currentDir,
+                      ),
+                  }
+                : {}),
+            },
           );
         }
         stagingPath = await this.extensionStore.createStagingDirectory();
@@ -2926,6 +3323,7 @@ export class ExtensionManager {
             initialActivation,
             stagingDirectory: stagingPath,
             destinationDirectory: destinationPath,
+            ...(versionSlot ? { versionSlot } : {}),
             currentDir,
             cleanupPaths,
             ...(preparedSettings
@@ -2957,6 +3355,7 @@ export class ExtensionManager {
           identity: { id: extensionId, name: newExtensionName },
           stagingDirectory: stagingPath,
           destinationDirectory: destinationPath,
+          ...(versionSlot ? { versionSlot } : {}),
           ...(!isUpdate ? { initialActivation } : {}),
           ...(expectedArtifactGeneration === undefined
             ? {}
@@ -2980,8 +3379,12 @@ export class ExtensionManager {
             { throwOnError: true },
           );
           if (!extension) throw new Error('Extension not found after commit.');
+          if (versionSlot) {
+            extension.versionSlot = versionSlot;
+            extension.installDir = destinationPath;
+          }
         } catch (reloadError) {
-          this.extensionCache?.delete(newExtensionName);
+          this.dropCachedExtension(extensionId);
           this.applyStoreActivation(snapshot);
           const warnings = [
             {
@@ -3010,7 +3413,19 @@ export class ExtensionManager {
         }
 
         if (this.extensionCache) {
-          this.extensionCache.set(extension.name, extension);
+          this.extensionCache.set(extensionCacheKey(extension), extension);
+        }
+        let latestSnapshot = snapshot;
+        if (versionSlot && !isUpdate) {
+          const prunedResult = await this.extensionStore
+            .pruneUnusedVersions()
+            .catch(() => undefined);
+          if (prunedResult) {
+            for (const pruned of prunedResult.pruned) {
+              this.dropCachedExtension(pruned.id);
+            }
+            latestSnapshot = prunedResult.snapshot;
+          }
         }
 
         if (isUpdate) {
@@ -3036,7 +3451,7 @@ export class ExtensionManager {
             ),
           );
         }
-        if (this.extensionCache) this.applyStoreActivation(snapshot);
+        if (this.extensionCache) this.applyStoreActivation(latestSnapshot);
         await this.refreshTools().catch((error) => {
           debugLogger.warn(
             `Extension "${newExtensionName}" was installed, but runtime refresh failed: ${getErrorMessage(error)}`,
@@ -3176,28 +3591,37 @@ export class ExtensionManager {
     try {
       let snapshot: ExtensionStoreSnapshot;
       try {
-        const stagedExtension = await this.loadExtension(
-          {
-            extensionDir: prepared.stagingDirectory,
-            workspaceDir: prepared.currentDir,
-          },
-          { throwOnError: true },
-        );
-        if (!stagedExtension) {
-          throw new Error('Prepared extension could not be loaded.');
-        }
-        if (
-          stagedExtension.id !== prepared.identity.id ||
-          stagedExtension.name !== prepared.identity.name ||
-          stagedExtension.version !== prepared.version
-        ) {
-          throw new Error('Prepared extension identity changed before commit.');
+        if (!prepared.idempotentReuse) {
+          const stagedExtension = await this.loadExtension(
+            {
+              extensionDir: prepared.stagingDirectory,
+              workspaceDir: prepared.currentDir,
+            },
+            { throwOnError: true },
+          );
+          if (!stagedExtension) {
+            throw new Error('Prepared extension could not be loaded.');
+          }
+          if (
+            stagedExtension.id !== prepared.identity.id ||
+            stagedExtension.name !== prepared.identity.name ||
+            stagedExtension.version !== prepared.version
+          ) {
+            throw new Error(
+              'Prepared extension identity changed before commit.',
+            );
+          }
         }
         snapshot = await this.extensionStore.commitArtifact({
           operation: prepared.operation,
           identity: prepared.identity,
-          stagingDirectory: prepared.stagingDirectory,
+          ...(prepared.idempotentReuse
+            ? { idempotent: true }
+            : { stagingDirectory: prepared.stagingDirectory }),
           destinationDirectory: prepared.destinationDirectory,
+          ...(prepared.versionSlot
+            ? { versionSlot: prepared.versionSlot }
+            : {}),
           ...(prepared.operation === 'install'
             ? { initialActivation: prepared.initialActivation }
             : {
@@ -3255,10 +3679,26 @@ export class ExtensionManager {
             { throwOnError: true },
           )) ?? undefined;
         if (!extension) throw new Error('Extension not found after commit.');
-        this.extensionCache?.set(extension.name, extension);
-        this.applyStoreActivation(snapshot);
+        if (prepared.versionSlot) {
+          extension.versionSlot = prepared.versionSlot;
+          extension.installDir = prepared.destinationDirectory;
+        }
+        this.extensionCache?.set(extensionCacheKey(extension), extension);
+        let latestSnapshot = snapshot;
+        if (prepared.versionSlot && prepared.operation === 'install') {
+          const prunedResult = await this.extensionStore
+            .pruneUnusedVersions()
+            .catch(() => undefined);
+          if (prunedResult) {
+            for (const pruned of prunedResult.pruned) {
+              this.dropCachedExtension(pruned.id);
+            }
+            latestSnapshot = prunedResult.snapshot;
+          }
+        }
+        this.applyStoreActivation(latestSnapshot);
       } catch (error) {
-        this.extensionCache?.delete(prepared.identity.name);
+        this.dropCachedExtension(prepared.identity.id);
         this.applyStoreActivation(snapshot);
         warnings.push({
           code: 'extension_reload_failed',
@@ -3347,7 +3787,10 @@ export class ExtensionManager {
     const credentialErrors = credentialCleanup.flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : [],
     );
-    const paths = [prepared.stagingDirectory, ...prepared.cleanupPaths];
+    const paths = [
+      ...(prepared.stagingDirectory ? [prepared.stagingDirectory] : []),
+      ...prepared.cleanupPaths,
+    ];
     let failedPaths = paths;
     let pathErrors: unknown[] = [];
     for (let attempt = 0; attempt < 2 && failedPaths.length > 0; attempt++) {
@@ -3381,22 +3824,37 @@ export class ExtensionManager {
     try {
       const currentDir = cwd ?? this.workspaceDir;
       const telemetryConfig = this.getTelemetryConfig(currentDir);
-      const installedExtensions = this.getLoadedExtensions();
-      const extension = installedExtensions.find(
-        (installed) =>
-          installed.config.name.toLowerCase() ===
-            extensionIdentifier.toLowerCase() ||
-          installed.installMetadata?.source.toLowerCase() ===
-            extensionIdentifier.toLowerCase(),
-      );
+      const extension = isUpdate
+        ? this.getLoadedExtensions().find(
+            (installed) =>
+              installed.config.name.toLowerCase() ===
+                extensionIdentifier.toLowerCase() ||
+              installed.installMetadata?.source.toLowerCase() ===
+                extensionIdentifier.toLowerCase(),
+          )
+        : this.findExtensionForMutation(
+            extensionIdentifier,
+            SettingScope.Workspace,
+          );
+      const policy = extension
+        ? (await this.extensionStore.readSnapshot()).extensions[extension.id]
+        : undefined;
+      if (extension && policy?.versionSlot) {
+        extension.versionSlot = policy.versionSlot;
+        extension.installDir =
+          this.extensionStore.resolveArtifactDirectory(policy);
+      }
       if (!extension) {
-        throw new Error(`Extension not found.`);
+        throw new Error(
+          `Extension not found. Use uninstall --version to target another installed version.`,
+        );
       }
       return await this.uninstallExtensionPolicy(
         { id: extension.id, name: extension.name },
-        extension.installMetadata?.type === 'link'
-          ? path.join(this.configDir, extension.name)
-          : extension.path,
+        extension.installDir ??
+          (extension.installMetadata?.type === 'link'
+            ? path.join(this.configDir, extension.name)
+            : extension.path),
         isUpdate,
         telemetryConfig,
         onCommitted,
@@ -3418,13 +3876,12 @@ export class ExtensionManager {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
       if (!policy || policy.declarationOnly) return snapshot;
-      const extension = this.getLoadedExtensions().find(
+      const extension = this.getAllLoadedExtensions().find(
         (candidate) => candidate.id === extensionId,
       );
       const destinationDirectory =
-        extension && extension.installMetadata?.type !== 'link'
-          ? extension.path
-          : path.join(this.configDir, policy.name);
+        (extension?.versionSlot ? extension?.installDir : extension?.path) ??
+        this.extensionStore.resolveArtifactDirectory(policy);
       const installMetadata =
         extension?.installMetadata ??
         this.loadInstallMetadata(destinationDirectory);
@@ -3449,6 +3906,7 @@ export class ExtensionManager {
     onCommitted?: ExtensionCommitCallback,
     hasStoredGitCredential = false,
   ): Promise<ExtensionStoreMutationResult> {
+    const snapshot = await this.extensionStore.readSnapshot();
     let deleteGitCredential: (() => Promise<void>) | undefined;
     let credentialCleanupError: unknown;
     if (hasStoredGitCredential && !isUpdate) {
@@ -3459,14 +3917,18 @@ export class ExtensionManager {
         credentialCleanupError = error;
       }
     }
-    const snapshot = await this.extensionStore.commitArtifact({
-      operation: 'uninstall',
-      identity,
-      destinationDirectory,
-    });
-    onCommitted?.(snapshot.generation);
-    this.extensionCache?.delete(identity.name);
-    if (isUpdate) return snapshot;
+    const policy = snapshot.extensions[identity.id];
+    const uninstallSnapshot =
+      policy?.versionSlot && !isUpdate
+        ? (await this.pruneUnusedVersions({ identity })).snapshot
+        : await this.extensionStore.commitArtifact({
+            operation: 'uninstall',
+            identity,
+            destinationDirectory,
+          });
+    onCommitted?.(uninstallSnapshot.generation);
+    this.dropCachedExtension(identity.id);
+    if (isUpdate) return uninstallSnapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
     if (deleteGitCredential) {
       try {
@@ -3481,16 +3943,25 @@ export class ExtensionManager {
         error: getErrorMessage(credentialCleanupError),
       });
     }
-    try {
-      this.preferencesStore.clear(identity.name);
-    } catch (error) {
-      debugLogger.warn(
-        `Extension "${identity.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
-      );
-      warnings.push({
-        code: 'extension_preferences_cleanup_failed',
-        error: getErrorMessage(error),
-      });
+    const hasRemainingSameName = Object.values(
+      uninstallSnapshot.extensions,
+    ).some(
+      (policy) =>
+        !policy.declarationOnly &&
+        policy.name.toLowerCase() === identity.name.toLowerCase(),
+    );
+    if (!hasRemainingSameName) {
+      try {
+        this.preferencesStore.clear(identity.name);
+      } catch (error) {
+        debugLogger.warn(
+          `Extension "${identity.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
+        );
+        warnings.push({
+          code: 'extension_preferences_cleanup_failed',
+          error: getErrorMessage(error),
+        });
+      }
     }
     try {
       await this.refreshTools();
@@ -3507,7 +3978,9 @@ export class ExtensionManager {
       telemetryConfig,
       new ExtensionUninstallEvent(identity.name, 'success'),
     );
-    return warnings.length > 0 ? { ...snapshot, warnings } : snapshot;
+    return warnings.length > 0
+      ? { ...uninstallSnapshot, warnings }
+      : uninstallSnapshot;
   }
 
   async performWorkspaceExtensionMigration(
@@ -3779,7 +4252,16 @@ export function getExtensionId(
   if (installMetadata?.pluginName) {
     idValue += `:${installMetadata.pluginName}`;
   }
-  return hashValue(idValue);
+  const baseId = hashValue(idValue);
+  if (installMetadata?.versionKey) {
+    return getVersionedExtensionId(
+      installMetadata.type === 'local' || installMetadata.type === 'archive-url'
+        ? ''
+        : baseId,
+      installMetadata.versionKey,
+    );
+  }
+  return baseId;
 }
 
 function parseSkillStates(value: unknown): Record<string, boolean> | undefined {

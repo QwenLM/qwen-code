@@ -380,7 +380,13 @@ export function resolveBootstrapRoute(
   // name cmd -- -v`, which the mcp fast path persists verbatim),
   // `=`-form tokens (`--model=-v` is one token, not an exact match), and
   // version tokens sitting in a BASE_VALUE_FLAGS value slot.
-  if (hasVersionToken(argv)) {
+  const isVersionedExtensionUninstall =
+    argv[0] === 'extensions' &&
+    argv[1] === 'uninstall' &&
+    argv[2] !== undefined &&
+    (argv[3]?.startsWith('--version=') ||
+      (argv[3] === '--version' && argv[4] !== undefined));
+  if (hasVersionToken(argv) && !isVersionedExtensionUninstall) {
     return 'version';
   }
 

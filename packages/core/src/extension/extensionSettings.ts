@@ -45,19 +45,25 @@ interface ExtensionSettingsSelector {
 function getSettingsSelectorPath(
   extensionName: string,
   envFilePathOverride?: string,
+  extensionDir?: string,
 ): string {
   return path.join(
     envFilePathOverride
       ? path.dirname(envFilePathOverride)
-      : new ExtensionStorage(extensionName).getExtensionDir(),
+      : (extensionDir ?? new ExtensionStorage(extensionName).getExtensionDir()),
     SETTINGS_SELECTOR_FILENAME,
   );
 }
 
 async function readSettingsSelector(
   extensionName: string,
+  extensionDir?: string,
 ): Promise<ExtensionSettingsSelector | undefined> {
-  const selectorPath = getSettingsSelectorPath(extensionName);
+  const selectorPath = getSettingsSelectorPath(
+    extensionName,
+    undefined,
+    extensionDir,
+  );
   if (!fsSync.existsSync(selectorPath)) return undefined;
   const parsed: unknown = JSON.parse(await fs.readFile(selectorPath, 'utf8'));
   if (
@@ -151,14 +157,21 @@ export interface ExtensionSetting {
   sensitive?: boolean;
 }
 
+export interface ExtensionSettingsPathOptions {
+  workspaceDir?: string;
+  extensionDir?: string;
+  workspaceEnvFilePath?: string;
+}
+
 const getKeychainStorageName = (
   extensionName: string,
   extensionId: string,
   scope: ExtensionSettingScope,
+  workspaceDir?: string,
 ): string => {
   const base = `Qwen Code Extensions ${extensionName} ${extensionId}`;
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return `${base} ${process.cwd()}`;
+    return `${base} ${workspaceDir ?? process.cwd()}`;
   }
   return base;
 };
@@ -166,9 +179,19 @@ const getKeychainStorageName = (
 const getEnvFilePath = (
   extensionName: string,
   scope: ExtensionSettingScope,
+  options?: ExtensionSettingsPathOptions,
 ): string => {
   if (scope === ExtensionSettingScope.WORKSPACE) {
-    return path.join(process.cwd(), EXTENSION_SETTINGS_FILENAME);
+    return (
+      options?.workspaceEnvFilePath ??
+      path.join(
+        options?.workspaceDir ?? process.cwd(),
+        EXTENSION_SETTINGS_FILENAME,
+      )
+    );
+  }
+  if (options?.extensionDir) {
+    return path.join(options.extensionDir, EXTENSION_SETTINGS_FILENAME);
   }
   return new ExtensionStorage(extensionName).getEnvFilePath();
 };
@@ -371,22 +394,24 @@ export async function getScopedEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
   scope: ExtensionSettingScope,
+  options?: ExtensionSettingsPathOptions,
 ): Promise<Record<string, string>> {
   const { name: extensionName } = extensionConfig;
-  const keychain = new HybridTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+  const serviceName = getKeychainStorageName(
+    extensionName,
+    extensionId,
+    scope,
+    options?.workspaceDir,
   );
+  const keychain = new HybridTokenStorage(serviceName);
   const selector =
     scope === ExtensionSettingScope.USER
-      ? await readSettingsSelector(extensionName)
+      ? await readSettingsSelector(extensionName, options?.extensionDir)
       : undefined;
   const settingsStorage = selector
-    ? createSelectedStorage(
-        getKeychainStorageName(extensionName, extensionId, scope),
-        selector.backend,
-      )
+    ? createSelectedStorage(serviceName, selector.backend)
     : keychain;
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(extensionName, scope, options);
   let customEnv: Record<string, string> = {};
   if (fsSync.existsSync(envFilePath)) {
     const envFile = fsSync.readFileSync(envFilePath, 'utf-8');
@@ -426,6 +451,7 @@ export async function getScopedEnvContents(
 export async function getEnvContents(
   extensionConfig: ExtensionConfig,
   extensionId: string,
+  options?: ExtensionSettingsPathOptions,
 ): Promise<Record<string, string>> {
   if (!extensionConfig.settings || extensionConfig.settings.length === 0) {
     return Promise.resolve({});
@@ -435,11 +461,13 @@ export async function getEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.USER,
+    options,
   );
   const workspaceSettings = await getScopedEnvContents(
     extensionConfig,
     extensionId,
     ExtensionSettingScope.WORKSPACE,
+    options,
   );
 
   return { ...userSettings, ...workspaceSettings };
@@ -451,6 +479,7 @@ export async function updateSetting(
   settingKey: string,
   requestSetting: (setting: ExtensionSetting) => Promise<string>,
   scope: ExtensionSettingScope,
+  options?: ExtensionSettingsPathOptions,
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (!settings || settings.length === 0) {
@@ -472,20 +501,21 @@ export async function updateSetting(
   }
 
   const newValue = await requestSetting(settingToUpdate);
-  const keychain = new HybridTokenStorage(
-    getKeychainStorageName(extensionName, extensionId, scope),
+  const serviceName = getKeychainStorageName(
+    extensionName,
+    extensionId,
+    scope,
+    options?.workspaceDir,
   );
+  const keychain = new HybridTokenStorage(serviceName);
 
   if (settingToUpdate.sensitive) {
     const selector =
       scope === ExtensionSettingScope.USER
-        ? await readSettingsSelector(extensionName)
+        ? await readSettingsSelector(extensionName, options?.extensionDir)
         : undefined;
     const settingsStorage = selector
-      ? createSelectedStorage(
-          getKeychainStorageName(extensionName, extensionId, scope),
-          selector.backend,
-        )
+      ? createSelectedStorage(serviceName, selector.backend)
       : keychain;
     if (selector) {
       await settingsStorage.setSecret(
@@ -507,7 +537,7 @@ export async function updateSetting(
 
   // For non-sensitive settings, we need to read the existing .env file,
   // update the value, and write it back, preserving any other values.
-  const envFilePath = getEnvFilePath(extensionName, scope);
+  const envFilePath = getEnvFilePath(extensionName, scope, options);
   let envContent = '';
   if (fsSync.existsSync(envFilePath)) {
     envContent = await fs.readFile(envFilePath, 'utf-8');
@@ -528,6 +558,7 @@ export async function updateSetting(
   }
 
   const newEnvContent = formatEnvContent(nonSensitiveSettings);
+  await fs.mkdir(path.dirname(envFilePath), { recursive: true });
   await atomicWriteFile(envFilePath, newEnvContent, { noFollow: true });
 }
 

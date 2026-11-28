@@ -54,12 +54,27 @@ const setCommand: CommandModule<object, SetArgs> = {
       writeStdoutLine(t('Extension "{{name}}" not found.', { name }));
       return;
     }
+    const workspaceDir = process.cwd();
+    const settingsPathOptions = {
+      workspaceDir,
+      extensionDir: extension.installDir ?? extension.path,
+      ...(extension.versionSlot &&
+      typeof extensionManager.getWorkspaceEnvFilePath === 'function'
+        ? {
+            workspaceEnvFilePath: extensionManager.getWorkspaceEnvFilePath(
+              extension.id,
+              workspaceDir,
+            ),
+          }
+        : {}),
+    };
     await updateSetting(
       extension.config,
       extension.id,
       setting,
       promptForSetting,
       scope as ExtensionSettingScope,
+      settingsPathOptions,
     );
   },
 };
@@ -96,15 +111,31 @@ const listCommand: CommandModule<object, ListArgs> = {
       return;
     }
 
+    const workspaceDir = process.cwd();
+    const settingsPathOptions = {
+      workspaceDir,
+      extensionDir: extension.installDir ?? extension.path,
+      ...(extension.versionSlot &&
+      typeof extensionManager.getWorkspaceEnvFilePath === 'function'
+        ? {
+            workspaceEnvFilePath: extensionManager.getWorkspaceEnvFilePath(
+              extension.id,
+              workspaceDir,
+            ),
+          }
+        : {}),
+    };
     const userSettings = await getScopedEnvContents(
       extension.config,
       extension.id,
       ExtensionSettingScope.USER,
+      settingsPathOptions,
     );
     const workspaceSettings = await getScopedEnvContents(
       extension.config,
       extension.id,
       ExtensionSettingScope.WORKSPACE,
+      settingsPathOptions,
     );
     const mergedSettings = { ...userSettings, ...workspaceSettings };
 
