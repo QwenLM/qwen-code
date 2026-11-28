@@ -102,8 +102,8 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
         [
           '#!/bin/sh',
           'set -eu',
-          '# Expected: -R "rdump / <tree>" <image>',
-          'TREE=$(printf "%s" "$2" | sed "s|^rdump / ||")',
+          '# Expected: -R \'rdump / "<tree>"\' <image>',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
           'mkdir -p "$TREE/bin" "$TREE/opt/poc"',
           'printf "base-marker\\n" > "$TREE/bin/base-marker"',
         ].join('\n') + '\n',
@@ -239,46 +239,6 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       ).toThrow(/single-link regular file/);
       rmSync(hardBase);
 
-      // 3. Hostile base image unpacking a symlink at /opt/qwen -> outside must be blocked before writing
-      const hostileDebugfs = join(root, 'hostile-debugfs');
-      writeExecutable(
-        hostileDebugfs,
-        [
-          '#!/bin/sh',
-          'set -eu',
-          'TREE=$(printf "%s" "$2" | sed "s|^rdump / ||")',
-          'mkdir -p "$TREE/opt"',
-          `ln -s "${outside}" "$TREE/opt/qwen"`,
-        ].join('\n') + '\n',
-      );
-      expect(() =>
-        deriveExt4GuestImage({
-          baseImagePath: golden,
-          outputImagePath: join(approved, 'hostile-out.ext4'),
-          approvedRoots: [approved],
-          debugfsBin: hostileDebugfs,
-          mkfsExt4Bin: fakeMkfs,
-          tempParentDir: root,
-        }),
-      ).toThrow(/escaped extract tree via symlink/);
-      expect(existsSync(join(outside, 'guest-vsock.py'))).toBe(false);
-      expect(existsSync(join(approved, 'hostile-out.ext4'))).toBe(false);
-
-      // 4. Failing mkfs.ext4 cleans temporary file and leaves no partial output
-      const failMkfs = join(root, 'fail-mkfs');
-      writeExecutable(failMkfs, '#!/bin/sh\necho "disk full" >&2\nexit 1\n');
-      expect(() =>
-        deriveExt4GuestImage({
-          baseImagePath: golden,
-          outputImagePath: join(approved, 'fail-out.ext4'),
-          approvedRoots: [approved],
-          debugfsBin: fakeDebugfs,
-          mkfsExt4Bin: failMkfs,
-          tempParentDir: root,
-        }),
-      ).toThrow(/exited 1: disk full/);
-      expect(existsSync(join(approved, 'fail-out.ext4'))).toBe(false);
-
       // 5. CLI derive works end to end and rejects bad arguments with exit 2
       const cliOut = join(approved, 'cli-derived.ext4');
       const cliOk = spawnSync(
@@ -336,5 +296,214 @@ describe('verify-pr-vm-image offline golden ext4 derivation', () => {
       expect(cliBadSize.status).toBe(2);
       expect(cliBadSize.stderr).toMatch(/positive integer/);
     },
+    15_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'blocks hostile extract-tree symlink escapes (leaf, ancestor, /opt/python), detects debugfs stderr/empty-tree errors, supports spaced tempParentDir and symlinked mkfs.ext4, and adds ENOSPC hint',
+    () => {
+      const root = makeTempDir('vimg-sec-');
+      const approved = join(root, 'approved');
+      const outside = join(root, 'outside');
+      mkdirSync(approved, { mode: 0o700 });
+      mkdirSync(outside, { mode: 0o700 });
+
+      const golden = join(root, 'golden-rootfs.ext4');
+      writeFileSync(golden, 'readonly-golden-ext4-image-bytes', {
+        mode: 0o444,
+      });
+
+      const fakeDebugfs = join(root, 'fake-debugfs');
+      writeExecutable(
+        fakeDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/bin" "$TREE/opt/poc"',
+          'printf "base-marker\\n" > "$TREE/bin/base-marker"',
+        ].join('\n') + '\n',
+      );
+      const fakeMkfs = join(root, 'fake-mkfs.ext4');
+      writeExecutable(
+        fakeMkfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'OUT=""',
+          'while [ $# -gt 0 ]; do OUT="$1"; shift; done',
+          'printf "derived-ext4-bytes\\n" > "$OUT"',
+        ].join('\n') + '\n',
+      );
+
+      // 1. Hostile /opt/qwen -> outside must be blocked before writing
+      const hostileDebugfs = join(root, 'hostile-debugfs');
+      writeExecutable(
+        hostileDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/opt"',
+          `ln -s "${outside}" "$TREE/opt/qwen"`,
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'hostile-out.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: hostileDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/escaped extract tree via symlink/);
+      expect(existsSync(join(outside, 'guest-vsock.py'))).toBe(false);
+      expect(existsSync(join(approved, 'hostile-out.ext4'))).toBe(false);
+
+      // 2. Hostile ancestor symlink /opt -> outside must not create outside/qwen
+      const hostileAncestorDebugfs = join(root, 'hostile-ancestor-debugfs');
+      writeExecutable(
+        hostileAncestorDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          `ln -s "${outside}" "$TREE/opt"`,
+        ].join('\n') + '\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'hostile-anc-out.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: hostileAncestorDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/escaped extract tree via symlink/);
+      expect(existsSync(join(outside, 'qwen'))).toBe(false);
+      expect(existsSync(join(outside, 'poc'))).toBe(false);
+
+      // 3. Hostile /opt/python -> outside-victim during --bundle-host-python must NOT delete victim files
+      const pyVictim = join(outside, 'python-victim');
+      mkdirSync(pyVictim, { mode: 0o700 });
+      writeFileSync(join(pyVictim, 'precious.txt'), 'keep-me');
+      const hostilePyDebugfs = join(root, 'hostile-py-debugfs');
+      writeExecutable(
+        hostilePyDebugfs,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'TREE=$(printf "%s" "$2" | sed -e "s|^rdump / ||" -e \'s|^"||\' -e \'s|"$||\')',
+          'mkdir -p "$TREE/opt"',
+          `ln -s "${pyVictim}" "$TREE/opt/python"`,
+        ].join('\n') + '\n',
+      );
+      const fakeLdd = join(root, 'fake-ldd');
+      writeExecutable(fakeLdd, '#!/bin/sh\nexit 0\n');
+      const fakePyBin = join(root, 'fake-python3');
+      writeExecutable(fakePyBin, '#!/bin/sh\nexit 0\n');
+      const fakePyStdlib = join(root, 'fake-stdlib');
+      mkdirSync(fakePyStdlib, { mode: 0o700 });
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'hostile-py-out.ext4'),
+          approvedRoots: [approved],
+          bundleHostPython: true,
+          pythonBin: fakePyBin,
+          pythonLibDir: fakePyStdlib,
+          lddBin: fakeLdd,
+          debugfsBin: hostilePyDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/escaped extract tree via symlink/);
+      expect(readFileSync(join(pyVictim, 'precious.txt'), 'utf8')).toBe(
+        'keep-me',
+      );
+
+      // 4. debugfs exiting 0 with stderr error (both rdump: prefix and open-error) or empty tree must fail closed
+      const silentErrDebugfs = join(root, 'silent-err-debugfs');
+      writeExecutable(
+        silentErrDebugfs,
+        '#!/bin/sh\necho "rdump: unsupported inode type" >&2\nexit 0\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'silent-err.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: silentErrDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/debugfs extraction failed/);
+
+      const badMagicDebugfs = join(root, 'bad-magic-debugfs');
+      writeExecutable(
+        badMagicDebugfs,
+        '#!/bin/sh\necho "Bad magic number in super-block while trying to open image" >&2\nexit 0\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'bad-magic.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: badMagicDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/debugfs extraction failed/);
+
+      const emptyDebugfs = join(root, 'empty-debugfs');
+      writeExecutable(emptyDebugfs, '#!/bin/sh\nexit 0\n');
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'empty-tree.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: emptyDebugfs,
+          mkfsExt4Bin: fakeMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/empty rootfs tree/);
+
+      // 5. tempParentDir containing spaces AND symlinked mkfs.ext4 -> mke2fs both succeed
+      const spaceParent = join(root, 'temp dir with spaces');
+      mkdirSync(spaceParent, { mode: 0o700 });
+      const symlinkMkfs = join(root, 'mkfs.ext4-link');
+      symlinkSync(fakeMkfs, symlinkMkfs);
+      const spacedOut = join(approved, 'derived-spaced', 'guest.ext4');
+      const spacedRes = deriveExt4GuestImage({
+        baseImagePath: golden,
+        outputImagePath: spacedOut,
+        approvedRoots: [approved],
+        debugfsBin: fakeDebugfs,
+        mkfsExt4Bin: symlinkMkfs,
+        tempParentDir: spaceParent,
+      });
+      expect(existsSync(spacedRes.outputImagePath)).toBe(true);
+
+      // 6. Failing mkfs.ext4 cleans temporary file, leaves no partial output, and adds size hint on ENOSPC
+      const failMkfs = join(root, 'fail-mkfs');
+      writeExecutable(
+        failMkfs,
+        '#!/bin/sh\necho "Could not allocate block in ext2 filesystem" >&2\nexit 1\n',
+      );
+      expect(() =>
+        deriveExt4GuestImage({
+          baseImagePath: golden,
+          outputImagePath: join(approved, 'fail-out.ext4'),
+          approvedRoots: [approved],
+          debugfsBin: fakeDebugfs,
+          mkfsExt4Bin: failMkfs,
+          tempParentDir: root,
+        }),
+      ).toThrow(/try a larger --size-mib/);
+      expect(existsSync(join(approved, 'fail-out.ext4'))).toBe(false);
+    },
+    15_000,
   );
 });

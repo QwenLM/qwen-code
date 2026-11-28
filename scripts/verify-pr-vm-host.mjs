@@ -904,8 +904,14 @@ function ensureApprovedDirHierarchy(
   for (let i = missing.length - 1; i >= 0; i -= 1) {
     const nextDir = missing[i];
     mkdirSync(nextDir, { mode });
-    // Record immediately after mkdirSync so a failing chmodSync still rolls back.
-    if (createdDirs) createdDirs.push(nextDir);
+    // Record immediately after mkdirSync so a failing chmodSync still rolls back,
+    // and never record a path equal to an approvedRoot itself.
+    if (
+      createdDirs &&
+      !normalizedRoots.includes(canonicalizePreservingLeaf(nextDir))
+    ) {
+      createdDirs.push(nextDir);
+    }
     chmodSync(nextDir, mode);
   }
   const realDir = realpathSync(abs);
@@ -1133,6 +1139,26 @@ function writeAtomicStagedFile(
       }
     }
   }
+}
+
+function parseFirecrackerFsizeLimit(plan) {
+  const argv = Array.isArray(plan?.argv) ? plan.argv : [];
+  for (let i = 0; i < argv.length; i += 1) {
+    let spec = null;
+    if (argv[i] === '--resource-limit' && typeof argv[i + 1] === 'string') {
+      spec = argv[i + 1];
+      i += 1;
+    } else if (
+      typeof argv[i] === 'string' &&
+      argv[i].startsWith('--resource-limit=')
+    ) {
+      spec = argv[i].slice('--resource-limit='.length);
+    }
+    if (spec && /^fsize=[1-9]\d*$/.test(spec)) {
+      return Number(spec.slice('fsize='.length));
+    }
+  }
+  return null;
 }
 
 function parseVfkitPlanPaths(plan) {
@@ -1427,6 +1453,15 @@ export function stageLocalVmRound({
         },
       );
       createdFiles.push(disk.path);
+
+      // Fail closed before boot if the rootfs image exceeds jailer's RLIMIT_FSIZE;
+      // otherwise any guest write past maxFsizeBytes kills Firecracker with SIGXFSZ.
+      const maxFsizeBytes = parseFirecrackerFsizeLimit(plan);
+      if (Number.isInteger(maxFsizeBytes) && disk.bytes > maxFsizeBytes) {
+        throw new Error(
+          `staged rootfs (${disk.bytes} bytes) exceeds Firecracker jailer maxFsizeBytes (${maxFsizeBytes}); pass a larger maxFsizeBytes or smaller --size-mib`,
+        );
+      }
 
       const configPath = writeAtomicStagedFile(
         join(jailRoot, 'config.json'),

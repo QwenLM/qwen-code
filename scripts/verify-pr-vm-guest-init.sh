@@ -13,16 +13,24 @@ fi
 
 export PATH="/opt/python/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export LD_LIBRARY_PATH="/opt/python/lib:/lib/aarch64-linux-gnu:/lib/x86_64-linux-gnu"
-export HOME="/run"
-export TMPDIR="/run"
+export HOME="/work"
+export TMPDIR="/work"
 export PYTHONNOUSERSITE="1"
 export PYTHONDONTWRITEBYTECODE="1"
 export LANG="C.UTF-8"
 export LC_ALL="C.UTF-8"
 
-mkdir -p /proc /sys /dev /run
+mkdir -p /proc /sys /dev /run /work
+chmod 0700 /work || true
 if ! mountpoint -q /dev 2>/dev/null; then
   mount -t devtmpfs devtmpfs /dev
+fi
+mkdir -p /dev/pts /dev/shm
+if ! mountpoint -q /dev/pts 2>/dev/null; then
+  mount -t devpts devpts /dev/pts
+fi
+if ! mountpoint -q /dev/shm 2>/dev/null; then
+  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
 fi
 if ! mountpoint -q /proc 2>/dev/null; then
   mount -t proc proc /proc

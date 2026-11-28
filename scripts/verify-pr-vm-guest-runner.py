@@ -5,16 +5,24 @@
 `/verify-pr` microVMs.
 
 Drives the 7-step guest contract end-to-end using `verify-pr-vm-guest-vsock.py`:
-  1. Fetch and SHA-verify manifest.json, round.bundle, and entropy.hex (port 53).
-  2. Mix host-supplied entropy into /dev/urandom (or configured urandom target).
-  3. Inspect guest isolation invariants (loopback-only NICs, no virtiofs/9p).
-  4. When manifest.modelProxy is present, launch loopback model-bridge (port 54)
-     and verify GET /__health nonce equality before starting the workload.
-  5. Materialize an isolated git workspace from round.bundle and assert exact
-     baseRefOid / headRefOid presence.
+  1. Fetch `manifest.json` (shape-validated) and `round.bundle` (verified
+     against manifest `bundleBytes`/`bundleSha256`) via port 53, and write
+     `entropy.hex` from `manifest.entropyHex`.
+  2. Mix host-supplied entropy into /dev/urandom (or configured urandom target)
+     and require the write to succeed fail-closed.
+  3. Inspect guest isolation invariants (loopback-only NICs, no virtiofs/9p);
+     unreadable sysfs/procfs paths fail closed.
+  4. Materialize an isolated git workspace from round.bundle and assert exact
+     baseRefOid / headRefOid presence (or verify the bundle header when
+     `--skip-materialize` is explicitly passed for git-less minimal images).
+  5. When manifest.modelProxy is present, launch loopback model-bridge using
+     the negotiated `manifest.modelProxy.port` and verify GET /__health raw
+     nonce equality before starting the workload.
   6. Execute either a configured workload script or the built-in self-test in a
-     credential-stripped environment under a bounded timeout.
-  7. Stop model-bridge cleanly and stream artifacts to the host collector (port 52).
+     credential-stripped environment under a bounded timeout; any isolation or
+     entropy breach refuses workload launch and emits an `inconclusive` report.
+  7. In `finally`, always stop model-bridge and stream artifacts to the host
+     collector (port 52).
 
 Supports both real AF_VSOCK (CID/ports, optionally parsed from `/proc/cmdline`)
 and Unix sockets (`--unix-input`/`--unix-model`/`--unix-collector`) for offline
@@ -28,6 +36,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -99,12 +108,18 @@ def inject_entropy(entropy_hex, urandom_path="/dev/urandom"):
 
 
 def inspect_guest_isolation(sys_net_dir="/sys/class/net", proc_mounts="/proc/mounts"):
+    net_inspected = False
     interfaces = []
     if os.path.isdir(sys_net_dir):
-        interfaces = sorted(os.listdir(sys_net_dir))
+        try:
+            interfaces = sorted(os.listdir(sys_net_dir))
+            net_inspected = True
+        except OSError:
+            net_inspected = False
     non_loopback = [iface for iface in interfaces if iface != "lo"]
-    no_nic = len(non_loopback) == 0
+    no_nic = net_inspected and len(non_loopback) == 0
 
+    mounts_inspected = False
     shared_mounts = []
     if os.path.isfile(proc_mounts):
         try:
@@ -113,14 +128,17 @@ def inspect_guest_isolation(sys_net_dir="/sys/class/net", proc_mounts="/proc/mou
                     parts = line.split()
                     if len(parts) >= 3 and parts[2] in SHARED_FS_TYPES:
                         shared_mounts.append({"mountPoint": parts[1], "fsType": parts[2]})
+            mounts_inspected = True
         except OSError:
-            pass
+            mounts_inspected = False
     return {
+        "netInspected": net_inspected,
+        "mountsInspected": mounts_inspected,
         "interfaces": interfaces,
         "nonLoopbackInterfaces": non_loopback,
         "noNic": no_nic,
         "sharedMounts": shared_mounts,
-        "hasDirectoryShare": len(shared_mounts) > 0,
+        "hasDirectoryShare": (not mounts_inspected) or len(shared_mounts) > 0,
     }
 
 
@@ -156,7 +174,12 @@ def start_model_bridge(vsock_script, *, cid, model_port, unix_model=None):
     info = json.loads(first_line)
     host = info.get("host")
     port = info.get("port")
-    if host != "127.0.0.1" or not isinstance(port, int) or port <= 0:
+    if (
+        host != "127.0.0.1"
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or not (1 <= port <= 65535)
+    ):
         stop_process(proc)
         raise RuntimeError(f"model-bridge announced invalid bind address: {info!r}")
     return proc, host, port
@@ -200,10 +223,17 @@ def verify_model_proxy_health(host, port, expected_nonce, timeout=10.0):
 
 
 def verify_bundle_header(bundle_path, base_oid, head_oid):
-    """Verifies a Git v2/v3 bundle header in pure Python without requiring `git`."""
+    """Verifies a Git v2/v3 bundle header in pure Python without requiring `git`.
+
+    `head_oid` must appear as an advertised (non-prerequisite) ref contained in
+    the bundle. `base_oid` may appear either as an advertised ref or as a
+    `-`<oid> prerequisite line (incremental bundles list the base commit as a
+    prerequisite).
+    """
     if not OID_RE.fullmatch(base_oid) or not OID_RE.fullmatch(head_oid):
         raise RuntimeError("baseRefOid and headRefOid must be 40-char lowercase hex")
     advertised = set()
+    prerequisites = set()
     with open(bundle_path, "rb") as fp:
         first = fp.readline(256).decode("utf-8", errors="replace").strip()
         if first not in ("# v2 git bundle", "# v3 git bundle"):
@@ -218,16 +248,19 @@ def verify_bundle_header(bundle_path, base_oid, head_oid):
             if line.startswith("-"):
                 token = line[1:].split(None, 1)[0]
                 if OID_RE.fullmatch(token):
-                    advertised.add(token)
+                    prerequisites.add(token)
             else:
                 token = line.split(None, 1)[0]
                 if OID_RE.fullmatch(token):
                     advertised.add(token)
-    if base_oid not in advertised or head_oid not in advertised:
+    has_base = base_oid in advertised or base_oid in prerequisites
+    has_head = head_oid in advertised
+    if not has_base or not has_head:
         raise RuntimeError(
-            f"bundle header missing required OIDs (base={base_oid in advertised}, head={head_oid in advertised})"
+            f"bundle header missing required OIDs (base={has_base}, head={has_head})"
         )
     return {
+        "verified": True,
         "skipped": True,
         "headerVerified": True,
         "baseRefOid": base_oid,
@@ -279,6 +312,7 @@ def materialize_bundle(bundle_path, repo_dir, base_oid, head_oid):
     diff_stat = run_git(["diff", "--name-only", f"{base_oid}..{head_oid}"])
     changed_files = [line for line in diff_stat.splitlines() if line]
     return {
+        "verified": True,
         "repoDir": str(repo_dir),
         "baseRefOid": resolved_base,
         "headRefOid": checked_head,
@@ -286,37 +320,21 @@ def materialize_bundle(bundle_path, repo_dir, base_oid, head_oid):
     }
 
 
-def write_self_test_artifacts(
+def write_runtime_log(
     artifacts_dir,
     *,
     manifest,
     isolation,
     entropy_status,
     materialized,
-    model_health,
     bridge_url,
     model_probe_status,
+    checks,
+    error_message=None,
 ):
     os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
     logs_dir = Path(artifacts_dir) / "logs"
     logs_dir.mkdir(mode=0o700, exist_ok=True)
-
-    checks = [
-        {"name": "manifest-verified", "ok": True},
-        {"name": "bundle-materialized", "ok": materialized["headRefOid"] == manifest["headRefOid"]},
-        {"name": "entropy-decoded", "ok": entropy_status["bytes"] == 32},
-        {"name": "guest-no-nic", "ok": isolation["noNic"]},
-        {"name": "guest-no-directory-share", "ok": not isolation["hasDirectoryShare"]},
-    ]
-    if manifest["modelProxy"] is not None:
-        checks.append({"name": "model-proxy-health-nonce", "ok": model_health is not None})
-        checks.append({"name": "model-proxy-probe", "ok": model_probe_status == 200})
-
-    failed = [c for c in checks if not c["ok"]]
-    verdict = "merge-ready" if not failed else "needs-changes"
-    passed_count = len(checks) - len(failed)
-    total_count = len(checks)
-
     runtime_log = {
         "schemaVersion": "verify-pr-guest-runtime-v1",
         "runId": manifest["runId"],
@@ -333,9 +351,66 @@ def write_self_test_artifacts(
         "bridgeUrl": bridge_url,
         "modelProbeStatus": model_probe_status,
         "checks": checks,
+        "error": error_message,
     }
     (logs_dir / "guest-runtime.json").write_text(
         json.dumps(runtime_log, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def write_self_test_artifacts(
+    artifacts_dir,
+    *,
+    manifest,
+    isolation,
+    entropy_status,
+    materialized,
+    model_health,
+    bridge_url,
+    model_probe_status,
+    error_message=None,
+    include_model_probe=True,
+):
+    os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
+
+    checks = [
+        {"name": "entropy-injected", "ok": bool(entropy_status.get("written"))},
+        {"name": "guest-no-nic", "ok": bool(isolation.get("noNic"))},
+        {
+            "name": "guest-no-directory-share",
+            "ok": not bool(isolation.get("hasDirectoryShare")),
+        },
+        {
+            "name": "bundle-verified",
+            "ok": bool(materialized and materialized.get("verified")),
+        },
+    ]
+    if manifest["modelProxy"] is not None:
+        checks.append(
+            {"name": "model-proxy-health-nonce", "ok": model_health is not None}
+        )
+        if include_model_probe:
+            checks.append(
+                {"name": "model-proxy-probe", "ok": model_probe_status == 200}
+            )
+    if error_message is not None:
+        checks.append({"name": "guest-lifecycle-error", "ok": False})
+
+    failed = [c for c in checks if not c["ok"]]
+    verdict = "merge-ready" if not failed else "inconclusive"
+    passed_count = len(checks) - len(failed)
+    total_count = len(checks)
+
+    write_runtime_log(
+        artifacts_dir,
+        manifest=manifest,
+        isolation=isolation,
+        entropy_status=entropy_status,
+        materialized=materialized,
+        bridge_url=bridge_url,
+        model_probe_status=model_probe_status,
+        checks=checks,
+        error_message=error_message,
     )
     (Path(artifacts_dir) / "verdict.txt").write_text(f"{verdict}\n", encoding="utf-8")
     (Path(artifacts_dir) / "assertions.json").write_text(
@@ -345,7 +420,15 @@ def write_self_test_artifacts(
                 "fail": len(failed),
                 "total": total_count,
                 "failures": [
-                    {"id": c["name"], "reason": "guest self-test check failed"}
+                    {
+                        "id": c["name"],
+                        "attribution": "harness",
+                        "reason": (
+                            error_message
+                            if c["name"] == "guest-lifecycle-error" and error_message
+                            else f"guest check failed: {c['name']}"
+                        ),
+                    }
                     for c in failed
                 ],
             },
@@ -354,22 +437,27 @@ def write_self_test_artifacts(
         + "\n",
         encoding="utf-8",
     )
-    report_md = "\n".join(
-        [
-            f"{verdict} · {passed_count} passed · {len(failed)} failed · {total_count} total · {manifest['headRefOid']}",
-            "",
-            "## Methodology",
-            "",
-            "**Boundary.** Hardware-isolated microVM executed by verify-pr-vm-guest-runner.",
-            "",
-            f"- Run ID: `{manifest['runId']}`",
-            f"- Base OID: `{manifest['baseRefOid']}`",
-            f"- Head OID: `{manifest['headRefOid']}`",
-            f"- Changed files in bundle: {len(materialized['changedFiles'])}",
-            "",
-        ]
+    changed_count = (
+        len(materialized.get("changedFiles", [])) if isinstance(materialized, dict) else 0
     )
-    (Path(artifacts_dir) / "report.md").write_text(report_md, encoding="utf-8")
+    report_lines = [
+        f"{verdict} · {passed_count} passed · {len(failed)} failed · {total_count} total · {manifest['headRefOid']}",
+        "",
+        "## Methodology",
+        "",
+        "**Boundary.** Hardware-isolated microVM executed by verify-pr-vm-guest-runner.",
+        "",
+        f"- Run ID: `{manifest['runId']}`",
+        f"- Base OID: `{manifest['baseRefOid']}`",
+        f"- Head OID: `{manifest['headRefOid']}`",
+        f"- Changed files in bundle: {changed_count}",
+    ]
+    if error_message:
+        report_lines.append(f"- Guest lifecycle error: `{error_message}`")
+    report_lines.append("")
+    (Path(artifacts_dir) / "report.md").write_text(
+        "\n".join(report_lines), encoding="utf-8"
+    )
     comment_md = (
         f"{verdict} ({passed_count}/{total_count} guest checks passed for `{manifest['headRefOid']}`)\n\n"
         "_— verify-pr-guest-runner via Qwen Code /verify-pr (v0.28.7; skill guest-self-test)_\n"
@@ -381,14 +469,19 @@ def run_guest_round(args):
     vsock_script = resolve_vsock_script(args.vsock_script)
     vsock_mod = load_vsock_module(vsock_script)
 
-    work_root = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="qc-guest-"))
+    work_root = (
+        Path(args.work_dir)
+        if args.work_dir
+        else Path(tempfile.mkdtemp(prefix="qc-guest-"))
+    )
     work_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     inputs_dir = work_root / "inputs"
     repo_dir = work_root / "repo"
+    repo_dir.mkdir(mode=0o700, exist_ok=True)
     artifacts_dir = work_root / "artifacts"
     artifacts_dir.mkdir(mode=0o700, exist_ok=True)
 
-    # 1. Fetch manifest + bundle + entropy via vsock input port (53)
+    # 1. Fetch manifest + bundle via vsock input port (53)
     fetch_ns = argparse.Namespace(
         cid=args.cid,
         port=args.input_port,
@@ -412,34 +505,69 @@ def run_guest_round(args):
         proc_mounts=args.proc_mounts,
     )
 
-    # 4. Materialize git workspace (or verify bundle header when --skip-materialize is explicitly requested)
-    if args.skip_materialize:
-        materialized = verify_bundle_header(
-            bundle_path,
-            manifest["baseRefOid"],
-            manifest["headRefOid"],
-        )
-    else:
-        materialized = materialize_bundle(
-            bundle_path,
-            repo_dir,
-            manifest["baseRefOid"],
-            manifest["headRefOid"],
-        )
+    workload_path = args.workload
+    if workload_path is None and os.path.isfile("/opt/qwen/workload.sh"):
+        workload_path = "/opt/qwen/workload.sh"
 
-    # 5. Start loopback model-bridge when manifest.modelProxy is present
+    materialized = None
     bridge_proc = None
     bridge_url = None
     model_health = None
     model_probe_status = None
     workload_rc = 0
+    round_error = None
+
     try:
+        # Fail-closed gate for workload rounds before materialization or execution
+        if workload_path is not None:
+            breaches = []
+            if not entropy_status["written"]:
+                breaches.append(
+                    f"entropy-write-failed:{entropy_status.get('error') or 'unwritten'}"
+                )
+            if not isolation["noNic"]:
+                breaches.append(
+                    f"non-loopback-nic:{','.join(isolation['nonLoopbackInterfaces']) or 'uninspected'}"
+                )
+            if isolation["hasDirectoryShare"]:
+                breaches.append(
+                    "shared-mount-detected"
+                    if isolation["mountsInspected"]
+                    else "mounts-uninspected"
+                )
+            if breaches:
+                raise RuntimeError(f"guest isolation breach ({'; '.join(breaches)})")
+
+        # 4. Materialize git workspace (or verify bundle header when --skip-materialize is requested)
+        if args.skip_materialize:
+            materialized = verify_bundle_header(
+                bundle_path,
+                manifest["baseRefOid"],
+                manifest["headRefOid"],
+            )
+        else:
+            materialized = materialize_bundle(
+                bundle_path,
+                repo_dir,
+                manifest["baseRefOid"],
+                manifest["headRefOid"],
+            )
+
+        # 5. Start loopback model-bridge when manifest.modelProxy is present
         proxy = manifest.get("modelProxy")
         if proxy is not None:
+            raw_port = proxy.get("port")
+            negotiated_port = (
+                raw_port
+                if isinstance(raw_port, int)
+                and not isinstance(raw_port, bool)
+                and 1 <= raw_port <= 65535
+                else args.model_port
+            )
             bridge_proc, b_host, b_port = start_model_bridge(
                 vsock_script,
                 cid=args.cid,
-                model_port=args.model_port,
+                model_port=negotiated_port,
                 unix_model=args.unix_model,
             )
             model_health = verify_model_proxy_health(b_host, b_port, proxy["nonce"])
@@ -449,11 +577,22 @@ def run_guest_round(args):
             bridge_url = f"http://{b_host}:{b_port}{base_path}"
 
         # 6. Run workload or built-in self-test
-        workload_path = args.workload
-        if workload_path is None and os.path.isfile("/opt/qwen/workload.sh"):
-            workload_path = "/opt/qwen/workload.sh"
-
         if workload_path:
+            write_runtime_log(
+                artifacts_dir,
+                manifest=manifest,
+                isolation=isolation,
+                entropy_status=entropy_status,
+                materialized=materialized,
+                bridge_url=bridge_url,
+                model_probe_status=model_probe_status,
+                checks=[
+                    {"name": "entropy-injected", "ok": True},
+                    {"name": "guest-no-nic", "ok": True},
+                    {"name": "guest-no-directory-share", "ok": True},
+                    {"name": "bundle-verified", "ok": True},
+                ],
+            )
             workload_env = {
                 "PATH": os.environ.get(
                     "PATH", "/opt/python/bin:/usr/local/bin:/usr/bin:/bin"
@@ -476,13 +615,29 @@ def run_guest_round(args):
                 workload_env["OPENAI_BASE_URL"] = bridge_url
                 workload_env["OPENAI_API_KEY"] = proxy["token"]
                 workload_env["QWEN_VERIFY_MODEL_NONCE"] = proxy["nonce"]
-            res = subprocess.run(
+            # Run workload in its own session so a timeout kills the entire
+            # process group instead of leaving orphaned children writing to artifacts_dir.
+            proc = subprocess.Popen(
                 [workload_path],
                 cwd=str(repo_dir),
                 env=workload_env,
-                timeout=args.workload_timeout,
+                start_new_session=True,
             )
-            workload_rc = res.returncode
+            try:
+                workload_rc = proc.wait(timeout=args.workload_timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
         else:
             if proxy is not None and bridge_url is not None:
                 probe_req = urllib.request.Request(
@@ -510,19 +665,41 @@ def run_guest_round(args):
                 bridge_url=bridge_url,
                 model_probe_status=model_probe_status,
             )
+    except Exception as exc:
+        round_error = exc
+        if not (artifacts_dir / "verdict.txt").is_file():
+            write_self_test_artifacts(
+                artifacts_dir,
+                manifest=manifest,
+                isolation=isolation,
+                entropy_status=entropy_status,
+                materialized=materialized,
+                model_health=model_health,
+                bridge_url=bridge_url,
+                model_probe_status=model_probe_status,
+                error_message=str(exc),
+                include_model_probe=(workload_path is None),
+            )
+        raise
     finally:
         stop_process(bridge_proc)
-
-    # 7. Upload artifacts to host collector (port 52)
-    upload_ns = argparse.Namespace(
-        cid=args.cid,
-        port=args.collector_port,
-        unix=args.unix_collector,
-        dir=str(artifacts_dir),
-    )
-    rc_upload = vsock_mod.cmd_upload_artifacts(upload_ns)
-    if rc_upload != 0:
-        raise RuntimeError(f"upload-artifacts failed with rc={rc_upload}")
+        # 7. Always upload produced artifacts to host collector (port 52)
+        upload_ns = argparse.Namespace(
+            cid=args.cid,
+            port=args.collector_port,
+            unix=args.unix_collector,
+            dir=str(artifacts_dir),
+        )
+        try:
+            rc_upload = vsock_mod.cmd_upload_artifacts(upload_ns)
+            if rc_upload != 0 and round_error is None:
+                raise RuntimeError(f"upload-artifacts failed with rc={rc_upload}")
+        except Exception as upload_exc:
+            if round_error is None:
+                raise
+            sys.stderr.write(
+                f"guest-runner: artifact upload after error failed: {upload_exc}\n"
+            )
     return workload_rc
 
 

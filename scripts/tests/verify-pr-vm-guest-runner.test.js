@@ -98,6 +98,13 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       encoding: 'utf8',
     });
     expect(shCheck.status, shCheck.stderr).toBe(0);
+    const initSource = readFileSync(GUEST_INIT_SH, 'utf8');
+    expect(initSource).toMatch(/export HOME="\/work"/);
+    expect(initSource).toMatch(/export TMPDIR="\/work"/);
+    expect(initSource).toMatch(/mount -t devpts devpts \/dev\/pts/);
+    expect(initSource).toMatch(
+      /mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs \/dev\/shm/,
+    );
 
     const root = makeTempDir('vgr-cmd-');
     const badCmdline = join(root, 'cmdline');
@@ -113,24 +120,50 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/invalid cmdline qwen\.workload_timeout/);
 
-    // Pure-Python bundle header check rejects wrong OIDs and accepts valid v2 headers
+    // Pure-Python bundle header check: accepts advertised base/head and
+    // incremental `-<base>` prerequisite, but rejects `-<head>` prerequisite-only bundles.
     const goodBundle = join(root, 'good.bundle');
+    const incrBundle = join(root, 'incr.bundle');
+    const headPrereqBundle = join(root, 'head-prereq.bundle');
     const oidA = 'a'.repeat(40);
     const oidB = 'b'.repeat(40);
     writeFileSync(
       goodBundle,
       `# v2 git bundle\n${oidA} refs/verify/base\n${oidB} refs/verify/head\n\nPACK`,
     );
+    writeFileSync(
+      incrBundle,
+      `# v2 git bundle\n-${oidA} base commit\n${oidB} refs/verify/head\n\nPACK`,
+    );
+    writeFileSync(
+      headPrereqBundle,
+      `# v2 git bundle\n${oidA} refs/verify/base\n-${oidB} head prerequisite only\n\nPACK`,
+    );
     const pyCheck = spawnSync(
       'python3',
       [
         '-c',
-        `import importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ok=mod.verify_bundle_header(${JSON.stringify(goodBundle)}, ${JSON.stringify(oidA)}, ${JSON.stringify(oidB)}); print(json.dumps(ok))`,
+        `import importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); ok1=mod.verify_bundle_header(${JSON.stringify(goodBundle)}, ${JSON.stringify(oidA)}, ${JSON.stringify(oidB)}); ok2=mod.verify_bundle_header(${JSON.stringify(incrBundle)}, ${JSON.stringify(oidA)}, ${JSON.stringify(oidB)}); print(json.dumps({"ok1": ok1, "ok2": ok2}))`,
       ],
       { encoding: 'utf8' },
     );
     expect(pyCheck.status, pyCheck.stderr).toBe(0);
-    expect(JSON.parse(pyCheck.stdout).headerVerified).toBe(true);
+    const pyOut = JSON.parse(pyCheck.stdout);
+    expect(pyOut.ok1.headerVerified).toBe(true);
+    expect(pyOut.ok1.verified).toBe(true);
+    expect(pyOut.ok2.headerVerified).toBe(true);
+    expect(pyOut.ok2.verified).toBe(true);
+
+    const pyHeadPrereq = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import importlib.util; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); mod.verify_bundle_header(${JSON.stringify(headPrereqBundle)}, ${JSON.stringify(oidA)}, ${JSON.stringify(oidB)})`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyHeadPrereq.status).toBe(1);
+    expect(pyHeadPrereq.stderr).toMatch(/bundle header missing required OIDs/);
 
     const pyBad = spawnSync(
       'python3',
@@ -142,6 +175,22 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
     );
     expect(pyBad.status).toBe(1);
     expect(pyBad.stderr).toMatch(/bundle header missing required OIDs/);
+
+    // Missing /sys/class/net and /proc/mounts must fail closed (noNic=false, hasDirectoryShare=true)
+    const pyMissingIso = spawnSync(
+      'python3',
+      [
+        '-c',
+        `import importlib.util, json; spec=importlib.util.spec_from_file_location("gr", ${JSON.stringify(GUEST_RUNNER_PY)}); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); print(json.dumps(mod.inspect_guest_isolation(${JSON.stringify(join(root, 'missing-net'))}, ${JSON.stringify(join(root, 'missing-mounts'))})))`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(pyMissingIso.status, pyMissingIso.stderr).toBe(0);
+    const missingIso = JSON.parse(pyMissingIso.stdout);
+    expect(missingIso.netInspected).toBe(false);
+    expect(missingIso.mountsInspected).toBe(false);
+    expect(missingIso.noNic).toBe(false);
+    expect(missingIso.hasDirectoryShare).toBe(true);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -304,7 +353,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'strips host secrets from custom workload env, flags non-loopback NIC/shared mounts as needs-changes, and fails closed on nonce mismatch',
+    'strips host secrets, passes verify-pr-check on inconclusive failures, gates workload on isolation/entropy, supports skip-materialize+workload, honors manifest.modelProxy.port, and uploads error diagnostics in finally',
     async () => {
       const root = makeTempDir('vgr-neg-');
       const repoDir = join(root, 'repo');
@@ -315,6 +364,11 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       const goldenRootfs = join(root, 'r');
       writeFileSync(goldenKernel, 'k', { mode: 0o444 });
       writeFileSync(goldenRootfs, 'r', { mode: 0o444 });
+
+      const cleanNet = join(root, 'clean-net');
+      mkdirSync(join(cleanNet, 'lo'), { recursive: true });
+      const cleanMounts = join(root, 'clean-mounts');
+      writeFileSync(cleanMounts, 'tmpfs /run tmpfs rw 0 0\n');
 
       const currentUid =
         typeof process.getuid === 'function' && process.getuid() > 0
@@ -374,7 +428,6 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
             'verdict.txt',
             'assertions.json',
             'comment.md',
-            'logs/head-file.txt',
           ]),
         },
         launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
@@ -394,6 +447,10 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
               workload,
               '--urandom-path',
               join(root, 'ur1'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
             ],
             {
               stdio: 'pipe',
@@ -424,13 +481,19 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       expect(
         readFileSync(join(root, 'v1', 'logs', 'head-file.txt'), 'utf8').trim(),
       ).toBe('head-v2-verified');
+      expect(existsSync(join(root, 'v1', 'logs', 'guest-runtime.json'))).toBe(
+        true,
+      );
 
-      // 2. Non-loopback NIC + virtiofs mount must fail self-test isolation checks
+      // 2. Non-loopback NIC + virtiofs mount + unwritable urandom must emit `inconclusive`
+      // with harness attribution and PASS verify-pr-check (`runChecker: true`)
       const badNet = join(root, 'bad-net');
       mkdirSync(join(badNet, 'lo'), { recursive: true });
       mkdirSync(join(badNet, 'eth0'), { recursive: true });
       const badMounts = join(root, 'bad-mounts');
       writeFileSync(badMounts, 'hostshare /mnt/host virtiofs rw 0 0\n');
+      const unwritableUrandom = join(root, 'urandom-is-a-dir');
+      mkdirSync(unwritableUrandom);
 
       const plan2 = buildFirecrackerLaunchPlan({
         runId: 'gr-iso-1',
@@ -454,16 +517,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
         stageAssets: true,
         applyChown: false,
         roundInput: { repoDir, baseRefOid, headRefOid },
-        collectorOptions: {
-          allowedFiles: new Set([
-            'report.md',
-            'verdict.txt',
-            'assertions.json',
-            'comment.md',
-            'logs/guest-runtime.json',
-          ]),
-        },
-        runChecker: false,
+        runChecker: true,
         launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
           const child = spawn(
             'python3',
@@ -478,7 +532,7 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
               '--unix-input',
               inputSocketPath,
               '--urandom-path',
-              join(root, 'ur2'),
+              unwritableUrandom,
               '--sys-net-dir',
               badNet,
               '--proc-mounts',
@@ -501,17 +555,210 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
           };
         },
       });
+      expect(isoRes.errors).toEqual([]);
       expect(isoRes.ok).toBe(true);
+      expect(isoRes.checkExitCode).toBe(0);
       expect(readFileSync(join(root, 'v2', 'verdict.txt'), 'utf8').trim()).toBe(
-        'needs-changes',
+        'inconclusive',
       );
+      const isoAssertions = JSON.parse(
+        readFileSync(join(root, 'v2', 'assertions.json'), 'utf8'),
+      );
+      expect(isoAssertions.failures.map((f) => f.id)).toEqual([
+        'entropy-injected',
+        'guest-no-nic',
+        'guest-no-directory-share',
+      ]);
+      expect(
+        isoAssertions.failures.every((f) => f.attribution === 'harness'),
+      ).toBe(true);
       const badRuntime = JSON.parse(
         readFileSync(join(root, 'v2', 'logs', 'guest-runtime.json'), 'utf8'),
       );
+      expect(badRuntime.entropy.written).toBe(false);
       expect(badRuntime.isolation.noNic).toBe(false);
       expect(badRuntime.isolation.hasDirectoryShare).toBe(true);
 
-      // 3. Squatter / wrong-nonce model proxy must fail closed BEFORE running workload
+      // 3. Workload mode MUST refuse launch on isolation/entropy breach AND upload inconclusive diagnostics
+      const breachMarker = join(root, 'breach-workload-ran.txt');
+      const breachWorkload = join(root, 'breach-workload.sh');
+      writeFileSync(
+        breachWorkload,
+        `#!/bin/sh\nprintf "ran" > "${breachMarker}"\n`,
+        { mode: 0o755 },
+      );
+      chmodSync(breachWorkload, 0o755);
+
+      const planBreach = buildFirecrackerLaunchPlan({
+        runId: 'gr-breach-1',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      let breachStderr = '';
+      const breachRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-breach'),
+        vaultDir: join(root, 'v-breach'),
+        approvedRoots: [root],
+        plan: planBreach,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        runChecker: false,
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw-breach'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--workload',
+              breachWorkload,
+              '--urandom-path',
+              unwritableUrandom,
+              '--sys-net-dir',
+              badNet,
+              '--proc-mounts',
+              badMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          child.stderr.on('data', (d) => {
+            breachStderr += d.toString('utf8');
+          });
+          await new Promise((ok, fail) => {
+            child.once('error', fail);
+            child.once('exit', (code) =>
+              code === 0 ? ok() : fail(new Error(`rc=${code}`)),
+            );
+          });
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(breachRes.ok).toBe(false);
+      expect(breachStderr).toMatch(/guest isolation breach/);
+      expect(existsSync(breachMarker)).toBe(false);
+      // Diagnostics were still uploaded via finally block
+      expect(
+        readFileSync(join(root, 'v-breach', 'verdict.txt'), 'utf8').trim(),
+      ).toBe('inconclusive');
+      const breachLog = JSON.parse(
+        readFileSync(
+          join(root, 'v-breach', 'logs', 'guest-runtime.json'),
+          'utf8',
+        ),
+      );
+      expect(breachLog.error).toMatch(/guest isolation breach/);
+
+      // 4. --skip-materialize + --workload creates repoDir so cwd does not raise ENOENT
+      const skipWorkload = join(root, 'skip-workload.sh');
+      writeFileSync(
+        skipWorkload,
+        [
+          '#!/bin/sh',
+          'set -eu',
+          'test -d "$QWEN_VERIFY_WORKSPACE"',
+          'printf "merge-ready\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/verdict.txt"',
+          'printf \'{"pass":1,"fail":0,"total":1}\\n\' > "$QWEN_VERIFY_ARTIFACTS_DIR/assertions.json"',
+          'printf "merge-ready · 1 passed · 0 failed · 1 total · %s\\n\\n## Methodology\\n\\n**Boundary.** microvm.\\n" "$QWEN_VERIFY_HEAD_OID" > "$QWEN_VERIFY_ARTIFACTS_DIR/report.md"',
+          'printf "merge-ready\\n\\n_— w via Qwen Code /verify-pr (v0.28.7; skill test)_\\n" > "$QWEN_VERIFY_ARTIFACTS_DIR/comment.md"',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(skipWorkload, 0o755);
+
+      const planSkip = buildFirecrackerLaunchPlan({
+        runId: 'gr-skip-wl',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+      });
+      const skipRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-skip'),
+        vaultDir: join(root, 'v-skip'),
+        approvedRoots: [root],
+        plan: planSkip,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        launchBackend: async ({ collectorSocketPath, inputSocketPath }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw-skip'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--skip-materialize',
+              '--workload',
+              skipWorkload,
+              '--urandom-path',
+              join(root, 'ur-skip'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          let stderr = '';
+          child.stderr.on('data', (d) => {
+            stderr += d.toString('utf8');
+          });
+          await new Promise((ok, fail) => {
+            child.once('error', fail);
+            child.once('exit', (code) =>
+              code === 0 ? ok() : fail(new Error(`rc=${code}: ${stderr}`)),
+            );
+          });
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(skipRes.errors).toEqual([]);
+      expect(skipRes.ok).toBe(true);
+      expect(skipRes.checkExitCode).toBe(0);
+
+      // 5. Squatter / wrong-nonce model proxy must fail closed BEFORE running workload
+      // and still upload failure diagnostics to the host collector via `finally`.
       const fakeModelSock = join(root, 'bad-model.sock');
       const squatter = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -578,6 +825,10 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
               guardedWorkload,
               '--urandom-path',
               join(root, 'ur3'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
             ],
             { stdio: 'pipe' },
           );
@@ -604,6 +855,315 @@ describe('verify-pr-vm-guest-runner and guest-init', () => {
       expect(nonceRes.ok).toBe(false);
       expect(nonceStderr).toMatch(/\/__health nonce mismatch/);
       expect(existsSync(markerIfRan)).toBe(false);
+      expect(readFileSync(join(root, 'v3', 'verdict.txt'), 'utf8').trim()).toBe(
+        'inconclusive',
+      );
+      const nonceLog = JSON.parse(
+        readFileSync(join(root, 'v3', 'logs', 'guest-runtime.json'), 'utf8'),
+      );
+      expect(nonceLog.error).toMatch(/\/__health nonce mismatch/);
     },
+    20_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'honors negotiated manifest.modelProxy.port over CLI --model-port default on the vsock model-bridge path',
+    async () => {
+      const root = makeTempDir('vgr-port-');
+      const repoDir = join(root, 'repo');
+      const { baseRefOid, headRefOid } = makeTwoCommitRepo(repoDir);
+      const ctx = makeHostContext(root, baseRefOid, headRefOid);
+
+      const goldenKernel = join(root, 'k');
+      const goldenRootfs = join(root, 'r');
+      writeFileSync(goldenKernel, 'k', { mode: 0o444 });
+      writeFileSync(goldenRootfs, 'r', { mode: 0o444 });
+
+      const cleanNet = join(root, 'clean-net');
+      mkdirSync(join(cleanNet, 'lo'), { recursive: true });
+      const cleanMounts = join(root, 'clean-mounts');
+      writeFileSync(cleanMounts, 'tmpfs /run tmpfs rw 0 0\n');
+
+      const currentUid =
+        typeof process.getuid === 'function' && process.getuid() > 0
+          ? process.getuid()
+          : 65534;
+      const currentGid =
+        typeof process.getgid === 'function' && process.getgid() > 0
+          ? process.getgid()
+          : 65534;
+
+      const portProbeScript = join(root, 'fake-vsock-port-capture.py');
+      const capturedPortFile = join(root, 'captured-model-port.txt');
+      writeFileSync(
+        portProbeScript,
+        [
+          '#!/usr/bin/env python3',
+          'import importlib.util, os, sys',
+          `spec = importlib.util.spec_from_file_location("real_vsock", ${JSON.stringify(GUEST_VSOCK_PY)})`,
+          'real = importlib.util.module_from_spec(spec)',
+          'spec.loader.exec_module(real)',
+          'cmd_fetch_inputs = real.cmd_fetch_inputs',
+          'cmd_upload_artifacts = real.cmd_upload_artifacts',
+          'if __name__ == "__main__":',
+          '    argv = list(sys.argv[1:])',
+          '    if argv and argv[0] == "model-bridge":',
+          '        rewritten = []',
+          '        i = 0',
+          '        while i < len(argv):',
+          '            if argv[i] == "--port" and i + 1 < len(argv):',
+          `                open(${JSON.stringify(capturedPortFile)}, "w").write(argv[i + 1])`,
+          '                i += 2',
+          '                continue',
+          '            if argv[i] == "--cid" and i + 1 < len(argv):',
+          '                i += 2',
+          '                continue',
+          '            rewritten.append(argv[i])',
+          '            i += 1',
+          '        rewritten.extend(["--unix", os.environ["TEST_UNIX_MODEL_SOCK"]])',
+          '        argv = rewritten',
+          '    sys.exit(real.main(argv))',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+
+      const planPort = buildFirecrackerLaunchPlan({
+        runId: 'gr-port-1',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+        modelVsockPort: 5401,
+      });
+      const portUpstream = http.createServer((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{"ok":true}');
+        });
+      });
+      await new Promise((r) => portUpstream.listen(0, '127.0.0.1', r));
+      cleanups.push(() => portUpstream.close());
+      const portUpPort = portUpstream.address().port;
+
+      const portRes = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l-port'),
+        vaultDir: join(root, 'v-port'),
+        approvedRoots: [root],
+        plan: planPort,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        modelProxy: {
+          baseUrl: `http://127.0.0.1:${portUpPort}/v1`,
+          apiKey: 'port-test-secret',
+          maxRequests: 2,
+        },
+        launchBackend: async ({
+          collectorSocketPath,
+          inputSocketPath,
+          proxyInfo,
+        }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              portProbeScript,
+              '--work-dir',
+              join(root, 'gw-port'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--model-port',
+              '54',
+              '--urandom-path',
+              join(root, 'ur-port'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            {
+              stdio: 'pipe',
+              env: {
+                ...process.env,
+                TEST_UNIX_MODEL_SOCK: proxyInfo.socketPath,
+              },
+            },
+          );
+          let stderr = '';
+          child.stderr.on('data', (d) => {
+            stderr += d.toString('utf8');
+          });
+          await new Promise((ok, fail) => {
+            child.once('error', fail);
+            child.once('exit', (code) =>
+              code === 0 ? ok() : fail(new Error(`rc=${code}: ${stderr}`)),
+            );
+          });
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(portRes.errors).toEqual([]);
+      expect(portRes.ok).toBe(true);
+      expect(portRes.checkExitCode).toBe(0);
+      expect(readFileSync(capturedPortFile, 'utf8').trim()).toBe('5401');
+    },
+    15_000,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills the entire workload process group on timeout and uploads inconclusive diagnostics without spurious model-proxy-probe failure',
+    async () => {
+      const root = makeTempDir('vgr-pgrp-');
+      const repoDir = join(root, 'repo');
+      const { baseRefOid, headRefOid } = makeTwoCommitRepo(repoDir);
+      const ctx = makeHostContext(root, baseRefOid, headRefOid);
+
+      const goldenKernel = join(root, 'k');
+      const goldenRootfs = join(root, 'r');
+      writeFileSync(goldenKernel, 'k', { mode: 0o444 });
+      writeFileSync(goldenRootfs, 'r', { mode: 0o444 });
+
+      const cleanNet = join(root, 'clean-net');
+      mkdirSync(join(cleanNet, 'lo'), { recursive: true });
+      const cleanMounts = join(root, 'clean-mounts');
+      writeFileSync(cleanMounts, 'tmpfs /run tmpfs rw 0 0\n');
+
+      const childMarker = join(root, 'orphan-wrote-after-timeout.txt');
+      const timeoutWorkload = join(root, 'timeout-wl.sh');
+      writeFileSync(
+        timeoutWorkload,
+        [
+          '#!/bin/sh',
+          `(sleep 2 && printf "orphan" > "${childMarker}") &`,
+          'wait',
+        ].join('\n') + '\n',
+        { mode: 0o755 },
+      );
+      chmodSync(timeoutWorkload, 0o755);
+
+      const up = http.createServer((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end('{"ok":true}');
+        });
+      });
+      await new Promise((r) => up.listen(0, '127.0.0.1', r));
+      cleanups.push(() => up.close());
+
+      const currentUid =
+        typeof process.getuid === 'function' && process.getuid() > 0
+          ? process.getuid()
+          : 65534;
+      const currentGid =
+        typeof process.getgid === 'function' && process.getgid() > 0
+          ? process.getgid()
+          : 65534;
+      const plan = buildFirecrackerLaunchPlan({
+        runId: 'gr-pgrp-1',
+        jailBaseDir: join(root, 'j'),
+        firecrackerBin: '/opt/firecracker',
+        jailerBin: '/opt/jailer',
+        vmmUid: currentUid,
+        vmmGid: currentGid,
+        vsockPort: 52,
+        inputVsockPort: 53,
+        modelVsockPort: 54,
+      });
+
+      const res = await runHardwareRound({
+        contextPath: ctx.path,
+        contextSha256: ctx.sha256,
+        launcherDir: join(root, 'l'),
+        vaultDir: join(root, 'v'),
+        approvedRoots: [root],
+        plan,
+        sourceKernelPath: goldenKernel,
+        sourceRootfsPath: goldenRootfs,
+        stageAssets: true,
+        applyChown: false,
+        runChecker: true,
+        roundInput: { repoDir, baseRefOid, headRefOid },
+        modelProxy: {
+          baseUrl: `http://127.0.0.1:${up.address().port}/v1`,
+          apiKey: 'secret-pgrp',
+          maxRequests: 2,
+        },
+        launchBackend: async ({
+          collectorSocketPath,
+          inputSocketPath,
+          proxyInfo,
+        }) => {
+          const child = spawn(
+            'python3',
+            [
+              GUEST_RUNNER_PY,
+              '--vsock-script',
+              GUEST_VSOCK_PY,
+              '--work-dir',
+              join(root, 'gw'),
+              '--unix-collector',
+              collectorSocketPath,
+              '--unix-input',
+              inputSocketPath,
+              '--unix-model',
+              proxyInfo.socketPath,
+              '--workload',
+              timeoutWorkload,
+              '--workload-timeout',
+              '1',
+              '--urandom-path',
+              join(root, 'ur'),
+              '--sys-net-dir',
+              cleanNet,
+              '--proc-mounts',
+              cleanMounts,
+            ],
+            { stdio: 'pipe' },
+          );
+          await new Promise((ok) => child.once('exit', ok));
+          return {
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            workerExe: 'python3',
+            expectedExeTokens: ['python'],
+            child,
+          };
+        },
+      });
+      expect(res.errors).toEqual([]);
+      expect(res.ok).toBe(true);
+      expect(res.checkExitCode).toBe(0);
+      expect(readFileSync(join(root, 'v', 'verdict.txt'), 'utf8').trim()).toBe(
+        'inconclusive',
+      );
+      const assertions = JSON.parse(
+        readFileSync(join(root, 'v', 'assertions.json'), 'utf8'),
+      );
+      expect(assertions.failures.map((f) => f.id)).toEqual([
+        'guest-lifecycle-error',
+      ]);
+      // Wait past the background child's 2s sleep to confirm SIGKILL reaped the process group
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(existsSync(childMarker)).toBe(false);
+    },
+    15_000,
   );
 });

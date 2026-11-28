@@ -33,6 +33,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   renameSync,
@@ -163,14 +164,14 @@ function findExecutable(explicitPath, fallbackNames) {
     if (typeof explicitPath !== 'string' || explicitPath.trim() === '') {
       throw new Error('explicit tool path must be a non-empty string');
     }
-    const st = lstatSync(explicitPath);
-    if (st.isSymbolicLink() || !st.isFile()) {
-      throw new Error(
-        `tool must be a non-symlink regular file: ${explicitPath}`,
-      );
+    // Resolve symlinks because Debian/Ubuntu ship /usr/sbin/mkfs.ext4 -> mke2fs.
+    const real = realpathSync(explicitPath);
+    const st = lstatSync(real);
+    if (!st.isFile()) {
+      throw new Error(`tool must be a regular file: ${explicitPath}`);
     }
-    accessSync(explicitPath, fsConstants.X_OK);
-    return realpathSync(explicitPath);
+    accessSync(real, fsConstants.X_OK);
+    return real;
   }
   const searchDirs = [
     '/usr/local/sbin',
@@ -186,10 +187,11 @@ function findExecutable(explicitPath, fallbackNames) {
       if (!dir) continue;
       const candidate = join(dir, name);
       try {
-        const st = lstatSync(candidate);
-        if (st.isFile() && !st.isSymbolicLink()) {
-          accessSync(candidate, fsConstants.X_OK);
-          return realpathSync(candidate);
+        const real = realpathSync(candidate);
+        const st = lstatSync(real);
+        if (st.isFile()) {
+          accessSync(real, fsConstants.X_OK);
+          return real;
         }
       } catch {
         // Try next directory.
@@ -199,7 +201,7 @@ function findExecutable(explicitPath, fallbackNames) {
   return null;
 }
 
-function runTool(bin, args, { timeoutMs = 180_000 } = {}) {
+function runToolFull(bin, args, { timeoutMs = 180_000 } = {}) {
   const res = spawnSync(bin, args, {
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -214,11 +216,74 @@ function runTool(bin, args, { timeoutMs = 180_000 } = {}) {
   }
   if (res.status !== 0) {
     const detail = (res.stderr || res.stdout || '').trim().slice(0, 600);
+    const spaceHint = /No space left|ENOSPC|Could not allocate/i.test(detail)
+      ? ' (try a larger --size-mib)'
+      : '';
     throw new Error(
-      `${basename(bin)} exited ${res.status}${detail ? `: ${detail}` : ''}`,
+      `${basename(bin)} exited ${res.status}${detail ? `: ${detail}` : ''}${spaceHint}`,
     );
   }
-  return res.stdout;
+  return { stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+}
+
+function runTool(bin, args, options) {
+  return runToolFull(bin, args, options).stdout;
+}
+
+/**
+ * Walks every path component beneath `extractTree` before any `mkdirSync` or
+ * `rmSync` so a symlink unpacked from an untrusted base image can never cause
+ * host-side directory creation, deletion, or writes outside `extractTree`.
+ */
+function ensureSafeExtractPath(
+  extractTree,
+  guestTargetPath,
+  { createParents = false, checkLeafAsDir = false } = {},
+) {
+  const realTree = realpathSync(extractTree);
+  const normalized = normalizeImageTargetPath(guestTargetPath);
+  const segments = normalized.split('/').filter(Boolean);
+  const dirSegments = checkLeafAsDir ? segments : segments.slice(0, -1);
+  let cursor = realTree;
+  for (const seg of dirSegments) {
+    cursor = join(cursor, seg);
+    let st = null;
+    try {
+      st = lstatSync(cursor);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (st !== null) {
+      if (st.isSymbolicLink()) {
+        throw new Error(
+          `injected path parent escaped extract tree via symlink: ${guestTargetPath}`,
+        );
+      }
+      if (!st.isDirectory()) {
+        throw new Error(
+          `cannot traverse non-directory inside image: ${guestTargetPath}`,
+        );
+      }
+    } else if (createParents) {
+      mkdirSync(cursor, { mode: 0o755 });
+    }
+  }
+  if (createParents || existsSync(cursor)) {
+    const realParent = realpathSync(cursor);
+    if (!withinDir(realTree, realParent)) {
+      throw new Error(
+        `injected path parent escaped extract tree via symlink: ${guestTargetPath}`,
+      );
+    }
+  }
+  return checkLeafAsDir ? cursor : join(cursor, segments[segments.length - 1]);
+}
+
+function escapeDebugfsArg(value) {
+  if (/[\0\r\n]/.test(value)) {
+    throw new Error('extract tree path must not contain newlines or NUL bytes');
+  }
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function bundleHostPythonIntoTree(
@@ -227,7 +292,10 @@ function bundleHostPythonIntoTree(
 ) {
   const realPy = realpathSync(pythonBin);
   const pyName = basename(realPy);
-  const pyRoot = join(treeDir, 'opt', 'python');
+  const pyRoot = ensureSafeExtractPath(treeDir, '/opt/python', {
+    createParents: false,
+    checkLeafAsDir: true,
+  });
   rmSync(pyRoot, { recursive: true, force: true });
   const pyBinDir = join(pyRoot, 'bin');
   const pyLibTargetDir = join(pyRoot, 'lib');
@@ -458,7 +526,22 @@ export function deriveExt4GuestImage({
   let bundledLibraries = [];
 
   try {
-    runTool(resolvedDebugfs, ['-R', `rdump / ${extractTree}`, baseInfo.path]);
+    const extract = runToolFull(resolvedDebugfs, [
+      '-R',
+      `rdump / "${escapeDebugfsArg(extractTree)}"`,
+      baseInfo.path,
+    ]);
+    if (
+      /^rdump:/m.test(extract.stderr) ||
+      /while trying to open|Bad magic number|Filesystem not open|Operation not permitted|Permission denied|No such file or directory|Input\/output error/i.test(
+        extract.stderr,
+      )
+    ) {
+      throw new Error(`debugfs extraction failed: ${extract.stderr.trim()}`);
+    }
+    if (readdirSync(extractTree).length === 0) {
+      throw new Error('debugfs extraction produced an empty rootfs tree');
+    }
 
     if (bundleHostPython) {
       const resolvedLdd = findExecutable(lddBin, ['ldd']);
@@ -479,20 +562,12 @@ export function deriveExt4GuestImage({
     }
 
     for (const item of verifiedInjects) {
-      const rel = item.target.replace(/^\/+/, '');
-      const dest = resolve(extractTree, rel);
-      if (!withinDir(extractTree, dest) || dest === extractTree) {
-        throw new Error(`injected path escaped extract tree: ${item.target}`);
-      }
-      mkdirSync(dirname(dest), { recursive: true, mode: 0o755 });
-      // Guard against symlinked directories unpacked from an untrusted base image.
-      const realDestParent = realpathSync(dirname(dest));
-      if (!withinDir(extractTree, realDestParent)) {
-        throw new Error(
-          `injected path parent escaped extract tree via symlink: ${item.target}`,
-        );
-      }
-      const safeDest = join(realDestParent, basename(dest));
+      // Verify every ancestor segment BEFORE creating directories so an
+      // unpacked symlink ancestor cannot create host directories outside extractTree.
+      const safeDest = ensureSafeExtractPath(extractTree, item.target, {
+        createParents: true,
+        checkLeafAsDir: false,
+      });
       try {
         const existing = lstatSync(safeDest);
         if (existing.isSymbolicLink() || existing.isFile()) {
