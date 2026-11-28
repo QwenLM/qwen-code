@@ -180,7 +180,7 @@ managed-agent E2E runner 在每个 fake 模型回调内部回答 `cron_create` �
 
 落位钉的子句逐条见证，而非整块见证：整条删除可能被兄弟子句杀掉，而对它做一处记号的收窄却仍能全绿。
 
-在合并后的 head `5df9a05f0f` 实测：scripts 元套件 `186 passed (186)`、core parity `35 passed (35)`、core `tsc --build` 净、eslint 与 prettier 净、build 与 bundle rc=0 且 core/cli dist 与 bundle 按构建起点时间戳断言已刷新、Java SDK 与 server jar 重建（没有任何 Java 源码或 pom 比 jar 更新）、四份嵌套契约 sidecar 字节相等、`ManagedLoopSkillTest` 22/22。对交付版判据的十一条子句级变异——每条子句各一，另加注册解析、包含规则、歧义计数、绑定模式计数与调用点位置——全部被敌意接线用例击杀，每条字节还原。
+在合并后的 head `5df9a05f0f` 实测，并在合入一个仅改 web-shell 的提交后于 `ec878e275` 复跑 scripts 元套件（仍 `186 passed (186)`）：scripts 元套件 `186 passed (186)`、core parity `35 passed (35)`、core `tsc --build` 净、eslint 与 prettier 净、build 与 bundle rc=0 且 core/cli dist 与 bundle 按构建起点时间戳断言已刷新、Java SDK 与 server jar 重建（没有任何 Java 源码或 pom 比 jar 更新）、四份嵌套契约 sidecar 字节相等、`ManagedLoopSkillTest` 22/22。对交付版判据的十一条子句级变异——每条子句各一，另加注册解析、包含规则、歧义计数、绑定模式计数与调用点位置——全部被敌意接线用例击杀，每条字节还原。
 
 **两条打包臂在本 head 均红，且红属 main。** 只把 runner 文件换成 `origin/main` 的版本重跑各臂，复现完全相同的失败——skill `Cron tool loop-cron-list was never called`、fire `No model round ran the /loop create input`——跑完 runner 字节还原。本 PR 的 runner diff 是三处 hunk，均不在这些路径上，故未夹带无关修复。上文「由臂承担」的结论是在臂为绿时实测的，今天不把它们重述为一次绿跑。
 
