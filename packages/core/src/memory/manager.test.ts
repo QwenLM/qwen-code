@@ -2481,7 +2481,12 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
     });
 
-    it('reports a flush whose own deadline expired while the slot was held', async () => {
+    // The zero-budget determinism rests on the deadline comparison being
+    // inclusive: with the clock frozen on the flush's creation millisecond,
+    // deadline === now and only >= treats it as expired. A strict > would
+    // send the body down the fork path and the warn would never fire — the
+    // 153-test suite stays green under that mutation without this pin.
+    it('treats a zero-budget deadline as expired on the creation millisecond (#17068)', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
       await turn(mgr, 2);
@@ -2496,12 +2501,12 @@ describe('MemoryManager', () => {
       );
 
       debugWarn.mockClear();
-      // The slot is held past the flush's 1ms budget, so the run that finally
-      // takes it finds its own deadline already expired.
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(42_000);
+      await expect(mgr.flushPendingExtract('sess', 0)).resolves.toBe(false);
       release();
       await direct;
       await mgr.drain();
+      clock.mockRestore();
 
       await vi.waitFor(() =>
         expect(debugWarn).toHaveBeenCalledWith(
