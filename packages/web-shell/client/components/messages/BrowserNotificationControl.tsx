@@ -17,9 +17,29 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 
+export type ClientOperatingSystem = 'macos' | 'windows' | 'ios' | 'other';
+
+export function detectClientOperatingSystem(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+  maxTouchPoints = typeof navigator === 'undefined'
+    ? 0
+    : navigator.maxTouchPoints,
+): ClientOperatingSystem {
+  const identity = `${platform} ${userAgent}`;
+  // iPadOS desktop-site mode reports a Mac identity; maxTouchPoints is the
+  // remaining signal that distinguishes it from a desktop Mac.
+  if (/iphone|ipad|ipod/i.test(identity)) return 'ios';
+  if (/macintel/i.test(platform) && maxTouchPoints > 1) return 'ios';
+  if (/macintosh|mac os x|macintel/i.test(identity)) return 'macos';
+  if (/windows/i.test(identity)) return 'windows';
+  return 'other';
+}
+
 export function BrowserNotificationControl() {
   const settings = useBrowserNotificationSettings();
   const { t } = useI18n();
+  const clientOperatingSystem = detectClientOperatingSystem();
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -204,33 +224,49 @@ export function BrowserNotificationControl() {
             </p>
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
-          <p className="text-muted-foreground">
-            {t('browserNotifications.helpSystem')}
-          </p>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              macOS
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpMac')}
+          {clientOperatingSystem !== 'other' && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpSystem')}
             </p>
-          </details>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              Windows
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpWindows')}
+          )}
+          {clientOperatingSystem === 'ios' && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpIos')}
             </p>
-          </details>
+          )}
+          {clientOperatingSystem === 'macos' && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                macOS
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpMac')}
+              </p>
+            </details>
+          )}
+          {clientOperatingSystem === 'windows' && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                Windows
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpWindows')}
+              </p>
+            </details>
+          )}
+          {clientOperatingSystem === 'other' && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpOther')}
+            </p>
+          )}
         </PopoverContent>
       </Popover>
     </span>
