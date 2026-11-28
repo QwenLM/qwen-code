@@ -37,6 +37,8 @@ const DEFAULT_PARSED_WORKTREE_ROOT: ParsedWorktreeRoot = Object.freeze({
 });
 
 const WINDOWS_DRIVE_RE = /^[A-Za-z]:/;
+const NTFS_FORBIDDEN_CHAR_RE = /[<>:"|?*]/;
+const WINDOWS_RESERVED_DEVICE_RE = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
 
 function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
@@ -168,8 +170,11 @@ function extractSegments(raw: string): string[] | { error: string } {
     if (segment === '..') {
       return { error: 'worktree.root must not contain ".." segments' };
     }
-    if (segment.includes(':')) {
-      return { error: 'worktree.root must not contain ":" characters' };
+    if (NTFS_FORBIDDEN_CHAR_RE.test(segment)) {
+      return {
+        error:
+          'worktree.root must not contain forbidden path characters (< > : " | ? *)',
+      };
     }
     if (segment.length > 0 && segment !== segment.trim()) {
       return {
@@ -181,6 +186,14 @@ function extractSegments(raw: string): string[] | { error: string } {
       return {
         error: 'worktree.root path segments must not end with "."',
       };
+    }
+    if (segment.length > 0) {
+      const baseName = segment.split('.')[0] ?? segment;
+      if (WINDOWS_RESERVED_DEVICE_RE.test(baseName)) {
+        return {
+          error: `worktree.root must not use reserved device name "${segment}"`,
+        };
+      }
     }
   }
   const segments = rawSegments.filter(
@@ -408,6 +421,67 @@ export function extractWorktreeFromPath(
   }
 }
 
+function assertResolvedTargetsAllowed(
+  realRepoTop: string,
+  realWorktreesDir: string,
+  parsedRoot: ParsedWorktreeRoot,
+  realGitDir?: string,
+): void {
+  if (
+    normalizeForComparison(realWorktreesDir) ===
+    normalizeForComparison(realRepoTop)
+  ) {
+    throw new InvalidWorktreeRootError(
+      'worktree.root must not resolve to the repository root',
+    );
+  }
+  if (realGitDir && isWithinDirectory(realWorktreesDir, realGitDir)) {
+    throw new InvalidWorktreeRootError(
+      'worktree.root must not resolve inside .git',
+    );
+  }
+  if (
+    !parsedRoot.isDefault &&
+    !isStrictlyWithinDirectory(realWorktreesDir, realRepoTop)
+  ) {
+    throw new InvalidWorktreeRootError(
+      `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
+    );
+  }
+}
+
+function assertPrefixStatAndRealpath(
+  prefix: string,
+  stat: fsSync.Stats,
+  parsedRoot: ParsedWorktreeRoot,
+  realPrefix: string | undefined,
+  realRepoTop: string,
+  realGitDir?: string,
+): void {
+  if (!parsedRoot.isDefault && stat.isSymbolicLink()) {
+    throw new InvalidWorktreeRootError(
+      `Custom worktree.root "${parsedRoot.normalized}" must not traverse a symbolic link or junction: ${prefix}`,
+    );
+  }
+  if (!stat.isDirectory() && !stat.isSymbolicLink()) {
+    throw new InvalidWorktreeRootError(
+      `worktree.root path component is not a directory: ${prefix}`,
+    );
+  }
+  if (!parsedRoot.isDefault && realPrefix !== undefined) {
+    if (!isStrictlyWithinDirectory(realPrefix, realRepoTop)) {
+      throw new InvalidWorktreeRootError(
+        `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
+      );
+    }
+    if (realGitDir && isWithinDirectory(realPrefix, realGitDir)) {
+      throw new InvalidWorktreeRootError(
+        `Custom worktree.root "${parsedRoot.normalized}" resolves inside .git`,
+      );
+    }
+  }
+}
+
 /**
  * Verifies runtime filesystem containment for a resolved worktree root.
  *
@@ -444,25 +518,18 @@ export async function assertWorktreeRootContainment(
       )
     : undefined;
 
-  if (
-    normalizeForComparison(realWorktreesDir) ===
-    normalizeForComparison(realRepoTop)
-  ) {
-    throw new InvalidWorktreeRootError(
-      'worktree.root must not resolve to the repository root',
-    );
-  }
-  if (realGitDir && isWithinDirectory(realWorktreesDir, realGitDir)) {
-    throw new InvalidWorktreeRootError(
-      'worktree.root must not resolve inside .git',
-    );
-  }
+  assertResolvedTargetsAllowed(
+    realRepoTop,
+    realWorktreesDir,
+    parsedRoot,
+    realGitDir,
+  );
 
   for (const prefix of getWorktreeRootPrefixes(
     repoTop,
     parsedRoot.normalized,
   )) {
-    let stat: fsSync.Stats | null;
+    let stat: fsSync.Stats;
     try {
       stat = await fs.lstat(prefix);
     } catch (error) {
@@ -475,18 +542,8 @@ export async function assertWorktreeRootContainment(
         }`,
       );
     }
-    if (!parsedRoot.isDefault && stat.isSymbolicLink()) {
-      throw new InvalidWorktreeRootError(
-        `Custom worktree.root "${parsedRoot.normalized}" must not traverse a symbolic link or junction: ${prefix}`,
-      );
-    }
-    if (!stat.isDirectory() && !stat.isSymbolicLink()) {
-      throw new InvalidWorktreeRootError(
-        `worktree.root path component is not a directory: ${prefix}`,
-      );
-    }
-    if (!parsedRoot.isDefault) {
-      let realPrefix: string;
+    let realPrefix: string | undefined;
+    if (!parsedRoot.isDefault && !stat.isSymbolicLink() && stat.isDirectory()) {
       try {
         realPrefix = await fs.realpath(prefix);
       } catch (error) {
@@ -496,25 +553,14 @@ export async function assertWorktreeRootContainment(
           }`,
         );
       }
-      if (!isStrictlyWithinDirectory(realPrefix, realRepoTop)) {
-        throw new InvalidWorktreeRootError(
-          `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
-        );
-      }
-      if (realGitDir && isWithinDirectory(realPrefix, realGitDir)) {
-        throw new InvalidWorktreeRootError(
-          `Custom worktree.root "${parsedRoot.normalized}" resolves inside .git`,
-        );
-      }
     }
-  }
-
-  if (
-    !parsedRoot.isDefault &&
-    !isStrictlyWithinDirectory(realWorktreesDir, realRepoTop)
-  ) {
-    throw new InvalidWorktreeRootError(
-      `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
+    assertPrefixStatAndRealpath(
+      prefix,
+      stat,
+      parsedRoot,
+      realPrefix,
+      realRepoTop,
+      realGitDir,
     );
   }
 }
@@ -548,25 +594,18 @@ export function assertWorktreeRootContainmentSync(
     }
   }
 
-  if (
-    normalizeForComparison(realWorktreesDir) ===
-    normalizeForComparison(realRepoTop)
-  ) {
-    throw new InvalidWorktreeRootError(
-      'worktree.root must not resolve to the repository root',
-    );
-  }
-  if (realGitDir && isWithinDirectory(realWorktreesDir, realGitDir)) {
-    throw new InvalidWorktreeRootError(
-      'worktree.root must not resolve inside .git',
-    );
-  }
+  assertResolvedTargetsAllowed(
+    realRepoTop,
+    realWorktreesDir,
+    parsedRoot,
+    realGitDir,
+  );
 
   for (const prefix of getWorktreeRootPrefixes(
     repoTop,
     parsedRoot.normalized,
   )) {
-    let stat: fsSync.Stats | null;
+    let stat: fsSync.Stats;
     try {
       stat = fsSync.lstatSync(prefix);
     } catch (error) {
@@ -579,18 +618,8 @@ export function assertWorktreeRootContainmentSync(
         }`,
       );
     }
-    if (!parsedRoot.isDefault && stat.isSymbolicLink()) {
-      throw new InvalidWorktreeRootError(
-        `Custom worktree.root "${parsedRoot.normalized}" must not traverse a symbolic link or junction: ${prefix}`,
-      );
-    }
-    if (!stat.isDirectory() && !stat.isSymbolicLink()) {
-      throw new InvalidWorktreeRootError(
-        `worktree.root path component is not a directory: ${prefix}`,
-      );
-    }
-    if (!parsedRoot.isDefault) {
-      let realPrefix: string;
+    let realPrefix: string | undefined;
+    if (!parsedRoot.isDefault && !stat.isSymbolicLink() && stat.isDirectory()) {
       try {
         realPrefix = fsSync.realpathSync(prefix);
       } catch (error) {
@@ -600,25 +629,14 @@ export function assertWorktreeRootContainmentSync(
           }`,
         );
       }
-      if (!isStrictlyWithinDirectory(realPrefix, realRepoTop)) {
-        throw new InvalidWorktreeRootError(
-          `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
-        );
-      }
-      if (realGitDir && isWithinDirectory(realPrefix, realGitDir)) {
-        throw new InvalidWorktreeRootError(
-          `Custom worktree.root "${parsedRoot.normalized}" resolves inside .git`,
-        );
-      }
     }
-  }
-
-  if (
-    !parsedRoot.isDefault &&
-    !isStrictlyWithinDirectory(realWorktreesDir, realRepoTop)
-  ) {
-    throw new InvalidWorktreeRootError(
-      `Custom worktree.root "${parsedRoot.normalized}" resolves outside the repository root`,
+    assertPrefixStatAndRealpath(
+      prefix,
+      stat,
+      parsedRoot,
+      realPrefix,
+      realRepoTop,
+      realGitDir,
     );
   }
 }

@@ -124,7 +124,9 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     const projectRoot =
       (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
     if (
-      (await raceWithAbort(signal, () => probe.isLinkedWorktree())) ||
+      (await raceWithAbort(signal, () =>
+        Promise.resolve(probe.isLinkedWorktree?.() ?? false),
+      )) ||
       isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
     ) {
       debugLogger.warn(`enter_worktree: ${nestedReason} (cwd=${cwd})`);

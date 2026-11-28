@@ -1074,9 +1074,9 @@ export async function resolveAtCommandQuery({
 
     let resolved;
     try {
-      resolved = await new SessionReferenceService(
-        config.getProjectRoot(),
-      ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+      resolved = await new SessionReferenceService(config.getProjectRoot(), {
+        worktreeRoot: config.getWorktreeRoot?.(),
+      }).resolve(sessionId, ref.title ? { title: ref.title } : {});
     } catch (error: unknown) {
       const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
       onDebugMessage(reason);

@@ -382,6 +382,8 @@ export interface CreateSubSessionLauncherOptions {
   resolveWorkspace?: (selector: string) => SubSessionWorkspaceResolution;
   /** Whether this launcher's own workspace is trusted, read per launch. */
   isTrusted?: (bridge: AcpSessionBridge) => boolean;
+  /** Optional lazy resolver for the workspace's `worktree.root` setting (or fail-closed sentinel). */
+  getWorktreeRoot?: () => string | undefined | Promise<string | undefined>;
 }
 
 /**
@@ -1143,6 +1145,7 @@ export function createSubSessionLauncher(
     isolatedWorkspace,
     resolveWorkspace,
     isTrusted,
+    getWorktreeRoot,
   } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDispatchTimeoutMs =
@@ -1257,7 +1260,10 @@ export function createSubSessionLauncher(
     if (sessionClosed && opts.removeUnusedTranscript) {
       try {
         const removeTranscript = async () => {
-          const service = new SessionService(boundWorkspace);
+          const worktreeRoot = await getWorktreeRoot?.();
+          const service = new SessionService(boundWorkspace, {
+            ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+          });
           if (!opts.named) return service.removeSession(sessionId);
           const coordinator = getArchiveCoordinator?.();
           if (!coordinator) return false;
@@ -1306,7 +1312,11 @@ export function createSubSessionLauncher(
     if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
       throw new Error('A session cannot send a message to itself.');
     }
-    const service = new SessionService(boundWorkspace, { runtimeBaseDir });
+    const worktreeRoot = await getWorktreeRoot?.();
+    const service = new SessionService(boundWorkspace, {
+      runtimeBaseDir,
+      ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+    });
     const storedId = await resolveSessionIdForRestore(service, sessionId);
     let metadata:
       | { parentSessionId?: string; sourceType?: string; sourceId?: string }
@@ -2156,8 +2166,11 @@ export function createSubSessionLauncher(
         if (sessionClosed) {
           if (!promptAdmitted) {
             try {
+              const worktreeRoot = await getWorktreeRoot?.();
               const removeTranscript = () =>
-                new SessionService(boundWorkspace).removeSession(sessionId);
+                new SessionService(boundWorkspace, {
+                  ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+                }).removeSession(sessionId);
               const transcriptRemoved = runtimeBaseDir
                 ? await Storage.runWithResolvedRuntimeBaseDir(
                     runtimeBaseDir,

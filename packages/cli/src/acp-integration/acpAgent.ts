@@ -15470,9 +15470,11 @@ class QwenAgent implements Agent {
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async (requestSettings) => {
-            const sessionService = new SessionService(cwd, {
-              worktreeRoot: requestSettings.merged.worktree?.root,
-            });
+            const worktreeRoot = requestSettings.merged.worktree?.root;
+            const sessionService =
+              worktreeRoot !== undefined
+                ? new SessionService(cwd, { worktreeRoot })
+                : new SessionService(cwd);
             return sessionService.removeSession(sessionId);
           },
         );
@@ -15522,9 +15524,11 @@ class QwenAgent implements Agent {
         const success = await this.runWithPinnedRuntimeBaseDirForRequest(
           cwd,
           async (requestSettings) => {
-            const sessionService = new SessionService(cwd, {
-              worktreeRoot: requestSettings.merged.worktree?.root,
-            });
+            const worktreeRoot = requestSettings.merged.worktree?.root;
+            const sessionService =
+              worktreeRoot !== undefined
+                ? new SessionService(cwd, { worktreeRoot })
+                : new SessionService(cwd);
             return sessionService.renameSession(sessionId, title);
           },
         );
@@ -15817,9 +15821,11 @@ class QwenAgent implements Agent {
           sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async (requestSettings) => {
-              const sessionService = new SessionService(cwd, {
-                worktreeRoot: requestSettings.merged.worktree?.root,
-              });
+              const worktreeRoot = requestSettings.merged.worktree?.root;
+              const sessionService =
+                worktreeRoot !== undefined
+                  ? new SessionService(cwd, { worktreeRoot })
+                  : new SessionService(cwd);
               return sessionService.loadSession(sessionId);
             },
           );

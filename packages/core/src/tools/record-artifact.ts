@@ -176,10 +176,14 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   private async expandDirectoryLocator(
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
+    const worktreeRoot = this.config.getWorktreeRoot?.();
+    const cwd = this.config.getTargetDir();
+    const inWorktree =
+      resolveBoundWorkspaceRoot(cwd, worktreeRoot) !== path.resolve(cwd);
     if (
       pathHasSkippedDirectoryComponent(
         locator.workspacePath,
-        this.config.getWorktreeRoot?.(),
+        inWorktree ? worktreeRoot : undefined,
       )
     ) {
       const message = [

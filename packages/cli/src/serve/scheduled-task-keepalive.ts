@@ -293,6 +293,7 @@ export interface StartScheduledTaskKeepaliveOptions {
   restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
   runtimeBaseDir?: string;
+  getWorktreeRoot?: () => string | undefined;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
@@ -315,8 +316,10 @@ export function startScheduledTaskKeepalive(
     opts.cleanupSession ??
     (async (sessionId: string) => {
       await bridge.closeSession(sessionId);
+      const worktreeRoot = opts.getWorktreeRoot?.();
       const removed = await new SessionService(boundWorkspace, {
         runtimeBaseDir: opts.runtimeBaseDir,
+        ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
       }).removeSession(sessionId);
       if (removed) bridge.markSessionCatalogChanged?.();
     });
@@ -377,9 +380,10 @@ export function startScheduledTaskKeepalive(
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
         reviving.add(sessionId);
-        const metadata = await new SessionService(
-          boundWorkspace,
-        ).readCreationMetadata(sessionId);
+        const worktreeRoot = opts.getWorktreeRoot?.();
+        const metadata = await new SessionService(boundWorkspace, {
+          ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+        }).readCreationMetadata(sessionId);
         const { completion: resume, deadline } = beginKeepaliveSessionResume(
           { resumeSession: restoreSession },
           {
@@ -582,6 +586,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
   restoreSession?: (request: KeepaliveSessionResumeRequest) => Promise<unknown>;
   boundWorkspace: string;
+  getWorktreeRoot?: () => string | undefined;
   onError?: (sessionId: string, err: unknown) => void;
   /** Values above the JS timer limit disable the caller-side watchdog. */
   loadTimeoutMs?: number;
@@ -610,9 +615,10 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
-    const metadata = await new SessionService(
-      boundWorkspace,
-    ).readCreationMetadata(sessionId);
+    const worktreeRoot = deps.getWorktreeRoot?.();
+    const metadata = await new SessionService(boundWorkspace, {
+      ...(worktreeRoot !== undefined ? { worktreeRoot } : {}),
+    }).readCreationMetadata(sessionId);
     const resume = restoreSession({
       sessionId,
       workspaceCwd: boundWorkspace,

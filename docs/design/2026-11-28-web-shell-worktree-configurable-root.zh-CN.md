@@ -48,10 +48,10 @@ CLI 通用 worktree（`--worktree`、`enter_worktree`、`exit_worktree`、`agent
 在零外部依赖的核心模块 `packages/core/src/utils/worktree-root.ts` 中集中提供 `DEFAULT_WORKTREE_ROOT`、`InvalidWorktreeRootError`、`validateWorktreeRoot` 与 `parseWorktreeRoot`：
 
 - `undefined` 解析为默认值 `.qwen/worktrees`（`isDefault: true`）。
-- 拒绝非字符串、空/纯空白、首尾带空白、含控制字符（`[\x00-\x1f\x7f]`）/ NUL / 换行符、以及长度超过 240 字符的值。
-- 拒绝 POSIX 绝对路径（`/…`）、Windows 盘符或 UNC 路径（`C:…`、`\\…`）、波浪号路径（`~`、`~/…`）以及含冒号（`:`）的分段。
+- 拒绝非字符串、空/纯空白、整串或任意单个分段的首尾空白、多字符分段的尾随 `.`、含控制字符（`[\x00-\x1f\x7f]`）/ NUL / 换行符、以及长度超过 240 字符的值。
+- 拒绝 POSIX 绝对路径（`/…`）、Windows 盘符或 UNC 路径（`C:…`、`\\…`）、波浪号路径（`~`、`~/…`）、Windows NTFS 禁用字符（`< > : " | ? *`）以及 Windows DOS 保留设备名（`CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`，无论是否带扩展名）。
 - 拒绝任何 `..` 分段；折叠冗余的 `.` 与尾部斜杠后若结果为空（如 `.`、`./`）同样拒绝。
-- 拒绝首段为 `.git`（大小写不敏感）的路径。
+- 拒绝任意层级包含 `.git`（大小写不敏感）分段的路径。
 - 拒绝单段 `.qwen`（大小写不敏感），防止 worktree 与 `.qwen/settings.json`、`.qwen/commands/` 冲突或导致 `.git/info/exclude` 隐藏整个 `.qwen/`；`.qwen/` 下的子目录（如 `.qwen/worktrees`、`.qwen/wt`）仍允许。
 - 规范化形式统一为 POSIX 正斜杠拼接的 `segments.join('/')`。
 

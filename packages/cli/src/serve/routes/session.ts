@@ -195,6 +195,7 @@ import {
   type ParsedWorktreeRoot,
 } from '@qwen-code/qwen-code-core/utils/worktree-root.js';
 import {
+  assertAnyManagedRootContained,
   isWorktreePathInManagedRoots,
   readRuntimeWorktreeRoot,
   resolveRuntimeWorktreeRootSetting,
@@ -4670,6 +4671,7 @@ export function registerSessionRoutes(
     // HTTP 400 `invalid_worktree_root` instead of misblaming the sidecar with
     // 409 `worktree_reset_invalid_state`.
     const parsedWorktreeRoot = readRuntimeWorktreeRoot(runtime);
+    assertAnyManagedRootContained(workspaceRoots, parsedWorktreeRoot);
     const candidateRoots = workspaceRoots.map((root) => {
       const candidate = path.join(root, ...parsedWorktreeRoot.segments);
       try {
@@ -4743,10 +4745,13 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
-          // Validate worktree.root before session lookup so a corrupt setting
-          // fails closed with 400 `invalid_worktree_root` instead of hiding a
-          // custom-root session behind 404 `session_not_found`.
-          readRuntimeWorktreeRoot(runtime);
+          // Validate worktree.root syntax and containment before session lookup
+          // so a corrupt or symlinked setting fails closed with 400
+          // `invalid_worktree_root` instead of hiding the session behind 404.
+          assertAnyManagedRootContained(
+            [runtime.workspaceCwd],
+            readRuntimeWorktreeRoot(runtime),
+          );
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           // The session record must exist (this resolver also normalizes
           // legacy case-variant spellings to the stored id).
@@ -5577,7 +5582,10 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
-          readRuntimeWorktreeRoot(runtime);
+          assertAnyManagedRootContained(
+            [runtime.workspaceCwd],
+            readRuntimeWorktreeRoot(runtime),
+          );
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           let storageSessionId = await resolveSessionIdForRestore(
             sessionService,
@@ -5772,7 +5780,10 @@ export function registerSessionRoutes(
     try {
       await runOwnerRuntimeActivity(runtime, () =>
         archiveCoordinator.runSharedMany([sessionId], async () => {
-          readRuntimeWorktreeRoot(runtime);
+          assertAnyManagedRootContained(
+            [runtime.workspaceCwd],
+            readRuntimeWorktreeRoot(runtime),
+          );
           const sessionService = createWorkspaceRuntimeSessionService(runtime);
           let storageSessionId = await resolveSessionIdForRestore(
             sessionService,

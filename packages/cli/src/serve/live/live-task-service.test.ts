@@ -574,14 +574,19 @@ describe('LiveTaskService', () => {
       expect.objectContaining({
         conversationKind: 'standalone-top-level',
       }),
-      { runtimeBaseDir: '/runtime/conversations' },
+      {
+        runtimeBaseDir: '/runtime/conversations',
+      },
     );
     expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
       2,
       harness.projectBridge,
       '/project',
       expect.objectContaining({ view: 'organized', group: 'all' }),
-      { runtimeBaseDir: '/runtime/project' },
+      {
+        runtimeBaseDir: '/runtime/project',
+        worktreeRoot: '.qwen/worktrees',
+      },
     );
     expect(listWorkspaceSessionsForResponse.mock.calls[1]?.[0]).toBe(
       harness.projectBridge,
@@ -607,7 +612,11 @@ describe('LiveTaskService', () => {
       harness.projectBridge,
       '/project',
       expect.objectContaining({ view: 'organized', group: 'all' }),
-      { runtimeBaseDir: '/runtime/project', allowSidecarWrite: false },
+      {
+        runtimeBaseDir: '/runtime/project',
+        allowSidecarWrite: false,
+        worktreeRoot: '.qwen/worktrees',
+      },
     );
   });
 

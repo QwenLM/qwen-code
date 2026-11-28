@@ -58,6 +58,21 @@ describe('resolveBoundWorkspaceRoot', () => {
     expect(resolveBoundWorkspaceRoot(myWorktree, 'worktrees')).toBe(
       path.resolve(agent),
     );
+    // R2-4: a custom root that itself ends with `.qwen/worktrees` (e.g.
+    // `sub/.qwen/worktrees`) must strip the full 3-segment root to `/repo`,
+    // not stop at `/repo/sub`.
+    const nestedCustom = `${agent}/sub/.qwen/worktrees/my-feature`;
+    expect(
+      resolveBoundWorkspaceRoot(nestedCustom, 'sub/.qwen/worktrees', agent),
+    ).toBe(path.resolve(agent));
+    expect(
+      toCanonicalWorkspaceArtifactPath(
+        `${nestedCustom}/report.csv`,
+        nestedCustom,
+        'sub/.qwen/worktrees',
+        agent,
+      ),
+    ).toBe('sub/.qwen/worktrees/my-feature/report.csv');
   });
 
   it('does not strip a custom prefix when worktreeRoot is invalid', () => {

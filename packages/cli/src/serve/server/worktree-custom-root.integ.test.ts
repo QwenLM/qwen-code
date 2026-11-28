@@ -348,4 +348,103 @@ describe('daemon worktree lifecycle with custom worktree.root', () => {
       ),
     ).toBeNull();
   });
+
+  it('fails closed on snapshot restore when worktree.root is invalid (R2 deferred #10)', async () => {
+    const base = makeRetentionRepo(root, 'primary');
+    const customRoot = '.worktrees';
+    configureWorkspaceWorktreeSettings(base, {
+      root: customRoot,
+      maxRetained: 1,
+    });
+    const target: RetentionTestRuntime = {
+      ...base,
+      git: new GitWorktreeService(base.repo, { worktreeRoot: customRoot }),
+    };
+    const evicted = await makeRetainedSession(target, {
+      slug: 'older-invalid-restore',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newer-invalid-restore',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+
+    const registry = createWorkspaceRegistry([target.runtime]);
+    await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      sweepWorktreeRetentionOnce(target.runtime, registry, coordinator),
+    );
+    expect(fs.existsSync(evicted.worktreePath)).toBe(false);
+
+    // Corrupt worktree.root before attempting snapshot restore.
+    configureWorkspaceWorktreeSettings(base, {
+      root: '../escape',
+      maxRetained: 1,
+    });
+    await expect(
+      runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        restoreWorktreeFromSessionSnapshot({
+          runtime: target.runtime,
+          sessionId: evicted.id,
+          archiveCoordinator: coordinator,
+        }),
+      ),
+    ).rejects.toThrow(/worktree\.root|\.\./);
+    expect(fs.existsSync(evicted.worktreePath)).toBe(false);
+  });
+
+  it('stops an in-flight retention sweep when worktree.root changes mid-sweep (R2 deferred #9)', async () => {
+    const base = makeRetentionRepo(root, 'primary');
+    const customRoot = '.worktrees';
+    configureWorkspaceWorktreeSettings(base, {
+      root: customRoot,
+      maxRetained: 1,
+    });
+    const target: RetentionTestRuntime = {
+      ...base,
+      git: new GitWorktreeService(base.repo, { worktreeRoot: customRoot }),
+    };
+    const first = await makeRetainedSession(target, {
+      slug: 'mid-sweep-1',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const second = await makeRetainedSession(target, {
+      slug: 'mid-sweep-2',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const third = await makeRetainedSession(target, {
+      slug: 'mid-sweep-3',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    // Mutate worktree.root to `.other-wt` while the sweep is iterating candidates
+    // (intercepted on the first candidate's coordinator exclusive run).
+    let mutated = false;
+    const origRun = coordinator.runExclusiveMany.bind(coordinator);
+    const spyCoordinator = Object.create(
+      coordinator,
+    ) as SessionArchiveCoordinator;
+    spyCoordinator.runExclusiveMany = async <T>(
+      ids: string[],
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      if (!mutated && ids.includes(first.id)) {
+        mutated = true;
+        configureWorkspaceWorktreeSettings(base, {
+          root: '.other-wt',
+          maxRetained: 1,
+        });
+      }
+      return origRun(ids, fn);
+    };
+
+    const registry = createWorkspaceRegistry([target.runtime]);
+    const report = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      sweepWorktreeRetentionOnce(target.runtime, registry, spyCoordinator),
+    );
+    expect(report.removed).toEqual([]);
+    expect(fs.existsSync(first.worktreePath)).toBe(true);
+    expect(fs.existsSync(second.worktreePath)).toBe(true);
+    expect(fs.existsSync(third.worktreePath)).toBe(true);
+  });
 });

@@ -22,6 +22,7 @@ import {
   writeWorktreeSession,
 } from './worktreeSessionService.js';
 import { SessionService } from './sessionService.js';
+import { SessionReferenceService } from './session-reference-service.js';
 import { Storage } from '../config/storage.js';
 
 const gitEnv = {
@@ -150,6 +151,36 @@ describe('GitWorktreeService custom worktree.root integration', () => {
     });
     expect(await probeOtherRoot.isLinkedWorktree()).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'isLinkedWorktree() handles repository paths containing a newline without false positives (R2-2)',
+    async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-nl-root-'));
+      dirs.push(root);
+      const nlRepo = path.join(root, 'repo\nline2');
+      await fs.mkdir(nlRepo, { recursive: true });
+      git(nlRepo, ['init', '-b', 'main']);
+      await fs.writeFile(path.join(nlRepo, 'README.md'), 'hello\n');
+      git(nlRepo, ['add', 'README.md']);
+      git(nlRepo, ['commit', '-m', 'init']);
+
+      const mainSvc = new GitWorktreeService(nlRepo, {
+        worktreeRoot: '.worktrees',
+      });
+      expect(await mainSvc.isLinkedWorktree()).toBe(false);
+
+      const created = await mainSvc.createUserWorktree('nl-wt', 'main');
+      expect(created.success).toBe(true);
+      const subDir = path.join(created.worktree!.path, 'nested');
+      await fs.mkdir(subDir, { recursive: true });
+      expect(
+        await new GitWorktreeService(created.worktree!.path).isLinkedWorktree(),
+      ).toBe(true);
+      expect(await new GitWorktreeService(subDir).isLinkedWorktree()).toBe(
+        true,
+      );
+    },
+  );
 
   it('blocks symlinkDirectories entries that overlap the configured custom worktree.root', async () => {
     const { repo } = await initRepo();
@@ -310,5 +341,25 @@ describe('GitWorktreeService custom worktree.root integration', () => {
     expect(await withCustomRoot.getSessionLocation(sessionId)).toBe('active');
     const listed = await withCustomRoot.listSessions();
     expect(listed.items.map((item) => item.sessionId)).toContain(sessionId);
+
+    // R2-3: SessionReferenceService also resolves the custom-root transcript
+    // only when configured with worktreeRoot.
+    const refWithoutRoot = new SessionReferenceService(repo, {
+      runtimeBaseDir,
+    });
+    expect(await refWithoutRoot.resolve(sessionId)).toEqual({
+      notFound: true,
+    });
+
+    const refWithRoot = new SessionReferenceService(repo, {
+      runtimeBaseDir,
+      worktreeRoot: '.worktrees',
+    });
+    const resolvedRef = await refWithRoot.resolve(sessionId);
+    expect('notFound' in resolvedRef).toBe(false);
+    if (!('notFound' in resolvedRef)) {
+      expect(resolvedRef.meta.sessionId).toBe(sessionId);
+      expect(resolvedRef.text).toContain('hello from custom wt');
+    }
   });
 });

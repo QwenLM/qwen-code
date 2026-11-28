@@ -3540,7 +3540,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
         if (
-          (await probe.isLinkedWorktree()) ||
+          (await probe.isLinkedWorktree?.()) ||
           isPathInsideWorktreeRoot(cwd, worktreeRoot, projectRoot)
         ) {
           return failWorktreeProvisioning(

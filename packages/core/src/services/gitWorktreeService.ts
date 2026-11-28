@@ -1925,8 +1925,6 @@ interface SessionConfigFile {
 }
 
 export interface GitWorktreeServiceOptions {
-  /** Optional custom base directory override for Arena worktrees. */
-  customBaseDir?: string;
   /** Repository-relative root for user/session worktrees (default: '.qwen/worktrees'). */
   worktreeRoot?: string;
 }
@@ -1952,7 +1950,6 @@ export class GitWorktreeService {
       this.customBaseDir = optionsOrCustomBaseDir;
       this.userWorktreeRoot = parseWorktreeRoot(undefined);
     } else {
-      this.customBaseDir = optionsOrCustomBaseDir?.customBaseDir;
       this.userWorktreeRoot = parseWorktreeRoot(
         optionsOrCustomBaseDir?.worktreeRoot,
       );
@@ -3361,43 +3358,24 @@ export class GitWorktreeService {
 
   /**
    * Returns true when `this.sourceRepoPath` is structurally inside a linked
-   * git worktree (its `--absolute-git-dir` differs from `--git-common-dir`),
-   * regardless of which `worktree.root` created it or how deep inside the
-   * checkout the path sits. Returns false for the main checkout or non-git dirs.
+   * git worktree, regardless of which `worktree.root` created it or how deep
+   * inside the checkout the path sits. Uses the single `--absolute-git-dir`
+   * value plus the presence of `<gitDir>/commondir` (which git writes
+   * exclusively for linked worktrees), so paths containing newlines are never
+   * mis-split. Returns false for the main checkout or non-git dirs.
    */
   async isLinkedWorktree(): Promise<boolean> {
     try {
       const git = await this.getGit();
-      const raw = (
-        await git.raw(['rev-parse', '--absolute-git-dir', '--git-common-dir'])
-      ).trim();
-      const lines = raw
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      if (lines.length < 2) return false;
-      const absGitDir = path.resolve(this.sourceRepoPath, lines[0]!);
-      const absCommonDir = path.resolve(this.sourceRepoPath, lines[1]!);
-      const [realGitDir, realCommonDir] = await Promise.all([
-        fs.realpath(absGitDir).catch(() => absGitDir),
-        fs.realpath(absCommonDir).catch(() => absCommonDir),
-      ]);
-      const fold =
-        process.platform === 'win32' || process.platform === 'darwin';
-      return fold
-        ? realGitDir.toLowerCase() !== realCommonDir.toLowerCase()
-        : realGitDir !== realCommonDir;
+      const raw = await git.raw(['rev-parse', '--absolute-git-dir']);
+      const gitDirRaw = raw.replace(/\r?\n$/, '');
+      if (!gitDirRaw) return false;
+      const absGitDir = path.resolve(this.sourceRepoPath, gitDirRaw);
+      await fs.access(path.join(absGitDir, 'commondir'));
+      return true;
     } catch {
       return false;
     }
-  }
-
-  /**
-   * Returns the parsed relative root for general-purpose and Web Shell
-   * managed worktrees (default `.qwen/worktrees`).
-   */
-  getUserWorktreeRoot(): ParsedWorktreeRoot {
-    return this.userWorktreeRoot;
   }
 
   /**

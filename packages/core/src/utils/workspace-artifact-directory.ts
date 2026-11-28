@@ -82,18 +82,36 @@ export function stripWorktreeArtifactPrefix(
   workspacePath: string,
   worktreeRoot?: string,
 ): string {
+  // Rank candidate prefixes by longest matched worktree root (most segments)
+  // so custom roots like `sub/.qwen/worktrees` and legacy `.qwen/worktrees`
+  // stay aligned with `resolveBoundWorkspaceRoot`.
+  let best: { stripped: string; segmentCount: number } | null = null;
+  if (WORKTREE_ARTIFACT_PREFIX_RE.test(workspacePath)) {
+    best = {
+      stripped: workspacePath.replace(WORKTREE_ARTIFACT_PREFIX_RE, ''),
+      segmentCount: DEFAULT_WORKTREE_ROOT_SEGMENTS.length,
+    };
+  }
   if (worktreeRoot !== undefined) {
     try {
       const parsed = parseWorktreeRoot(worktreeRoot);
-      const customRe = buildWorktreeArtifactPrefixRegex(parsed.segments);
-      if (customRe.test(workspacePath)) {
-        return workspacePath.replace(customRe, '');
+      if (!parsed.isDefault) {
+        const customRe = buildWorktreeArtifactPrefixRegex(parsed.segments);
+        if (
+          customRe.test(workspacePath) &&
+          (!best || parsed.segments.length > best.segmentCount)
+        ) {
+          best = {
+            stripped: workspacePath.replace(customRe, ''),
+            segmentCount: parsed.segments.length,
+          };
+        }
       }
     } catch {
       // Invalid worktree.root — do not strip a custom prefix.
     }
   }
-  return workspacePath.replace(WORKTREE_ARTIFACT_PREFIX_RE, '');
+  return best ? best.stripped : workspacePath;
 }
 
 export function pathHasSkippedDirectoryComponent(

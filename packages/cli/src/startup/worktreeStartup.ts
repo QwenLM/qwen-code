@@ -201,7 +201,7 @@ export async function setupStartupWorktree(
   // downstream `startsWith` checks don't mix `/` and `\` on Windows.
   const repoRoot = path.resolve(rawRepoRoot);
   if (
-    (await probe.isLinkedWorktree()) ||
+    (await probe.isLinkedWorktree?.()) ||
     isPathInsideWorktreeRoot(launchCwd, worktreeRoot, repoRoot)
   ) {
     return {

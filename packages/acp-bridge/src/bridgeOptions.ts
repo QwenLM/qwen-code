@@ -261,6 +261,12 @@ export interface BridgeOptions {
   /** Captured owner runtime for saved webpage bytes and references. */
   artifactSnapshotRuntimeBaseDir?: string;
   /**
+   * Optional lazy resolver for the workspace's configured `worktree.root`
+   * setting, forwarded to `SessionArtifactStore` so custom dot-prefixed
+   * worktree roots do not trip the skipped-directory gate.
+   */
+  resolveWorktreeRoot?: () => string | undefined | Promise<string | undefined>;
+  /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp
    * root. Direct embedded callers may omit it for process-local storage.

@@ -251,6 +251,14 @@ interface SessionArtifactStoreOptions {
   runtimeBaseDir?: string;
   maxArtifacts?: number;
   persistence?: SessionArtifactPersistence;
+  /**
+   * Configured `worktree.root` (or lazy resolver) for the owning workspace so
+   * dot-prefixed custom roots (such as `.worktrees/<slug>/...`) do not trip
+   * the skipped-directory gate during directory artifact expansion.
+   */
+  worktreeRoot?:
+    | string
+    | (() => string | undefined | Promise<string | undefined>);
 }
 
 interface NormalizedArtifact extends DaemonSessionArtifact {
@@ -284,6 +292,9 @@ export class SessionArtifactStore {
   private readonly runtimeBaseDir: string;
   private readonly maxArtifacts: number;
   private readonly persistence?: SessionArtifactPersistence;
+  private readonly worktreeRootOption?:
+    | string
+    | (() => string | undefined | Promise<string | undefined>);
   private readonly artifacts = new Map<string, StoredArtifact>();
   private receivedSeq = 0;
   private insertSeq = 0;
@@ -311,6 +322,20 @@ export class SessionArtifactStore {
     this.runtimeBaseDir = options.runtimeBaseDir ?? Storage.getRuntimeBaseDir();
     this.maxArtifacts = options.maxArtifacts ?? 200;
     this.persistence = options.persistence;
+    this.worktreeRootOption = options.worktreeRoot;
+  }
+
+  private async resolveConfiguredWorktreeRoot(): Promise<string | undefined> {
+    if (this.worktreeRootOption === undefined) return undefined;
+    try {
+      const value =
+        typeof this.worktreeRootOption === 'function'
+          ? await this.worktreeRootOption()
+          : this.worktreeRootOption;
+      return typeof value === 'string' && value.length > 0 ? value : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   inputBatchLimit(): number {
@@ -1738,11 +1763,14 @@ export class SessionArtifactStore {
         'workspacePath',
       );
     }
+    const configuredWorktreeRoot = await this.resolveConfiguredWorktreeRoot();
     if (
       pathHasSkippedDirectoryComponent(
         resolvedRelative.split(path.sep).join('/'),
+        configuredWorktreeRoot,
       ) ||
-      (walkRelative && pathHasSkippedDirectoryComponent(walkRelative))
+      (walkRelative &&
+        pathHasSkippedDirectoryComponent(walkRelative, configuredWorktreeRoot))
     ) {
       throw new SessionArtifactValidationError(
         'workspacePath is a skipped directory and cannot be recorded',

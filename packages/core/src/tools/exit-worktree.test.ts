@@ -584,4 +584,81 @@ describe('ExitWorktreeTool', () => {
       expect(await readWorktreeSession(sidecarPath)).toBeNull();
     });
   });
+
+  describe('custom worktree.root resolution and guards (R2-6)', () => {
+    let baseDir: string;
+
+    beforeEach(async () => {
+      baseDir = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'exit-wt-custom-')),
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(baseDir, { recursive: true, force: true });
+    });
+
+    function makeCustomConfig(
+      targetDir: string,
+      worktreeRoot?: string,
+    ): Config {
+      return {
+        getTargetDir: vi.fn(() => targetDir),
+        getSessionId: vi.fn(() => 'session-r2-6'),
+        getWorktreeSymlinkDirectories: vi.fn(() => []),
+        getWorktreeRoot: vi.fn(() => worktreeRoot),
+      } as unknown as Config;
+    }
+
+    it('resolves custom worktree.root from cwd without a sidecar on keep', async () => {
+      const repoDir = path.join(baseDir, 'repo');
+      await fs.mkdir(repoDir, { recursive: true });
+      await initRepo(repoDir);
+      const svc = new GitWorktreeService(repoDir, {
+        worktreeRoot: 'worktrees',
+      });
+      const created = await svc.createUserWorktree('feat-cwd', 'main');
+      expect(created.success).toBe(true);
+
+      const nested = path.join(created.worktree!.path, 'sub');
+      await fs.mkdir(nested, { recursive: true });
+
+      const result = await new ExitWorktreeTool(
+        makeCustomConfig(nested, 'worktrees'),
+      )
+        .build({ name: 'feat-cwd', action: 'keep' })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(String(result.llmContent)).toContain(created.worktree!.path);
+    });
+
+    it('does not misidentify a standalone repo at <parent>/worktrees/<name> whose .git is a directory', async () => {
+      // Parent also holds a `.git` directory so only the linked-worktree
+      // `.git` file check separates a standalone repo from a managed worktree.
+      await fs.mkdir(path.join(baseDir, '.git'), { recursive: true });
+      const standalone = path.join(baseDir, 'worktrees', 'my-app');
+      await fs.mkdir(standalone, { recursive: true });
+      await initRepo(standalone);
+
+      const result = await new ExitWorktreeTool(
+        makeCustomConfig(standalone, 'worktrees'),
+      )
+        .build({ name: 'my-app', action: 'keep' })
+        .execute(new AbortController().signal);
+      expect(result.error?.message).toMatch(/not found/i);
+    });
+
+    it('rejects an invalid worktree.root setting cleanly', async () => {
+      const repoDir = path.join(baseDir, 'repo');
+      await fs.mkdir(repoDir, { recursive: true });
+      await initRepo(repoDir);
+
+      const result = await new ExitWorktreeTool(
+        makeCustomConfig(repoDir, '../escape'),
+      )
+        .build({ name: 'any-slug', action: 'keep' })
+        .execute(new AbortController().signal);
+      expect(result.error?.message).toContain('Invalid worktree.root setting');
+    });
+  });
 });

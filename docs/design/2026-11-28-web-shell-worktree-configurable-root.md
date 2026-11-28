@@ -48,10 +48,10 @@ Use `worktree.root` (type `string`, default `'.qwen/worktrees'`, `requiresRestar
 A single zero-dependency core module `packages/core/src/utils/worktree-root.ts` defines `DEFAULT_WORKTREE_ROOT`, `InvalidWorktreeRootError`, `validateWorktreeRoot`, and `parseWorktreeRoot`:
 
 - `undefined` resolves to `.qwen/worktrees` (`isDefault: true`).
-- Non-string, empty/whitespace-only, leading/trailing whitespace, control characters (`[\x00-\x1f\x7f]`), NUL, CR/LF, or length > 240 chars are rejected.
-- Absolute POSIX paths (`/…`), Windows drive/UNC paths (`C:…`, `\\…`), tilde paths (`~`, `~/…`), and colons (`:`) in any segment are rejected.
+- Non-string, empty/whitespace-only, leading/trailing whitespace (either on the whole value or on any individual segment), trailing `.` on a multi-character segment, control characters (`[\x00-\x1f\x7f]`), NUL, CR/LF, or length > 240 chars are rejected.
+- Absolute POSIX paths (`/…`), Windows drive/UNC paths (`C:…`, `\\…`), tilde paths (`~`, `~/…`), Windows NTFS-forbidden characters (`< > : " | ? *`), and Windows reserved DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without extensions) are rejected.
 - Any `..` segment is rejected. Redundant `.` and trailing slashes are normalized; an empty normalized result (e.g. `.`, `./`) is rejected.
-- First segment `.git` (case-insensitive) is rejected.
+- Any `.git` segment at any depth (case-insensitive) is rejected.
 - Exact single segment `.qwen` (case-insensitive) is rejected so worktrees cannot collide with `.qwen/settings.json`, `.qwen/commands/`, or hide all of `.qwen/` in `.git/info/exclude`. Subdirectories under `.qwen/` (such as `.qwen/worktrees` or `.qwen/wt`) remain valid.
 - Canonical form is POSIX slash-separated `segments.join('/')`.
 

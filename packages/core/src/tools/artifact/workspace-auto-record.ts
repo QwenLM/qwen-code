@@ -18,7 +18,10 @@ import {
   OFFICE_DOCUMENT_EXTENSIONS,
   pathHasSkippedDirectoryComponent,
 } from '../../utils/workspace-artifact-directory.js';
-import { toCanonicalWorkspaceArtifactPath } from '../../utils/workspace-artifact-path.js';
+import {
+  resolveBoundWorkspaceRoot,
+  toCanonicalWorkspaceArtifactPath,
+} from '../../utils/workspace-artifact-path.js';
 import { getSpecificMimeType } from '../../utils/fileUtils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
@@ -152,6 +155,9 @@ function resolveRecordedWorkspaceFile(
     // Keep the lexical path when the file or root cannot be realpath'd yet.
   }
   const worktreeRoot = config.getWorktreeRoot?.();
+  const inWorktree =
+    resolveBoundWorkspaceRoot(resolvedRoot, worktreeRoot) !==
+    path.resolve(resolvedRoot);
   const workspacePath = toCanonicalWorkspaceArtifactPath(
     resolvedFile,
     resolvedRoot,
@@ -160,7 +166,12 @@ function resolveRecordedWorkspaceFile(
   if (!workspacePath) {
     return null;
   }
-  if (pathHasSkippedDirectoryComponent(workspacePath, worktreeRoot)) {
+  if (
+    pathHasSkippedDirectoryComponent(
+      workspacePath,
+      inWorktree ? worktreeRoot : undefined,
+    )
+  ) {
     return null;
   }
   return { filePath: resolvedFile, workspacePath };

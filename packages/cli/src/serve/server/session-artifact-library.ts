@@ -25,6 +25,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+import { tryReadRuntimeWorktreeRoot } from './worktree-root.js';
 
 export interface ArtifactLibrarySessionMetadata {
   displayName?: string;
@@ -209,6 +210,7 @@ export async function readPersistedWorkspaceArtifactLibrary(
     sessionId,
     workspaceCwd: runtime.workspaceCwd,
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+    worktreeRoot: () => tryReadRuntimeWorktreeRoot(runtime)?.normalized,
   }).readPersistedLibrary(snapshot);
   const displayName = metadata.customTitle || metadata.prompt;
   return {

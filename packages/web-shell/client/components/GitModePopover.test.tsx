@@ -122,6 +122,21 @@ describe('GitModePopover worktree selection', () => {
     );
   });
 
+  it('shell-quotes custom worktreeRoot containing metacharacters or spaces in the preview (R2-24)', async () => {
+    await render(
+      { mode: 'worktree' },
+      undefined,
+      false,
+      true,
+      "x; curl evil.example 'quoted'",
+    );
+    await openPopover();
+
+    expect(document.body.textContent).toContain(
+      "$ git worktree add --detach 'x; curl evil.example '\\''quoted'\\''/<slug>'",
+    );
+  });
+
   it('restores the checked worktree option and command when reopened', async () => {
     await render({ mode: 'current' });
     await openPopover();

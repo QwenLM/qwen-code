@@ -5644,16 +5644,9 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
-          const worktreeRoot = resolveWorkspaceWorktreeRootSetting(
-            this.boundWorkspace,
-            {
-              environment: this.getEnv(),
-              workspaceTrusted: this.isWorkspaceTrusted(),
-            },
-          );
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
-            worktreeRoot,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
@@ -5684,16 +5677,9 @@ export class AcpDispatcher {
           const resolveConflicts = this.parseResolveConflicts(params);
           const requireIdle = this.parseRequireIdle(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
-          const worktreeRoot = resolveWorkspaceWorktreeRootSetting(
-            this.boundWorkspace,
-            {
-              environment: this.getEnv(),
-              workspaceTrusted: this.isWorkspaceTrusted(),
-            },
-          );
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
-            worktreeRoot,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],
@@ -5722,16 +5708,9 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/unarchive`: {
           const ids = this.parseSessionIds(params);
           const resolveConflicts = this.parseResolveConflicts(params);
-          const worktreeRoot = resolveWorkspaceWorktreeRootSetting(
-            this.boundWorkspace,
-            {
-              environment: this.getEnv(),
-              workspaceTrusted: this.isWorkspaceTrusted(),
-            },
-          );
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
-            worktreeRoot,
+            worktreeRoot: this.getWorktreeRootSetting(),
           });
           const result = await this.runWithSessionListInvalidation(
             ['active', 'archived'],

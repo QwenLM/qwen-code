@@ -3488,6 +3488,59 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
+  it('expands a directory under a dot-prefixed custom worktree.root while still rejecting skipped dirs inside it (R2-19)', async () => {
+    await fs.mkdir(path.join(workspace, '.worktrees', 'feat', 'reports'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, '.worktrees', 'feat', 'reports', 'q4.xlsx'),
+      'xlsx',
+    );
+    await fs.mkdir(path.join(workspace, '.worktrees', 'feat', '.hidden'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(workspace, '.worktrees', 'feat', '.hidden', 'secret.xlsx'),
+      'xlsx',
+    );
+
+    // Without worktreeRoot, `.worktrees/feat/reports` is rejected by the dot-dir gate.
+    const defaultStore = new SessionArtifactStore({
+      sessionId: 's-dir-custom-wt-default',
+      workspaceCwd: workspace,
+    });
+    await expect(
+      defaultStore.upsertMany(
+        [{ title: 'Reports', workspacePath: '.worktrees/feat/reports' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+
+    // With worktreeRoot configured, `.worktrees/feat/reports` expands cleanly
+    // while `.hidden` inside the custom worktree stays rejected.
+    const customStore = new SessionArtifactStore({
+      sessionId: 's-dir-custom-wt',
+      workspaceCwd: workspace,
+      worktreeRoot: () => '.worktrees',
+    });
+    const expanded = await customStore.upsertMany(
+      [{ title: 'Reports', workspacePath: '.worktrees/feat/reports' }],
+      { strict: true },
+    );
+    expect(expanded.changes.length).toBeGreaterThan(0);
+    const listed = await customStore.list();
+    expect(listed.artifacts.map((a) => a.workspacePath)).toEqual([
+      '.worktrees/feat/reports/q4.xlsx',
+    ]);
+
+    await expect(
+      customStore.upsertMany(
+        [{ title: 'Hidden', workspacePath: '.worktrees/feat/.hidden' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
   it('rejects directory expansion when the parent description is invalid', async () => {
     await fs.mkdir(path.join(workspace, 'reports-desc'));
     await fs.writeFile(path.join(workspace, 'reports-desc', 'a.xlsx'), 'xlsx');

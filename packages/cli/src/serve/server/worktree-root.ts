@@ -203,3 +203,37 @@ export function isWorktreePathInManagedRoots(
   }
   return false;
 }
+
+/**
+ * Verifies that at least one base directory's managed root passes containment.
+ * Throws {@link InvalidWorktreeRootError} when every base directory fails
+ * containment with an {@link InvalidWorktreeRootError} (e.g. symlinked custom
+ * root), so routes like `worktree-reset` report 400 `invalid_worktree_root`
+ * instead of misblaming the sidecar with 409.
+ */
+export function assertAnyManagedRootContained(
+  baseDirs: readonly string[],
+  parsedRoot: ParsedWorktreeRoot,
+): void {
+  let firstError: InvalidWorktreeRootError | undefined;
+  let anySafe = false;
+  for (const baseDir of baseDirs) {
+    const candidateRoot = path.join(baseDir, ...parsedRoot.segments);
+    try {
+      assertWorktreeRootContainmentSync(
+        baseDir,
+        candidateRoot,
+        parsedRoot,
+        path.join(baseDir, '.git'),
+      );
+      anySafe = true;
+    } catch (error) {
+      if (error instanceof InvalidWorktreeRootError && !firstError) {
+        firstError = error;
+      }
+    }
+  }
+  if (!anySafe && firstError) {
+    throw firstError;
+  }
+}

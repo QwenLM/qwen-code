@@ -195,6 +195,21 @@ describe('setupStartupWorktree', () => {
       expect(nested!.error).toContain('inside another worktree');
     }
 
+    // Launching from a plain unregistered directory under `<repo>/.worktrees/scratch`
+    // (not a linked git worktree, so `isLinkedWorktree()` is false) must still
+    // be refused by the anchored `isPathInsideWorktreeRoot` guard (R2-23).
+    const plainScratch = path.join(tempRepo, '.worktrees', 'scratch');
+    await fs.mkdir(plainScratch, { recursive: true });
+    process.chdir(plainScratch);
+    const fromPlainSubdir = await setupStartupWorktree('from-scratch', {
+      worktreeRoot: '.worktrees',
+    });
+    expect(fromPlainSubdir).not.toBeNull();
+    expect(fromPlainSubdir!.ok).toBe(false);
+    if (!fromPlainSubdir!.ok) {
+      expect(fromPlainSubdir!.error).toContain('inside another worktree');
+    }
+
     // Re-attach from the main checkout finds the custom-root worktree.
     process.chdir(tempRepo);
     const reattached = await setupStartupWorktree('custom-slug', {

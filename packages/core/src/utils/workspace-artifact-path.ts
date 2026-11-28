@@ -78,12 +78,18 @@ export function resolveBoundWorkspaceRoot(
   repoRoot?: string,
 ): string {
   const resolved = path.resolve(targetDir);
-  // Check the dedicated default `.qwen/worktrees/<slug>` suffix first so a
-  // legacy `.qwen/worktrees/<slug>` checkout under `worktree.root: "worktrees"`
-  // still strips cleanly to `<repo>` rather than `<repo>/.qwen`.
+  // Rank both the dedicated default `.qwen/worktrees/<slug>` suffix and any
+  // verified custom `worktree.root/<slug>` suffix by longest stripped root
+  // (most segments). This preserves legacy `.qwen/worktrees/<slug>` under
+  // `worktree.root: "worktrees"` (2 > 1 -> `<repo>`) while also stripping
+  // nested custom `sub/.qwen/worktrees/<slug>` to `<repo>` (3 > 2).
+  let best: { base: string; segmentCount: number } | null = null;
   const defaultMatch = resolved.match(WORKTREE_DIR_RE);
   if (defaultMatch) {
-    return finalizeBaseMatch(resolved, defaultMatch[1] ?? '');
+    best = {
+      base: finalizeBaseMatch(resolved, defaultMatch[1] ?? ''),
+      segmentCount: DEFAULT_WORKTREE_ROOT_SEGMENTS.length,
+    };
   }
   if (worktreeRoot !== undefined) {
     try {
@@ -94,15 +100,16 @@ export function resolveBoundWorkspaceRoot(
         );
         if (customMatch) {
           const base = finalizeBaseMatch(resolved, customMatch[1] ?? '');
-          if (repoRoot !== undefined) {
-            if (
-              normalizeForComparison(path.resolve(base)) ===
-              normalizeForComparison(path.resolve(repoRoot))
-            ) {
-              return base;
-            }
-          } else if (isLinkedWorktreeOfBase(resolved, base)) {
-            return base;
+          const verified =
+            repoRoot !== undefined
+              ? normalizeForComparison(path.resolve(base)) ===
+                normalizeForComparison(path.resolve(repoRoot))
+              : isLinkedWorktreeOfBase(resolved, base);
+          if (
+            verified &&
+            (!best || parsed.segments.length > best.segmentCount)
+          ) {
+            best = { base, segmentCount: parsed.segments.length };
           }
         }
       }
@@ -110,7 +117,7 @@ export function resolveBoundWorkspaceRoot(
       // Invalid worktree.root — do not strip a custom prefix.
     }
   }
-  return resolved;
+  return best ? best.base : resolved;
 }
 
 /**
