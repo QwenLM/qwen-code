@@ -375,11 +375,12 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
   return [];
 }
 
-// The nonce scan's aggregate bounds (B2, #17371): hoisted to module scope so
-// the refusal message is built from them — a silent constant change reds the
-// message pin instead of shipping a bound the scan no longer enforces.
-const TOTAL_BUDGET = 64 * 1024 * 1024;
-const MAX_ENTRIES = 20000;
+// The nonce scan's aggregate bounds (B2, #17371): hoisted to module scope and
+// exported so both the refusal message and the skill's bound-phrase pin are
+// built from them — a silent constant change reds both pins instead of
+// shipping a bound the scan no longer enforces or the docs deny (R2-4).
+export const TOTAL_BUDGET = 64 * 1024 * 1024;
+export const MAX_ENTRIES = 20000;
 
 /**
  * Whether a round log carries a `container-nonce: <value>` line whose value's

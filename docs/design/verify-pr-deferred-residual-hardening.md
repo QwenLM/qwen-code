@@ -33,6 +33,14 @@ before being acted on; several are already covered or not reproducible:
 - **D17-14 (liveness-gated dead-round recovery) — this is the accepted
   dead-round `--release`→restart silent-drop window**; it stays tracked, not
   changed here.
+- **Round-8 #1 (resting-view admission boundary) — not acted on here.**
+  `readState` admits an object-valued legacy head marker (probed:
+  `{pr: 1, inFlightHead: {}}` reads as resting) that the ladder consumes none
+  of, so the next `--start` rewrites the file from empty lists. The admitted
+  shapes hold no dedup history, so nothing the guard protects is erased;
+  narrowing the admission must keep the `inFlightHead: null` /
+  `verifiedHead: null` legacy resting bodies admitted (R7-1). Still tracked in
+  #17371.
 
 ## Proposed changes
 
@@ -45,14 +53,18 @@ before being acted on; several are already covered or not reproducible:
   "a `*Heads` list implies `seqCounter`" therefore does not hold for every
   writer. `releaseRound` now sets
   `seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0)`, matching
-  `startRound`/`completeRound`. Behavior-neutral for every reachable shape (the
-  released body was already admitted via `releasedHeads`, and every
-  writer-produced shape already has `entry.seq ≤ seqCounter`); it makes the
-  invariant robust and keeps the counter from regressing below a seq it carries
-  into `releasedHeads` (`nextSeq` never reads that list). A witness releases
-  a legacy no-`seqCounter` state and asserts the written body carries an integer
-  `seqCounter`; a second witness seeds a counter below the marker's `seq` and
-  pins the fold, so the `?? 0` fallback alone reds it.
+  `startRound`/`completeRound`. Admission, dedup and ordering are unchanged for
+  every shape, and the written counter is byte-identical for every
+  writer-produced shape (each already has `entry.seq ≤ seqCounter`, and a
+  legacy pre-list marker carries no seq). On a hand-edited state whose marker
+  seq exceeds its counter — or a seq-bearing list with no counter at all — the
+  fold deliberately raises the persisted counter to the released seq, so the
+  next mint stays above it (`nextSeq` never reads `releasedHeads`). A witness
+  releases a legacy no-`seqCounter` state and asserts the written body carries
+  an integer `seqCounter`; a second witness seeds a counter below the marker's
+  `seq` and pins the fold, so the `?? 0` fallback alone reds it; a third seeds
+  a counter above the marker's seq and pins the preserve-higher branch, so
+  `entry.seq ?? 0` alone reds it.
 - **A2 — drop the dead `sandboxRuntime` field (D17-8).** `detectIsolation` in
   `verify-pr-prepare.mjs` returns `sandboxRuntime`, but no production consumer
   reads it (callers use `isolated` / `signals` / `seatbelt`). Remove the field
@@ -66,14 +78,17 @@ before being acted on; several are already covered or not reproducible:
   drop the ordering implication and name both remedies — reduce the
   non-evidence log volume AND consolidate it into fewer files or directories,
   since directories and empty files charge the entry cap, not the byte budget
-  (R1-7) — keeping the `mode:"waived"` escape.
+  (R1-7) — keeping main's execution-approval tail (re-run prepare with
+  `--execution host|vm` and its approval arguments before the battery; never
+  hand-write the declaration).
 - **B2 — pin the bound constants (round-7 #8).** The refusal hardcoded its
   numbers independently of the function-local `TOTAL_BUDGET` / `MAX_ENTRIES`,
   so a silent constant change red nothing (R1-5). Hoist both bounds to module
   scope and build the refusal from them; the message pin now asserts the
   rendered `64 MiB total / 20000 entries`, so a constant change reds it. The
-  skill-side pin covers the full bound phrase, `20000 entries in total`
-  included.
+  bounds are exported and the skill-side bound-phrase pin is built from them
+  (R2-4), so a constant change reds the skill pin too without a SKILL edit —
+  the operator-facing contract cannot drift from the scan.
 - **B3 — per-file / per-directory budget witness (round-7 #9).** The two bounds
   are asserted only on flat single-directory fixtures; add a nested-directory
   forest proving the entry cap is aggregate and a two-file (2 × 33 MiB)
@@ -86,7 +101,7 @@ before being acted on; several are already covered or not reproducible:
   scan's 64 MiB / 20000-entry bound, so a compliant round can still be refused
   without the operator knowing why. Add a sentence naming the bound and both
   remedies (reduce non-evidence log volume / consolidate into fewer files or
-  directories / `mode:"waived"` with approval).
+  directories / re-run prepare with `--execution host|vm` under its approval).
 - **C2 — scope the nonce claim to "cannot produce" (round-7 #3).** The step-5
   echo puts the nonce plaintext in the PR-writable log, so "a host battery
   cannot read the nonce" is stronger than established. The binding is that a
@@ -113,13 +128,28 @@ before being acted on; several are already covered or not reproducible:
   a watch/re-verification procedure, not a fresh `/verify-pr <n>`; the transient
   case retries prepare without release). They stay tracked in #17371 as polish
   rather than re-churned here, to avoid a non-converging prose loop.
+- **C5 — fold the retraction into the lead-in (R2-1).** Round-1 appended the
+  echo-time scoping beneath a lead-in that still said the binding "ties the
+  `mode:"container"` declaration to execution inside this container", so the
+  paragraph asserted two opposite things. Rewrite the lead-in to bind the
+  declaration to a container-local value the harness read at echo time — not
+  to execution inside the container — and add a negative pin on the retracted
+  lead-in beside the existing nonce negatives.
 
-### D. prepare test (`scripts/tests/verify-pr-prepare.test.js`)
+### D. prepare (`scripts/verify-pr-prepare.mjs`) + test
 
 - **D1 — `homedir()` throw witness (round-7 #4).** The R5-1 home-refusal guard
   is exercised only via the post-catch `home:null` seam; add a witness that
   injects a `homedir` that actually throws, proving the lazy try/catch reaches
   the exit-3 refusal (not an escaped exit 1).
+- **D2 — align the gate's nonce comment (R2-5).** `requireBoundary`'s nonce
+  comment still said the binding "ties the declaration to execution inside
+  THIS container" and "corroborates an operator who ran the round in the
+  container", contradicting the skill and checker after R1-1. Rewrite it to
+  the echo-time scoping (the hash-only record proves the harness held the
+  container-local plaintext at echo time; the echoed line rides the
+  PR-writable round dir, so it establishes nothing about where the battery
+  ran), and add a prepare-source pin so restoring the retracted claim reds it.
 
 ### E. text-pin suite (`scripts/tests/qwen-triage-workflow.test.js`)
 
@@ -133,17 +163,24 @@ before being acted on; several are already covered or not reproducible:
   manual-section ordering pin's left operand (and the watch heading pin's right
   operand), and scope the `<dir>` provenance pin to the watch prompt's own
   slice so the manual copy is not its alibi.
+- **E4 — round-2 pin corrections.** R2-1: a negative pin on the retracted
+  "ties the declaration to execution inside this container" lead-in, beside
+  the folded scoped claim. R2-3: the nonce negatives pin the retracted clause
+  as a whole, not its true atoms. R2-4: the skill bound-phrase pin is built
+  from the exported `TOTAL_BUDGET` / `MAX_ENTRIES`, so a constant change reds
+  it without a SKILL edit. R2-5: a prepare-source pin keeps the gate's nonce
+  comment on the echo-time scoping.
 
 ### F. documentation sweeps (bilingual)
 
-- **F1 — R5-2 Java recipe waived-model coherence.** Sweep
+- **F1 — R5-2 Java recipe waived-model coherence.** The original head swept
   `docs/design/2026-11-14-verify-pr-java-container-recipe.md` (+ `.zh-CN.md`)
-  to a single coherent `mode:"waived"` model: step-1 digest-pinned-Node
-  rationale, the step-1 nonce paragraph (a waived round's check reads no gate
-  record; the battery container runs no gate and carries no Node), step-4
-  lead-in, the Validation plan, the Acceptance criteria, and what the report's
-  mandatory `**Boundary.**` line reads (waiver + approval; containers named in
-  the declaration `detail`/report body, not the Boundary line).
+  to a single coherent `mode:"waived"` model. Main's execution-approval
+  rewrite (#18064, #18539) has since re-expressed the whole recipe: prepare
+  writes the `waived` declaration under a pre-seed execution approval, the
+  seed gate is optional provenance, and containers are named in `--reason`,
+  not a hand-written `detail`. The merge adopts main's recipe verbatim in both
+  languages; this PR no longer edits the recipe pair.
 - **F2 — `verify-pr-watch.md` null directory.** The canonical watch design
   still says every state entry carries an artifact directory; register-ahead
   (#17550) permits a `null` dir on the in-flight marker. Correct it (+ `.zh-CN.md`).
@@ -151,9 +188,11 @@ before being acted on; several are already covered or not reproducible:
   list names 8 of the PR's 14 files; enumerate the documentation pairs too
   (+ `.zh-CN.md`).
 - **F4 — round-14 register-ahead doc.** Note the post-prepare-success head
-  comparison in the scope boundary, and make residual (3)'s recovery recipe
-  pass `--round` (not optional), consistent with the doc's own rule
-  (+ `.zh-CN.md`).
+  comparison in the scope boundary. Residual (3)'s recovery recipe keeps the
+  guidance to read the dead round's number from the state file (omit only for
+  a legacy marker that records no round); the merge adopts main's optional
+  `--round` / restart-at-`<r>` form, which the registration-nonce guard now
+  backs (+ `.zh-CN.md`).
 
 ## Key design decisions
 
@@ -180,11 +219,11 @@ before being acted on; several are already covered or not reproducible:
   `scripts/tests/verify-pr-prepare.test.js` (A2, D1),
   `scripts/tests/verify-pr-check.test.js` (B2, B3, D17-10 witness),
   `scripts/tests/qwen-triage-workflow.test.js` (C/E pins).
-- `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md` (F1),
-  `docs/design/verify-pr-watch.md` + `.zh-CN.md` (F2),
+- `docs/design/verify-pr-watch.md` + `.zh-CN.md` (F2),
   `docs/design/verify-pr-residual-hardening.md` + `.zh-CN.md` (F3),
   `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md` (F4),
-  and this design pair.
+  and this design pair. The Java recipe pair (F1) matches main after the
+  merge and is no longer edited here.
 
 ## Scope boundaries
 

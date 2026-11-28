@@ -4345,6 +4345,23 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     }
   });
 
+  // R2-5 (#17371): the gate's own nonce comment must carry the same echo-time
+  // scoping as the skill and the checker — the echoed plaintext rides the
+  // PR-writable round dir, so the binding does not establish where the battery
+  // ran. Restoring the retracted "execution inside THIS container" /
+  // "corroborates an operator who ran the round in the container" claim reds
+  // this.
+  it('describes the nonce binding as echo-time scoping, not battery location', () => {
+    const source = readFileSync('scripts/verify-pr-prepare.mjs', 'utf8');
+    expect(source).not.toContain(
+      'corroborates an operator who ran the round in the container',
+    );
+    expect(source).not.toContain(
+      'ties the declaration to execution inside THIS',
+    );
+    expect(source).toContain('not where the battery ran');
+  });
+
   it('prints the prepare-first recovery for a declared-only marker', () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')

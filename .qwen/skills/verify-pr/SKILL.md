@@ -694,14 +694,14 @@ guard snapshots are never mounted into the container.
    holds the binary PNG artifacts and is skipped by the scan. The checker
    (step 7's authoritative gate) matches only that prefix and hashes the first
    whitespace-delimited token after it, so any other spelling (a bare nonce,
-   `verify nonce=<value>`, a separate nonce file) is refused. This ties the
-   `mode:"container"` declaration to execution inside this container — a
-   battery run on the host cannot produce the matching `container-nonce:` line
-   without the container-local plaintext, and the record's hash does not
-   reveal it. The echo itself writes that plaintext into the PR-writable round
-   dir, so the binding proves the round's harness read a container-local value
-   at echo time — not that the battery ran in the container: any later writer
-   with the round dir can reuse the echoed line. The scan is bounded (64 MiB
+   `verify nonce=<value>`, a separate nonce file) is refused. This binds the
+   `mode:"container"` declaration to a container-local value the round's
+   harness read at echo time — not to execution inside this container: a
+   battery with no access to this container cannot produce the matching
+   `container-nonce:` line without the container-local plaintext, but the
+   mandated echo writes that plaintext into the PR-writable round dir, so any
+   later writer with the round dir can reuse the echoed line, and the record's
+   hash does not reveal the nonce. The scan is bounded (64 MiB
    of non-`evidence/` logs / 20000 entries in total): a round whose marker lies
    beyond the bound is refused, so keep the non-evidence log volume under it
    and consolidate logs into fewer files or directories (empty files and

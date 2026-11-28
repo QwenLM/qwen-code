@@ -46,6 +46,8 @@ const triagePublisher = readFileSync(
 );
 import {
   ATTRIBUTIONS,
+  MAX_ENTRIES,
+  TOTAL_BUDGET,
   VERDICTS,
   checkArtifacts,
 } from '../../scripts/verify-pr-check.mjs';
@@ -7843,24 +7845,35 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'cannot produce the matching `container-nonce:` line without the container-local plaintext',
     );
-    expect(flat).not.toContain('cannot read the container-local nonce');
+    // R2-1 (#17371): the lead-in binds the declaration to the echo-time value,
+    // not to execution inside the container — the retracted overclaim stays gone.
+    expect(flat).not.toContain(
+      'ties the `mode:"container"` declaration to execution inside this container',
+    );
     // R1-1 (#17371): the retracted parenthetical denying the shared mount carries
     // the plaintext must stay gone — the mandated echo writes it into the round
     // dir — and the claim is scoped to what the echo proves (the harness read a
-    // container-local value at echo time, not where the battery ran). The
-    // step-7 comment's old "cannot read that file" claim is aligned with it.
+    // container-local value at echo time, not where the battery ran).
     expect(flat).not.toContain('the shared mount does not carry it');
-    expect(flat).not.toContain('a host battery cannot read that file');
+    // R2-3 (#17371): pin the retracted argument as a whole, not its true atoms —
+    // "the nonce file is container-local" is a fact the step-7 comment may
+    // state; what must stay gone is the claim that the host battery therefore
+    // cannot obtain the nonce at all. An accurate locality clarification stays
+    // writable.
+    expect(flat).not.toContain(
+      "cannot read the container-local nonce, and the record's hash does not reveal it",
+    );
     expect(flat).toContain(
       'any later writer with the round dir can reuse the echoed line',
     );
     // C1 (#17371 round-7): the nonce contract names the scan's resource bound so
     // a compliant round refused beyond it is not a surprise. R1-5 (#17371): pin
-    // the full bound phrase — the half-sentence pin left "20000 entries in
-    // total" unguarded. R1-7 (#17371): the sentence names the entry-side remedy
-    // too (directories and empty files charge the entry cap, not the budget).
+    // the full bound phrase. R2-4 (#17371): build it from the exported constants
+    // so a constant change reds this operator-facing pin without a SKILL edit.
+    // R1-7 (#17371): the sentence names the entry-side remedy too (directories
+    // and empty files charge the entry cap, not the budget).
     expect(flat).toContain(
-      'The scan is bounded (64 MiB of non-`evidence/` logs / 20000 entries in total)',
+      `The scan is bounded (${TOTAL_BUDGET / (1024 * 1024)} MiB of non-\`evidence/\` logs / ${MAX_ENTRIES} entries in total)`,
     );
     expect(flat).toContain('consolidate logs into fewer files or directories');
     expect(flat).toContain('the SINGLE authoritative implementation');

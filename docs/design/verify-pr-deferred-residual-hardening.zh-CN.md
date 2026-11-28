@@ -26,6 +26,12 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   写者成立（见下）作为廉价加固，并补见证。
 - **D17-14（活性门控的死轮恢复）——即已接受的死轮 `--release`→重启静默丢弃
   窗口**；仍跟踪，不在此改动。
+- **第 8 轮 #1（resting-view 准入边界）——本轮不处理。** `readState` 会接纳
+  对象值的遗留 head 标记（实测：`{pr: 1, inFlightHead: {}}` 读作 resting），
+  阶梯消费不了它，故下一次 `--start` 用空列表重写该文件。被接纳的形状不含
+  去重历史，守卫保护的东西没有被抹掉；若要收窄准入，必须继续接纳
+  `inFlightHead: null` / `verifiedHead: null` 的遗留 resting 正文（R7-1）。
+  仍由 #17371 跟踪。
 
 ## 拟议改动
 
@@ -36,12 +42,14 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   带列表却无 `seqCounter` 正文的写者（遗留前列态无可继承）。读守卫的文档不变量
   「`*Heads` 列表蕴含 `seqCounter`」因此并非对每个写者成立。`releaseRound` 现
   设 `seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0)`，与
-  `startRound`/`completeRound` 一致。对每个可达形状行为中性（释放正文本就经
-  `releasedHeads` 接纳，且写者产出的形状本就 `entry.seq ≤ seqCounter`）；使
-  不变量稳健，并使计数器不会回落到它搬进 `releasedHeads` 的 seq 之下
-  （`nextSeq` 从不读该列表）。见证释放一个遗留无 `seqCounter` 态，断言写出
-  的正文带整数 `seqCounter`；第二条见证种一个低于标记 `seq` 的计数器并钉住
-  折叠，仅 `?? 0` 回退即红。
+  `startRound`/`completeRound` 一致。准入、去重与排序对每个形状都不变，且
+  写者产出的每个形状写出的计数器逐字节相同（本就 `entry.seq ≤ seqCounter`，
+  遗留前列标记不带 seq）。对手改的「标记 seq 高于计数器」或「带 seq 列表却
+  无计数器」形状，折叠刻意把持久计数器提到被释放的 seq，使下一次铸号保持
+  在其之上（`nextSeq` 从不读 `releasedHeads`）。见证释放一个遗留无
+  `seqCounter` 态，断言写出的正文带整数 `seqCounter`；第二条见证种一个低于
+  标记 `seq` 的计数器并钉住折叠，仅 `?? 0` 回退即红；第三条种一个高于标记
+  seq 的计数器并钉住保留较高值分支，仅 `entry.seq ?? 0` 即红。
 - **A2 —— 移除死字段 `sandboxRuntime`（D17-8）。** `verify-pr-prepare.mjs` 的
   `detectIsolation` 返回 `sandboxRuntime`，但无生产消费者读它（调用方用
   `isolated`/`signals`/`seatbelt`）。移除该字段及钉它的 prepare 测试断言。
@@ -51,11 +59,13 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
 - **B1 —— 上限拒绝文案（第 7 轮 #6）。** 资源上限拒绝建议「把 nonce echo 进
   早日志」，但遍历无序，「早」不控制读取顺序；上限按总字节计。改写去掉顺序
   暗示并点名两种补救——降低非 evidence 日志量，且把日志并成更少的文件或目录
-  （目录与空文件计条目上限、不计字节预算，R1-7）——保留 `mode:"waived"` 退路。
+  （目录与空文件计条目上限、不计字节预算，R1-7）——保留 main 的执行审批尾部
+  （电池前以 `--execution host|vm` 及其批准参数重跑 prepare；绝不手写声明）。
 - **B2 —— 钉上限常量（第 7 轮 #8）。** 拒绝文案的数字曾独立于函数内
   `TOTAL_BUDGET`/`MAX_ENTRIES` 硬编码，常量被悄悄改动不会红（R1-5）。把两个界
   提到模块作用域、用它们拼拒绝文案，并钉渲染出的 `64 MiB total / 20000 entries`
-  ——常量改动即红消息钉。skill 侧钉覆盖完整界句（含 `20000 entries in total`）。
+  ——常量改动即红消息钉。两个界导出，skill 侧界句钉由它们拼出（R2-4），常量
+  改动无需改 SKILL 也红 skill 钉——面向操作者的契约不会与扫描漂移。
 - **B3 —— 按文件/按目录预算见证（第 7 轮 #9）。** 两个界只在扁平单目录夹具上
   断言；补嵌套目录森林证明条目上限聚合、补双文件（2 × 33 MiB）夹具证明字节
   预算聚合——按目录/按文件重置各使其夹具红（R1-6）。
@@ -64,7 +74,8 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
 
 - **C1 —— nonce 扫描界文案（第 7 轮 #2）。** nonce 契约漏写扫描的 64 MiB/
   20000 条目界，合规轮也可能被拒而操作者不知其因。补一句点名该界与两种补救
-  （降低非 evidence 日志量/并成更少的文件或目录/经批准 `mode:"waived"`）。
+  （降低非 evidence 日志量/并成更少的文件或目录/经批准以 `--execution host|vm`
+  重跑 prepare）。
 - **C2 —— nonce 声称限定为「无法产出」（第 7 轮 #3）。** step-5 echo 把 nonce
   明文放进 PR 可写日志，故「宿主电池读不到 nonce」强于所证。绑定在于宿主电池
   没有容器本地明文就**无法产出**匹配的 `container-nonce:` 行。据此改写，并把
@@ -83,12 +94,23 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   已由相邻澄清承载（注册是 watch/复验程序、而非全新 `/verify-pr <n>`；瞬时情形
   重试 prepare 不 release）。它们作为打磨项继续由 #17371 跟踪，不在此反复改，
   以免陷入不收敛的 prose 循环。
+- **C5 —— 把撤回并入开头句（R2-1）。** 第 1 轮把 echo 时限定追加在仍声称绑定
+  「ties the `mode:"container"` declaration to execution inside this container」
+  的开头句之下，使段落同时断言两件相反的事。把开头句改写为：绑定的是 harness
+  在 echo 时读到的容器本地值——而非在容器内执行——并在现有 nonce 负向钉旁对
+  被撤回的开头句加负向钉。
 
-### D. prepare 测试（`scripts/tests/verify-pr-prepare.test.js`）
+### D. prepare（`scripts/verify-pr-prepare.mjs`）+ 测试
 
 - **D1 —— `homedir()` 抛出见证（第 7 轮 #4）。** R5-1 home 拒绝守卫仅经 catch 后
   `home:null` 接缝演练；补一条注入真正抛出的 `homedir` 的见证，证明惰性
   try/catch 到达 exit-3 拒绝（而非逃逸 exit 1）。
+- **D2 —— 对齐门禁 nonce 注释（R2-5）。** `requireBoundary` 的 nonce 注释仍写
+  绑定「ties the declaration to execution inside THIS container」与
+  「corroborates an operator who ran the round in the container」，与 R1-1 后的
+  skill/checker 矛盾。改写为 echo 时限定（仅哈希记录证明 harness 在 echo 时
+  持有容器本地明文；echo 行随 PR 可写 round dir 可见，故不说明电池在哪里运行），
+  并补 prepare 源码钉，使恢复被撤回声称即红。
 
 ### E. 文本钉套件（`scripts/tests/qwen-triage-workflow.test.js`）
 
@@ -99,22 +121,28 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
 - **E3 —— 第 14 轮钉守卫。** 补手动节顺序钉左操作数（及 watch 标题钉右操作数）
   缺失的存在性守卫，并把 `<dir>` 来源钉限定到 watch prompt 自己的切片，使手动
   副本不作不在场证明。
+- **E4 —— 第 2 轮钉纠正。** R2-1：在折叠后的限定声称旁，对被撤回的
+  「ties the declaration to execution inside this container」开头句加负向钉。
+  R2-3：nonce 负向钉改钉被撤回的整句，而非其中为真的原子。R2-4：skill 界句钉
+  由导出的 `TOTAL_BUDGET` / `MAX_ENTRIES` 拼出，常量改动无需改 SKILL 即红。
+  R2-5：prepare 源码钉使门禁 nonce 注释保持 echo 时限定。
 
 ### F. 文档 sweep（双语）
 
-- **F1 —— R5-2 Java 配方 waived 模型协调。** 把
+- **F1 —— R5-2 Java 配方 waived 模型协调。** 原始 head 曾把
   `docs/design/2026-11-14-verify-pr-java-container-recipe.md`（+ `.zh-CN.md`）
-  全文统一为单一自洽 `mode:"waived"` 模型：step-1 digest 钉住 Node 理由、
-  step-1 nonce 段（waived 轮的检查不读门禁记录；电池容器不跑门禁、镜像无 Node）、
-  step-4 开头、校验计划、验收标准，以及报告强制 `**Boundary.**` 行应写什么
-  （waiver + 批准；容器在声明 `detail`/报告正文点名，而非 Boundary 行）。
+  全文统一为单一自洽 `mode:"waived"` 模型。main 的执行审批重写（#18064、
+  #18539）此后重新表述了整份配方：prepare 在预置前执行批准下写出 `waived`
+  声明，预置门禁只是可选溯源，容器在 `--reason` 点名、而非手写 `detail`。
+  合并双语照单采纳 main 的配方；本 PR 不再编辑该配方对。
 - **F2 —— `verify-pr-watch.md` null 目录。** 规范 watch 设计仍称每条状态带产物
   目录；提前注册（#17550）允许在飞标记 `null` 目录。修正（+ `.zh-CN.md`）。
 - **F3 —— `verify-pr-residual-hardening.md` Files-affected 完整性。** 清单列了
   PR 14 个文件中的 8 个；把文档对也枚举（+ `.zh-CN.md`）。
 - **F4 —— 第 14 轮 register-ahead 文档。** 在范围边界注明 prepare 成功后的 head
-  比对，并把残余(3)恢复配方的 `--round` 改为必选（非可选），与文档自身规则一致
-  （+ `.zh-CN.md`）。
+  比对。残余(3)恢复配方保留「从状态文件读出死轮编号传入（仅遗留无 round 标记
+  可省略）」的指引；合并采纳 main 的可选 `--round` / 重启于 `<r>` 形式，
+  registration-nonce 守卫如今为其兜底（+ `.zh-CN.md`）。
 
 ## 关键设计决定
 
@@ -138,11 +166,10 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   `scripts/tests/verify-pr-prepare.test.js`（A2、D1）、
   `scripts/tests/verify-pr-check.test.js`（B2、B3、D17-10 见证）、
   `scripts/tests/qwen-triage-workflow.test.js`（C/E 钉）。
-- `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md`（F1）、
-  `docs/design/verify-pr-watch.md` + `.zh-CN.md`（F2）、
+- `docs/design/verify-pr-watch.md` + `.zh-CN.md`（F2）、
   `docs/design/verify-pr-residual-hardening.md` + `.zh-CN.md`（F3）、
   `docs/design/verify-pr-register-ahead-of-prepare.md` + `.zh-CN.md`（F4）、
-  以及本设计文档对。
+  以及本设计文档对。Java 配方对（F1）合并后与 main 一致，不再在此编辑。
 
 ## 范围边界
 

@@ -2700,16 +2700,16 @@ export function requireBoundary(artifactDir = null, options = {}) {
     return 4;
   }
   if (artifactDir) {
-    // A per-round nonce ties the declaration to execution inside THIS
-    // container (R16-1). The plaintext is written to a container-local path
-    // (the process home, NOT the shared artifact mount) so the round must
-    // read it from inside the container and echo it into its raw harness
-    // logs; the checker refuses mode:"container" unless a log line's sha256
-    // matches the record. Only the HASH rides the gate record: a host
-    // battery cannot recover the plaintext from the hash, so it cannot copy
-    // it out of the PR-writable record into a forged log line. Like the
-    // record itself, this corroborates an operator who ran the round in the
-    // container — it is not proof against a round that forges both.
+    // A per-round nonce binds the declaration to a container-local value the
+    // round's harness read at echo time (R16-1). The plaintext is written to a
+    // container-local path (the process home, NOT the shared artifact mount),
+    // and the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record — but the
+    // mandated echo writes the plaintext itself into the PR-writable round
+    // dir, so any later writer with that dir can reuse the echoed line: the
+    // binding proves the harness held the container-local plaintext at echo
+    // time, not where the battery ran. Like the record itself, it is not
+    // proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',

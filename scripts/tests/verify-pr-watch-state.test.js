@@ -1402,6 +1402,37 @@ describe('releaseRound', () => {
     expect(state.releasedHeads[0].seq).toBe(7);
   });
 
+  // Round-2 (#17371): the fold must also PRESERVE a counter already above the
+  // marker's seq — the ordering every writer-produced state satisfies.
+  // Replacing Math.max with entry.seq ?? 0 would lower it; the inherit-only
+  // ?? 0 form keeps it (but reds the fold case above). This pins the
+  // preserve-higher branch independently of the fold.
+  it('release preserves a seqCounter already above the released seq', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        seqCounter: 9,
+        inFlightHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'r10',
+            startedAt: '2026-11-18T00:00:00Z',
+            seq: 7,
+            retries: 0,
+          },
+        ],
+        verifiedHeads: [],
+        deferredHeads: [],
+      }) + '\n',
+    );
+    expect(releaseRound(root, { pr: 1, head: HEAD }).released).toBe(true);
+    expect(readState(root, 1).seqCounter).toBe(9);
+  });
+
   it('refuses a marker belonging to another head', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });

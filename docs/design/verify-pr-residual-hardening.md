@@ -208,8 +208,10 @@ parseArgs refuses (R3-4).
   from this list).
 - `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md` —
   the recipe's nonce/boundary prose aligned to the hash-only record; the full
-  waived-model coherence sweep was deferred as R5-2 at the time and is completed
-  by verify-pr-deferred-residual-hardening.md (F1) (F3: previously omitted).
+  waived-model coherence sweep was deferred as R5-2 at the time and swept by
+  verify-pr-deferred-residual-hardening.md (F1), whose wording main's
+  execution-approval rewrite (#18064, #18539) has since superseded (F3:
+  previously omitted).
 
 ## Scope boundaries
 
