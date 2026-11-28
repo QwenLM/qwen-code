@@ -10,7 +10,6 @@
 // resumes without losing its cursor or work in progress.
 
 import type { CommandModule } from 'yargs';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { realpathNearestExisting } from '@qwen-code/qwen-code-core/utils/paths.js';
@@ -29,6 +28,8 @@ import { matchRemotes } from '../review/lib/remote-match.js';
 import { redirectedAncestor } from '../review/lib/worktree.js';
 import {
   assertOwnedBySession,
+  assertTreeHasNoWatchFiles,
+  assertWatchFilesNotTracked,
   autofixPrPaths,
   currentSessionId,
   ghNotFound,
@@ -362,47 +363,6 @@ export interface PrepareArgs {
 }
 
 /**
- * Refuse when any watch file of this PR is tracked in the git index (e.g. a
- * contributor force-added a forged state, history, gate cursor, instructions,
- * lock, or worktree entry under `.qwen/tmp/autofix-pr-<n>*` on the PR branch).
- * Uses narrowed case-insensitive pathspecs so unrelated `.qwen/tmp` entries
- * are never emitted, and fails closed if git cannot read the index.
- */
-function assertWatchFilesNotTracked(checkout: string, prNumber: number): void {
-  const res = spawnSync(
-    'git',
-    [
-      '-C',
-      checkout,
-      'ls-files',
-      '-z',
-      '--',
-      `:(icase,glob).qwen/tmp/autofix-pr-${prNumber}-*`,
-      `:(icase).qwen/tmp/autofix-pr-${prNumber}.lock`,
-      `:(icase).qwen/tmp/autofix-pr-${prNumber}`,
-    ],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
-  if (res.error || res.status !== 0) {
-    throw new Error(
-      `git cannot check whether PR #${prNumber}'s watch files are tracked in ${checkout}; fix the repository before starting --in-place.`,
-    );
-  }
-  const tracked = (res.stdout ?? '')
-    .split('\0')
-    .filter((entry) => entry !== '');
-  if (tracked.length > 0) {
-    const shown =
-      tracked.length > 3
-        ? `${tracked.slice(0, 3).join(', ')}, +${tracked.length - 3} more`
-        : tracked.join(', ');
-    throw new Error(
-      `PR #${prNumber}'s watch file(s) are tracked by git in ${checkout} (${shown}); remove them from the branch before starting --in-place.`,
-    );
-  }
-}
-
-/**
  * A daemon session runs the fix agent's commands only inside the session's own
  * working directory or a worktree that session owns, so a worktree outside it
  * can be created but never used: no test, no commit, no push. Refuse before a
@@ -553,8 +513,9 @@ function runInPlacePrepare(
       throw new Error(alreadyWatched(where));
     }
     if (state.prNumber !== prNumber) {
+      const badPath = autofixPrPaths(where, prNumber).statePath;
       throw new Error(
-        `PR #${prNumber}'s state file records PR #${state.prNumber}; run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
+        `PR #${prNumber}'s state file (${badPath}) records PR #${state.prNumber}; delete ${badPath} and run prepare again.`,
       );
     }
     if (!sameRepository(state, { host, owner, repo: repoName })) {
@@ -653,6 +614,7 @@ function runInPlacePrepare(
       remote,
       `+refs/pull/${prNumber}/head:${paths.headRef}`,
     ]);
+    assertTreeHasNoWatchFiles(checkout, prNumber, paths.headRef);
     const headSha = git(
       '-C',
       checkout,
@@ -723,6 +685,7 @@ function runInPlacePrepare(
     remote,
     `+refs/pull/${prNumber}/head:${paths.headRef}`,
   ]);
+  assertTreeHasNoWatchFiles(checkout, prNumber, paths.headRef);
   const headSha = git('-C', checkout, 'rev-parse', `${paths.headRef}^{commit}`);
   const localSha = git(
     '-C',
@@ -812,6 +775,11 @@ function runInPlacePrepare(
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
+  }
+  if (args.watch && !args.inPlace) {
+    throw new Error(
+      '--watch is only used with --in-place (worktree watches are scheduled by default).',
+    );
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
@@ -1208,7 +1176,7 @@ export const prepareCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          "Fix in the user's own checkout of the PR head branch: attended, foreground, nothing ever discarded (one round per start unless --watch schedules rounds)",
+          "Fix in the user's own checkout of the PR head branch: attended, foreground, nothing ever discarded (one round per start; --watch only records consent for scheduled rounds, which `schedule` creates)",
       })
       .option('watch', {
         type: 'boolean',

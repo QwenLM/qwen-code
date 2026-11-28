@@ -221,8 +221,8 @@ proposal answer.
 
 ### 6.2 `prepare` and `state` (`packages/cli/src/commands/autofix-pr/prepare.ts`, `state.ts`)
 
-- Add `--watch` to `prepare` (`inPlaceWatch?: true` on `AutofixPrState`, validated by `stateDefect`) so scheduled `--in-place --watch` starts record explicit watch consent while one-shot `--in-place` stays unschedulable.
-- Guard `runInPlacePrepare` against a symlinked `.qwen` or `.qwen/tmp` inside the checkout via `redirectedAncestor`, against any git-tracked watch file of PR `<n>` committed on the PR branch (`assertWatchFilesNotTracked` via narrowed `:(icase,glob).qwen/tmp/autofix-pr-<n>-*`, `.lock`, and worktree pathspecs covering state, history, gate cursor, instructions, replies, and lock — checked both before `gh` and under the watch lock, failing closed if git cannot read the index), and against a state file whose `prNumber` does not match `<n>`.
+- Add `--watch` to `prepare` (`inPlaceWatch?: true` on `AutofixPrState`, validated by `stateDefect`; refused without `--in-place` in both `prepare` and `AutofixPrTool`) so scheduled `--in-place --watch` starts record explicit watch consent while one-shot `--in-place` stays unschedulable.
+- Guard `runInPlacePrepare` against a symlinked `.qwen` or `.qwen/tmp` inside the checkout via `redirectedAncestor`, against any git-tracked watch file of PR `<n>` in both the local index (`assertWatchFilesNotTracked` via narrowed `:(icase,glob).qwen/tmp/autofix-pr-<n>-*`, `.lock*`, and worktree pathspecs with sanitized git env and `GIT_TIMEOUT_MS`) and the fetched PR head tree (`assertTreeHasNoWatchFiles`, zero-magic case-insensitive tree walk — also run in `sync` before an in-place fast-forward merge so behind checkouts and later PR pushes cannot materialize forged watch files), and enforce `state.prNumber === prNumber` in `requireState` and `cleanup` (with `cleanup --force` sweeping only the argument PR's files and ref).
 - Allow `runInPlacePrepare` to resume an existing in-place watch in the
   same checkout (matching the watch root `where` rather than a potentially
   stale `state.worktreePath`, so a moved clone directory can resume too)

@@ -595,5 +595,9 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       'say that the existing watch continues running and `/autofix-pr stop <n>` ends it',
     );
+    // R1-8 (PR #18546): Per-round proposal includes unpushed local commits count.
+    expect(inPlace).toContain(
+      'and when `sync` reported `unpushed` commits, that count (noting that approving "Fix it" pushes those local commits on top of the PR head too)',
+    );
   });
 });

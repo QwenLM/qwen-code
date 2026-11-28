@@ -182,8 +182,8 @@ Fix them in your checkout?  [Fix it] [Not now] [Stop watching]
 
 ### 6.2 `prepare` 与 `state`（`packages/cli/src/commands/autofix-pr/prepare.ts`、`state.ts`）
 
-- 为 `prepare` 新增 `--watch` 标志（`AutofixPrState.inPlaceWatch?: true`，并纳入 `stateDefect` 校验），使定时 `--in-place --watch` 启动记录显式定时同意，而一次性 `--in-place` 状态保持不可排程。
-- 在 `runInPlacePrepare` 中通过 `redirectedAncestor` 拦住检出内被替换成符号链接的 `.qwen` 或 `.qwen/tmp`，通过 `assertWatchFilesNotTracked`（使用收窄的 `:(icase,glob).qwen/tmp/autofix-pr-<n>-*`、`.lock` 与 worktree 路径规格，覆盖 state、history、gate 游标、instructions、replies 与 lock，在 `gh` 调用前与持锁后双重校验，git 读索引失败时 fail-closed）拒绝 PR 分支中 `git add -f` 提交的任意伪造 watch 文件，并在 `sameInPlaceWatch` 中校验 `state.prNumber === prNumber`。
+- 为 `prepare` 新增 `--watch` 标志（`AutofixPrState.inPlaceWatch?: true`，纳入 `stateDefect` 校验；`prepare` 与 `AutofixPrTool` 均拒绝未带 `--in-place` 的单独 `--watch`），使定时 `--in-place --watch` 启动记录显式定时同意，而一次性 `--in-place` 状态保持不可排程。
+- 在 `runInPlacePrepare` 中通过 `redirectedAncestor` 拦住检出内被替换成符号链接的 `.qwen` 或 `.qwen/tmp`；通过 `assertWatchFilesNotTracked`（收窄的 `:(icase,glob).qwen/tmp/autofix-pr-<n>-*`、`.lock*` 与 worktree 路径规格，使用 `sanitizedGitEnv()`、显式清零 pathspec 环境变量与 `GIT_TIMEOUT_MS`，在 `gh` 前与双锁路径内复检）和 `assertTreeHasNoWatchFiles`（零路径规格魔法的 3 步大小写不敏感树遍历，同时在 `prepare` fetch 之后与 `sync` in-place 快进合并之前拦截落后检出或后续推送引入的伪造 watch 文件）；并在 `requireState` 与 `cleanup` 中统一校验 `state.prNumber === prNumber`（`cleanup --force` 仅清理参数 PR 的文件与引用）。
 - 允许 `runInPlacePrepare` 恢复同一检出里的已有 in-place watch（按实际找到的 watch 根目录 `where` 校验，而非可能陈旧的 `state.worktreePath`，使克隆目录移动后也可正常恢复），并在带 `--take-over` 时接管其他会话的 watch；重新校验 PR 资格（已合入/关闭时返回 `pr_closed`）、`authorCanPush`、remote、head 分支与 upstream 跟踪，同步刷新 `headRefName`、`baseRefName`、`branch`、`worktreePath`、`authorCanPush`、`remote`、`pushTarget`、`sessionId` 与 `inPlaceWatch` 并重新确认 trust anchor，fetch 到私有引用 `paths.headRef` 以保证 `localCopy` 准确，且不触碰检出里的脏文件或超前提交（留给 `sync` 安全处理）。
 - 在 `state.ts` 抽取 `isTakeOver` 与 `repositoryMismatchMessage` 供经典与 in-place 路径共用，并更新 `assertOwnedBySession` 对未排程的 in-place watch 指引使用 `/autofix-pr <n> --in-place --watch`。
 - 继续拒绝：已有 worktree watch（禁止静默转换模式）、不同仓库、不同检出（兄弟 worktree）、以及未带 `--take-over` 的他会话 watch（`watched_elsewhere`）。

@@ -225,6 +225,13 @@ export function validateAutofixPrParams(
       return `"${command}" needs "${option}".`;
     }
   }
+  if (
+    command === 'prepare' &&
+    params.watch === true &&
+    params.in_place !== true
+  ) {
+    return '"watch" needs "in_place".';
+  }
   return null;
 }
 

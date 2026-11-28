@@ -31,7 +31,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   gh: vi.fn((..._args: string[]): string => ''),
@@ -1730,6 +1730,11 @@ describe('runPrepare (real git)', () => {
         branch: 'feat',
         lastKnownHeadSha: headSha,
       });
+      // One-shot --in-place does not record watch consent, so schedule refuses it.
+      expect(state.inPlaceWatch).toBeUndefined();
+      expect(() => runSchedule({ pr: 7, every: 5 })).toThrow(
+        /one-shot in-place watch/,
+      );
       expect(lastReport()).toMatchObject({
         inPlace: true,
         resumed: false,
@@ -1739,6 +1744,13 @@ describe('runPrepare (real git)', () => {
       expect(run(clone, 'branch', '--list', 'qwen-autofix/pr-7')).toBe('');
       // The checkout did not move.
       expect(run(clone, 'rev-parse', 'HEAD')).toBe(headSha);
+    });
+
+    it('refuses --watch without --in-place', () => {
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', watch: true })).toThrow(
+        /--watch is only used with --in-place/,
+      );
+      expect(existsSync(statePath())).toBe(false);
     });
 
     it('refuses another branch, leaving nothing written', () => {
@@ -2343,11 +2355,11 @@ describe('runPrepare (real git)', () => {
       expect(readState(statePath())!.lastKnownHeadSha).toBe(headSha);
     });
 
-    it('refuses git-tracked forged history, gate, and lock files while ignoring other PR numbers', () => {
+    it('refuses git-tracked forged history, gate, lock, lock.break, uppercase, and worktree-dir files while ignoring other PR numbers', () => {
       const repository = { host: 'github.com', owner: 'o', repo: 'r' };
       const bare = join(dir, 'bare.git');
       const histFile = historyPath(autofixPrPaths(clone, 7), repository);
-      const histRel = `.qwen/tmp/${histFile.slice(histFile.lastIndexOf('/') + 1)}`;
+      const histRel = `.qwen/tmp/${basename(histFile)}`;
       mkdirSync(dirname(histFile), { recursive: true });
       writeFileSync(
         histFile,
@@ -2381,30 +2393,42 @@ describe('runPrepare (real git)', () => {
       expect(readState(statePath())).toBeNull();
       expect(readAnchor(repository, 7)).toBeNull();
 
-      // Swap tracked history for tracked gate cursor and lock file: both blocked.
-      run(clone, 'rm', '-q', histRel);
-      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
-      writeFileSync(
-        join(clone, '.qwen', 'tmp', 'autofix-pr-7-gate.json'),
-        '{}',
-      );
-      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7-gate.json');
-      run(clone, 'commit', '-q', '-m', 'forged gate');
-      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
-        /tracked by git/,
-      );
-
-      run(clone, 'rm', '-q', '.qwen/tmp/autofix-pr-7-gate.json');
-      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
-      writeFileSync(join(clone, '.qwen', 'tmp', 'autofix-pr-7.lock'), '');
-      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7.lock');
-      run(clone, 'commit', '-q', '-m', 'forged lock');
-      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
-        /tracked by git/,
-      );
+      // Swap tracked history for gate, lock, lock.break, mixed-case, and bare worktree dir: all blocked.
+      let prev = histRel;
+      for (const rel of [
+        '.qwen/tmp/autofix-pr-7-gate.json',
+        '.qwen/tmp/autofix-pr-7.lock',
+        '.qwen/tmp/autofix-pr-7.lock.break',
+        '.qwen/tmp/AUTOFIX-PR-7-STATE.json',
+        '.qwen/tmp/autofix-pr-7/nested.txt',
+      ]) {
+        run(clone, 'rm', '-q', prev);
+        const abs = join(clone, rel);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, '{}');
+        run(clone, 'add', '-f', rel);
+        run(clone, 'commit', '-q', '-m', `forged ${rel}`);
+        const sha = run(clone, 'rev-parse', 'HEAD');
+        run(clone, 'push', '-q', 'origin', 'feat');
+        run(bare, 'update-ref', 'refs/pull/7/head', sha);
+        mocks.gh.mockImplementation((...args: string[]) => {
+          if (args[0] === 'pr')
+            return JSON.stringify(prView({ headRefOid: sha }));
+          if (args[0] === 'repo') return JSON.stringify(writable);
+          throw new Error(`unexpected gh ${args.join(' ')}`);
+        });
+        mocks.gh.mockClear();
+        expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+          new RegExp(
+            `tracked by git.*${rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+          ),
+        );
+        expect(mocks.gh).not.toHaveBeenCalled();
+        prev = rel;
+      }
 
       // Negative control: a tracked file for PR #70 must not block PR #7.
-      run(clone, 'rm', '-q', '.qwen/tmp/autofix-pr-7.lock');
+      run(clone, 'rm', '-q', prev);
       mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
       writeFileSync(
         join(clone, '.qwen', 'tmp', 'autofix-pr-70-state.json'),
@@ -2424,6 +2448,79 @@ describe('runPrepare (real git)', () => {
 
       runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
       expect(readState(statePath())?.inPlace).toBe(true);
+    });
+
+    it('refuses when the checkout is behind a PR head that tracks a forged watch file (including uppercase .QWEN/TMP)', () => {
+      const bare = join(dir, 'bare.git');
+      const other = join(dir, 'other-behind');
+      run(dir, 'clone', '-q', '-b', 'feat', bare, other);
+      run(other, 'config', 'user.email', 't@example.com');
+      run(other, 'config', 'user.name', 't');
+      mkdirSync(join(other, '.QWEN', 'TMP'), { recursive: true });
+      writeFileSync(
+        join(other, '.QWEN', 'TMP', 'AUTOFIX-PR-7-GATE.JSON'),
+        '{}',
+      );
+      run(other, 'add', '-f', '.QWEN/TMP/AUTOFIX-PR-7-GATE.JSON');
+      run(other, 'commit', '-q', '-m', 'forged gate on pr head');
+      const forgedHead = run(other, 'rev-parse', 'HEAD');
+      run(other, 'push', '-q', 'origin', 'feat');
+      run(bare, 'update-ref', 'refs/pull/7/head', forgedHead);
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr')
+          return JSON.stringify(prView({ headRefOid: forgedHead }));
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+
+      // Local checkout is clean at headSha (behind forgedHead) and has no tracked watch file locally.
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+      expect(readState(statePath())).toBeNull();
+      expect(
+        readAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7),
+      ).toBeNull();
+    });
+
+    it('ignores ambient GIT_INDEX_FILE and GIT_LITERAL_PATHSPECS when checking tracked watch files', () => {
+      mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        join(clone, '.qwen', 'tmp', 'autofix-pr-7-gate.json'),
+        '{}',
+      );
+      run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7-gate.json');
+      run(clone, 'commit', '-q', '-m', 'forged gate');
+      const emptyIdx = join(dir, 'empty-index');
+      const savedIdx = process.env['GIT_INDEX_FILE'];
+      const savedLit = process.env['GIT_LITERAL_PATHSPECS'];
+      process.env['GIT_INDEX_FILE'] = emptyIdx;
+      process.env['GIT_LITERAL_PATHSPECS'] = '1';
+      try {
+        expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+          /tracked by git/,
+        );
+      } finally {
+        if (savedIdx === undefined) delete process.env['GIT_INDEX_FILE'];
+        else process.env['GIT_INDEX_FILE'] = savedIdx;
+        if (savedLit === undefined) delete process.env['GIT_LITERAL_PATHSPECS'];
+        else process.env['GIT_LITERAL_PATHSPECS'] = savedLit;
+      }
+    });
+
+    it('re-checks tracked watch files under the fresh lock if staged after fetch', () => {
+      mocks.afterFetch = () => {
+        mkdirSync(join(clone, '.qwen', 'tmp'), { recursive: true });
+        writeFileSync(
+          join(clone, '.qwen', 'tmp', 'autofix-pr-7-gate.json'),
+          '{}',
+        );
+        run(clone, 'add', '-f', '.qwen/tmp/autofix-pr-7-gate.json');
+      };
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /tracked by git/,
+      );
+      expect(readState(statePath())).toBeNull();
     });
 
     it('re-checks tracked watch files under the resume lock if staged during gh calls', () => {

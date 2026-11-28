@@ -138,6 +138,20 @@ describe('runSchedule', () => {
     expect(state().watch).toBeUndefined();
   });
 
+  it('still allows --again on a legacy scheduled in-place state that has watch set without inPlaceWatch', () => {
+    write({
+      inPlace: true,
+      worktreePath: repo,
+      branch: 'main',
+      watch: { every: 5, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    const again = runSchedule({ pr: 7, again: true });
+    expect(again.task).not.toBe('aaaaaaaaaaaa');
+    expect(again.prompt).toBe(
+      `Run /autofix-pr tick o/r#7 --task ${again.task} --in-place`,
+    );
+  });
+
   it('refuses --again on an unscheduled in-place watch, naming --in-place --watch', () => {
     write({
       inPlace: true,

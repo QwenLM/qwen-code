@@ -167,6 +167,10 @@ describe('validateAutofixPrParams', () => {
     [{ command: 'schedule', pr: 1, every: 2.5 }, /positive integer/],
     [{ command: 'push', pr: 1, in_place: true }, /does not take "in_place"/],
     [{ command: 'push', pr: 1, watch: true }, /does not take "watch"/],
+    [
+      { command: 'prepare', pr: 1, repo: 'o/r', watch: true },
+      /needs "in_place"/,
+    ],
     // The plan is the one the skill writes beside the worktree, never a file
     // of another PR, a relative path, or one the PR's own tree carries.
     [
