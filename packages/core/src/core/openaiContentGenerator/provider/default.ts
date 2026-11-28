@@ -80,6 +80,47 @@ function mirrorReasoningContentToReasoning(
   } as OpenAI.Chat.ChatCompletionMessageParam;
 }
 
+function preserveFlatErrorResponses(
+  baseFetch: typeof globalThis.fetch,
+): typeof globalThis.fetch {
+  return async (input, init) => {
+    const response = await baseFetch(input, init);
+    if (
+      response.ok ||
+      !response.headers.get('content-type')?.includes('application/json')
+    ) {
+      return response;
+    }
+
+    const payload: unknown = await response
+      .clone()
+      .json()
+      .catch(() => undefined);
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      Array.isArray(payload) ||
+      'error' in payload
+    ) {
+      return response;
+    }
+    const error = payload as Record<string, unknown>;
+    if (error['object'] !== 'error' || typeof error['message'] !== 'string') {
+      return response;
+    }
+
+    // The SDK drops a top-level error object, including the provider message.
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    headers.delete('content-encoding');
+    return new Response(JSON.stringify({ error }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+}
+
 /**
  * Default provider for standard OpenAI-compatible APIs
  */
@@ -142,10 +183,12 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: buildSessionAwareFetch(
-        runtimeOptions?.fetch,
-        this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
+      fetch: preserveFlatErrorResponses(
+        buildSessionAwareFetch(
+          runtimeOptions?.fetch,
+          this.cliConfig,
+          this.contentGeneratorConfig.customHeaders,
+        ),
       ),
     });
   }
