@@ -115,6 +115,19 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+function ecsProxyEnv(text) {
+  return {
+    HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
+    http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
+  };
+}
+
 // Executed-harness factory shared by the claim and finalize lifecycle tests
 // and the verify job's review snapshot: a stubbed `gh` on PATH with
 // failure-injection arms, the real step script run under GitHub's exact
@@ -11981,6 +11994,22 @@ describe('qwen-triage tmux lane parity', () => {
 });
 
 describe('qwen-triage pnpm store producer', () => {
+  it('passes the optional host proxy into every shared ECS container', () => {
+    const workflows = parse(workflow);
+    const producers = [cacheProducerWorkflow, mavenRepoProducerWorkflow].map(
+      (text) => parse(text),
+    );
+    // An unset variable stays empty so existing directly connected runners
+    // retain their behavior; protected hosts opt in with these repo vars.
+    for (const jobName of ['triage', 'tmux-testing', 'verify']) {
+      const container = workflows.jobs[jobName].container;
+      expect(container.env).toEqual(ecsProxyEnv());
+    }
+    for (const producer of producers) {
+      expect(producer.jobs.save.container.env).toEqual(ecsProxyEnv());
+    }
+  });
+
   it('saves with the same key and path the triage lanes restore', () => {
     expect(cacheProducerWorkflow).toContain('actions/cache/save@');
     // Prettier may choose single or double quotes depending on inner

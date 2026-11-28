@@ -32,6 +32,15 @@ jobs:
       image: 'node:22-bookworm'
       # Match the host runner UID/GID so bind-mounted files stay writable.
       options: '--init --user node'
+      env:
+        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     # This producer always cold-downloads -- RUNNER_TEMP is fresh per job and
     # there is no cache/restore step here -- so its cost is a full registry
     # fetch every time, and on the shared pool that is what varies. Under npm,

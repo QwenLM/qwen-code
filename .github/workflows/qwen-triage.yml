@@ -541,6 +541,15 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
+      env:
+        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'
@@ -1842,6 +1851,15 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
+      env:
+        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'
@@ -2887,6 +2905,15 @@ jobs:
     container:
       image: 'node:22-bookworm'
       options: '--init'
+      env:
+        HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
+        http_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        https_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        all_proxy: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}'
+        no_proxy: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}'
     defaults:
       run:
         shell: 'bash'
