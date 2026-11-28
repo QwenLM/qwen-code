@@ -122,7 +122,14 @@ describe('turn-scoped host actions on external Files sessions', () => {
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ...stored.response, replayed }));
+        res.end(
+          JSON.stringify({
+            protocolVersion: 1,
+            harnessSessionId: SESSION_ID,
+            ...stored.response,
+            replayed,
+          }),
+        );
       });
     });
     await new Promise<void>((resolve) =>
@@ -139,7 +146,7 @@ describe('turn-scoped host actions on external Files sessions', () => {
     );
     installHostedHarnessContractMiddleware(harnessApp, contract);
     registerHostedHarnessSessionRoutes(harnessApp, contract, state.root, {
-      baseUrl: `http://127.0.0.1:${brokerPort}/internal/runtime-broker/v1`,
+      baseUrl: `http://127.0.0.1:${brokerPort}`,
       token: 'broker-secret',
     });
     const listener: Server = createServer(harnessApp);
@@ -164,23 +171,18 @@ describe('turn-scoped host actions on external Files sessions', () => {
       'releaseMount',
     ).mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockImplementation(
-      async (toolName, callId) => ({
-        executionId: `exec-${callId}`,
-        toolName,
-      }),
+      async (callId) => `exec-${callId}`,
     );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockImplementation(
-      async (_executionId, args) => {
-        workerExecutedTools.push(
-          String((args as { file_path?: string }).file_path ?? 'unknown'),
-        );
+      async (_executionId, payloadJson) => {
+        const { input } = JSON.parse(payloadJson) as {
+          input: { file_path?: string };
+        };
+        workerExecutedTools.push(input.file_path ?? 'unknown');
         return {
-          status: 'SUCCEEDED',
-          output: {
-            llmContent: 'Wrote review-summary.md',
-            returnDisplay: 'ok',
-          },
-        } as Awaited<ReturnType<HostedWorkspaceBroker['execute']>>;
+          executionStatus: 'success',
+          responseParts: [{ text: 'Wrote review-summary.md' }],
+        };
       },
     );
     vi.spyOn(
@@ -203,6 +205,7 @@ describe('turn-scoped host actions on external Files sessions', () => {
             callId: writeCallId,
             name: 'write_file',
             args: { file_path: 'review-summary.md', content: '# LGTM\n' },
+            isClientInitiated: false,
             prompt_id: PROMPT_ID,
           },
         ],
@@ -228,6 +231,7 @@ describe('turn-scoped host actions on external Files sessions', () => {
             callId: commentCallId,
             name: 'post_pr_comment',
             args: commentArgs,
+            isClientInitiated: false,
             prompt_id: PROMPT_ID,
           },
         ],
@@ -259,7 +263,7 @@ describe('turn-scoped host actions on external Files sessions', () => {
           sessionScope: 'thread',
           managedSessionStore: store(),
           toolProfile: 'hosted-workspace-external-files/1',
-          approvalMode: 'default',
+          approvalMode: 'yolo',
         })
         .expect(200);
       const clientId = created.body.clientId as string;
@@ -443,6 +447,7 @@ describe('turn-scoped host actions on external Files sessions', () => {
               callId: 'bad-call',
               name: 'post_pr_comment',
               args: { body: '', unexpected: true },
+              isClientInitiated: false,
               prompt_id: 'annotated-turn',
             },
           ],
