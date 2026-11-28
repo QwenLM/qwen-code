@@ -157,10 +157,16 @@ member is terminal. An absent group, an unknown state, or a failed query stays
 live. On Linux, a zombie leader with more than one thread also stays live,
 because other threads can still execute after the leader exits.
 
-`ESRCH` means a PID or group is already gone. `EPERM` means it still exists and
-cleanup is not confirmed. Timers and liveness polling remain referenced while
-`kill()` is pending; an unresolved promise does not by itself keep Node alive
-after the ACP root exits.
+`ESRCH` means a PID or group is already gone. On a liveness probe, `EPERM`
+means the group still exists and cleanup is not confirmed. On a signal, `EPERM`
+proves neither: the group may already have emptied, or the PGID may have been
+reused by a process this child did not start. A refused signal therefore keeps
+the group committed and is recorded as a refusal, and a group that is still
+alive at the deadline fails with a message that names the surviving PGIDs and
+the signals they refused. A group whose refused signal is followed by an
+emptied group settles normally. Timers and liveness polling remain referenced
+while `kill()` is pending; an unresolved promise does not by itself keep Node
+alive after the ACP root exits.
 
 Termination state is monotonic. A synchronous force-kill sets a
 `forceKillRequested` state before taking its snapshot. The asynchronous path
@@ -295,7 +301,10 @@ production change is required.
 - Linux zombie-only groups settle after KILL, while `Z` leaders with live
   threads and groups with any non-zombie member stay committed.
 - `ESRCH`, `EPERM`, missing PID, spawn errors, snapshot failures, and deadlines
-  follow the declared semantics.
+  follow the declared semantics: a refused liveness probe keeps the group
+  committed, a refused signal records a refusal without resolving or throwing
+  on its own, and the refusal rides along on the deadline error for the
+  surviving PGIDs only.
 - Concurrent `terminate()` calls, registry shutdown, and `killSync()` remain
   idempotent.
 - A root-exited tree remains reachable by `killAllSync()` during explicit
