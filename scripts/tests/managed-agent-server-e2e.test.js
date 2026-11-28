@@ -112,6 +112,22 @@ const fencedShellBlocks = (text) =>
     ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
   ].map((match) => match[1]);
 
+// A type assertion, a non-null assertion and parentheses do not change the
+// expression, so every reader below strips them the same way.
+const unwrap = (node) => {
+  let current = node;
+  while (
+    current !== undefined &&
+    (isParenthesizedExpression(current) ||
+      isAsExpression(current) ||
+      isNonNullExpression(current) ||
+      isSatisfiesExpression(current))
+  ) {
+    current = current.expression;
+  }
+  return current;
+};
+
 // The literal text of a string or untagged template node, or undefined. One
 // extractor shared by the AST helpers below: a call id and a minted-id key mean
 // the same thing whether they are spelled as a string or a template, and two
@@ -128,8 +144,8 @@ const literalText = (node) => {
     isBinaryExpression(node) &&
     node.operatorToken.kind === SyntaxKind.PlusToken
   ) {
-    const left = literalText(node.left);
-    const right = literalText(node.right);
+    const left = literalText(unwrap(node.left));
+    const right = literalText(unwrap(node.right));
     return left !== undefined && right !== undefined ? left + right : undefined;
   }
   return undefined;
@@ -160,19 +176,6 @@ const classifierDelegation = (text) => {
       if (isFn(current)) return current;
     }
     return undefined;
-  };
-  const unwrap = (node) => {
-    let current = node;
-    while (
-      current !== undefined &&
-      (isParenthesizedExpression(current) ||
-        isAsExpression(current) ||
-        isNonNullExpression(current) ||
-        isSatisfiesExpression(current))
-    ) {
-      current = current.expression;
-    }
-    return current;
   };
   // Every declaration of a name counts, with an initializer or not: a bare
   // `let x;` elsewhere still makes the name ambiguous, and an acceptance must
@@ -250,12 +253,14 @@ const classifierDelegation = (text) => {
   const visit = (node) => {
     if (
       isCallExpression(node) &&
-      isIdentifier(node.expression) &&
-      node.expression.text === 'loopClassifierResponse'
+      isIdentifier(unwrap(node.expression)) &&
+      unwrap(node.expression).text === 'loopClassifierResponse'
     ) {
       const fake = fakeOf(node);
       calls.push({
-        callId: literalText(unwrap(node.arguments[1])),
+        // Resolved, not matched: a hoisted or const-bound id names the same
+        // literal as an inline one, and the sibling clauses resolve too.
+        callId: literalText(resolve(node.arguments[1])),
         fake: fake !== undefined,
         fn: fake === undefined ? -1 : fake.pos,
         line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
@@ -3766,7 +3771,7 @@ describe('managed-agent-server e2e runner', () => {
       delegationViolations(delegation),
       delegation.calls
         .map((c) => `delegation @ runner:${c.line} — ${c.text}`)
-        .join('\n'),
+        .join('\n') || 'no loopClassifierResponse call found in the runner',
     ).toEqual([]);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
@@ -4099,6 +4104,18 @@ describe('managed-agent-server e2e runner', () => {
         'in-fake-callback',
         withSkill('class K { constructor() {\n' + SKILL + '\n} }\nvoid K;'),
       ],
+      // A function expression is a callable kind too.
+      [
+        'in-fake-callback',
+        withSkill('const g = function () {\n' + SKILL + '\n};\nvoid g;'),
+      ],
+      // Half of a concatenation is not a literal, so the id is not attributable.
+      [
+        'literal-call-ids',
+        withSkill(
+          "const classified = loopClassifierResponse(body, 'loop-' + someVar);\nif (classified !== undefined) return classified;",
+        ),
+      ],
       // A second binding of the callback's name — here through a destructuring
       // pattern — makes the lookup ambiguous, so the fake is not credited.
       [
@@ -4197,6 +4214,38 @@ describe('managed-agent-server e2e runner', () => {
         withSkill(
           "const classified = loopClassifierResponse(body, ('loop-classifier' as string));\nif (classified !== undefined) return classified;",
         ),
+      ],
+      // Every spelling of the same literal id, and a callee in parentheses.
+      ...[
+        '`loop-classifier`',
+        "('loop-classifier'!)",
+        "('loop-classifier' satisfies string)",
+        "('loop-' as string) + 'classifier'",
+        'ID',
+      ].map((id) => [
+        'id spelling',
+        withSkill(
+          "const ID = 'loop-classifier';\nconst classified = loopClassifierResponse(body, " +
+            id +
+            ');\nif (classified !== undefined) return classified;',
+        ),
+      ]),
+      [
+        'parenthesized callee',
+        withSkill(
+          "const classified = (loopClassifierResponse)(body, 'loop-classifier');\nif (classified !== undefined) return classified;",
+        ),
+      ],
+      // The callback reached through two binding hops still resolves.
+      [
+        'two-hop callback alias',
+        [
+          decision,
+          'const skillFake = ({ body }) => {\n' + SKILL + '\n};',
+          'const alias = skillFake;',
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(alias);\n}',
+          fire(FIRE),
+        ].join('\n'),
       ],
       // An extra flag around the fake is not the pin's question either.
       [
