@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -17,12 +17,16 @@ const sanitizeTerminalText = vi.hoisted(() =>
 
 vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
 
-vi.mock('node:child_process', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:child_process')>()),
-  spawn: vi.fn(() => {
-    throw new Error('unexpected daemon spawn');
-  }),
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(() => {
+      throw new Error('unexpected daemon spawn');
+    }),
+    spawnSync: vi.fn(actual.spawnSync),
+  };
+});
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -32,7 +36,7 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
   return {
     ...actual,
     currentPidNamespace: () => 'pid:[1]',
-    isProcessAlive: () => false,
+    isProcessAlive: vi.fn(() => false),
   };
 });
 
@@ -68,12 +72,18 @@ import {
   type DaemonRestartPlan,
 } from './daemon.js';
 import {
+  isProcessAlive,
   readDaemonToken,
   writeDaemonDiscovery,
   writeDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
+import {
+  readDaemonOccupancy,
+  startDaemonOccupancyPublisher,
+} from '../serve/daemon-occupancy.js';
+import { getSseOccupancy } from '../serve/sse-occupancy.js';
 
 function entry(port: number): DaemonDiscoveryEntry {
   return {
@@ -890,6 +900,184 @@ describe('qwen daemon command', () => {
       await fsp.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('shows unchecked and dead daemon samples offline, then prunes the dead sample online', async () => {
+    const dir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-offline-status-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const fetchMock = vi.fn(async () => new Response('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    const stopPublishers: Array<() => Promise<void>> = [];
+    const records = [
+      { ...entry(4170).record, pidNamespace: 'pid:[2]' },
+      { ...entry(4171).record, pidNamespace: 'pid:[1]' },
+      { ...entry(4172).record, pidNamespace: 'pid:[2]' },
+    ];
+    const run = (...args: string[]) =>
+      yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .command(daemonCommand)
+        .parseAsync(['daemon', 'status', ...args]);
+
+    try {
+      const entries = records.map((record) => ({
+        record,
+        path: writeDaemonDiscovery(record),
+      }));
+      for (const item of entries.slice(0, 2)) {
+        stopPublishers.push(
+          startDaemonOccupancyPublisher(
+            item,
+            () => ({
+              total: 1,
+              bySurface: {
+                restEvents: 1,
+                agentEvents: 0,
+                generation: 0,
+                artifactLibrary: 0,
+                hostedEvents: 0,
+                acpSse: 0,
+                acpWs: 0,
+              },
+              byListener: {
+                primary: 1,
+                'local-control': 0,
+                'remote-access': 0,
+              },
+            }),
+            () => {},
+          ),
+        );
+      }
+      await vi.waitFor(() => {
+        expect(readDaemonOccupancy(entries[0]!)).toBeDefined();
+        expect(readDaemonOccupancy(entries[1]!)).toBeDefined();
+      });
+
+      await run('--offline', '--json');
+      const rows = stdout.mock.calls
+        .map(([chunk]) => String(chunk))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(rows).toMatchObject([
+        {
+          port: 4170,
+          status: 'unchecked',
+          streamOccupancy: {
+            total: 1,
+            stale: false,
+            asOf: expect.any(String),
+            bySurface: { restEvents: 1 },
+            byListener: { primary: 1 },
+          },
+        },
+        { port: 4171, status: 'stale', streamOccupancy: { stale: true } },
+        { port: 4172, status: 'unchecked', streamOccupancy: null },
+      ]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(run('--offline', '--prune')).rejects.toThrow(
+        '--offline cannot be combined',
+      );
+      await expect(run('--offline', '--detail')).rejects.toThrow(
+        '--offline cannot be combined',
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(fsp.stat(entries[1]!.path)).resolves.toBeDefined();
+
+      await run('--prune', '--json');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      await expect(fsp.stat(entries[1]!.path)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(readDaemonOccupancy(entries[1]!)).toBeUndefined();
+      expect(readDaemonOccupancy(entries[0]!)).toBeDefined();
+    } finally {
+      await Promise.all(stopPublishers.map((stop) => stop()));
+      stdout.mockRestore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'removes the occupancy file after force-stopping a daemon',
+    async () => {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-force-stop-'));
+      vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('ok')),
+      );
+      const exitCode = process.exitCode;
+      const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+      const record = {
+        ...entry(4170).record,
+        pid: process.pid + 1,
+        pidNamespace: 'pid:[1]',
+      };
+      const discovery = { record, path: writeDaemonDiscovery(record) };
+      const stopPublisher = startDaemonOccupancyPublisher(
+        discovery,
+        getSseOccupancy,
+        vi.fn(),
+      );
+      let alive = true;
+      const kill = vi.spyOn(process, 'kill').mockImplementation((_, signal) => {
+        if (signal === 'SIGKILL') alive = false;
+        return true;
+      });
+      vi.mocked(isProcessAlive).mockImplementation(() => alive);
+      const psResult = (stdout: string) => ({
+        pid: 1,
+        status: 0,
+        signal: null,
+        output: [null, stdout, ''],
+        stdout,
+        stderr: '',
+      });
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce(psResult(record.startedAt))
+        .mockReturnValueOnce(psResult('qwen serve'));
+
+      try {
+        await vi.waitFor(() => {
+          expect(readDaemonOccupancy(discovery)).toBeDefined();
+        });
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+        const stopped = yargs([])
+          .exitProcess(false)
+          .fail(false)
+          .command(daemonCommand)
+          .parseAsync(['daemon', 'stop', '--port', '4170', '--force']);
+        await vi.runAllTimersAsync();
+        await stopped;
+
+        expect(kill.mock.calls).toEqual([
+          [record.pid, 'SIGTERM'],
+          [record.pid, 'SIGKILL'],
+        ]);
+        expect(process.exitCode).toBe(exitCode);
+        expect(await fsp.readdir(path.dirname(discovery.path))).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+        kill.mockRestore();
+        stdout.mockRestore();
+        vi.mocked(spawnSync).mockReset();
+        vi.mocked(isProcessAlive).mockReset();
+        process.exitCode = exitCode;
+        vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+        await stopPublisher();
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('preserves memory figures, nulls and missing fields in JSON detail', () => {
     const process = {

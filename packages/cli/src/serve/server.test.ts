@@ -60,6 +60,8 @@ import {
   type ChannelWorkerControlState,
 } from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
+import { readDaemonDiscoveries } from './daemon-discovery.js';
+import { readDaemonOccupancy } from './daemon-occupancy.js';
 import {
   getServeAppLifecycle,
   type ServeAppLifecycle,
@@ -42860,6 +42862,34 @@ describe('runQwenServe', () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     delete process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
     delete process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'];
+  });
+
+  it('stops publishing occupancy when the server closes directly', async () => {
+    vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir!);
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        serveWebShell: false,
+      });
+      const { entries } = readDaemonDiscoveries();
+      expect(entries).toHaveLength(1);
+      const entry = entries[0]!;
+      await vi.waitFor(() => {
+        expect(readDaemonOccupancy(entry)?.total).toBe(0);
+      });
+
+      const server = handle.server;
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await vi.waitFor(() => {
+        expect(readDaemonOccupancy(entry)).toBeUndefined();
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('binds 0.0.0.0 without a token using a generated ephemeral bearer', async () => {

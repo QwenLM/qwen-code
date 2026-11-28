@@ -330,6 +330,20 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
         pid: number;
       };
       expect(first.conversationsDir).toBe(f.selected);
+      const occupancyFiles = async () =>
+        (await fs.readdir(path.dirname(recordPath))).filter(
+          (name) =>
+            name.startsWith(`occupancy-${summary.port}-`) &&
+            name.endsWith('.json'),
+        );
+      const [oldOccupancyFile] = await vi.waitFor(
+        async () => {
+          const files = await occupancyFiles();
+          expect(files).toHaveLength(1);
+          return files;
+        },
+        { timeout: 10_000 },
+      );
       f.env['QWEN_CONVERSATIONS_DIR'] = path.join(f.root, 'changed-env');
       await f.command(['daemon', 'restart', '--port', String(summary.port)]);
       const second = JSON.parse(await fs.readFile(recordPath, 'utf8')) as {
@@ -338,6 +352,14 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
       };
       expect(second.pid).not.toBe(first.pid);
       expect(second.conversationsDir).toBe(f.selected);
+      await vi.waitFor(
+        async () => {
+          const files = await occupancyFiles();
+          expect(files).toHaveLength(1);
+          expect(files).not.toContain(oldOccupancyFile);
+        },
+        { timeout: 10_000 },
+      );
       const sessionId = '123e4567-e89b-42d3-a456-426614174000';
       const response = await post(
         { base: summary.url, token },
