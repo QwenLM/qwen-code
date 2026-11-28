@@ -37,6 +37,13 @@ const cacheProducerPath = join(
   'pnpm-store.yml',
 );
 const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
+const mavenRepoProducerPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'verify-maven-repo.yml',
+);
+const mavenRepoProducerDoc = parse(readFileSync(mavenRepoProducerPath, 'utf8'));
 const prWorkflowPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -1867,6 +1874,35 @@ describe('qwen-triage: pnpm store producer workflow', () => {
   });
 });
 
+describe('qwen-triage: container proxy env', () => {
+  it('publishes lowercase aliases without entering the scrubbed PR-test workloads', () => {
+    const expected = {
+      HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+      HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+      ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+      NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
+    };
+    const bootstrap = 'Configure lowercase proxy aliases';
+    for (const jobName of ['triage', 'tmux-testing', 'verify']) {
+      const step = doc.jobs[jobName].steps.find((s) => s.name === bootstrap);
+      assert.ok(step, `${jobName} must publish the lowercase aliases`);
+      assert.match(step.run, />> "\$GITHUB_ENV"/, jobName);
+    }
+    for (const producer of [cacheProducerDoc, mavenRepoProducerDoc]) {
+      assert.deepEqual(producer.jobs.save.env, expected);
+    }
+    // The gate re-execs through `env -i` with an explicit allowlist, so the
+    // job-level proxy vars cannot reach the PR test code it samples.
+    const reExec = (verifyJob.steps
+      .find((s) => s.id === 'flake')
+      .run.match(/exec \/usr\/bin\/env -i[^\n]*(?:\\\n[^\n]*)*/) ?? [''])[0];
+    assert.ok(reExec, 'the gate must re-exec through env -i');
+    for (const key of Object.keys(expected)) {
+      assert.doesNotMatch(reExec, new RegExp(`\\b${key}=`), key);
+    }
+  });
+});
+
 describe('qwen-triage: flakiness gate (#9125)', () => {
   const recordStep = verifyJob.steps.find(
     (s) => s.name === 'Record changed test files for the flakiness gate',
@@ -2384,13 +2420,17 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       gatePreKill !== -1 && gateReExec !== -1 && gatePreKill < gateReExec,
       'node survivors must be killed (and their absence verified) BEFORE the re-exec snapshot re-reads this script from disk',
     );
-    // Actions merges workflow- and job-level env into every step: the
-    // step-key pin above is only exhaustive while those levels stay empty.
+    // Actions merges workflow- and job-level env into every step. The step
+    // env above re-pins every key the gate accepts, so a job-level key is
+    // safe only while it cannot override one of those pins; the gate's
+    // `env -i` re-exec forwards an allowlist that excludes proxy vars.
     assert.equal(doc.env, undefined, 'no workflow-level env may appear');
     assert.equal(
-      verifyJob.env,
+      Object.keys(verifyJob.env ?? {}).find((key) =>
+        Object.hasOwn(flakeStep.env, key),
+      ),
       undefined,
-      'no verify-job-level env may appear — it would flow into the gate',
+      'no verify-job-level env may shadow a gate step env key',
     );
     // Keys AND the one non-blank value: FLAKE_ROUNDS must come from the
     // repo variable, not a hardcoded count or a PR-influenced expression.

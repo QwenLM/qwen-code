@@ -115,6 +115,28 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+function ecsProxyEnv() {
+  return {
+    HTTP_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    HTTPS_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    ALL_PROXY: '${{ vars.QWEN_ECS_CONTAINER_PROXY }}',
+    NO_PROXY: '${{ vars.QWEN_ECS_CONTAINER_NO_PROXY }}',
+  };
+}
+
+function expectLowercaseProxyBootstrap(configuredJob) {
+  const bootstrap = configuredJob.steps.find(
+    (candidate) => candidate.name === 'Configure lowercase proxy aliases',
+  );
+  expect(bootstrap).toBeDefined();
+  expect(configuredJob.steps[0]).toBe(bootstrap);
+  expect(bootstrap.run).toContain(
+    'printf \'%s_PROXY=%s\\n\' "$name" "${!upper}" >> "$GITHUB_ENV"',
+  );
+  expect(bootstrap.run).toContain('for name in http https all no; do');
+  expect(bootstrap.run).toContain('upper="${name^^}_PROXY"');
+}
+
 // Executed-harness factory shared by the claim and finalize lifecycle tests
 // and the verify job's review snapshot: a stubbed `gh` on PATH with
 // failure-injection arms, the real step script run under GitHub's exact
@@ -11981,6 +12003,25 @@ describe('qwen-triage tmux lane parity', () => {
 });
 
 describe('qwen-triage pnpm store producer', () => {
+  it('passes the optional host proxy into every shared ECS container', () => {
+    const workflows = parse(workflow);
+    const producers = [cacheProducerWorkflow, mavenRepoProducerWorkflow].map(
+      (text) => parse(text),
+    );
+    // An unset variable stays empty so existing directly connected runners
+    // retain their behavior; protected hosts opt in with these repo vars.
+    for (const jobName of ['triage', 'tmux-testing', 'verify']) {
+      expect(workflows.jobs[jobName].env).toEqual(ecsProxyEnv());
+      expect(workflows.jobs[jobName].container.env).toBeUndefined();
+      expectLowercaseProxyBootstrap(workflows.jobs[jobName]);
+    }
+    for (const producer of producers) {
+      expect(producer.jobs.save.env).toEqual(ecsProxyEnv());
+      expect(producer.jobs.save.container.env).toBeUndefined();
+      expectLowercaseProxyBootstrap(producer.jobs.save);
+    }
+  });
+
   it('saves with the same key and path the triage lanes restore', () => {
     expect(cacheProducerWorkflow).toContain('actions/cache/save@');
     // Prettier may choose single or double quotes depending on inner
