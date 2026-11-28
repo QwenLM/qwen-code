@@ -29,6 +29,7 @@ import type {
 } from './DaemonTransport.js';
 export type { DaemonSseConnectReason } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
+import { composeAbortSignals } from './abortSignals.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
   DaemonAgentMutationResult,
@@ -10889,63 +10890,10 @@ export function abortTimeout(ms: number): AbortSignal {
   return ctrl.signal;
 }
 
-/**
- * `AbortSignal.any` is available natively in every Node version this
- * package supports (`engines.node >=22.0.0` ships it). The polyfill
- * branch below is defensive against non-Node runtimes (browsers /
- * edge workers / stripped-down V8 hosts) that may consume the SDK
- * and lack `AbortSignal.any` — without it those callers would throw
- * `TypeError: AbortSignal.any is not a function` on every
- * non-streaming method.
- *
- * The polyfill creates a fresh controller and forwards the first abort
- * from any input signal, including any that are already aborted at call
- * time. It does NOT support every native edge-case (cleanup of remaining
- * listeners after the first fire is best-effort), but for `fetch`-style
- * single-shot use the difference is invisible.
- */
-// Exported solely for direct unit testing — see note on `abortTimeout`.
-export function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
-  const anyFn = (
-    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
-  ).any;
-  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
-  const ctrl = new AbortController();
-  // Track per-input listener so we can detach them all on the FIRST
-  // abort (whichever input fires). Without this, callers who reuse a
-  // long-lived AbortSignal (e.g. a session-scope cancel signal that
-  // never fires for the lifetime of the SDK client) accumulate one
-  // listener per SDK call — slow leak that retains the closure +
-  // controller of every prior call.
-  const cleanups: Array<() => void> = [];
-  const detachAll = () => {
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop();
-      try {
-        fn?.();
-      } catch {
-        /* swallow */
-      }
-    }
-  };
-  for (const s of signals) {
-    if (s.aborted) {
-      ctrl.abort(s.reason);
-      detachAll();
-      return ctrl.signal;
-    }
-    const onAbort = () => {
-      ctrl.abort(s.reason);
-      detachAll();
-    };
-    s.addEventListener('abort', onAbort, { once: true });
-    cleanups.push(() => s.removeEventListener('abort', onAbort));
-  }
-  // Also detach if our composed controller aborts via some other path
-  // (e.g. its consumer aborted independently — defense-in-depth).
-  ctrl.signal.addEventListener('abort', detachAll, { once: true });
-  return ctrl.signal;
-}
+// `composeAbortSignals` is imported from `abortSignals.ts` (canonical
+// implementation) and re-exported here for the direct unit tests that
+// exercise the polyfill branch through this module's export.
+export { composeAbortSignals };
 
 /**
  * Check whether a daemon SSE event is a `turn_complete` or

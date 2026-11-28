@@ -83,45 +83,11 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/**
- * Compose multiple `AbortSignal` instances into one that aborts when
- * ANY of the inputs aborts. Uses `AbortSignal.any()` when available
- * (Node 20+), otherwise falls back to a manual wiring approach.
- */
-export function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
-  const anyFn = (
-    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
-  ).any;
-  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
-
-  const ctrl = new AbortController();
-  const cleanups: Array<() => void> = [];
-  const detachAll = () => {
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop();
-      try {
-        fn?.();
-      } catch {
-        /* swallow */
-      }
-    }
-  };
-  for (const s of signals) {
-    if (s.aborted) {
-      ctrl.abort(s.reason);
-      detachAll();
-      return ctrl.signal;
-    }
-    const onAbort = () => {
-      ctrl.abort(s.reason);
-      detachAll();
-    };
-    s.addEventListener('abort', onAbort, { once: true });
-    cleanups.push(() => s.removeEventListener('abort', onAbort));
-  }
-  ctrl.signal.addEventListener('abort', detachAll, { once: true });
-  return ctrl.signal;
-}
+// Compose multiple `AbortSignal` instances into one that aborts when
+// ANY of the inputs aborts — canonical implementation in
+// `abortSignals.ts` (re-exported so ACP transports keep importing it
+// from this module).
+export { composeAbortSignals } from './abortSignals.js';
 
 /**
  * Merge transport-specific headers with caller-provided headers from
