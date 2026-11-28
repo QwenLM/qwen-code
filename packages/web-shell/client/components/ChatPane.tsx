@@ -1546,38 +1546,30 @@ export function ChatPane({
       .find((block) => matchesPaneUserBlock(block, failedPrompt.block));
   }, [blocks, connection.sessionId, failedPrompt]);
 
-  // Carries the specific host diagnostic across ChatSurface's generic
-  // approval-rejection and stop-failure error sinks so transport errors and
-  // mode-lock refusals preserve their cause without double-reporting.
-  const pendingPermissionFailureRef = useRef<{
-    error: unknown;
-    fallback: string;
-  } | null>(null);
-  const pendingCancelFailureRef = useRef<{
-    error: unknown;
-    fallback: string;
-  } | null>(null);
+  // Carries host-specific diagnostics across ChatSurface's generic approval
+  // and stop failure sinks in FIFO settlement order so concurrent attempts
+  // preserve exact 1:1 cause pairing without double-reporting.
+  const pendingSurfaceFailuresRef = useRef<{
+    permission: Array<{ error: unknown; fallback: string }>;
+    cancel: Array<{ error: unknown; fallback: string }>;
+  }>({ permission: [], cancel: [] });
   useEffect(() => {
-    pendingPermissionFailureRef.current = null;
-    pendingCancelFailureRef.current = null;
+    pendingSurfaceFailuresRef.current.permission = [];
+    pendingSurfaceFailuresRef.current.cancel = [];
   }, [connection.sessionId]);
 
   const handleSurfaceError = useCallback(
     (error: unknown, fallback: string) => {
-      const pending = pendingPermissionFailureRef.current;
-      if (
-        pending &&
-        (fallback === t('chat.approvalNotAccepted') ||
-          fallback === t('askUser.submitFailed'))
-      ) {
-        pendingPermissionFailureRef.current = null;
+      const bucket =
+        fallback === t('chat.approvalNotAccepted') ||
+        fallback === t('askUser.submitFailed')
+          ? pendingSurfaceFailuresRef.current.permission
+          : fallback === t('chat.stopNotConfirmed')
+            ? pendingSurfaceFailuresRef.current.cancel
+            : undefined;
+      const pending = bucket?.shift();
+      if (pending) {
         reportError(pending.error, pending.fallback);
-        return;
-      }
-      const pendingCancel = pendingCancelFailureRef.current;
-      if (pendingCancel && fallback === t('chat.stopNotConfirmed')) {
-        pendingCancelFailureRef.current = null;
-        reportError(pendingCancel.error, pendingCancel.fallback);
         return;
       }
       reportError(error, fallback);
@@ -1587,14 +1579,13 @@ export function ChatPane({
 
   const submitPanePermission = useCallback(
     async (id: string, selectedOption: string): Promise<Admission> => {
-      pendingPermissionFailureRef.current = null;
       const request = pendingToolApprovalRef.current;
       const isPlan = request?.id === id && isExitPlanApprovalRequest(request);
       if (isPlan && modeTransitionRef.current?.owner.isCurrent()) {
-        pendingPermissionFailureRef.current = {
+        pendingSurfaceFailuresRef.current.permission.push({
           error: new Error(t('mode.changePending')),
           fallback: 'Failed to submit permission choice',
-        };
+        });
         return 'rejected';
       }
       const owner = sessionOwnerGuard.capture();
@@ -1637,10 +1628,10 @@ export function ChatPane({
       } catch (error) {
         if (transition) releaseModeTransition(transition);
         if (owner.isCurrent()) {
-          pendingPermissionFailureRef.current = {
+          pendingSurfaceFailuresRef.current.permission.push({
             error,
             fallback: 'Failed to submit permission choice',
-          };
+          });
         }
         return 'unknown';
       }
@@ -1655,17 +1646,16 @@ export function ChatPane({
   );
 
   const cancelPanePrompt = useCallback(async (): Promise<Admission> => {
-    pendingCancelFailureRef.current = null;
     const owner = sessionOwnerGuard.capture();
     try {
       await actions.cancel();
       return 'accepted';
     } catch (error) {
       if (owner.isCurrent()) {
-        pendingCancelFailureRef.current = {
+        pendingSurfaceFailuresRef.current.cancel.push({
           error,
           fallback: 'Failed to cancel request',
-        };
+        });
       }
       return 'unknown';
     }

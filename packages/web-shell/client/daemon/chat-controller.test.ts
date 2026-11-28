@@ -493,17 +493,21 @@ describe('daemon controller: pass-through facts and lifecycle', () => {
     expect(h.controller.phase).toBe('failed');
   });
 
-  it('reports running while deps.responding is true and prioritizes cancelling over responding', async () => {
+  it('reports running while deps.responding is true, prioritizes cancelling over responding, and avoids fabricating failed cancel operations', async () => {
     let responding = true;
     let resolveCancel!: (value: Admission) => void;
     const cancelPromise = new Promise<Admission>((resolve) => {
       resolveCancel = resolve;
     });
+    let cancelCalls = 0;
     const h = harness({
       get responding() {
         return responding;
       },
-      cancelPrompt: () => cancelPromise,
+      cancelPrompt: () => {
+        cancelCalls += 1;
+        return cancelCalls === 1 ? cancelPromise : Promise.resolve('unknown');
+      },
     });
     expect(h.controller.phase).toBe('running');
 
@@ -511,7 +515,16 @@ describe('daemon controller: pass-through facts and lifecycle', () => {
     expect(h.controller.phase).toBe('cancelling');
 
     resolveCancel('accepted');
-    await pendingCancel;
+    const acceptedResult = await pendingCancel;
+    expect(acceptedResult.admission).toBe('accepted');
+    expect(acceptedResult.outcome).toBe('unsettled');
+    expect(h.controller.operations).toEqual([]);
+    expect(h.controller.phase).toBe('running');
+
+    const unknownResult = await h.controller.cancel();
+    expect(unknownResult.admission).toBe('unknown');
+    expect(unknownResult.outcome).toBe('failed');
+    expect(h.controller.operations).toEqual([]);
     expect(h.controller.phase).toBe('running');
 
     responding = false;

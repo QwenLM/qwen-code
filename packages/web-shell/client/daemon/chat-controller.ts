@@ -167,6 +167,7 @@ export function createDaemonChatController(
   deps: DaemonChatControllerDeps,
 ): SessionChatController {
   const intents: DaemonChatIntents = createDaemonChatIntents();
+  let hostCancelInFlight = 0;
 
   // promptId -> the attempts it settles. A turn's terminal event closes both
   // the submit that started it and any cancel that targeted it.
@@ -365,6 +366,7 @@ export function createDaemonChatController(
     },
     loadOlder: deps.loadOlder?.bind(deps),
     get phase(): ChatPhase {
+      if (hostCancelInFlight > 0) return 'cancelling';
       const derived = intents.phase(deps.settledPhase ?? 'idle');
       if (derived === 'cancelling') return 'cancelling';
       if (deps.responding) return 'running';
@@ -443,6 +445,25 @@ export function createDaemonChatController(
     async cancel(): Promise<IntentResult> {
       // Resolve the target at dispatch time: the active (FIFO-head) live turn.
       const cancelTarget = livePromptQueue[0];
+      if (cancelTarget === undefined && deps.responding) {
+        // Host-driven responding turn (submitted outside this controller):
+        // surface `'cancelling'` while in flight without fabricating a failed
+        // cancel operation row in `controller.operations`.
+        hostCancelInFlight += 1;
+        let admission: Admission;
+        try {
+          admission = await deps.cancelPrompt();
+        } catch {
+          admission = 'unknown';
+        } finally {
+          hostCancelInFlight -= 1;
+        }
+        return {
+          admission,
+          outcome: admission === 'accepted' ? 'unsettled' : 'failed',
+          target: target(),
+        };
+      }
       if (cancelTarget !== undefined) {
         pendingCancelBinds.set(
           cancelTarget,

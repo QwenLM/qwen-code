@@ -5019,6 +5019,74 @@ describe('ChatPane ChatSurface convergence (slice 4)', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('sends exactly one cancel and reports no error when Stop resolves', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    render({ onError });
+
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('preserves FIFO error causes when two concurrent Stop attempts reject in the same tick', async () => {
+    const onError = vi.fn();
+    streamingStateValue = 'responding';
+    let rejectA!: (reason: unknown) => void;
+    let rejectB!: (reason: unknown) => void;
+    cancel
+      .mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectA = reject;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectB = reject;
+        }),
+      );
+    render({ onError });
+
+    await act(async () => {
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      testid('pane-cancel')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+
+    const errA = new Error('stop A boom');
+    const errB = new Error('stop B boom');
+    await act(async () => {
+      rejectA(errA);
+      rejectB(errB);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenNthCalledWith(
+      1,
+      errA,
+      'Failed to cancel request',
+    );
+    expect(onError).toHaveBeenNthCalledWith(
+      2,
+      errB,
+      'Failed to cancel request',
+    );
+  });
+
   it('resets viewport captures between tests and wires DaemonTranscriptViewport and DAEMON_STATUS_CARD_RENDERERS into TranscriptViewport', () => {
     expect(
       latestTranscriptViewportProps.sessionViewportComponent,

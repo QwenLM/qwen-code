@@ -3,10 +3,11 @@
 [English](2026-11-16-unified-chat-surface.md) |
 [简体中文](2026-11-16-unified-chat-surface.zh-CN.md)
 
-状态：已实现（切片 1–6 已全部落地 `main`，完成于 2026-11-28）。原提案日期：
-2026-11-16（2026-11-16 评审后修订：纳入 `ChatPane`、区分受理与结果确立、收紧
-契约不变量并明确守卫车道）。下文「现状」章节保留为 2026-11-16 提案基线记录；
-全部已合入 PR 与子设计文档见 **迁移切片** 下的已落地台账。
+状态：已实现（切片 1–6 已落地 `main`，切片 4b 于 #18596 完成，日期
+2026-11-28）。原提案日期：2026-11-16（2026-11-16 评审后修订：纳入
+`ChatPane`、区分受理与结果确立、收紧契约不变量并明确守卫车道）。下文「现状」
+章节保留为 2026-11-16 提案基线记录；全部已合入 PR 与子设计文档见
+**迁移切片** 下的已落地台账。
 
 ## 问题
 
@@ -375,7 +376,7 @@ managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复�
 | 2b–2e     | Daemon 意图引擎、控制器、绑定 hook、`ChatSurface`                                                           | #17709、#17794、#17895、#17952（[Daemon 控制器](2026-11-19-daemon-chat-controller.zh-CN.md)）                                                                                                                     |
 | 2f.1–2f.3 | 会话作用域准入锁、历史/取消守卫、`App.tsx` 主列切换                                                         | #18066、#18091、#18505（[会话准入锁](2026-11-22-chat-surface-session-locks.zh-CN.md)）                                                                                                                            |
 | 3a–3c.3   | Managed 适配器核心与 hook、Managed 就绪解耦、`AskUserQuestion` 与 `ManagedSessionsPage` 切换                | #18117、#18205、#18246、#18273、#18376（[Managed 控制器](2026-11-22-managed-chat-controller.zh-CN.md)、[就绪解耦](2026-11-24-chat-surface-managed-readiness.zh-CN.md)）                                           |
-| 4a–4b     | `ChatPane` 收敛至 `ChatSurface` + 退场临时取消/`isResponding` 覆写                                          | #18476 + Slice 4b 收尾（[ChatPane 切换](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)）                                                                                                                      |
+| 4a–4b     | `ChatPane` 收敛至 `ChatSurface` + 退场临时取消/`isResponding` 覆写                                          | #18476、#18596（[ChatPane 切换](2026-11-27-chat-pane-chat-surface-switch.zh-CN.md)）                                                                                                                              |
 | 5         | Managed 会话能力门控 `ComposerUsageStats` 与上下文入口对等                                                  | #18518（[用量与上下文对等](2026-11-27-managed-usage-stats-and-context-parity.zh-CN.md)）                                                                                                                          |
 | 6a–6c     | Fail-closed AST/编译器边界守卫、`managed-host` daemon 值导入清零（47 → 31 → 16 → 0）、CI 零 daemon 产物门禁 | #18532、#18543、#18582（[6a](2026-11-27-managed-host-boundary-guards-and-cleanup.zh-CN.md)、[6b](2026-11-27-chat-editor-daemon-decoupling.zh-CN.md)、[6c](2026-11-28-managed-host-zero-daemon-cleanup.zh-CN.md)） |
 
@@ -436,9 +437,11 @@ managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复�
 
 1. 每一个聊天列——daemon 主列、分屏、侧任务与 managed——经由同一个
    `ChatSurface` 组件渲染；导入图显示一个聊天面、两个适配器。
-2. 现状表列出的分叉编排从 `ManagedSessionsPage.tsx` 与 `ChatPane.tsx`
-   删除（转录、输入框接线、审批流程、状态展示），后端专属面板以插槽
-   保留。
+2. 转录渲染、工具审批流程、提问渲染以及窗格临时的取消/`isResponding`
+   覆写已从 `ManagedSessionsPage.tsx` 与 `ChatPane.tsx` 删除；daemon
+   专属斜杠/排队提交流程（`onComposerSubmit`）、后端专属面板及由共享
+   `ComposerStatusStack` 承载的 `composerStatus` 插槽与 `App.tsx` 一致
+   保留为宿主插槽。
 3. `chat-core` 自身模块不含 daemon 导入，且 managed-only 源码图已清空
    daemon 值导入，由源码级检查加 managed-host 车道的产物 grep 证明；
    Managed-only 入口继续在没有 daemon 的情况下工作。
