@@ -25,6 +25,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import type { Key } from './useKeypress.js';
+import { sanitizeTerminalLine } from '../utils/textUtils.js';
 
 const DELETION_KEY_NAMES = new Set(['backspace', 'delete']);
 const graphemeSegmenter = new Intl.Segmenter(undefined, {
@@ -81,6 +82,29 @@ export function isPrintableSearchChar(key: Key): boolean {
   const code = graphemes[0].codePointAt(0);
   if (code === undefined) return false;
   return code >= 0x20 && code !== 0x7f && (code < 0x80 || code > 0x9f);
+}
+
+/**
+ * Extract single-line printable text from an unmodified bracketed paste event
+ * for a focused search input.
+ *
+ * Allows at most one trailing CR/LF line ending (common when copying a single
+ * line from a terminal or editor) while rejecting multi-line pastes,
+ * whitespace-only pastes, and stripping terminal escape sequences, control
+ * characters, DEL bytes, and Unicode bidi override characters.
+ */
+export function getSearchPasteText(key: Key): string | null {
+  if (!key.paste || key.ctrl || key.meta) return null;
+
+  const candidate = key.sequence.endsWith('\r\n')
+    ? key.sequence.slice(0, -2)
+    : key.sequence.endsWith('\n') || key.sequence.endsWith('\r')
+      ? key.sequence.slice(0, -1)
+      : key.sequence;
+  if (/[\r\n\v\f\u2028\u2029\u0085]/.test(candidate)) return null;
+
+  const cleaned = sanitizeTerminalLine(candidate).replace(/\x7f/g, '');
+  return cleaned.trim().length > 0 ? cleaned : null;
 }
 
 export interface UseSessionSearchInputOptions {
@@ -174,6 +198,14 @@ export function useSessionSearchInput(
   const handleSearchKey = useCallback(
     (key: Key): void => {
       const { name, sequence, ctrl } = key;
+
+      if (key.paste) {
+        const pasted = getSearchPasteText(key);
+        if (pasted) {
+          setSearchQuery((q) => q + pasted);
+        }
+        return;
+      }
 
       if (name === 'escape') {
         // Drop the query; the ref-backed setter fires onExitToList

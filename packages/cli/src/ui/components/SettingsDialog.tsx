@@ -43,6 +43,7 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
+  getSearchPasteText,
   isDeletionKey,
   isPrintableSearchChar,
   removeLastGrapheme,
@@ -770,6 +771,13 @@ export function SettingsDialog({
 
       // Settings tab, search box focused: type to filter; ↑ to tabs, ↓ to list.
       if (focusZone === 'search') {
+        if (key.paste) {
+          const pasted = getSearchPasteText(key);
+          if (pasted) {
+            setSearchQuery((q) => q + pasted);
+          }
+          return;
+        }
         if (name === 'up') {
           setFocusZone('tabs');
         } else if (name === 'down' || name === 'return') {

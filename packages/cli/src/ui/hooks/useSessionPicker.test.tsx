@@ -277,3 +277,39 @@ describe('useSessionPicker multi-select state', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+describe('useSessionPicker search paste', () => {
+  it('accepts single-line paste in search mode and rejects multi-line or list-mode paste', () => {
+    const { result } = renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect: vi.fn(),
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: sessions,
+        }),
+      { wrapper },
+    );
+
+    // List mode: bracketed paste must not implicitly enter search mode.
+    pressKey({ paste: true, sequence: 'two' });
+    expect(result.current.viewMode).toBe('list');
+    expect(result.current.searchQuery).toBe('');
+
+    // Enter search mode explicitly via '/'.
+    pressKey({ sequence: '/' });
+    expect(result.current.viewMode).toBe('search');
+
+    // Multi-line paste is rejected even in search mode.
+    pressKey({ paste: true, sequence: 'one\ntwo' });
+    expect(result.current.searchQuery).toBe('');
+
+    // Single-line paste updates the query and filters the session list.
+    pressKey({ paste: true, sequence: 'two\r\n' });
+    expect(result.current.searchQuery).toBe('two');
+    expect(result.current.filteredSessions.map((s) => s.sessionId)).toEqual([
+      's2',
+    ]);
+  });
+});

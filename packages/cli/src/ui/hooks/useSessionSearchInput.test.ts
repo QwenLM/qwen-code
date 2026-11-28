@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import {
+  getSearchPasteText,
   isPrintableSearchChar,
   useSessionSearchInput,
 } from './useSessionSearchInput.js';
@@ -505,6 +506,127 @@ describe('useSessionSearchInput', () => {
       );
     });
     expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+});
+
+describe('getSearchPasteText', () => {
+  it('extracts single-line ASCII, CJK, emoji, and space-containing pastes', () => {
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'enableAutoUpdate' })),
+    ).toBe('enableAutoUpdate');
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: '登录 🚀 vim mode' })),
+    ).toBe('登录 🚀 vim mode');
+  });
+
+  it('strips trailing CR/LF line endings from a single copied line', () => {
+    expect(getSearchPasteText(k({ paste: true, sequence: '登录\r\n' }))).toBe(
+      '登录',
+    );
+    expect(getSearchPasteText(k({ paste: true, sequence: 'foo\n' }))).toBe(
+      'foo',
+    );
+    expect(getSearchPasteText(k({ paste: true, sequence: 'bar\r' }))).toBe(
+      'bar',
+    );
+  });
+
+  it('rejects multi-line pastes, trailing blank lines, and line/page separators', () => {
+    expect(getSearchPasteText(k({ paste: true, sequence: 'a\nb' }))).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\r\nb' })),
+    ).toBeNull();
+    expect(getSearchPasteText(k({ paste: true, sequence: 'a\rb' }))).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: '\nfoo' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'foo\n\n' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\x0bb' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\x0cb' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\u2028b' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\u2029b' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: 'a\u0085b' })),
+    ).toBeNull();
+  });
+
+  it('strips ANSI escapes, C0/C1 controls, bidi overrides, DEL bytes, flattens tabs, and rejects whitespace-only pastes', () => {
+    expect(
+      getSearchPasteText(
+        k({
+          paste: true,
+          sequence: '\x1b[31mhello\x1b[0m\tworld\x7f\x07\u009b\u202e',
+        }),
+      ),
+    ).toBe('hello world');
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: '\x1b[31m\x1b[0m\t\x7f' })),
+    ).toBeNull();
+    expect(getSearchPasteText(k({ paste: true, sequence: '\r\n' }))).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, sequence: '   \r\n' })),
+    ).toBeNull();
+  });
+
+  it('rejects non-paste, modified, or empty sequences', () => {
+    expect(getSearchPasteText(k({ paste: false, sequence: 'foo' }))).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, ctrl: true, sequence: 'foo' })),
+    ).toBeNull();
+    expect(
+      getSearchPasteText(k({ paste: true, meta: true, sequence: 'foo' })),
+    ).toBeNull();
+    expect(getSearchPasteText(k({ paste: true, sequence: '' }))).toBeNull();
+  });
+});
+
+describe('useSessionSearchInput paste handling', () => {
+  it('appends a sanitized single-line paste in search mode', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+      result.current.handleSearchKey(k({ paste: true, sequence: ' 登录\r\n' }));
+    });
+
+    expect(result.current.searchQuery).toBe('a 登录');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('ignores multi-line or control-only pastes without deleting or exiting', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    act(() => {
+      result.current.handleSearchKey(
+        k({ paste: true, sequence: 'line1\nline2' }),
+      );
+      result.current.handleSearchKey(k({ paste: true, sequence: '\x7f' }));
+      result.current.handleSearchKey(
+        k({ name: 'escape', paste: true, sequence: '' }),
+      );
+    });
+
+    expect(result.current.searchQuery).toBe('a');
     expect(onExitToList).not.toHaveBeenCalled();
   });
 });

@@ -1884,6 +1884,62 @@ describe('SettingsDialog', () => {
 
       unmount();
     });
+
+    it('accepts single-line bracketed paste in the focused search box and rejects multi-line or list-zone paste', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // List zone: bracketed paste must not enter the search box or seed a query.
+      act(() => {
+        stdin.write('\x1b[200~vim\x1b[201~');
+      });
+      await wait();
+      expect(lastFrame()).toContain('Search settings…');
+
+      // Move focus up into the search box.
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+
+      // Multi-line paste is rejected in the search box.
+      act(() => {
+        stdin.write('\x1b[200~vim\nmode\x1b[201~');
+      });
+      await wait();
+      expect(lastFrame()).toContain('Search settings…');
+
+      // Single-line pastes append to the search box and filter settings.
+      act(() => {
+        stdin.write('\x1b[200~vim\x1b[201~');
+      });
+      await wait();
+      expect(lastFrame()).toContain('⌕ vim');
+
+      act(() => {
+        stdin.write('\x1b[200~ mode\r\n\x1b[201~');
+      });
+      await wait();
+      const filteredFrame = lastFrame();
+      expect(filteredFrame).toContain('⌕ vim mode');
+      expect(filteredFrame).toContain('Vim Mode');
+      expect(filteredFrame).not.toContain('Auto Update');
+
+      // Pasting a raw DEL byte does not delete existing search query chars.
+      act(() => {
+        stdin.write('\x1b[200~\x7f\x1b[201~');
+      });
+      await wait();
+      expect(lastFrame()).toContain('⌕ vim mode');
+
+      unmount();
+    });
   });
 
   describe('Snapshot Tests', () => {
