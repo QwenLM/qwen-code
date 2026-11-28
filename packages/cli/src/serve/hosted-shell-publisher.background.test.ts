@@ -37,6 +37,7 @@ import { HostedMonitorRemoteExecutor } from './hosted-monitor-remote-executor.js
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
+import { monitorNotificationText } from './hosted-monitor-notification.js';
 
 // child_run's shell kind and monitor_run are enabled by the H3 enablement
 // slice (#13856): this suite drives both background paths through the real
@@ -956,6 +957,98 @@ it.each([false, true])(
     expect(wakes).toHaveLength(lifecycle ? 0 : 1);
   },
 );
+
+it('bounds an ownerless watch tail before its observation and notification', async () => {
+  const r = await rig();
+  const monitorId = 'monitor-tail-large';
+  const BINDING = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId,
+    ownerScopeId: r.key.sessionId,
+    executionCallId: monitorId,
+    args: { command: 'seq 1 1005', description: 'large watch' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted(monitorId, BINDING);
+  const request = backgroundRequest(r.key, '1', true);
+  (request.capture as Record<string, unknown>)['executionCallId'] = monitorId;
+  publisher!.register(
+    { reference: request.reference, capture: request.capture },
+    'model-call-m',
+    request.reference.sessionId,
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  await r.monitors.attach(monitorId, BINDING, { pid: 9 });
+  prepared.sink.setStarted(9);
+  const lines = Array.from(
+    { length: 1_005 },
+    (_, index) => `${index.toString().padStart(4, '0')}:${'x'.repeat(40)}`,
+  );
+  await prepared.sink.write(
+    'stdout',
+    Buffer.from(`${lines.join('\n')}\n`, 'utf8'),
+  );
+  prepared.sink.setProcessResult({
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    exitCode: 0,
+    signal: null,
+    pid: undefined,
+    executionMethod: 'child_process',
+  });
+  await prepared.sink.finish('stdout', true);
+  const envelope = await prepared.sink.finalize('success', [], undefined);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = parseMonitorRun(
+    session!.authority.extensionRecord('monitor_run', monitorId)!.record,
+  );
+  expect(record).toMatchObject({
+    observationSequence: 1,
+    notifiedThrough: 1,
+    stopReason: 'exited',
+    run: { state: 'settled', execution: 'settled' },
+  });
+  const observation = JSON.parse(
+    (await session!.resources.read(record.lastObservationRef!)).toString(
+      'utf8',
+    ),
+  ) as { lines: string[] };
+  expect(observation.lines).toHaveLength(712);
+  expect(
+    Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+  ).toBeLessThanOrEqual(32 * 1024);
+  const retained = observation.lines.slice(0, -1);
+  expect(retained).toEqual(lines.slice(0, retained.length));
+  expect(observation.lines.at(-1)).toBe(
+    `... ${lines.length - retained.length} more lines omitted`,
+  );
+
+  const inputEvent = session!.authority
+    .eventsInSequenceRange(1, session!.authority.committedSequence)
+    .find((event) => event.kind === 'input.accepted');
+  expect(inputEvent).toBeDefined();
+  const contentRef = (
+    inputEvent!.payload as unknown as { contentRef: ManagedSessionDurableRef }
+  ).contentRef;
+  const notification = JSON.parse(
+    (await session!.resources.read(contentRef)).toString('utf8'),
+  ) as { text: string };
+  expect(notification.text).toBe(
+    monitorNotificationText({
+      monitorId,
+      toolUseId: monitorId,
+      description: 'large watch',
+      eventCount: 1,
+      lines: observation.lines,
+    }),
+  );
+});
 
 it('completes a refused exit settle on the record’s own attach, without a client retry', async () => {
   const r = await rig();

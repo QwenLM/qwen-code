@@ -24,7 +24,10 @@ import {
   type ManagedDeliveryResource,
   type ManagedMonitorStopReason,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
-import { monitorNotificationText } from './hosted-monitor-notification.js';
+import {
+  boundMonitorObservationLines,
+  monitorNotificationText,
+} from './hosted-monitor-notification.js';
 import type {
   ManagedShellCaptureSink,
   ToolResultAcknowledgement,
@@ -947,7 +950,7 @@ export class WorkerMonitorPolicy {
 
   private async flush(): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
-    const lines = this.buffered;
+    const lines = boundMonitorObservationLines(this.buffered);
     this.buffered = [];
     this.sequence += 1;
     const inputId = `${this.params.monitorId}:notify:${this.sequence}`;

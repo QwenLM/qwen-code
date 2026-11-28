@@ -148,6 +148,7 @@ commands without backgrounding instead.
   the model still reads each line's text, so avoid monitoring streams that
   external parties can write to unless you trust the model to ignore embedded
   instructions.
+- **Managed observation windows:** Each observation contains at most 1,000 window entries and 32 KiB of their raw UTF-8 text. A larger window keeps the leading complete entries and appends one `... N more lines omitted` marker, where `N` counts omitted window entries, not original source lines. Existing lane-specific 4,096-character partial-line handling runs before this rule and can split or discard source-line fragments. An individual window entry larger than the 32 KiB budget is omitted whole rather than sliced. If the first complete entry fits but the accurate omission marker does not, the helper preserves that entry without adding a marker instead of dropping the entire observation.
 - **Permissions:** `monitor` has its own permission boundary and permission
   rules, such as `Monitor(git status)`. Read-only commands are automatically
   allowed; commands that modify state require user approval; commands containing
