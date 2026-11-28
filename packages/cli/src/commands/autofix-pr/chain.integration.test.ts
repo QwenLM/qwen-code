@@ -1274,5 +1274,168 @@ describe.skipIf(process.platform === 'win32')(
       expect(run(inPlaceDir, 'rev-parse', 'HEAD')).toBe(fixedSha);
       expectPushes([[head, fixedSha]]);
     });
+
+    it('resolves fixed review threads through reply after push, and keeps them open under --no-resolve', async () => {
+      const head = prHead();
+      updateWorld((world) => {
+        world.threads.push(
+          {
+            id: 'PRRT_FIXED',
+            path: 'sum.js',
+            line: 1,
+            comments: [
+              {
+                id: 'PRRC_801',
+                databaseId: 801,
+                author: 'alice',
+                authorAssociation: 'MEMBER',
+                body: 'Drop the + 1.',
+              },
+            ],
+          },
+          {
+            id: 'PRRT_DECLINED',
+            path: 'sum.js',
+            line: 1,
+            comments: [
+              {
+                id: 'PRRC_802',
+                databaseId: 802,
+                author: 'alice',
+                authorAssociation: 'MEMBER',
+                body: 'Rename sum to add.',
+              },
+            ],
+          },
+        );
+      });
+      const [prep] = await cli(
+        'prepare',
+        '7',
+        '--repo',
+        'o/r',
+        '--host',
+        'ghe.example.com',
+      );
+      const wt = prep['worktreePath'] as string;
+      const [snap] = await cli('snapshot', '7');
+      expect(snap).toMatchObject({ action: 'fix' });
+
+      const fixedSha = agentCommits(
+        wt,
+        'export const sum = (a, b) => a + b;\n',
+        'Fix sum',
+      );
+      expect(await cli('push', '7')).toMatchObject([
+        {
+          pushed: true,
+          sha: fixedSha,
+        },
+      ]);
+
+      const planPath = join(clone, '.qwen', 'tmp', 'autofix-pr-7-plan.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          replies: [
+            {
+              replyTo: 801,
+              body: `Fixed in ${fixedSha.slice(0, 7)}: dropped + 1.`,
+              handled: ['PRRC_801'],
+              resolve: true,
+            },
+            {
+              replyTo: 802,
+              body: 'Not changed: public export name.',
+              handled: ['PRRC_802'],
+            },
+          ],
+          summary: { body: `Pushed ${fixedSha.slice(0, 7)}.`, handled: [] },
+        }),
+      );
+      const [replied] = await cli('reply', '7', planPath);
+      expect(replied).toMatchObject({
+        resolvedThreads: ['PRRT_FIXED'],
+        resolveSkipped: [],
+      });
+
+      // World reflects PRRT_FIXED resolved and PRRT_DECLINED still open.
+      const worldAfter = JSON.parse(readFileSync(worldPath, 'utf8')) as {
+        threads: Array<{ id: string; isResolved?: boolean }>;
+      };
+      expect(
+        worldAfter.threads.find((t) => t.id === 'PRRT_FIXED')?.isResolved,
+      ).toBe(true);
+      expect(
+        Boolean(
+          worldAfter.threads.find((t) => t.id === 'PRRT_DECLINED')?.isResolved,
+        ),
+      ).toBe(false);
+
+      // A new thread replied with --no-resolve stays open even when marked resolve: true.
+      updateWorld((world) => {
+        world.threads.push({
+          id: 'PRRT_NORESOLVE',
+          path: 'sum.js',
+          line: 1,
+          comments: [
+            {
+              id: 'PRRC_803',
+              databaseId: 803,
+              author: 'alice',
+              authorAssociation: 'MEMBER',
+              body: 'Add a newline.',
+            },
+          ],
+        });
+      });
+      const [snap2] = await cli('snapshot', '7');
+      expect(snap2).toMatchObject({ action: 'fix' });
+      const sha2 = agentCommits(
+        wt,
+        'export const sum = (a, b) => a + b;\n\n',
+        'Add trailing newline',
+      );
+      expect(await cli('push', '7')).toMatchObject([
+        {
+          pushed: true,
+          sha: sha2,
+        },
+      ]);
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          replies: [
+            {
+              replyTo: 803,
+              body: `Fixed in ${sha2.slice(0, 7)}: added newline.`,
+              handled: ['PRRC_803'],
+              resolve: true,
+            },
+          ],
+        }),
+      );
+      const [replied2] = await cli('reply', '7', planPath, '--no-resolve');
+      expect(replied2).toMatchObject({
+        resolvedThreads: [],
+        resolveSkipped: [{ replyTo: 803, reason: 'disabled' }],
+      });
+      const worldFinal = JSON.parse(readFileSync(worldPath, 'utf8')) as {
+        threads: Array<{ id: string; isResolved?: boolean }>;
+      };
+      expect(
+        Boolean(
+          worldFinal.threads.find((t) => t.id === 'PRRT_NORESOLVE')?.isResolved,
+        ),
+      ).toBe(false);
+
+      expect(await cli('cleanup', '7')).toMatchObject({
+        0: { removed: true },
+      });
+      expectPushes([
+        [head, fixedSha],
+        [fixedSha, sha2],
+      ]);
+    });
   },
 );

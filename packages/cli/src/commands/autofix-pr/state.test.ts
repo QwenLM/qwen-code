@@ -272,6 +272,7 @@ describe('stateDefect', () => {
       ['pushCount', '0'],
       ['watch', { every: 3, reply: true, instructions: '' }],
       ['watch', { every: 2, reply: 'yes', instructions: '' }],
+      ['watch', { every: 2, reply: true, resolve: 'no', instructions: '' }],
       ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],

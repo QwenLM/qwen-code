@@ -196,7 +196,7 @@ describe('fix-start and fix-end', () => {
       refused(
         'fix_in_flight',
         // How that fix ends, as every refusal with this code says.
-        /a fix agent is working in PR #7's worktree \(attempt 0123456789ab.*\/autofix-pr stop 7.*within 45 minutes/,
+        /a fix agent is working in PR #7's worktree \(attempt 0123456789ab.*\/autofix-pr stop 7.*within 75 minutes/,
       ),
     );
     age(FIX_FRESH_MS + 1000);
@@ -370,8 +370,8 @@ describe('fix-start and fix-end', () => {
     // The two halves of the marker's contract: the session (core) refreshes
     // and drops it, these helpers read it.
     expect(FIX_HEARTBEAT_MS).toBe(30_000);
-    expect(FIX_TIME_LIMIT_MS).toBe(30 * 60_000);
-    expect(FIX_CLAIM_DEADLINE_MS).toBe(40 * 60_000);
+    expect(FIX_TIME_LIMIT_MS).toBe(60 * 60_000);
+    expect(FIX_CLAIM_DEADLINE_MS).toBe(70 * 60_000);
     // Not stale before the session would drop it for a late refresh.
     expect(FIX_FRESH_MS).toBeGreaterThanOrEqual(
       FIX_HEARTBEAT_MS + FIX_HEARTBEAT_LATE_MS,

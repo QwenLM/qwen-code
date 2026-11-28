@@ -227,7 +227,7 @@ function reviewNode(review) {
 function threadNode(thread) {
   return {
     id: thread.id,
-    isResolved: false,
+    isResolved: Boolean(thread.isResolved),
     isOutdated: false,
     path: thread.path,
     line: thread.line,
@@ -531,7 +531,33 @@ function api() {
       unsupported('a second path');
     }
   }
-  if (path === 'graphql') return print(graphql(fields, typed));
+  if (path === 'graphql') {
+    if (method === 'POST' && stdin) {
+      const payload = JSON.parse(stdin);
+      const query = String(payload.query ?? '');
+      if (query.includes('resolveReviewThread')) {
+        const threadId = payload.variables?.threadId;
+        const thread = world.threads.find((t) => t.id === threadId);
+        if (!thread) {
+          return print({
+            data: { resolveReviewThread: null },
+            errors: [{ message: `thread ${threadId} not found` }],
+          });
+        }
+        thread.isResolved = true;
+        saveWrite('gh: HTTP 502: Bad Gateway');
+        return print({
+          data: {
+            resolveReviewThread: {
+              thread: { id: thread.id, isResolved: true },
+            },
+          },
+        });
+      }
+      unsupported('GraphQL mutation');
+    }
+    return print(graphql(fields, typed));
+  }
   if (path === 'user') return answer({ login: world.viewer }, jq);
 
   const base = `repos/${slug}/`;

@@ -366,7 +366,9 @@ describe('trackFailingChecks', () => {
   });
 
   it(`keeps the newest ${MAX_PUSHES} heads it had no result for`, () => {
-    const between = Array.from({ length: 11 }, (_, i) => sha(i.toString(16)));
+    const between = Array.from({ length: MAX_PUSHES + 1 }, (_, i) =>
+      i.toString(16).padStart(2, '0').repeat(20),
+    );
     expect(
       trackFailingChecks(
         pr(H3, [checkRun('FAILURE')]),
@@ -378,7 +380,9 @@ describe('trackFailingChecks', () => {
     ).toEqual([
       {
         ...record(H3, 1, H3),
-        unanswered: between.slice(-10).map((s) => ({ sha: s, pushes: 1 })),
+        unanswered: between
+          .slice(-MAX_PUSHES)
+          .map((s) => ({ sha: s, pushes: 1 })),
       },
     ]);
   });

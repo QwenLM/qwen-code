@@ -56,8 +56,16 @@ const MAX_BODY_CHARS = 65_536;
 const MAX_NEEDS_HUMAN_CHARS = 300;
 
 export interface ReplyPlan {
-  /** Replies to review threads, by the thread's first comment. */
-  replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
+  /** Replies to review threads, by the thread's first comment. Set
+   * `resolve: true` only when the round verified and pushed a fix for that
+   * thread; the helper resolves it fail-closed unless `--no-resolve` or
+   * `--no-post`. */
+  replies?: Array<{
+    replyTo: number;
+    body: string;
+    handled: string[];
+    resolve?: boolean;
+  }>;
   /** The round's PR comment: what the push addressed and how it was
    * verified, or — with nothing pushed — what blocks it and needs a person. */
   summary?: { body: string; handled?: string[] } | null;
@@ -70,6 +78,19 @@ export interface ReplyPlan {
   /** One line per item the round left for a person, for `status`. */
   needsHuman?: string[];
 }
+
+export type ResolveSkipReason =
+  | 'no_post'
+  | 'disabled'
+  | 'not_pushed'
+  | 'head_mismatch'
+  | 'thread_not_found'
+  | 'already_resolved'
+  | 'not_replied'
+  | 'new_comment_in_thread'
+  | 'graphql_error'
+  | 'not_resolved'
+  | 'request_failed';
 
 export interface ReplyOutcome {
   posted: Array<{ kind: 'thread' | 'summary'; id: string; url: string }>;
@@ -85,6 +106,10 @@ export interface ReplyOutcome {
   /** Replies found already on the PR (a POST whose answer was lost) and
    * recorded instead of posted again. */
   adopted: number;
+  /** Review threads resolved on GitHub by this run (their GraphQL ids). */
+  resolvedThreads: string[];
+  /** Threads marked `resolve: true` that were left open (fail-closed). */
+  resolveSkipped: Array<{ replyTo: number; reason: ResolveSkipReason }>;
 }
 
 function stringList(value: unknown, what: string): string[] {
@@ -151,10 +176,15 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
           `replies[${index}].handled must name the thread comments the reply answers`,
         );
       }
+      const resolve = reply['resolve'];
+      if (resolve !== undefined && typeof resolve !== 'boolean') {
+        throw new TypeError(`replies[${index}].resolve must be a boolean`);
+      }
       return {
         replyTo: replyTo as number,
         body: bodyOf(reply['body'], `replies[${index}].body`),
         handled,
+        ...(resolve === true ? { resolve: true } : {}),
       };
     },
   );
@@ -223,29 +253,41 @@ function keyHead(key: string): string | null {
 }
 
 /**
- * The failure keys the round's prepared snapshot reported. The head can
- * move on from one while the round runs — a re-run, a run a review starts
- * — and the round's answer to it still stands: a key that names no run (a
- * workflow a review starts) is the one the next failure of that check on
- * the head carries.
+ * The round's prepared snapshot: its failure keys (the head can move on from
+ * one while the round runs — a re-run, a run a review starts — and the round's
+ * answer to it still stands) and the `headSha` the round started from (so
+ * thread resolution can prove this round actually pushed a new head after
+ * reading the thread).
  */
-function snapshotChecks(path: string): Set<string> {
+function roundSnapshot(path: string): {
+  checks: Set<string>;
+  headSha: string | null;
+} {
   // A FIFO in its place would block, the lock held.
-  if (!isRegularFile(path)) return new Set();
+  if (!isRegularFile(path)) return { checks: new Set(), headSha: null };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return new Set();
+    return { checks: new Set(), headSha: null };
   }
-  const events = (parsed as { events?: unknown } | null)?.events;
-  if (!Array.isArray(events)) return new Set();
-  return new Set(
-    events.flatMap((event: unknown) => {
-      const { type, key } = (event ?? {}) as { type?: unknown; key?: unknown };
-      return type === 'ci_failed' && typeof key === 'string' ? [key] : [];
-    }),
-  );
+  const obj = parsed as { events?: unknown; headSha?: unknown } | null;
+  const headSha =
+    typeof obj?.headSha === 'string' && obj.headSha !== '' ? obj.headSha : null;
+  const events = obj?.events;
+  if (!Array.isArray(events)) return { checks: new Set(), headSha };
+  return {
+    headSha,
+    checks: new Set(
+      events.flatMap((event: unknown) => {
+        const { type, key } = (event ?? {}) as {
+          type?: unknown;
+          key?: unknown;
+        };
+        return type === 'ci_failed' && typeof key === 'string' ? [key] : [];
+      }),
+    ),
+  };
 }
 
 /**
@@ -324,11 +366,64 @@ function postComment(path: string, body: string): { id: string; url: string } {
   return { id: response.node_id, url: response.html_url ?? '' };
 }
 
+const RESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+function resolveReviewThread(threadId: string):
+  | { resolved: true }
+  | {
+      resolved: false;
+      reason: 'graphql_error' | 'not_resolved' | 'request_failed';
+    } {
+  try {
+    const response = JSON.parse(
+      ghWithInput(
+        JSON.stringify({
+          query: RESOLVE_REVIEW_THREAD_MUTATION,
+          variables: { threadId },
+        }),
+        'api',
+        '--method',
+        'POST',
+        'graphql',
+        '--input',
+        '-',
+      ),
+    ) as {
+      errors?: unknown[];
+      data?: {
+        resolveReviewThread?: {
+          thread?: { id?: string; isResolved?: boolean };
+        };
+      };
+    };
+    if (Array.isArray(response.errors) && response.errors.length > 0) {
+      return { resolved: false, reason: 'graphql_error' };
+    }
+    if (response.data?.resolveReviewThread?.thread?.isResolved === true) {
+      return { resolved: true };
+    }
+    return { resolved: false, reason: 'not_resolved' };
+  } catch {
+    return { resolved: false, reason: 'request_failed' };
+  }
+}
+
 export interface ReplyArgs {
   pr: number;
   planPath: string;
   /** `--no-post`: record what was handled, post nothing (`--no-reply`). */
   post: boolean;
+  /** `--no-resolve`: leave fixed review threads open instead of resolving them. */
+  resolve?: boolean;
   /** The scheduled task that woke the round. */
   task?: string;
 }
@@ -382,6 +477,17 @@ function replyLocked(
     throw new AutofixPrRefusal(
       'plan_invalid',
       `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
+    );
+  }
+  const allowResolve = args.resolve !== false;
+  if (
+    allowResolve &&
+    args.task !== undefined &&
+    state.watch?.resolve === false
+  ) {
+    throw new AutofixPrRefusal(
+      'plan_invalid',
+      `PR #${args.pr}'s watch was started with --no-resolve: run reply with --no-resolve.`,
     );
   }
   setGhHost(state.host);
@@ -516,11 +622,12 @@ function replyLocked(
   const knownChecks = new Set(state.handledChecks ?? []);
   // The round of a background fix claimed its snapshot under another
   // name, and no round prepared one since.
-  const roundChecks = snapshotChecks(
+  const roundSnap = roundSnapshot(
     isRegularFile(paths.snapshotPath)
       ? paths.snapshotPath
       : fixSnapshotPath(paths, args.pr),
   );
+  const roundChecks = roundSnap.checks;
   const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
@@ -600,7 +707,10 @@ function replyLocked(
     handledChecks: 0,
     ignoredChecks,
     adopted,
+    resolvedThreads: [],
+    resolveSkipped: [],
   };
+  const postedReplyTos = new Set<number>();
   const addHandled = (ids: string[]) => {
     const fresh = [...new Set(ids)].filter((id) => !done.has(id));
     for (const id of fresh) done.add(id);
@@ -661,6 +771,7 @@ function replyLocked(
       pendingPosts: settled,
     });
     outcome.posted.push({ kind: 'thread', ...posted });
+    postedReplyTos.add(reply.replyTo);
   }
 
   // A summary is posted once: one that handles comments, while any of them
@@ -736,6 +847,89 @@ function replyLocked(
       ? { handledConflictSha: head }
       : {}),
   });
+
+  // Fail-closed thread resolution: only after replies and handled state are
+  // persisted, only when this watch pushed the current head and GitHub's live
+  // head matches it, and only for threads replied to by this plan with no
+  // unanswered trusted follow-up comments. Never calls unresolve.
+  const resolveCandidates = plan.replies.filter(
+    (reply) => reply.resolve === true,
+  );
+  if (resolveCandidates.length > 0) {
+    const pushedThisRound =
+      state.pushedShas.includes(head) &&
+      roundSnap.headSha !== null &&
+      roundSnap.headSha !== head;
+    const globalSkip: ResolveSkipReason | null = !args.post
+      ? 'no_post'
+      : !allowResolve
+        ? 'disabled'
+        : !pushedThisRound
+          ? 'not_pushed'
+          : pr.headRefOid !== head
+            ? 'head_mismatch'
+            : null;
+    if (globalSkip) {
+      for (const reply of resolveCandidates) {
+        outcome.resolveSkipped.push({
+          replyTo: reply.replyTo,
+          reason: globalSkip,
+        });
+      }
+    } else {
+      for (const reply of resolveCandidates) {
+        const thread = pr.reviewThreads.nodes.find(
+          (t) => t.root.nodes[0]?.databaseId === reply.replyTo,
+        );
+        if (!thread || !thread.id) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'thread_not_found',
+          });
+          continue;
+        }
+        if (thread.isResolved) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'already_resolved',
+          });
+          continue;
+        }
+        const replyBodyHash = bodyHash(reply.body);
+        const replied =
+          postedReplyTos.has(reply.replyTo) ||
+          thread.comments.nodes.some(
+            (node) =>
+              isOwnReply(node, state.viewer) &&
+              bodyHash(node.body) === replyBodyHash,
+          );
+        if (!replied || !reply.handled.every((id) => done.has(id))) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'not_replied',
+          });
+          continue;
+        }
+        const threadOpen = offer.threads.get(reply.replyTo);
+        if (threadOpen && [...threadOpen].some((id) => !done.has(id))) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'new_comment_in_thread',
+          });
+          continue;
+        }
+        const resolved = resolveReviewThread(thread.id);
+        if (resolved.resolved) {
+          outcome.resolvedThreads.push(thread.id);
+        } else {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: resolved.reason,
+          });
+        }
+      }
+    }
+  }
   return outcome;
 }
 
@@ -761,6 +955,12 @@ export const replyCommand: CommandModule = {
         describe:
           'Post the replies and the summary; --no-post only records what was handled',
       })
+      .option('resolve', {
+        type: 'boolean',
+        default: true,
+        describe:
+          'Resolve review threads marked fixed in the plan; --no-resolve leaves them open',
+      })
       .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
@@ -769,6 +969,7 @@ export const replyCommand: CommandModule = {
           pr: Number(argv['pr']),
           planPath: String(argv['plan']),
           post: Boolean(argv['post']),
+          resolve: Boolean(argv['resolve']),
           task: taskArg(argv),
         }),
       ),

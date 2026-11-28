@@ -1280,6 +1280,454 @@ describe('runReply', () => {
     ).toThrow(refused('plan_invalid', /the reply plan cannot be read: ENOENT/));
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
+
+  it('resolves a fixed review thread fail-closed after posting on a pushed head', () => {
+    const PREV_HEAD = '0'.repeat(40);
+    writeState(paths.statePath, { ...state(), pushedShas: [HEAD] });
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: PREV_HEAD, events: [] }),
+    );
+    mocks.ghWithInput.mockImplementation((input, ...args) => {
+      if (args[3] === 'graphql') {
+        const payload = JSON.parse(input) as {
+          query: string;
+          variables: { threadId: string };
+        };
+        expect(payload.query).toContain('resolveReviewThread');
+        return JSON.stringify({
+          data: {
+            resolveReviewThread: {
+              thread: { id: payload.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      const id = nextId++;
+      return JSON.stringify({
+        node_id: `POSTED_${id}`,
+        html_url: `https://github.com/o/r/pull/7#posted-${id}`,
+      });
+    });
+    const outcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: handled.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    });
+    expect(outcome.resolvedThreads).toEqual(['T1']);
+    expect(outcome.resolveSkipped).toEqual([]);
+    const graphqlCalls = mocks.ghWithInput.mock.calls.filter(
+      ([, ...args]) => args[3] === 'graphql',
+    );
+    expect(graphqlCalls).toHaveLength(1);
+    expect(
+      (JSON.parse(graphqlCalls[0]![0]) as { variables: { threadId: string } })
+        .variables,
+    ).toEqual({ threadId: 'T1' });
+
+    // Background-fix claimed snapshot (autofix-pr-7-fix-snapshot.json) also
+    // proves the round pushed past the snapshot head when snapshot.json moved.
+    rmSync(paths.snapshotPath);
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'autofix-pr-7-fix-snapshot.json'),
+      JSON.stringify({ headSha: PREV_HEAD, events: [] }),
+    );
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    const bgOutcome = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: handled.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    });
+    expect(bgOutcome.resolvedThreads).toEqual(['T1']);
+  });
+
+  it('never resolves threads not marked resolve: true, or under --no-resolve / --no-post / unpushed head / stale-round head / missing snapshot / head mismatch', () => {
+    const PREV_HEAD = '0'.repeat(40);
+    const writePriorSnapshot = (headSha = PREV_HEAD) =>
+      writeFileSync(
+        paths.snapshotPath,
+        JSON.stringify({ headSha, events: [] }),
+      );
+
+    // 1. Not marked resolve: true (e.g. declined / needs_human): no GraphQL call.
+    writeState(paths.statePath, { ...state(), pushedShas: [HEAD] });
+    writePriorSnapshot();
+    const plain = reply({
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Not changed: by design.',
+          handled: ['PRRC_101'],
+        },
+      ],
+    });
+    expect(plain.resolvedThreads).toEqual([]);
+    expect(plain.resolveSkipped).toEqual([]);
+    expect(
+      mocks.ghWithInput.mock.calls.filter(([, ...a]) => a[3] === 'graphql'),
+    ).toHaveLength(0);
+
+    // 2. --no-resolve (resolve: false) skips resolution and enforces watch.resolve === false.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      watch: {
+        every: 2,
+        reply: true,
+        resolve: false,
+        instructions: '',
+        task: 'feedc0ffee12',
+      },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Fixed.',
+            handled: ['PRRC_101'],
+            resolve: true,
+          },
+        ],
+      }),
+    );
+    expect(() =>
+      runReply({
+        pr: 7,
+        planPath,
+        post: true,
+        resolve: true,
+        task: 'feedc0ffee12',
+      }),
+    ).toThrow(refused('plan_invalid', /started with --no-resolve/));
+    const disabled = runReply({
+      pr: 7,
+      planPath,
+      post: true,
+      resolve: false,
+      task: 'feedc0ffee12',
+    });
+    expect(disabled.resolvedThreads).toEqual([]);
+    expect(disabled.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'disabled' },
+    ]);
+
+    // 3. --no-post never resolves threads.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+      watch: undefined,
+    });
+    const noPost = reply(
+      {
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Fixed.',
+            handled: ['PRRC_101'],
+            resolve: true,
+          },
+        ],
+      },
+      false,
+    );
+    expect(noPost.resolvedThreads).toEqual([]);
+    expect(noPost.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'no_post' },
+    ]);
+
+    // 4. Unpushed head (watch did not push current head): fail-closed skip.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [],
+    });
+    const unpushed = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(unpushed.resolvedThreads).toEqual([]);
+    expect(unpushed.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 5. Same head as an earlier round's push (snapshot.headSha === head):
+    // this round did not push a new fix after reading the comment -> fail-closed.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    writePriorSnapshot(HEAD);
+    const sameRoundHead = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(sameRoundHead.resolvedThreads).toEqual([]);
+    expect(sameRoundHead.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 6. Missing round snapshot cannot prove head advanced after reading the thread.
+    rmSync(paths.snapshotPath);
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    const missingSnapshot = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(missingSnapshot.resolvedThreads).toEqual([]);
+    expect(missingSnapshot.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_pushed' },
+    ]);
+
+    // 7. Live headRefOid lags or moved past lastKnownHeadSha: fail-closed skip.
+    writePriorSnapshot();
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: [],
+      postedCommentIds: [],
+      pushedShas: [HEAD],
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({ headRefOid: 'b'.repeat(40) }),
+      viewer: 'me',
+    }));
+    const mismatch = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(mismatch.resolvedThreads).toEqual([]);
+    expect(mismatch.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'head_mismatch' },
+    ]);
+  });
+
+  it('skips resolution fail-closed when a thread has a new unanswered trusted comment, is already resolved, or previously got a different reply', () => {
+    writeState(paths.statePath, { ...state(), pushedShas: [HEAD] });
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: '0'.repeat(40), events: [] }),
+    );
+    // New trusted follow-up PRRC_102 arrived in thread T1 while plan only handled PRRC_101.
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              comment('PRRC_102', 'alice', 'COLLABORATOR'),
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const withFollowUp = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(withFollowUp.resolvedThreads).toEqual([]);
+    expect(withFollowUp.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'new_comment_in_thread' },
+    ]);
+
+    // Already resolved on GitHub: skipped without calling resolve mutation.
+    writeState(paths.statePath, {
+      ...state(),
+      handledCommentIds: ['PRRC_101'],
+      pushedShas: [HEAD],
+    });
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            {
+              ...thread('T1', [
+                comment('PRRC_101', 'alice', 'COLLABORATOR'),
+                {
+                  ...comment('PRRC_199', 'me', 'OWNER'),
+                  body: `Fixed.\n\n${REPLY_MARKER}`,
+                },
+              ]),
+              isResolved: true,
+            },
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const already = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(already.resolvedThreads).toEqual([]);
+    expect(already.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'already_resolved' },
+    ]);
+
+    // Old thread previously answered "Needs a human decision" cannot be resolved
+    // on a later pushed head by re-submitting its already-handled comment id
+    // with a different "Fixed." body.
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              {
+                ...comment('PRRC_198', 'me', 'OWNER'),
+                body: `Needs a human decision: clarify?\n\n${REPLY_MARKER}`,
+              },
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const mismatchedBody = reply({
+      replies: [
+        { replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'], resolve: true },
+      ],
+    });
+    expect(mismatchedBody.resolvedThreads).toEqual([]);
+    expect(mismatchedBody.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_replied' },
+    ]);
+  });
+
+  it('isolates GraphQL resolve failures without losing posted replies, and resolves idempotently on retry', () => {
+    writeState(paths.statePath, { ...state(), pushedShas: [HEAD] });
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: '0'.repeat(40), events: [] }),
+    );
+    // First attempt: thread reply POST succeeds, GraphQL resolve fails with error.
+    let graphqlCalls = 0;
+    mocks.ghWithInput.mockImplementation((input, ...args) => {
+      if (args[3] === 'graphql') {
+        graphqlCalls += 1;
+        if (graphqlCalls === 1) {
+          return JSON.stringify({
+            data: { resolveReviewThread: null },
+            errors: [{ message: 'Resource not accessible by integration' }],
+          });
+        }
+        if (graphqlCalls === 2) {
+          return JSON.stringify({
+            data: {
+              resolveReviewThread: { thread: { id: 'T1', isResolved: false } },
+            },
+          });
+        }
+        if (graphqlCalls === 3) {
+          throw new Error('HTTP 502 Bad Gateway');
+        }
+        return JSON.stringify({
+          data: {
+            resolveReviewThread: { thread: { id: 'T1', isResolved: true } },
+          },
+        });
+      }
+      const id = nextId++;
+      return JSON.stringify({
+        node_id: `POSTED_${id}`,
+        html_url: `https://github.com/o/r/pull/7#posted-${id}`,
+      });
+    });
+
+    const plan: ReplyPlan = {
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Fixed in aaaaaaa: done.',
+          handled: ['PRRC_101'],
+          resolve: true,
+        },
+      ],
+    };
+    const r1 = reply(plan);
+    expect(r1.posted).toHaveLength(1);
+    expect(state().handledCommentIds).toEqual(['PRRC_101']);
+    expect(r1.resolvedThreads).toEqual([]);
+    expect(r1.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'graphql_error' },
+    ]);
+
+    // Subsequent retries see our posted reply already in the thread: skip re-posting
+    // and exercise post-check false, network exception, then clean resolution.
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [
+              comment('PRRC_101', 'alice', 'COLLABORATOR'),
+              {
+                ...comment('POSTED_1', 'me', 'OWNER'),
+                body: `Fixed in aaaaaaa: done.\n\n${REPLY_MARKER}`,
+              },
+            ]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+
+    const r2 = reply(plan);
+    expect(r2.posted).toEqual([]);
+    expect(r2.skipped).toBe(1);
+    expect(r2.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'not_resolved' },
+    ]);
+
+    const r3 = reply(plan);
+    expect(r3.posted).toEqual([]);
+    expect(r3.resolveSkipped).toEqual([
+      { replyTo: 101, reason: 'request_failed' },
+    ]);
+
+    const r4 = reply(plan);
+    expect(r4.posted).toEqual([]);
+    expect(r4.skipped).toBe(1);
+    expect(r4.resolvedThreads).toEqual(['T1']);
+    expect(r4.resolveSkipped).toEqual([]);
+  });
 });
 
 describe('parsePlan', () => {
@@ -1288,6 +1736,18 @@ describe('parsePlan', () => {
     expect(() => parsePlan({ resolve: true })).toThrow(
       /unknown reply plan field/,
     );
+    expect(() =>
+      parsePlan({
+        replies: [{ replyTo: 1, body: 'x', handled: ['a'], resolve: 'yes' }],
+      }),
+    ).toThrow(/resolve must be a boolean/);
+    expect(
+      parsePlan({
+        replies: [
+          { replyTo: 1, body: 'Fixed.', handled: ['a'], resolve: true },
+        ],
+      }).replies[0],
+    ).toMatchObject({ replyTo: 1, resolve: true });
     expect(() =>
       parsePlan({ replies: [{ replyTo: 0, body: 'x', handled: ['a'] }] }),
     ).toThrow(/replyTo must be a positive integer/);

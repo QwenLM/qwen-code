@@ -155,6 +155,9 @@ export interface AutofixPrWatchOptions {
   every: number;
   /** False with `--no-reply`: rounds record what they handled, posting nothing. */
   reply: boolean;
+  /** False with `--no-resolve`: rounds reply without resolving review threads;
+   * absent in states written before thread resolution (treated as true). */
+  resolve?: boolean;
   /** The user's instructions for every round, on one line; '' for none. */
   instructions: string;
   /** The task that drives the watch, minted by every `schedule`: the gate of
@@ -230,7 +233,7 @@ export function rerunFloors(state: {
 }
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
-export const MAX_PUSHES = 10;
+export const MAX_PUSHES = 20;
 
 /** Pushes of a watch a check may go on failing across before a round
  * leaves it for a person instead of fixing it again (Section 10). */
@@ -1030,6 +1033,7 @@ function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
     watch !== null &&
     WATCH_INTERVALS.includes(watch.every) &&
     typeof watch.reply === 'boolean' &&
+    (watch.resolve === undefined || typeof watch.resolve === 'boolean') &&
     typeof watch.instructions === 'string' &&
     watch.instructions.length <= MAX_INSTRUCTIONS_CHARS &&
     // A prompt is one line, and says what it shows.
@@ -1093,6 +1097,7 @@ export function readState(statePath: string): AutofixPrState | null {
           watch: {
             every: watch.every,
             reply: watch.reply,
+            ...(watch.resolve !== undefined ? { resolve: watch.resolve } : {}),
             instructions: watch.instructions,
             ...(watch.task !== undefined ? { task: watch.task } : {}),
           },

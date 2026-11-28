@@ -64,7 +64,7 @@ else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePa
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else if (command === 'fix-start') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), task: process.env.FAKE_TASK || 'feedc0ffee12' }) + '\\n');
 else if (command === 'fix-end') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), snapshot: 'snap.json', brief: 'brief.md', head: 'abc' }) + '\\n');
-else if (command === 'schedule') process.stdout.write(JSON.stringify({ task: process.env.FAKE_TASK || 'feedc0ffee12', reply: process.env.FAKE_REPLY !== '0', instructions: process.env.FAKE_INSTRUCTIONS || '' }) + '\\n');
+else if (command === 'schedule') process.stdout.write(JSON.stringify({ task: process.env.FAKE_TASK || 'feedc0ffee12', reply: process.env.FAKE_REPLY !== '0', resolve: process.env.FAKE_RESOLVE !== '0', instructions: process.env.FAKE_INSTRUCTIONS || '' }) + '\\n');
 else process.stdout.write(JSON.stringify({ command, rest, session: process.env.QWEN_CODE_SESSION_ID, cwd: process.cwd() }) + '\\n');
 `;
 
@@ -255,8 +255,15 @@ describe('autofixPrArgs', () => {
         pr: 5,
         plan: '/x/.qwen/tmp/autofix-pr-5-plan.json',
         no_post: true,
+        no_resolve: true,
       },
-      ['reply', '5', '/x/.qwen/tmp/autofix-pr-5-plan.json', '--no-post'],
+      [
+        'reply',
+        '5',
+        '/x/.qwen/tmp/autofix-pr-5-plan.json',
+        '--no-post',
+        '--no-resolve',
+      ],
     ],
     [
       { command: 'sync', pr: 5, discard: true, task: 't1' },
@@ -268,9 +275,17 @@ describe('autofixPrArgs', () => {
         pr: 5,
         every: 5,
         no_reply: true,
+        no_resolve: true,
         instructions: true,
       },
-      ['schedule', '5', '--every=5', '--no-reply', '--instructions'],
+      [
+        'schedule',
+        '5',
+        '--every=5',
+        '--no-reply',
+        '--no-resolve',
+        '--instructions',
+      ],
     ],
     [{ command: 'schedule', pr: 5, again: true }, ['schedule', '5', '--again']],
     [{ command: 'sync', pr: 5, discard: false }, ['sync', '5']],
@@ -1377,6 +1392,7 @@ describe('background fixes', () => {
     expect(watchTask('session-a', 12)).toEqual({
       task: 'feedc0ffee12',
       reply: false,
+      resolve: true,
       instructions: 'keep the API',
     });
   });
@@ -1489,6 +1505,7 @@ describe('background fixes', () => {
       watch: {
         task: 'feedc0ffee12',
         reply: false,
+        resolve: true,
         instructions: 'keep the API',
       },
     });
@@ -1990,7 +2007,7 @@ describe('background fixes', () => {
       expect(fix.done).toBe(false);
     });
 
-    it('waits for a claim until 40 minutes after it opened, however late the agent ended', async () => {
+    it('waits for a claim until 70 minutes after it opened, however late the agent ended', async () => {
       writeMarker(fix.attempt);
       await vi.advanceTimersByTimeAsync(FIX_CLAIM_DEADLINE_MS - 60_000);
       fix.end({ status: 'completed', report: 'done' });
@@ -2122,6 +2139,28 @@ describe('background fixes', () => {
       const instructed = bare({ reply: true, instructions: 'keep the API' });
       expect(argsOf(instructed)).toBe(
         `after-fix o/r#12 --task feedc0ffee12 --attempt ${instructed.attempt} -- keep the API`,
+      );
+      const noResolve = new BackgroundFix(
+        'session-c',
+        12,
+        'o/r',
+        worktree,
+        {
+          task: 'feedc0ffee12',
+          reply: true,
+          resolve: false,
+          instructions: 'keep the API',
+        },
+        {
+          pr: 12,
+          worktree,
+          check: async () => true,
+          open: async () => ({ task: 'feedc0ffee12' }),
+          close: async () => {},
+        },
+      );
+      expect(argsOf(noResolve)).toBe(
+        `after-fix o/r#12 --task feedc0ffee12 --attempt ${noResolve.attempt} --no-resolve -- keep the API`,
       );
     });
   });
