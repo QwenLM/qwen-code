@@ -95,7 +95,10 @@ class FakeConnection implements AcpConnectionLike {
     });
   }
 
-  prompt(params: Record<string, unknown>): Promise<{ stopReason?: string }> {
+  prompt(params: Record<string, unknown>): Promise<{
+    stopReason?: string;
+    _meta?: Record<string, unknown>;
+  }> {
     this.promptCalls.push(params);
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -104,11 +107,16 @@ class FakeConnection implements AcpConnectionLike {
       reject = rej;
     });
     this.pendingStopReason = 'end_turn';
+    this.pendingPromptMeta = undefined;
     this.promptWaiter = { promise, resolve, reject };
-    return promise.then(() => ({ stopReason: this.pendingStopReason }));
+    return promise.then(() => ({
+      stopReason: this.pendingStopReason,
+      _meta: this.pendingPromptMeta,
+    }));
   }
 
   pendingStopReason: string = 'end_turn';
+  pendingPromptMeta?: Record<string, unknown>;
 
   cancel(params: Record<string, unknown>): Promise<void> {
     this.cancelCalls.push(params);
@@ -130,13 +138,18 @@ class FakeConnection implements AcpConnectionLike {
 
   setModeCalls: Array<Record<string, unknown>> = [];
 
-  settle(stopReason = 'end_turn', error?: unknown): void {
+  settle(
+    stopReason = 'end_turn',
+    error?: unknown,
+    meta?: Record<string, unknown>,
+  ): void {
     const waiter = this.promptWaiter;
     this.promptWaiter = undefined;
     if (waiter === undefined) return;
     if (error !== undefined) waiter.reject(error);
     else {
       this.pendingStopReason = stopReason;
+      this.pendingPromptMeta = meta;
       waiter.resolve({});
     }
   }
@@ -526,6 +539,10 @@ describe('AcpAdaptor sessions and receipts', () => {
     const cases: Array<[string, string]> = [
       ['cancelled', 'cancelled'],
       ['refusal', 'the agent declined to continue the task'],
+      [
+        'max_tokens',
+        'the task stopped early (token or turn limit); ask to continue it',
+      ],
     ];
     for (const [stopReason, expected] of cases) {
       const collector = eventCollector(adaptor, handle.id);
@@ -539,6 +556,30 @@ describe('AcpAdaptor sessions and receipts', () => {
         error: expected,
       });
     }
+  });
+
+  it('surfaces the partial answer when a response reaches the output limit', async () => {
+    const connection = new FakeConnection();
+    const adaptor = makeAdaptor(connection);
+    adaptors.push(adaptor);
+    const handle = await adaptor.createSession({ cwd: '/ws' });
+    const collector = eventCollector(adaptor, handle.id);
+    await adaptor.prompt(handle, [{ type: 'text', text: 'go' }]);
+    connection.update(handle.id, {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Partial answer' },
+    });
+    connection.settle('max_tokens', undefined, {
+      'qwen.outputTruncated': true,
+    });
+    const events = await collector.waitFor((collected) =>
+      collected.some((event) => event.type === 'turn_complete'),
+    );
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'turn_complete',
+      detail: expect.stringContaining('Partial answer'),
+      summary: expect.stringContaining('output limit'),
+    });
   });
 
   it('steers into the drain queue once the agent has drained', async () => {

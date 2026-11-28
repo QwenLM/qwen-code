@@ -10965,6 +10965,7 @@ export function matchTurnEvent(
     const data = event.data as {
       promptId?: string;
       stopReason?: string;
+      outputTruncated?: boolean;
       branchPoint?: {
         assistantRecordUuid?: unknown;
         checkpointUuid?: unknown;
@@ -10972,11 +10973,13 @@ export function matchTurnEvent(
     };
     if (data.promptId === promptId) {
       const stopReason = data.stopReason ?? 'end_turn';
+      const outputTruncated =
+        stopReason === 'max_tokens' && data.outputTruncated === true;
       const candidate = data.branchPoint;
       const recordUuidPattern =
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       const branchPoint =
-        stopReason === 'end_turn' &&
+        (stopReason === 'end_turn' || outputTruncated) &&
         typeof candidate?.assistantRecordUuid === 'string' &&
         recordUuidPattern.test(candidate.assistantRecordUuid) &&
         typeof candidate.checkpointUuid === 'string' &&
@@ -10988,6 +10991,7 @@ export function matchTurnEvent(
           : undefined;
       return {
         stopReason,
+        ...(outputTruncated ? { outputTruncated } : {}),
         ...(branchPoint ? { branchPoint } : {}),
       };
     }

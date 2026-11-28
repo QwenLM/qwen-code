@@ -423,7 +423,8 @@ function applyDaemonTranscriptEvent(
       if (
         event.branchRecordId &&
         event.promptId &&
-        event.reason === 'end_turn'
+        (event.reason === 'end_turn' ||
+          (event.reason === 'max_tokens' && event.outputTruncated === true))
       ) {
         const assistant = getWritableBlockById(
           next,

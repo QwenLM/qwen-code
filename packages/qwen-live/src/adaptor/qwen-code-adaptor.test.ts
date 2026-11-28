@@ -882,6 +882,37 @@ describe('QwenCodeAdaptor.events', () => {
     expect(end.done).toBe(true);
   });
 
+  it('includes the partial answer and output-limit notice for a daemon turn', async () => {
+    const client = makeClient({
+      subscribeEvents: vi.fn(() =>
+        envelopeStream([
+          envelope('pending_prompt_started', {}, { promptId: 'p1' }),
+          envelope('session_update', {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Partial answer' },
+            },
+          }),
+          envelope(
+            'turn_complete',
+            { stopReason: 'max_tokens', outputTruncated: true },
+            { promptId: 'p1' },
+          ),
+        ]),
+      ),
+    });
+    const adaptor = makeAdaptor(client);
+    const events = adaptor.events(handleFor())[Symbol.asyncIterator]();
+    expect((await events.next()).value).toMatchObject({ type: 'turn_started' });
+    expect((await events.next()).value).toMatchObject({ type: 'activity' });
+    expect((await events.next()).value).toMatchObject({
+      type: 'turn_complete',
+      detail: expect.stringContaining('Partial answer'),
+      summary: expect.stringContaining('output limit'),
+    });
+    expect((await events.next()).done).toBe(true);
+  });
+
   it('keeps background status out of the main answer', async () => {
     const text = (value: string, source?: string) =>
       envelope('session_update', {

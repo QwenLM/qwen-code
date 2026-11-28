@@ -223,6 +223,7 @@ export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
 export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
   type: 'assistant.done';
   reason?: string;
+  outputTruncated?: boolean;
 }
 
 /**

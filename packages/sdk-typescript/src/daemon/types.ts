@@ -6262,6 +6262,8 @@ export type PromptContentBlock = PromptTextContent | Record<string, unknown>;
 /** Returned from `POST /session/:id/prompt`. */
 export interface PromptResult {
   stopReason: string;
+  /** The model reached its output cap after producing a partial answer. */
+  outputTruncated?: boolean;
   branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }

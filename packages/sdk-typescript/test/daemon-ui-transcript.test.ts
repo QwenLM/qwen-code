@@ -825,6 +825,28 @@ describe('daemon transcript rewind', () => {
     expect(state.blocks[0]).not.toHaveProperty('branchRecordId');
   });
 
+  it('preserves the rewind point and truncation flag for a partial answer', () => {
+    const branchPoint = {
+      assistantRecordUuid: '11111111-1111-4111-8111-111111111111',
+      checkpointUuid: '22222222-2222-4222-8222-222222222222',
+    };
+    expect(
+      matchTurnEvent(
+        {
+          v: 1,
+          type: 'turn_complete',
+          data: {
+            promptId: 'prompt-1',
+            stopReason: 'max_tokens',
+            outputTruncated: true,
+            branchPoint,
+          },
+        },
+        'prompt-1',
+      ),
+    ).toEqual({ stopReason: 'max_tokens', outputTruncated: true, branchPoint });
+  });
+
   it('drops malformed or non-completed branch point metadata', () => {
     for (const [stopReason, assistantRecordUuid, checkpointUuid] of [
       ['end_turn', '11111111-1111-4111-8111-111111111111', 'not-a-uuid'],
