@@ -80,6 +80,8 @@ export interface ReasoningIdRejection {
 }
 
 const REJECTION_CODE = 'string_above_max_length';
+const ENCRYPTED_CONTENT_CODE = 'invalid_encrypted_content';
+const ALL_MODELS_FAILED_PREFIX = 'AllModelsFailed:';
 const PARAM_PATTERN = /^input\[(\d+)\]\.id$/;
 const PARAM_REFERENCE_PATTERN = /input\[\d+\]\.id/g;
 const MAXIMUM_LENGTH_PATTERN = /maximum length \d+/gi;
@@ -647,7 +649,7 @@ export function isEncryptedReasoningRejection(
   const envelope = readEnvelope(text, MAX_OBJECT_CANDIDATES, false);
   if (!envelope || !isPlainObject(envelope.value)) return false;
   const direct = readErrorMember(envelope.value);
-  if (direct) return direct['code'] === 'invalid_encrypted_content';
+  if (direct) return direct['code'] === ENCRYPTED_CONTENT_CODE;
 
   const gateway = envelope.value['routify_response'];
   if (
@@ -657,7 +659,26 @@ export function isEncryptedReasoningRejection(
   )
     return false;
   const error = readErrorMember(gateway['error_detail']);
-  return error?.['code'] === 'invalid_encrypted_content';
+  if (error) return error['code'] === ENCRYPTED_CONTENT_CODE;
+
+  // This gateway also quotes the upstream error after a known failure prefix.
+  // Parse only that one object, within the outer envelope's remaining budget.
+  const message = gateway['error_message'];
+  if (
+    typeof message !== 'string' ||
+    !message.startsWith(ALL_MODELS_FAILED_PREFIX)
+  )
+    return false;
+  const nestedText = toEnvelopeText(
+    message.slice(ALL_MODELS_FAILED_PREFIX.length),
+  );
+  if (!nestedText) return false;
+  const nested = readEnvelope(
+    nestedText,
+    MAX_OBJECT_CANDIDATES - envelope.objects,
+    false,
+  );
+  return readErrorMember(nested?.value)?.['code'] === ENCRYPTED_CONTENT_CODE;
 }
 
 export function downgradeEncryptedReasoningItems(
