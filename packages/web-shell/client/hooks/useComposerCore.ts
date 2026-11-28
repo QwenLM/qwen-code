@@ -1034,6 +1034,9 @@ function getInlineComposerTagPlacements(
 // ---- EditorHandle type (shared) ----
 
 export interface EditorHandle extends WebShellComposerApi {
+  retainDraftDuringSessionCreation<T>(
+    operation: (onSessionAllocated: (sessionId: string) => void) => Promise<T>,
+  ): Promise<T>;
   clearText(): void;
   focus(): void;
   getText(): string;
@@ -6904,6 +6907,44 @@ export function useComposerCore(
     },
     [],
   );
+  const retainDraftDuringSessionCreation = useCallback(
+    async <T>(
+      operation: (
+        onSessionAllocated: (sessionId: string) => void,
+      ) => Promise<T>,
+    ): Promise<T> => {
+      const identity = { ...composerIdentityRef.current };
+      const existing = draftSessionAssignmentRef.current;
+      const assignment = existing ?? {
+        storageKey: identity.draftStorageKey,
+        editsAtSubmit: identity.draftStorageKey
+          ? composerDraftEdits.get(identity.draftStorageKey)
+          : undefined,
+        canMigrate: () => true,
+      };
+      if (!identity.sessionId && !existing)
+        draftSessionAssignmentRef.current = assignment;
+      try {
+        return await operation((sessionId) => {
+          const current = draftSessionAssignmentRef.current;
+          // A concurrent Send may own the same draft's assignment by now.
+          if (
+            current &&
+            composerMountedRef.current &&
+            composerIdentityRef.current.sessionId === undefined &&
+            composerIdentityRef.current.promptHistoryStorageKey ===
+              identity.promptHistoryStorageKey &&
+            current.storageKey === identity.draftStorageKey
+          )
+            current.assignedSessionId = sessionId;
+        });
+      } finally {
+        if (!existing && draftSessionAssignmentRef.current === assignment)
+          draftSessionAssignmentRef.current = undefined;
+      }
+    },
+    [],
+  );
   const handle = useMemo<EditorHandle>(() => {
     return {
       clearText,
@@ -6921,6 +6962,7 @@ export function useComposerCore(
       restoreImages,
       restoreFiles,
       restoreInputAnnotations,
+      retainDraftDuringSessionCreation,
       submit,
     };
   }, [
@@ -6936,6 +6978,7 @@ export function useComposerCore(
     restoreImages,
     restoreFiles,
     restoreInputAnnotations,
+    retainDraftDuringSessionCreation,
     retryLast,
     saveCurrentDraftToHistory,
     setText,

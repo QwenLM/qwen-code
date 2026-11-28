@@ -1887,6 +1887,8 @@ export interface WebShellProps {
   composerRef?: React.Ref<WebShellComposerApi>;
   /** Called once the real composer API is mounted and safe to call. */
   onComposerReady?: (api: WebShellComposerApi) => void;
+  /** Read Skills from a real session, creating it on first menu access. */
+  skillsRequireSession?: boolean;
   /** Declarative composer input value. Increment composerInputVersion to replay the same value. */
   composerInput?: WebShellComposerInput;
   /** Replay key for composerInput. */
@@ -4067,6 +4069,7 @@ export function App({
   onToast,
   composerRef,
   onComposerReady,
+  skillsRequireSession = false,
   composerInput,
   composerInputVersion,
   onSessionChange,
@@ -10411,6 +10414,10 @@ export function App({
     editorRef.current?.focus();
   }, []);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
+  const publicComposerApiRef = useRef<WebShellComposerApi>(emptyComposerApi);
+  const ensureComposerSessionRef = useRef<() => Promise<string>>(async () => {
+    throw new Error('The composer is not ready');
+  });
   const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
     useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
@@ -10429,16 +10436,24 @@ export function App({
   const setEditorHandle = useCallback(
     (handle: EditorHandle | null) => {
       editorRef.current = handle;
-      assignComposerRef(composerRef, handle ?? emptyComposerApi);
+      if (!handle) {
+        publicComposerApiRef.current = emptyComposerApi;
+        notifiedComposerReadyRef.current = null;
+      }
       if (handle && notifiedComposerReadyRef.current !== handle) {
         notifiedComposerReadyRef.current = handle;
-        onComposerReady?.(handle);
+        publicComposerApiRef.current = {
+          ...handle,
+          ensureSession: () => ensureComposerSessionRef.current(),
+        };
+        onComposerReady?.(publicComposerApiRef.current);
       }
+      assignComposerRef(composerRef, publicComposerApiRef.current);
     },
     [composerRef, onComposerReady],
   );
   useEffect(() => {
-    assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
+    assignComposerRef(composerRef, publicComposerApiRef.current);
   }, [composerRef]);
   const [goalSnapshot, setGoalSnapshot] = useState<GoalSnapshotV2 | null>(null);
   const goalSnapshotRef = useRef<GoalSnapshotV2 | null>(null);
@@ -10902,7 +10917,9 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
   const skillsCatalogActive =
-    composerSkillsOpen || showHelpDialog || Boolean(renderFooter);
+    composerSkillsOpen ||
+    showHelpDialog ||
+    (!skillsRequireSession && Boolean(renderFooter));
   const skillsCatalogForNewSession = connection.sessionId === undefined;
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsLoadError, setSkillsLoadError] = useState(false);
@@ -10927,6 +10944,7 @@ export function App({
   const skillsCatalogKey = useMemo(
     () => ({
       cwd: connection.workspaceCwd,
+      sessionId: connection.sessionId,
       forNewSession: skillsCatalogForNewSession,
       client: workspace.client,
       settings: workspaceEventSignals?.settingsVersion,
@@ -10935,6 +10953,7 @@ export function App({
     }),
     [
       connection.workspaceCwd,
+      connection.sessionId,
       skillsCatalogForNewSession,
       workspace.client,
       workspaceEventSignals?.settingsVersion,
@@ -10991,6 +11010,31 @@ export function App({
           setSkillsLoadError(false);
         }
         try {
+          if (skillsRequireSession) {
+            const sessionId = await ensureComposerSessionRef.current();
+            const status =
+              await workspace.client.sessionSupportedCommands(sessionId);
+            if (
+              request !== loadedSkillsRequestRef.current ||
+              connectionRef.current.sessionId !== sessionId
+            )
+              return;
+            if (status.sessionId !== sessionId)
+              throw new Error('Skills belong to another session');
+            setLoadedSkills(
+              availableSessionSkillInfos(
+                status.availableSkills,
+                status.availableCommands.map((command) => ({
+                  name: command.name,
+                  description: command.description ?? '',
+                  argumentHint: command.input?.hint,
+                })),
+              ),
+            );
+            setLoadedSkillsFallback({ sessionId, workspaceCwd });
+            setLoadedSkillsReady(true);
+            return;
+          }
           if (
             forNewSession &&
             workspaceCwd &&
@@ -11107,6 +11151,7 @@ export function App({
       pushToast,
       skillsConfigRuntimeSupported,
       skillsAcpPreheatSupported,
+      skillsRequireSession,
       workspace.capabilities?.workspaceCwd,
       workspace.client,
       workspaceActions,
@@ -11120,11 +11165,17 @@ export function App({
     setSkillsLoading(false);
     setSkillsLoadError(false);
     setLoadedSkillsFallback(undefined);
-  }, [connection.workspaceCwd, workspaceContextActive, reloadLoadedSkills]);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    workspaceContextActive,
+    reloadLoadedSkills,
+  ]);
   useEffect(() => {
     if (!connected || !workspaceContextActive || !skillsCatalogActive) return;
     // Attached sessions already supply their authoritative Skill commands.
     if (
+      !skillsRequireSession &&
       connectionSkillSnapshotRef.current.sessionId &&
       connectionSkillSnapshotRef.current.skills !== undefined
     )
@@ -11151,6 +11202,7 @@ export function App({
     skillsCatalogActive,
     skillsCatalogForNewSession,
     skillsCatalogKey,
+    skillsRequireSession,
     workspaceContextActive,
   ]);
   const handledSkillMutationKeysRef = useRef(new Set<string>());
@@ -13755,8 +13807,15 @@ export function App({
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
   }, []);
+  const sessionPreparationOwnersRef = useRef(
+    new WeakMap<object, { retainOnNavigation: boolean }>(),
+  );
   const ensureSessionForPrompt = useCallback(
-    (notify?: (id: string) => void, initialTitle?: string) => {
+    (
+      notify?: (id: string) => void,
+      initialTitle?: string,
+      retainOnNavigation = true,
+    ) => {
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
@@ -13765,6 +13824,10 @@ export function App({
           composerSourceVersionRef.current ===
             preparingSessionSourceVersionRef.current
         ) {
+          const owner = sessionPreparationOwnersRef.current.get(
+            createSessionPromiseRef.current,
+          );
+          if (owner && retainOnNavigation) owner.retainOnNavigation = true;
           return createSessionPromiseRef.current;
         }
         if (currentSessionId) return Promise.resolve(undefined);
@@ -13785,7 +13848,14 @@ export function App({
         return Promise.resolve(undefined);
       }
       const pendingManualTitle = pendingManualTitleRef.current;
-      const promise = (async () => {
+      const preparationOwner = { retainOnNavigation };
+      const promise: Promise<
+        | {
+            sessionId: string;
+            detachedSession?: DaemonSessionClient;
+          }
+        | undefined
+      > = (async () => {
         let allocatedSessionId: string | undefined;
         let detachedSessionResult: DaemonSessionClient | undefined;
         const draftSelection = subscriptionDraftModelRef.current;
@@ -14024,6 +14094,12 @@ export function App({
           setSelectedWorkspaceCwd(undefined);
         }
         if (!allocatedSessionId) return undefined;
+        // A menu alone does not own background work after navigation. A prompt
+        // sharing this preparation keeps the detached client for admission.
+        if (detachedSessionResult && !preparationOwner.retainOnNavigation) {
+          await detachedSessionResult.detach();
+          throw new DOMException('The composer changed', 'AbortError');
+        }
         return {
           sessionId: allocatedSessionId,
           ...(detachedSessionResult
@@ -14032,6 +14108,7 @@ export function App({
         };
       })();
       createSessionPromiseRef.current = promise;
+      sessionPreparationOwnersRef.current.set(promise, preparationOwner);
       preparingSessionSourceVersionRef.current =
         composerSourceVersionRef.current;
       const clearPreparation = () => {
@@ -14055,6 +14132,28 @@ export function App({
       t,
     ],
   );
+  ensureComposerSessionRef.current = async () => {
+    if (!appMountedRef.current)
+      throw new DOMException('The composer is closed', 'AbortError');
+    const sourceVersion = composerSourceVersionRef.current;
+    const existing = connectionRef.current.sessionId;
+    const editor = editorRef.current;
+    if (!editor) throw new Error('The composer is not ready');
+    const allocation = await editor.retainDraftDuringSessionCreation(
+      (onSessionAllocated) =>
+        ensureSessionForPrompt(onSessionAllocated, undefined, false),
+    );
+    const sessionId = allocation?.sessionId ?? existing;
+    if (
+      !appMountedRef.current ||
+      allocation?.detachedSession ||
+      sourceVersion !== composerSourceVersionRef.current ||
+      !sessionId ||
+      connectionRef.current.sessionId !== sessionId
+    )
+      throw new DOMException('The composer changed', 'AbortError');
+    return sessionId;
+  };
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const prepareSubmitRef = useRef(prepareSubmit);
