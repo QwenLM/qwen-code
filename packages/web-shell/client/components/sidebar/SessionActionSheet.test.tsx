@@ -210,4 +210,56 @@ describe('SessionActionSheet', () => {
       vi.useRealTimers();
     }
   });
+
+  it('restores focus to the triggering element on Escape even when returnFocusEl clears on close', async () => {
+    const trigger = document.createElement('button');
+    trigger.textContent = 'Trigger';
+    document.body.appendChild(trigger);
+
+    function Controlled() {
+      const [targetEl, setTargetEl] = useState<HTMLElement | null>(trigger);
+      return (
+        <I18nProvider initialLanguage="en">
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <SessionActionSheet
+              open={targetEl !== null}
+              onOpenChange={(next) => {
+                if (!next) setTargetEl(null);
+              }}
+              session={baseSession}
+              label={baseSession.displayName!}
+              time="2m ago"
+              completedUnread={false}
+              showDetails={false}
+              actions={[{ id: 'pin', label: 'Pin', onSelect: vi.fn() }]}
+              returnFocusEl={targetEl}
+            />
+          </WebShellPortalRootContext.Provider>
+        </I18nProvider>
+      );
+    }
+
+    act(() => {
+      root.render(<Controlled />);
+    });
+
+    const sheet = portalRoot.querySelector<HTMLElement>(
+      '[data-web-shell-session-action-sheet]',
+    )!;
+    expect(sheet).not.toBeNull();
+    expect(sheet.style.touchAction).toBe('pan-y');
+
+    await act(async () => {
+      sheet.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(
+      portalRoot.querySelector('[data-web-shell-session-action-sheet]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
 });

@@ -452,4 +452,61 @@ describe('WebShellSidebar touch actions (P0 + P1)', () => {
     expect(actionButtons[0]!.getAttribute('aria-label')).toBe('Pin');
     expect(actionButtons[1]!.getAttribute('aria-label')).toBe('More actions');
   });
+
+  it('supports touch long-press and finger taps on More in fine-pointer hybrid iPad layouts without opening a duplicate dropdown', async () => {
+    vi.useFakeTimers();
+    setTouchMedia(false);
+    renderSidebar({
+      mobileOpen: false,
+      sessionActions: { inlineItems: ['pin'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((el) => el.textContent?.includes('Alpha touch session'))!;
+    const moreButton = row.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    )!;
+
+    // Finger tap on the desktop More trigger opens Action Sheet, not DropdownMenu.
+    act(() => {
+      moreButton.dispatchEvent(
+        makePointerEvent('pointerdown', { pointerType: 'touch' }),
+      );
+    });
+    expect(
+      portalRoot.querySelector('[data-web-shell-session-action-sheet]'),
+    ).not.toBeNull();
+    expect(
+      portalRoot.querySelector('[data-slot="dropdown-menu-content"]'),
+    ).toBeNull();
+
+    // Dismiss sheet, then verify finger long-press on the row also opens it.
+    const sheet = portalRoot.querySelector<HTMLElement>(
+      '[data-web-shell-session-action-sheet]',
+    )!;
+    act(() => {
+      sheet.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(
+      portalRoot.querySelector('[data-web-shell-session-action-sheet]'),
+    ).toBeNull();
+
+    const title = row.querySelector('[data-web-shell-session-title]')!;
+    act(() => {
+      title.dispatchEvent(
+        makePointerEvent('pointerdown', { pointerType: 'touch' }),
+      );
+      vi.advanceTimersByTime(500);
+    });
+    expect(
+      portalRoot.querySelector('[data-web-shell-session-action-sheet]'),
+    ).not.toBeNull();
+    expect(loadSession).not.toHaveBeenCalled();
+  });
 });

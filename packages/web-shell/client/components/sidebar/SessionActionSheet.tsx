@@ -85,6 +85,7 @@ export interface SessionActionSheetProps {
   showDetails: boolean;
   actions: readonly SessionActionSheetItem[];
   groupPicker?: SessionActionSheetGroupPicker;
+  returnFocusEl?: HTMLElement | null;
 }
 
 type SheetPage = 'root' | 'group';
@@ -157,31 +158,57 @@ export function SessionActionSheet({
   showDetails,
   actions,
   groupPicker,
+  returnFocusEl,
 }: SessionActionSheetProps) {
   const { t } = useI18n();
   const [page, setPage] = useState<SheetPage>('root');
   const [loadingGroups, setLoadingGroups] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const pendingCloseActionRef = useRef<(() => void) | null>(null);
+  const returnFocusOnCloseRef = useRef(true);
+  const lastReturnFocusElRef = useRef<HTMLElement | null>(null);
   const loadRequestRef = useRef(0);
 
-  const runPendingCloseAction = useCallback(() => {
+  const finishClose = useCallback(() => {
     const action = pendingCloseActionRef.current;
+    const focusTarget = lastReturnFocusElRef.current;
     pendingCloseActionRef.current = null;
-    action?.();
+    lastReturnFocusElRef.current = null;
+    if (action) {
+      action();
+      return;
+    }
+    if (returnFocusOnCloseRef.current && focusTarget?.isConnected) {
+      focusTarget.focus({ preventScroll: true });
+    }
   }, []);
 
   useEffect(() => {
-    if (!open) {
-      loadRequestRef.current += 1;
-      setPage('root');
-      setLoadingGroups(false);
-      if (pendingCloseActionRef.current) {
-        const timer = window.setTimeout(runPendingCloseAction, 0);
-        return () => window.clearTimeout(timer);
-      }
+    if (open) {
+      returnFocusOnCloseRef.current = true;
+      lastReturnFocusElRef.current = returnFocusEl ?? null;
+      return undefined;
+    }
+    loadRequestRef.current += 1;
+    setPage('root');
+    setLoadingGroups(false);
+    if (pendingCloseActionRef.current || lastReturnFocusElRef.current) {
+      const timer = window.setTimeout(finishClose, 0);
+      return () => window.clearTimeout(timer);
     }
     return undefined;
-  }, [open, runPendingCloseAction]);
+  }, [finishClose, open, returnFocusEl]);
+
+  useEffect(() => {
+    if (!open || page !== 'group') return;
+    const raf = window.requestAnimationFrame(() => {
+      const firstItem = contentRef.current?.querySelector<HTMLElement>(
+        '[role="menuitemradio"]',
+      );
+      firstItem?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [open, page]);
 
   useEffect(() => {
     loadRequestRef.current += 1;
@@ -250,17 +277,30 @@ export function SessionActionSheet({
       shouldScaleBackground={false}
     >
       <DrawerContent
+        ref={contentRef}
+        tabIndex={-1}
         aria-describedby={undefined}
         data-web-shell-session-action-sheet=""
         overlayProps={{ className: ACTION_SHEET_Z_CLASS }}
-        className={`${ACTION_SHEET_Z_CLASS} max-h-[85dvh] pb-[max(1rem,env(safe-area-inset-bottom))] sm:mx-auto sm:max-w-md sm:rounded-t-2xl`}
+        // Override vaul's runtime-injected unlayered `[data-vaul-drawer]{touch-action:none}`
+        // so native vertical touch scrolling works inside the sheet on iOS/Android.
+        style={{ touchAction: 'pan-y' }}
+        className={`${ACTION_SHEET_Z_CLASS} max-h-[85dvh] pb-[max(1rem,env(safe-area-inset-bottom))] outline-none sm:mx-auto sm:max-w-md sm:rounded-t-2xl`}
         onClick={(event) => event.stopPropagation()}
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          contentRef.current?.focus({ preventScroll: true });
+        }}
+        onPointerDownOutside={() => {
+          returnFocusOnCloseRef.current = false;
+        }}
+        onInteractOutside={() => {
+          returnFocusOnCloseRef.current = false;
+        }}
         onCloseAutoFocus={(event) => {
-          if (pendingCloseActionRef.current) {
-            event.preventDefault();
-            runPendingCloseAction();
-          }
+          event.preventDefault();
+          finishClose();
         }}
       >
         <div className="flex items-start gap-2 px-3 pt-1 pb-2">
@@ -289,8 +329,9 @@ export function SessionActionSheet({
           </Button>
         </div>
         <div
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-2"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-2 touch-pan-y"
           data-vaul-no-drag
+          data-web-shell-session-action-sheet-scroll=""
         >
           {page === 'root' && session && (
             <div className="flex flex-col gap-2">

@@ -380,6 +380,7 @@ interface ActionSheetTarget {
     onArchive: () => void;
   };
   workspaceLabel?: string;
+  returnFocusEl?: HTMLElement | null;
 }
 
 interface SessionRowContainerProps extends HTMLAttributes<HTMLDivElement> {
@@ -6556,7 +6557,7 @@ export function WebShellSidebar({
         !recent && (showDefaultActions || sessionActionItems.has('details'));
       const touchActionSheetAvailable =
         touchRecentHasActions || touchDefaultHasActions;
-      const openRowActionSheet = () => {
+      const openRowActionSheet = (triggerEl?: HTMLElement | null) => {
         setActionSheetTarget({
           session,
           identity: sessionIdentity,
@@ -6572,14 +6573,16 @@ export function WebShellSidebar({
             standalone || recent?.isStandalone
               ? t('sidebar.standaloneWorkspaceLabel')
               : undefined,
+          returnFocusEl: triggerEl ?? null,
         });
       };
       return withDetails(
         <SessionRowContainer
-          longPressEnabled={
-            useActionSheet && !isEditing && touchActionSheetAvailable
-          }
-          onLongPress={openRowActionSheet}
+          // Always allow touch long-press on actionable rows (useLongPress
+          // ignores mouse pointers) so hybrid-pointer iPads with an attached
+          // trackpad still get long-press when tapped by hand.
+          longPressEnabled={!isEditing && touchActionSheetAvailable}
+          onLongPress={() => openRowActionSheet(null)}
           className={cx(
             styles.sessionRow,
             tree &&
@@ -6800,7 +6803,12 @@ export function WebShellSidebar({
                       type="button"
                       aria-label={t('sidebar.moreActions')}
                       title={t('sidebar.moreActions')}
-                      onClick={openRowActionSheet}
+                      aria-expanded={
+                        actionSheetTarget?.identity === sessionIdentity
+                      }
+                      onClick={(event) =>
+                        openRowActionSheet(event.currentTarget)
+                      }
                     >
                       <EllipsisVerticalIcon />
                     </button>
@@ -6925,6 +6933,15 @@ export function WebShellSidebar({
                             }}
                             onPointerDown={(event) => {
                               groupMenuTriggerRef.current = event.currentTarget;
+                              // Hybrid-pointer iPads with an attached trackpad
+                              // still use the desktop DropdownMenu for pointer
+                              // clicks, but open the Action Sheet when tapped
+                              // by finger.
+                              if (event.pointerType === 'touch') {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                openRowActionSheet(event.currentTarget);
+                              }
                             }}
                             onClick={(event) => {
                               groupMenuTriggerRef.current = event.currentTarget;
@@ -7127,6 +7144,7 @@ export function WebShellSidebar({
       isTouchActions,
       useActionSheet,
       narrowViewport,
+      actionSheetTarget?.identity,
       livePresence,
       startRename,
       splitSessionIds,
@@ -7340,6 +7358,7 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
           isTouchActions={isTouchActions}
+          onMenuOpenChange={handleSessionMenuOpenChange}
         >
           {tree.rows.map((row) => (
             <Fragment key={row.session.sessionId}>
@@ -7374,6 +7393,7 @@ export function WebShellSidebar({
     groupBusy,
     handleDeleteGroup,
     handleRenameGroup,
+    handleSessionMenuOpenChange,
     isTouchActions,
     loading,
     organizationEnabled,
@@ -8927,6 +8947,7 @@ export function WebShellSidebar({
           showDetails={sessionActionItems.has('details')}
           actions={actionSheetModel?.items ?? []}
           groupPicker={actionSheetModel?.groupPicker}
+          returnFocusEl={actionSheetTarget?.returnFocusEl ?? null}
         />
         {renameDialogTarget && (
           <SessionRenameDialog
@@ -9764,6 +9785,7 @@ export function WebShellSidebar({
                     }
                     showSessionDetails={sessionActionItems.has('details')}
                     isTouchActions={isTouchActions}
+                    onGroupMenuOpenChange={handleSessionMenuOpenChange}
                   />
                 ))}
               {pinnedSectionVisible && (
@@ -10182,6 +10204,7 @@ export function WebShellSidebar({
                               'details',
                             )}
                             isTouchActions={isTouchActions}
+                            onGroupMenuOpenChange={handleSessionMenuOpenChange}
                             overviewEnabled={
                               !channelView && workspaceOverviewEnabled
                             }
@@ -10696,62 +10719,7 @@ export function WebShellSidebar({
                                 onError(error, t('sidebar.switchFailed')),
                               );
                           },
-                          actions: isTouchActions ? (
-                            <SessionMenu
-                              onOpenChange={handleSessionMenuOpenChange}
-                            >
-                              <DropdownMenuTrigger asChild>
-                                <button
-                                  type="button"
-                                  className={styles.sessionActionButton}
-                                  aria-label={t('sidebar.moreActions')}
-                                  title={t('sidebar.moreActions')}
-                                >
-                                  <EllipsisIcon size={16} />
-                                </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent
-                                align="end"
-                                onPointerDownOutside={
-                                  handleSessionMenuPointerDownOutside
-                                }
-                                onCloseAutoFocus={
-                                  handleSessionMenuCloseAutoFocus
-                                }
-                                style={SESSION_MENU_PORTAL_STYLE}
-                              >
-                                <DropdownMenuItem
-                                  disabled={
-                                    busy ||
-                                    isStandalone ||
-                                    !canOrganizeSession(session, 'pin')
-                                  }
-                                  onSelect={() => handleTogglePin(session)}
-                                >
-                                  <PinIcon size={16} strokeWidth={1.2} />
-                                  {pinLabel}
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  disabled={archiveDisabled}
-                                  title={
-                                    isCurrent
-                                      ? t('sidebar.archiveCurrentDisabled')
-                                      : running
-                                        ? t('sidebar.archiveRunningDisabled')
-                                        : t('sidebar.archive')
-                                  }
-                                  onSelect={() =>
-                                    isStandalone
-                                      ? handleArchiveRecentStandalone(session)
-                                      : handleArchive(session)
-                                  }
-                                >
-                                  <ArchiveIcon size={16} strokeWidth={1.2} />
-                                  {t('sidebar.archive')}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </SessionMenu>
-                          ) : (
+                          actions: (
                             <>
                               <button
                                 type="button"

@@ -285,6 +285,8 @@ interface WorkspaceSectionProps {
   manageableOverviewItems?: ReadonlySet<WorkspaceOverviewItem>;
   /** Touch/mobile drawer mode: renders touch-friendly group header menus. */
   isTouchActions?: boolean;
+  /** Propagates open state of touch group header menus to sidebar overlay guards. */
+  onGroupMenuOpenChange?: (open: boolean) => void;
 }
 
 export function WorkspaceSection({
@@ -345,6 +347,7 @@ export function WorkspaceSection({
   onOpenOverviewItem,
   manageableOverviewItems,
   isTouchActions = false,
+  onGroupMenuOpenChange,
 }: WorkspaceSectionProps) {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -1281,6 +1284,7 @@ export function WorkspaceSection({
                       deleteLabel={deleteGroupLabel}
                       actionsDisabled={groupActionsDisabled}
                       isTouchActions={isTouchActions}
+                      onMenuOpenChange={onGroupMenuOpenChange}
                     >
                       {tree.nodes}
                     </SessionGroupSection>

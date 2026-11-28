@@ -47,6 +47,7 @@ export function useLongPress({
   const activePointerIdRef = useRef<number | null>(null);
   const startPointRef = useRef<{ x: number; y: number } | null>(null);
   const suppressNextClickRef = useRef(false);
+  const detachInterruptListenersRef = useRef<(() => void) | null>(null);
   const onLongPressRef = useRef(onLongPress);
   onLongPressRef.current = onLongPress;
 
@@ -55,13 +56,19 @@ export function useLongPress({
     suppressResetTimerRef.current = undefined;
   }, []);
 
+  const detachInterruptListeners = useCallback(() => {
+    detachInterruptListenersRef.current?.();
+    detachInterruptListenersRef.current = null;
+  }, []);
+
   const cancel = useCallback(() => {
     window.clearTimeout(timerRef.current);
     timerRef.current = undefined;
+    detachInterruptListeners();
     activePointerIdRef.current = null;
     startPointRef.current = null;
     setPressing(false);
-  }, []);
+  }, [detachInterruptListeners]);
 
   useEffect(() => {
     if (!enabled) {
@@ -75,8 +82,9 @@ export function useLongPress({
     () => () => {
       window.clearTimeout(timerRef.current);
       window.clearTimeout(suppressResetTimerRef.current);
+      detachInterruptListeners();
     },
-    [],
+    [detachInterruptListeners],
   );
 
   const onPointerDown = useCallback(
@@ -96,8 +104,16 @@ export function useLongPress({
       activePointerIdRef.current = event.pointerId;
       startPointRef.current = { x: event.clientX, y: event.clientY };
       setPressing(true);
+      const handleInterrupt = () => cancel();
+      window.addEventListener('blur', handleInterrupt);
+      window.addEventListener('scroll', handleInterrupt, true);
+      detachInterruptListenersRef.current = () => {
+        window.removeEventListener('blur', handleInterrupt);
+        window.removeEventListener('scroll', handleInterrupt, true);
+      };
       timerRef.current = window.setTimeout(() => {
         timerRef.current = undefined;
+        detachInterruptListeners();
         activePointerIdRef.current = null;
         startPointRef.current = null;
         setPressing(false);
@@ -120,7 +136,7 @@ export function useLongPress({
         onLongPressRef.current();
       }, delayMs);
     },
-    [cancel, clearSuppressTimer, delayMs, enabled],
+    [cancel, clearSuppressTimer, delayMs, detachInterruptListeners, enabled],
   );
 
   const onPointerMove = useCallback(

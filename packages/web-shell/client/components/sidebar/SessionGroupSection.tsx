@@ -1,6 +1,7 @@
 import {
   Children,
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -48,6 +49,7 @@ export interface SessionGroupSectionProps {
   actionsDisabled?: boolean;
   limitSessions?: boolean;
   isTouchActions?: boolean;
+  onMenuOpenChange?: (open: boolean) => void;
 }
 
 export function SessionGroupSection({
@@ -67,8 +69,18 @@ export function SessionGroupSection({
   actionsDisabled,
   limitSessions = true,
   isTouchActions = false,
+  onMenuOpenChange,
 }: SessionGroupSectionProps) {
   const { t } = useI18n();
+  const menuOpenRef = useRef(false);
+  const onMenuOpenChangeRef = useRef(onMenuOpenChange);
+  onMenuOpenChangeRef.current = onMenuOpenChange;
+  useEffect(
+    () => () => {
+      if (menuOpenRef.current) onMenuOpenChangeRef.current?.(false);
+    },
+    [],
+  );
   const [visibleCount, setVisibleCount] = useState(
     SIDEBAR_SESSION_PREVIEW_LIMIT,
   );
@@ -122,7 +134,12 @@ export function SessionGroupSection({
             data-touch-actions={isTouchActions ? 'true' : undefined}
           >
             {isTouchActions ? (
-              <DropdownMenu>
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  menuOpenRef.current = open;
+                  onMenuOpenChange?.(open);
+                }}
+              >
                 <DropdownMenuTrigger asChild>
                   <button
                     className={styles.sessionGroupActionButton}

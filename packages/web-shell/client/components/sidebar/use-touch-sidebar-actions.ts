@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
 
-export const TOUCH_SIDEBAR_MEDIA_QUERY = '(hover: none), (pointer: coarse)';
+// Match coarse primary pointers (phones, tablets, and Apple Pencil hover iPads)
+// without tripping on headless Linux desktop Chromium which reports
+// `hover: none` alongside `pointer: fine`.
+export const TOUCH_SIDEBAR_MEDIA_QUERY = '(pointer: coarse)';
 
 export interface TouchSidebarActionsState {
   isTouchActions: boolean;

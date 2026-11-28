@@ -282,7 +282,7 @@ function ManagedWorkspaceGroup({
         {workspaceId &&
           (onSelectWorkspace || (onOpenArtifactLibrary && canOpenLibrary)) && (
             <div
-              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover/managed-workspace:visible group-focus-within/managed-workspace:visible [@media(hover:none)]:visible [@media(pointer:coarse)]:visible`}
+              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover/managed-workspace:visible group-focus-within/managed-workspace:visible [@media(pointer:coarse)]:visible`}
             >
               {onOpenArtifactLibrary && canOpenLibrary && (
                 <button

@@ -127,7 +127,7 @@
   );
 }
 
-@media (hover: none), (pointer: coarse) {
+@media (pointer: coarse) {
   .sidebar.mobileOpen {
     width: clamp(
       min(var(--web-shell-sidebar-min-width, 220px), 100%),
@@ -1611,7 +1611,7 @@ button.livePendingSession:hover {
 
 /* Touch devices get no hover reveal, so the actions stay in the flow and
    share the slot with the markers instead of overlaying and hiding them. */
-@media (hover: none), (pointer: coarse) {
+@media (pointer: coarse) {
   .sessionActions {
     position: static;
     opacity: 1;
@@ -1625,7 +1625,7 @@ button.livePendingSession:hover {
 
 /* Very narrow touch drawers prioritize the title and enabled actions over
    branch/source decoration. PR state and goal markers stay visible. */
-@media (hover: none), (pointer: coarse) {
+@media (pointer: coarse) {
   .sidebar.mobileOpen[data-narrow] .sessionGitIcon {
     display: none;
   }
@@ -1790,21 +1790,33 @@ button.livePendingSession:hover {
   stroke-linejoin: round;
 }
 
-/* Touch devices (including hybrid-pointer iPads) and mobile drawers enlarge
-   sidebar row/workspace/group touch targets and keep controls in-flow without
-   interfering with the ultra-narrow (<=280px) drawer layout or Settings
-   archived rows. */
-@media (hover: none), (pointer: coarse) {
+/* Touch devices (including Apple Pencil hover iPads) and mobile drawers
+   enlarge sidebar row/workspace/group touch targets and keep controls in-flow
+   without interfering with the ultra-narrow (<=280px) drawer layout or
+   Settings archived rows. */
+@media (pointer: coarse) {
   .sidebar:not([data-narrow]) .sessionRow:not(.archivedRow) {
     min-height: 40px;
     -webkit-touch-callout: none;
     user-select: none;
   }
 
+  .sidebar:not([data-narrow])
+    .sessionRow:not(.archivedRow):not(.sessionTreeRow) {
+    padding-left: 16px;
+  }
+
+  .sidebar:not([data-narrow])
+    .sessionRow:not(.archivedRow):not(.sessionTreeRow)
+    .sessionStatusSlot {
+    left: 1px;
+    width: 14px;
+  }
+
   .sidebar:not([data-narrow]) .sessionRow:not(.archivedRow) .sessionMetaSlot {
     height: auto;
     min-height: 36px;
-    gap: 4px;
+    gap: 2px;
   }
 
   .sidebar:not([data-narrow])
@@ -1831,6 +1843,10 @@ button.livePendingSession:hover {
     .sessionRow:not(.archivedRow)
     .sessionActions
     .sessionActionButton:active,
+  .sidebar
+    .sessionRow:not(.archivedRow)
+    .sessionActions
+    .sessionActionButton:focus,
   .sidebar
     .sessionRow:not(.archivedRow)
     .sessionActions
@@ -1868,6 +1884,18 @@ button.livePendingSession:hover {
 }
 
 .sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow):not(.sessionTreeRow) {
+  padding-left: 16px;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
+  .sessionRow:not(.archivedRow):not(.sessionTreeRow)
+  .sessionStatusSlot {
+  left: 1px;
+  width: 14px;
+}
+
+.sidebar.mobileOpen:not([data-narrow])
   .sessionRow:not(.archivedRow)
   .sessionMetaSlot,
 .sidebar.mobileOpen:not([data-narrow])
@@ -1876,7 +1904,7 @@ button.livePendingSession:hover {
   min-width: 0;
   height: auto;
   min-height: 36px;
-  gap: 4px;
+  gap: 2px;
 }
 
 .sidebar.mobileOpen .sessionRow:not(.archivedRow) .sessionActions {
@@ -1909,6 +1937,10 @@ button.livePendingSession:hover {
   .sessionRow:not(.archivedRow)
   .sessionActions
   .sessionActionButton:active,
+.sidebar.mobileOpen
+  .sessionRow:not(.archivedRow)
+  .sessionActions
+  .sessionActionButton:focus,
 .sidebar.mobileOpen
   .sessionRow:not(.archivedRow)
   .sessionActions

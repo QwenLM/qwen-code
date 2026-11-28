@@ -233,4 +233,47 @@ describe('useLongPress', () => {
     });
     expect(ctxEvent.defaultPrevented).toBe(true);
   });
+
+  it('pins the default long-press delay against literal wall-clock bounds', () => {
+    const onLongPress = vi.fn();
+    act(() => {
+      root.render(<Harness onLongPress={onLongPress} onRowClick={vi.fn()} />);
+    });
+
+    const row = container.querySelector('[data-testid="row"]') as HTMLElement;
+    act(() => {
+      row.dispatchEvent(createPointerEvent('pointerdown'));
+      vi.advanceTimersByTime(350);
+    });
+    expect(onLongPress).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an active long press on window blur or ancestor scroll', () => {
+    const onLongPress = vi.fn();
+    act(() => {
+      root.render(<Harness onLongPress={onLongPress} onRowClick={vi.fn()} />);
+    });
+
+    const row = container.querySelector('[data-testid="row"]') as HTMLElement;
+    act(() => {
+      row.dispatchEvent(createPointerEvent('pointerdown'));
+      vi.advanceTimersByTime(200);
+      window.dispatchEvent(new Event('blur'));
+      vi.advanceTimersByTime(500);
+    });
+    expect(onLongPress).not.toHaveBeenCalled();
+
+    act(() => {
+      row.dispatchEvent(createPointerEvent('pointerdown'));
+      vi.advanceTimersByTime(200);
+      container.dispatchEvent(new Event('scroll'));
+      vi.advanceTimersByTime(500);
+    });
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
 });
