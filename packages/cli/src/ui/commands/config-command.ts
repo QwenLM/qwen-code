@@ -26,16 +26,11 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 
-// Typed against the schema's own union so an entry that is not a setting type
-// is a compile error, rather than a key that silently drops out of `/config`,
-// completion and typo suggestions.
-const SETTABLE_TYPES: ReadonlySet<SettingsType> = new Set([
-  'boolean',
-  'string',
-  'number',
-  'integer',
-  'enum',
-]);
+function isSettableType(
+  type: SettingsType,
+): type is Exclude<SettingsType, 'array' | 'object'> {
+  return type !== 'array' && type !== 'object';
+}
 
 const SENSITIVE_KEY_PATTERNS = [
   /apikey/i,
@@ -73,7 +68,7 @@ function findClosestKey(input: string): string | undefined {
 
   for (const key of allKeys) {
     const def = getSettingDefinition(key);
-    if (!def || !SETTABLE_TYPES.has(def.type)) continue;
+    if (!def || !isSettableType(def.type)) continue;
     const distance = levenshteinDistance(
       input.toLowerCase(),
       key.toLowerCase(),
@@ -115,7 +110,17 @@ function coerceValue(
   def: SettingDefinition,
   rawValue: string | undefined,
 ): { value: unknown; error?: string } {
-  switch (def.type) {
+  const type = def.type;
+  if (!isSettableType(type)) {
+    return {
+      value: undefined,
+      error: t(
+        'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+        { type },
+      ),
+    };
+  }
+  switch (type) {
     case 'boolean': {
       const normalised = rawValue?.toLowerCase().trim();
       if (normalised === 'true' || normalised === '1') return { value: true };
@@ -179,23 +184,15 @@ function coerceValue(
       return { value: rawValue };
     }
 
-    case 'array':
-    case 'object':
-      return {
-        value: undefined,
-        error: t(
-          'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
-          { type: def.type },
-        ),
-      };
-
-    default:
+    default: {
+      const unsupported: never = type;
       return {
         value: undefined,
         error: t('Unsupported setting type: "{{type}}".', {
-          type: String(def.type),
+          type: String(unsupported),
         }),
       };
+    }
   }
 }
 
@@ -218,7 +215,7 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
   const lines: string[] = [];
 
   const keys = Object.keys(flattened)
-    .filter((key) => SETTABLE_TYPES.has(flattened[key]!.type))
+    .filter((key) => isSettableType(flattened[key]!.type))
     .sort();
   // The key column is the longest settable name, so a deep model.* knob is
   // not truncated away: `model.chatCompression.screenshotTriggerThreshold`
@@ -420,7 +417,7 @@ export const configCommand: SlashCommand = {
       .filter((k) => {
         if (!k.startsWith(current)) return false;
         const def = getSettingDefinition(k);
-        return def && SETTABLE_TYPES.has(def.type);
+        return def && isSettableType(def.type);
       })
       .map((k) => {
         const def = getSettingDefinition(k);

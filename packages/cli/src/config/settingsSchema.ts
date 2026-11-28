@@ -31,16 +31,18 @@ import {
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  OutputFormat,
+  REASONING_EFFORT_TIERS,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
+import {
   DEFAULT_MAX_RECENT_FILES,
   DEFAULT_MAX_RECENT_IMAGES,
   DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
   DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
   DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
-  OutputFormat,
-  REASONING_EFFORT_TIERS,
-  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/compactionInputSlimming.js';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';

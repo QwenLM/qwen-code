@@ -336,30 +336,9 @@ describe('SettingsSchema', () => {
     it('should declare every model.chatCompression knob', () => {
       const properties =
         getSettingsSchema().model.properties.chatCompression.properties;
-      // `keyof ChatCompressionSettings` is pinned to this union: every member
-      // of the interface is optional, so a seventh field added in core does not
-      // fail to compile at any read site — it silently leaves the knob
-      // undeclared and unvalidated. Add the field here when it is added there.
-      expectTypeOf<keyof ChatCompressionSettings>().toEqualTypeOf<
-        | 'enableScreenshotTrigger'
-        | 'imagePayloadThreshold'
-        | 'imageTokenEstimate'
-        | 'maxRecentFilesToRetain'
-        | 'maxRecentImagesToRetain'
-        | 'screenshotTriggerThreshold'
+      expectTypeOf<keyof typeof properties>().toEqualTypeOf<
+        keyof ChatCompressionSettings
       >();
-      // The union can only drift alongside the read site; this catches a knob
-      // that is declared in core but still missing from the schema.
-      expect(Object.keys(properties).sort()).toEqual(
-        [
-          'enableScreenshotTrigger',
-          'imagePayloadThreshold',
-          'imageTokenEstimate',
-          'maxRecentFilesToRetain',
-          'maxRecentImagesToRetain',
-          'screenshotTriggerThreshold',
-        ].sort(),
-      );
       // Every declared default is pinned: nothing else in the repo compares a
       // numeric schema default against core's constant, so an unpinned one
       // can drift from the value the runtime actually uses.
