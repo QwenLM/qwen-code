@@ -365,6 +365,11 @@ export async function fetchGitDiffHunksForFile(
     oldPath != null ? toRepoRelativePath(gitRoot, oldPath) : null;
   const diffArgs = [
     '--no-optional-locks',
+    // `--` ends option parsing but does not disable pathspec magic, so a path
+    // like `config[1].json` would also select `config1.json` and the diff
+    // viewer would render another file's changes under this one's name.
+    // Reading every pathspec as a plain name is what the review helpers do.
+    '--literal-pathspecs',
     'diff',
     '--no-ext-diff',
     '--no-textconv',
@@ -391,6 +396,7 @@ export async function fetchGitDiffHunksForFile(
   const untrackedOut = await runGit(
     [
       '--no-optional-locks',
+      '--literal-pathspecs',
       'ls-files',
       '--others',
       '--exclude-standard',
