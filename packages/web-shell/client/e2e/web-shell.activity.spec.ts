@@ -41,6 +41,8 @@ async function activityFixture(
     unavailableCwd?: string;
     extraRows?: number;
     noPreview?: boolean;
+    waitForSecondaryUnread?: boolean;
+    secondaryResponseDelayMs?: number;
   } = {},
 ) {
   const now = Date.now();
@@ -124,11 +126,19 @@ async function activityFixture(
   const unavailable = new Set<string>(
     options.unavailableCwd ? [options.unavailableCwd] : [],
   );
+  const secondaryResponseDelayMs = options.secondaryResponseDelayMs ?? 0;
+  const delaySecondary = async (cwd: string) => {
+    if (cwd !== secondary || secondaryResponseDelayMs === 0) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, secondaryResponseDelayMs),
+    );
+  };
   let revision = 1;
   await page.route(/\/workspaces?\/[^/]+\/sessions(?:\?|$)/, async (route) => {
     const url = new URL(route.request().url());
     const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
     catalogReads.push({ cwd, failed: unavailable.has(cwd) });
+    await delaySecondary(cwd);
     if (unavailable.has(cwd)) {
       await route.fulfill({
         status: 503,
@@ -155,6 +165,7 @@ async function activityFixture(
       const cwd = decodeURIComponent(
         new URL(route.request().url()).pathname.split('/')[2]!,
       );
+      await delaySecondary(cwd);
       await route.fulfill({
         json: {
           v: 1,
@@ -286,21 +297,28 @@ async function activityFixture(
       exact: true,
     })
     .click();
-  await expect(
-    row(page, 'unread-result').locator('[data-web-shell-session-running]'),
-  ).toBeVisible();
+  const unreadRows = [row(page, 'unread-result')];
+  if (options.waitForSecondaryUnread)
+    unreadRows.push(row(page, 'unread-result', secondary));
+  for (const unreadRow of unreadRows) {
+    await expect(
+      unreadRow.locator('[data-web-shell-session-running]'),
+    ).toBeVisible();
+  }
   for (const session of completed) session.hasActivePrompt = false;
   revision++;
-  if (!options.unavailableCwd)
-    await expect(
-      row(page, 'unread-result').locator(
-        '[data-web-shell-session-completed-unread]',
-      ),
-    ).toBeVisible();
-  else
+  if (!options.unavailableCwd) {
+    // Reopening Activity freezes priority order while each workspace polls independently.
+    for (const unreadRow of unreadRows) {
+      await expect(
+        unreadRow.locator('[data-web-shell-session-completed-unread]'),
+      ).toBeVisible();
+    }
+  } else {
     await expect(
       row(page, 'unread-result').locator('[data-web-shell-session-running]'),
     ).toHaveCount(0);
+  }
   await page.keyboard.press('Escape');
   previews.length = 0;
   return {
@@ -536,7 +554,10 @@ test('activity rows share hover details, scoped pin actions and the normal sessi
 test('activity ranks attention, previews assistants and keeps source identities @smoke', async ({
   page,
 }, testInfo) => {
-  const fixture = await activityFixture(page, testInfo);
+  const fixture = await activityFixture(page, testInfo, {
+    waitForSecondaryUnread: true,
+    secondaryResponseDelayMs: 1000,
+  });
   await expect(
     page.locator('[data-web-shell-session-completed-unread]').first(),
   ).toBeVisible();
@@ -595,11 +616,15 @@ test('activity ranks attention, previews assistants and keeps source identities 
 test('activity clears shared in-memory unread state without writes and keeps the open snapshot', async ({
   page,
 }, testInfo) => {
-  const fixture = await activityFixture(page, testInfo);
+  const fixture = await activityFixture(page, testInfo, {
+    waitForSecondaryUnread: true,
+    secondaryResponseDelayMs: 1000,
+  });
   await openActivity(page);
   const priorityRows = page.locator(
     '[data-activity-section="priority"] [data-activity-key]',
   );
+  await expect(priorityRows).toHaveCount(8);
   const before = await priorityRows.evaluateAll((rows) =>
     rows.map((element) => element.getAttribute('data-activity-key')),
   );
