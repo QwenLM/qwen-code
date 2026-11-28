@@ -53,6 +53,25 @@ export function BrowserNotificationControl() {
     : settings.permission === 'default'
       ? Bell
       : BellOff;
+  const platform =
+    typeof navigator === 'undefined' ? '' : (navigator.platform ?? '');
+  const touchPoints =
+    typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints;
+  const showWindowsHelp = /^Win/i.test(platform);
+  // Apple mobile reports `iPhone`/`iPad`/`iPod`, and an iPad in desktop mode
+  // reports `MacIntel` with a touch screen. Android reports a `Linux` platform
+  // with touch points, so match any touch device that is not Windows rather
+  // than listing Apple's names. A single reported touch point still counts.
+  // This reads the reported touch count, not the form factor: a Linux or
+  // ChromeOS touch laptop also reports touch points and loses both guides.
+  // Neither guide applies on a non-Windows phone or tablet.
+  const isMobile =
+    !showWindowsHelp && (/iPhone|iPad|iPod/i.test(platform) || touchPoints > 0);
+  const showMacHelp = /Mac/i.test(platform) && !isMobile;
+  // An empty or unrecognized desktop platform keeps both rather than losing
+  // the help.
+  const showBothGuides = !isMobile && !showMacHelp && !showWindowsHelp;
+  const showAnyGuide = showMacHelp || showWindowsHelp || showBothGuides;
   const cancelClose = () => clearTimeout(timer.current);
   const show = () => {
     cancelClose();
@@ -204,33 +223,39 @@ export function BrowserNotificationControl() {
             </p>
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
-          <p className="text-muted-foreground">
-            {t('browserNotifications.helpSystem')}
-          </p>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              macOS
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpMac')}
+          {showAnyGuide && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpSystem')}
             </p>
-          </details>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              Windows
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpWindows')}
-            </p>
-          </details>
+          )}
+          {(showMacHelp || showBothGuides) && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                macOS
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpMac')}
+              </p>
+            </details>
+          )}
+          {(showWindowsHelp || showBothGuides) && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                Windows
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpWindows')}
+              </p>
+            </details>
+          )}
         </PopoverContent>
       </Popover>
     </span>
