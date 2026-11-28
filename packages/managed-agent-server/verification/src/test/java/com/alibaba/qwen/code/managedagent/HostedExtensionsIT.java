@@ -344,7 +344,6 @@ class HostedExtensionsIT {
                         "--qwen.managed-agent.harness.token=" + TOKEN,
                         "--qwen.managed-agent.harness.capability-digest=" + CAPABILITY,
                         "--qwen.managed-agent.runtime-broker.enabled=true",
-                        "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.mcp-parking.enabled=" + parkApprovals,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
@@ -708,6 +707,6 @@ class HostedExtensionsIT {
     private void probePorts() {
         port = reservePort();
         harnessPort = reservePort();
-        brokerPort = reservePort();
+        brokerPort = port;
     }
 }

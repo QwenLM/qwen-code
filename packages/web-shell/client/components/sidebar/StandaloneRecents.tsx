@@ -57,6 +57,7 @@ interface StandaloneRecentsProps {
   hideWhenSearchEmpty?: boolean;
   groupCountLabel?: (count: number, hasMore: boolean) => string;
   onNewSession?: () => void;
+  newSessionDisabled?: boolean;
   renderSession: (
     session: DaemonStandaloneSessionSummary,
     options: {
@@ -141,6 +142,7 @@ export function StandaloneRecents({
   hideWhenSearchEmpty = false,
   groupCountLabel,
   onNewSession,
+  newSessionDisabled = false,
   renderSession,
   onLoadSession,
   onRenameSession,
@@ -662,6 +664,7 @@ export function StandaloneRecents({
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}
+                disabled={newSessionDisabled}
                 onClick={onNewSession}
               >
                 <SquarePenIcon size={16} strokeWidth={1.2} />

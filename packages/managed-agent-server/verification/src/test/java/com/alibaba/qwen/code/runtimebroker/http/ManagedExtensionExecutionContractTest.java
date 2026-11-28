@@ -36,7 +36,7 @@ class ManagedExtensionExecutionContractTest {
             if (state == ToolExecutionRecord.State.UNKNOWN
                     || state == ToolExecutionRecord.State.ABANDONED) {
                 // The Broker answers runtime_broker_execution_unknown
-                // instead of a status; RuntimeBrokerHttpServerTest pins it.
+                // instead of a status; RuntimeBrokerHttpControllerTest pins it.
                 assertEquals("unknown",
                         inspection.required("outcome").textValue(), id);
                 continue;
@@ -45,7 +45,7 @@ class ManagedExtensionExecutionContractTest {
                     id);
             JsonNode status = inspection.required("status");
             assertEquals(status.required("state").textValue(),
-                    RuntimeBrokerHttpServer.wireState(state), id);
+                    RuntimeBrokerHttpController.wireState(state), id);
             // A settled record's result carries its execution status.
             JsonNode executionStatus = each.required("executionStatus");
             assertEquals(executionStatus.isNull() ? null

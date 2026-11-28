@@ -221,8 +221,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'stale-chart-data',
       'stale-chart-root',
       'stale-chart-canvas',
+      'copy-total-only',
+      'copy-missing-share',
+      'copy-reversed-labels',
     ] as const)(
-      'checks bill allocation order and complete reset behavior: %s',
+      'checks bill allocation order, copy output and complete reset behavior: %s',
       async (mode) => {
         const page = await browser.newPage();
         try {
@@ -317,7 +320,21 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 if (fault === 'chart-root') document.getElementById('chart').setAttribute('style', staleChartStyle);
                 if (fault === 'chart-canvas') document.getElementById('chart').getContext('2d').putImageData(stalePixels, 0, 0);
               };
-              document.getElementById('copy').onclick = () => parent.navigator.clipboard.writeText(document.getElementById('total').textContent);
+              document.getElementById('copy').onclick = () => {
+                const mode = ${JSON.stringify(mode)};
+                const lines = [document.getElementById('total').textContent];
+                if (mode !== 'copy-total-only') {
+                  const shares = document.getElementById('shares').children;
+                  for (const row of shares) {
+                    const share = row.lastElementChild?.textContent ?? row.textContent;
+                    lines.push(mode === 'copy-reversed-labels'
+                      ? share.replace(/[0-9]+/, (label) => String(shares.length + 1 - Number(label)))
+                      : share);
+                  }
+                  if (mode === 'copy-missing-share') lines.pop();
+                }
+                parent.navigator.clipboard.writeText(lines.join(String.fromCharCode(10)));
+              };
               render();
             </script>`,
           );
@@ -347,6 +364,18 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           ).toBe('pass');
           expect(results.find(({ id }) => id === 'bill.scenario')?.status).toBe(
             mode === 'reversed' ? 'fail' : 'pass',
+          );
+          expect(
+            results.find(({ id }) => id === 'bill.copies-current')?.status,
+          ).toBe(
+            [
+              'reversed',
+              'copy-total-only',
+              'copy-missing-share',
+              'copy-reversed-labels',
+            ].includes(mode)
+              ? 'fail'
+              : 'pass',
           );
           expect(results.find(({ id }) => id === 'bill.reset')?.status).toBe(
             mode.startsWith('stale-') ? 'fail' : 'pass',
@@ -687,7 +716,12 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       },
     );
 
-    it.each([
+    it.each<{
+      mode: string;
+      resetFault: string;
+      initialPlan: string | null;
+      exportMode?: string;
+    }>([
       { mode: 'in-place', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'new-card', resetFault: 'none', initialPlan: 'basic' },
       { mode: 'replace-card', resetFault: 'none', initialPlan: 'basic' },
@@ -700,24 +734,19 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       { mode: 'in-place', resetFault: 'none', initialPlan: null },
       { mode: 'new-card', resetFault: 'none', initialPlan: null },
       { mode: 'in-place', resetFault: 'plan', initialPlan: null },
-      {
+      ...[
+        'wrong-plan',
+        'stale-value',
+        'selected-only',
+        'stale-basic',
+        'duplicate-basic',
+        'moving-button',
+      ].map((exportMode) => ({
         mode: 'in-place',
         resetFault: 'none',
         initialPlan: 'basic',
-        exportMode: 'wrong-plan',
-      },
-      {
-        mode: 'in-place',
-        resetFault: 'none',
-        initialPlan: 'basic',
-        exportMode: 'stale-value',
-      },
-      {
-        mode: 'in-place',
-        resetFault: 'none',
-        initialPlan: 'basic',
-        exportMode: 'moving-button',
-      },
+        exportMode,
+      })),
     ])(
       'observes $mode comparator updates (reset=$resetFault, initialPlan=$initialPlan, export=$exportMode)',
       async ({ mode, resetFault, initialPlan, exportMode }) => {
@@ -751,11 +780,17 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               document.addEventListener('change', render);
               document.getElementById('export').onclick = () => {
                 const mode = ${JSON.stringify(exportMode)};
-                const payment = document.getElementById('team-payment').textContent;
-                const grouped = Number(payment).toLocaleString('en-US', { maximumFractionDigits: 2 });
-                const rows = mode === 'wrong-plan'
-                  ? ['plan,payment', 'pro,' + payment, 'team,0']
-                  : ['"plan","payment"', '"team","' + (mode === 'stale-value' ? '14,227.20' : grouped) + '"'];
+                const plans = mode === 'selected-only' ? ['team'] : ['basic', 'pro', 'team'];
+                const rows = ['"plan","payment"'];
+                for (const plan of plans) {
+                  let payment = document.getElementById(plan + '-payment').textContent;
+                  if (mode === 'wrong-plan' && plan === 'team') payment = document.getElementById('pro-payment').textContent;
+                  if (mode === 'stale-value' && plan === 'team') payment = '14227.20';
+                  if (mode === 'stale-basic' && plan === 'basic') payment = '6739.20';
+                  const grouped = Number(payment).toLocaleString('en-US', { maximumFractionDigits: 2 });
+                  rows.push('"' + plan + '","' + grouped + '"');
+                }
+                if (mode === 'duplicate-basic') rows.push(rows[1]);
                 const link = document.createElement('a');
                 link.href = URL.createObjectURL(new Blob([rows.join(String.fromCharCode(13, 10))], { type: 'text/csv' }));
                 link.download = 'comparator.csv';
@@ -926,9 +961,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             'comparator.extends-existing-card':
               mode === 'in-place' ? 'pass' : 'fail',
             'comparator.exports-current-csv':
-              exportMode === 'wrong-plan' || exportMode === 'stale-value'
-                ? 'fail'
-                : 'pass',
+              !exportMode || exportMode === 'moving-button' ? 'pass' : 'fail',
             'comparator.reset-via-follow-up':
               resetFault === 'none' && mode !== 'parked-reset'
                 ? 'pass'

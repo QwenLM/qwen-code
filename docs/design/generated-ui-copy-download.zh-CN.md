@@ -2,7 +2,7 @@
 
 [English](generated-ui-copy-download.md) | [简体中文](generated-ui-copy-download.zh-CN.md)
 
-状态：进行中。第 1 步（卡片运行时和宿主）由加入本文档的 PR 实现。第 2 步（skill 和评测）尚未实现。
+状态：已实现。第 1 步（卡片运行时和宿主）已在 #18158 合入。第 2 步（skill 和评测）由更新本文档的 PR 实现。
 
 ## 问题
 
@@ -104,8 +104,8 @@ Web Shell 自己校验每个请求，不依赖 App 的检查。以下情况宿�
 
 ## 推进步骤
 
-1. **运行时和宿主**（本 PR）：guest 中的 `ui.copy` 和 `ui.download`、轮次结果的 `effect` 字段、App 的轮次规则、提示和请求，以及 Web Shell 的校验、复制、下载、后备按钮和结果属性，覆盖所有语言。
-2. **Skill 和评测：** 在 Generated UI skill 和工具描述里教这两个调用，让参考账单拆分和比价器用它们实现复制和导出，并把 `bill.copies-current` 和 `comparator.exports-current-csv` 翻转为通过。
+1. **运行时和宿主**（#18158）：guest 中的 `ui.copy` 和 `ui.download`、轮次结果的 `effect` 字段、App 的轮次规则、提示和请求，以及 Web Shell 的校验、复制、下载、后备按钮和结果属性，覆盖所有语言。
+2. **Skill 和评测**（本 PR）：在 Generated UI skill 和工具描述里教这两个调用，让参考账单拆分和比价器用它们实现复制和导出，并把 `bill.copies-current` 和 `comparator.exports-current-csv` 翻转为通过。
 
 ## 风险
 
@@ -127,7 +127,7 @@ Web Shell 自己校验每个请求，不依赖 App 的检查。以下情况宿�
 第 2 步：
 
 - Replay：`bill.copies-current` 和 `comparator.exports-current-csv` 通过，其余固定项不变。
-- 用 gating 模型对账单拆分和比价器用例做一次 live 运行，结果写在 PR 里。
+- 用 gating 模型对四个用例做一次 live 运行，结果写在 PR 里。账单拆分和比价器检查翻转的两项固定项；清单和活动表单检查变大的 skill 没有改变其他结果。
 
 ## 验收标准
 

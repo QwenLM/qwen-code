@@ -4,7 +4,10 @@ import {
 } from '../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useRef, useState } from 'react';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionScheduledTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
 import {
   useActions,
   useDaemonSessionOwnerGuard,
@@ -13,6 +16,7 @@ import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMes
 import { isSessionDisconnectedError } from '../utils/sessionErrors';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
+const SCHEDULED_TASK_POLL_INTERVAL_MS = 30000;
 const MAX_EMPTY_TASK_POLLS = 2;
 
 function hasActiveTask(
@@ -38,6 +42,14 @@ export function useBackgroundTasks(
   connected: boolean,
   refreshTrigger = 0,
   workflowsEnabled = false,
+  onScheduledTasks?: (
+    tasks: readonly DaemonSessionScheduledTaskStatus[],
+  ) => void,
+  /**
+   * Session cron / loop activity. Shares the one request-driven snapshot
+   * channel instead of opening an independent session-status request path.
+   */
+  scheduledTaskActivityKey = '',
 ): DaemonSessionTaskWithWorkflowStatus[] {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -46,11 +58,15 @@ export function useBackgroundTasks(
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
   const owner = ownerRef.current;
+  const onScheduledTasksRef = useRef(onScheduledTasks);
+  onScheduledTasksRef.current = onScheduledTasks;
   const [tasks, setTasks] = useState<DaemonSessionTaskWithWorkflowStatus[]>([]);
   const tasksOwnerRef = useRef(owner);
   const [pollingActive, setPollingActive] = useState(false);
   const [tasksPanelActive, setTasksPanelActive] = useState(false);
   const emptyPollsRef = useRef(0);
+  const hasPendingSchedulesRef = useRef(false);
+  const pollIntervalMsRef = useRef(TASKS_POLL_INTERVAL_MS);
   const tasksRefreshInFlightRef = useRef<typeof owner | null>(null);
 
   useEffect(() => {
@@ -58,6 +74,8 @@ export function useBackgroundTasks(
     setTasks([]);
     setPollingActive(false);
     emptyPollsRef.current = 0;
+    hasPendingSchedulesRef.current = false;
+    pollIntervalMsRef.current = TASKS_POLL_INTERVAL_MS;
   }, [owner, sessionId]);
 
   useEffect(() => {
@@ -68,14 +86,20 @@ export function useBackgroundTasks(
   }, [sessionId]);
 
   useEffect(() => {
-    if (!connected || !sessionId || (!taskActivityKey && refreshTrigger === 0))
+    if (
+      !connected ||
+      !sessionId ||
+      (!taskActivityKey && !scheduledTaskActivityKey && refreshTrigger === 0)
+    ) {
       return;
+    }
     emptyPollsRef.current = 0;
     setPollingActive(true);
   }, [
     connected,
     owner,
     refreshTrigger,
+    scheduledTaskActivityKey,
     sessionId,
     taskActivityActive,
     taskActivityKey,
@@ -87,7 +111,7 @@ export function useBackgroundTasks(
     if (!connected || !sessionId || !pollingActive) return;
 
     let disposed = false;
-    const refresh = () => {
+    const refresh = async () => {
       if (
         (availability && availability.getSnapshot() !== 'available') ||
         tasksRefreshInFlightRef.current === owner
@@ -97,7 +121,7 @@ export function useBackgroundTasks(
       const request = workflowsEnabled
         ? actions.getWorkflowTasks({ silent: true })
         : actions.getTasks({ silent: true });
-      request
+      await request
         .then((snapshot) => {
           if (
             disposed ||
@@ -106,8 +130,22 @@ export function useBackgroundTasks(
           )
             return;
           setTasks(snapshot.tasks);
+          if (snapshot.scheduledTasks !== undefined) {
+            onScheduledTasksRef.current?.(snapshot.scheduledTasks);
+            hasPendingSchedulesRef.current = snapshot.scheduledTasks.some(
+              (task) => task.enabled !== false,
+            );
+          } else {
+            hasPendingSchedulesRef.current = false;
+          }
+          const active = hasActiveTask(snapshot.tasks) || taskActivityActive;
+          pollIntervalMsRef.current = active
+            ? TASKS_POLL_INTERVAL_MS
+            : hasPendingSchedulesRef.current
+              ? SCHEDULED_TASK_POLL_INTERVAL_MS
+              : TASKS_POLL_INTERVAL_MS;
           if (snapshot.tasks.length === 0) {
-            if (taskActivityActive) return;
+            if (hasPendingSchedulesRef.current || active) return;
             emptyPollsRef.current += 1;
             if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
               setPollingActive(false);
@@ -115,7 +153,7 @@ export function useBackgroundTasks(
             return;
           }
           emptyPollsRef.current = 0;
-          if (!hasActiveTask(snapshot.tasks) && !taskActivityActive) {
+          if (!active && !hasPendingSchedulesRef.current) {
             setPollingActive(false);
           }
         })
@@ -140,11 +178,16 @@ export function useBackgroundTasks(
         });
     };
 
-    refresh();
-    const id = setInterval(refresh, TASKS_POLL_INTERVAL_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      await refresh();
+      if (disposed) return;
+      timer = setTimeout(poll, pollIntervalMsRef.current);
+    };
+    void poll();
     return () => {
       disposed = true;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
   }, [
     actions,
@@ -153,6 +196,7 @@ export function useBackgroundTasks(
     connected,
     owner,
     pollingActive,
+    scheduledTaskActivityKey,
     sessionId,
     taskActivityActive,
     taskActivityKey,

@@ -723,6 +723,12 @@ export function createHostedSessionSuspension({
               ? session.placement
               : undefined;
           if (!done.sealed) {
+            // A pusher's live-writer request would race the seal; a parked
+            // Turn's pusher posts its marker after the seal instead.
+            for (const ingest of session.eventIngests?.values() ?? [])
+              await ingest.pause();
+            if (actionPark)
+              await session.eventIngests?.get(actionPark.promptId)?.flush();
             // The writer lease's own renewal timer lives in the Store client,
             // not in the activation renewal below. End it before the release
             // and seal so a failure here leaves a lease that lapses instead of
@@ -778,6 +784,10 @@ export function createHostedSessionSuspension({
             await session.managed.authority.close(wake);
             done.sealed = true;
           }
+          // The park marker rides the sealed incarnation, which the
+          // placement release below fences.
+          if (actionPark)
+            await session.eventIngests?.get(actionPark.promptId)?.park();
           if (placement !== undefined) {
             const release = session.ownershipRelease!;
             release.proof ??= session.managed.authority.commitProof;

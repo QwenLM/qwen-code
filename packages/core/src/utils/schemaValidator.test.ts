@@ -222,6 +222,139 @@ describe('SchemaValidator', () => {
         ).toEqual({ urls });
       },
     );
+
+    it('points at the syntax error when a string holds broken JSON', () => {
+      // An array of objects with one bracket too many, passed on as a string.
+      const docs =
+        '\n[{"pages": [1], "fields": {"a": {"raw_value": "x"}]}, "issues": []}]\n';
+      const error = SchemaValidator.validate(
+        obj({ docs: arrayOf(obj({ pages: arrayOf({ type: 'integer' }) })) }),
+        { docs },
+      );
+      expect(error).toContain(
+        'params/docs arrived as a string whose text is not valid JSON at position 50',
+      );
+      expect(error).not.toContain('raw_value');
+      expect(error).toContain(
+        'Fix the JSON syntax and send it as a JSON array',
+      );
+    });
+
+    it.each(['[oops at position 5]', '[oops\n at position 999]'])(
+      'does not take the error position from echoed input: %s',
+      (docs) => {
+        const error = SchemaValidator.validate(obj({ docs: strings() }), {
+          docs,
+        });
+        expect(error).toContain(
+          'arrived as a string whose text is not valid JSON',
+        );
+        expect(error).not.toContain('oops');
+        expect(error).not.toContain('position');
+        expect(error).toContain(
+          'Fix the JSON syntax and send it as a JSON array',
+        );
+      },
+    );
+
+    it('names a nested path once, even under anyOf', () => {
+      const error = SchemaValidator.validate(
+        obj({ outer: obj({ config: orNull(obj({ key: {} })) }) }),
+        { outer: { config: '{"key": 1,}' } },
+      );
+      expect(error).toContain(
+        'params/outer/config arrived as a string whose text is not valid JSON',
+      );
+      expect(error?.split('arrived as a string')).toHaveLength(2);
+      expect(error).toContain('send it as a JSON object, not as a string');
+    });
+
+    it('does not pick the first JSON type from a failed anyOf', () => {
+      const schema = {
+        anyOf: [
+          obj({ docs: strings(), mode: { const: 'list' } }, 'docs', 'mode'),
+          obj(
+            { docs: obj({ field: {} }), mode: { const: 'record' } },
+            'docs',
+            'mode',
+          ),
+        ],
+      };
+      const error = SchemaValidator.validate(schema, {
+        docs: '{"field": 1,}',
+        mode: 'record',
+      });
+      expect(error?.split('arrived as a string')).toHaveLength(2);
+      expect(error).toContain('send it as a JSON array or object');
+    });
+
+    it('reports both JSON types when the type keyword allows either', () => {
+      const error = SchemaValidator.validate(
+        obj({ docs: { type: ['object', 'array'] } }),
+        { docs: '{"field": 1,}' },
+      );
+      expect(error).toContain('send it as a JSON array or object');
+    });
+
+    it('makes the hint conditional when another alternative accepts the string', () => {
+      const schema = {
+        definitions: { list: obj({ docs: strings() }, 'docs') },
+        anyOf: [
+          obj(
+            { docs: { type: 'string' }, mode: { const: 'text' } },
+            'docs',
+            'mode',
+          ),
+          { $ref: '#/definitions/list' },
+        ],
+      };
+      const docs = '[raw text]';
+      const error = SchemaValidator.validate(schema, { docs });
+      expect(error).toContain("must have required property 'mode'");
+      expect(error).toContain(
+        'If the schema alternative requiring a structured value applies, fix the JSON syntax',
+      );
+      expect(
+        SchemaValidator.validate(schema, { docs, mode: 'text' }),
+      ).toBeNull();
+    });
+
+    it('finds broken JSON at an escaped property path', () => {
+      expect(
+        SchemaValidator.validate(obj({ 'a/b~c': strings() }), {
+          'a/b~c': '[1,',
+        }),
+      ).toContain('params/a~1b~0c arrived as a string');
+    });
+
+    it('points at the syntax error for a plain object field', () => {
+      const error = SchemaValidator.validate(obj({ config: obj({}) }), {
+        config: '{"key": 1,}',
+      });
+      expect(error).toContain(
+        'params/config arrived as a string whose text is not valid JSON at position 10',
+      );
+      expect(error).toContain('send it as a JSON object');
+    });
+
+    it('reports the UTF-16 offset after an astral character', () => {
+      const docs = '["😀" 1]';
+      const error = SchemaValidator.validate(obj({ docs: strings() }), {
+        docs,
+      });
+      expect(error).toContain(
+        'at position 6 in the trimmed text (zero-based UTF-16 offset)',
+      );
+      expect(error).not.toContain('😀');
+    });
+
+    it('adds nothing for strings that do not start like JSON', () => {
+      expect(
+        SchemaValidator.validate(obj({ urls: strings() }), {
+          urls: 'hello world',
+        }),
+      ).toBe('params/urls must be array');
+    });
   });
 
   describe('numeric string coercion', () => {

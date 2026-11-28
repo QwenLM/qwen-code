@@ -70,7 +70,10 @@ class InternalSurfaceConfigurationTest {
         for (String spelling : new String[] {
                 "/%69nternal/managed-session-store/v1/sessions/s/restore",
                 "/internal;/managed-session-store/v1/sessions/s/restore",
-                "/internal;x=1/managed-session-store/v1/sessions/s/restore"}) {
+                "/internal;x=1/managed-session-store/v1/sessions/s/restore",
+                "/%69nternal/runtime-broker/v1/tool-sessions:acquire",
+                "/internal;/runtime-broker/v1/tool-sessions:acquire",
+                "/internal;x=1/runtime-broker/v1/tool-sessions:acquire"}) {
             MockHttpServletResponse onPublic = new MockHttpServletResponse();
             MockFilterChain publicChain = new MockFilterChain();
             filter.doFilter(request(spelling, PUBLIC), onPublic,

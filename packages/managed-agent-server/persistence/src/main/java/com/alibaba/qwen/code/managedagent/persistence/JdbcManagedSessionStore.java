@@ -354,6 +354,14 @@ public class JdbcManagedSessionStore
         return writerLifecycle.hasLiveWriter(tenantId, sessionId);
     }
 
+    @Transactional
+    public long authenticateEventIngest(String tenantId, String sessionId,
+            String writerToken, String workspaceId, String writerId,
+            long writerGeneration, boolean sealed) {
+        return writerLifecycle.authenticateEventIngest(tenantId, sessionId,
+                writerToken, workspaceId, writerId, writerGeneration, sealed);
+    }
+
     static String commandKeyHash(String operation,
             String commandId) {
         return JournalStoreRows.commandKeyHash(operation, commandId);
