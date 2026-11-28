@@ -4179,6 +4179,29 @@ class ManagedAgentApiContractTest {
         return snapshot;
     }
 
+    /**
+     * The read path accepts and relays up to 2^53-1, so the document must keep
+     * describing those responses at that bound; only the request and admission
+     * side is held to 2^53-2. A gateway validating against this document would
+     * otherwise reject a legitimate 200 at the boundary the ceiling is about.
+     */
+    @Test
+    void managedMcpResponsesAllowTheRevisionTheReadPathRelays() {
+        var atSharedCeiling = mcpManagementSnapshot(1, 0);
+        atSharedCeiling.put("revision", 9_007_199_254_740_991L);
+        ((ObjectNode) atSharedCeiling.withArray("servers").get(0))
+                .put("serverRevision", 9_007_199_254_740_991L);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                atSharedCeiling)).isEmpty();
+
+        var aboveSharedCeiling = mcpManagementSnapshot(1, 0);
+        aboveSharedCeiling.put("revision", 9_007_199_254_740_992L);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                aboveSharedCeiling)).isNotEmpty();
+    }
+
     private String errorCode(String content) {
         try {
             String code = objectMapper.readTree(content).path("error")
