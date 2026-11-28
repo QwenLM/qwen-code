@@ -7,7 +7,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, waitFor } from '@testing-library/react';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import {
   BaseSelectionList,
   type BaseSelectionListProps,
@@ -449,6 +452,54 @@ describe('BaseSelectionList', () => {
       expect(output).toContain('Item 1');
       expect(output).toContain('Item 10');
       expect(mockRenderItem).toHaveBeenCalledTimes(10);
+    });
+
+    it('should reclamp scroll offset when maxItemsToShow expands while scrolled to the end', async () => {
+      const componentProps: BaseSelectionListProps<
+        string,
+        { value: string; label: string; key: string }
+      > = {
+        items: longList,
+        maxItemsToShow: 3,
+        onSelect: mockOnSelect,
+        onHighlight: mockOnHighlight,
+        renderItem: mockRenderItem,
+      };
+
+      vi.mocked(useSelectionList).mockReturnValue({
+        activeIndex: 9,
+        setActiveIndex: vi.fn(),
+        selectIndex: vi.fn(),
+      });
+
+      mockRenderItem.mockImplementation(
+        (item: (typeof longList)[0], context: RenderItemContext) => (
+          <Text color={context.titleColor}>{item.label}</Text>
+        ),
+      );
+
+      const { rerender, lastFrame } = renderSelectionList(
+        <BaseSelectionList {...componentProps} />,
+      );
+
+      expect(lastFrame()).toContain('Item 10');
+      expect(lastFrame()).toContain('Item 8');
+      expect(lastFrame()).not.toContain('Item 5');
+
+      await act(async () => {
+        rerender(
+          withProviders(
+            <BaseSelectionList {...componentProps} maxItemsToShow={6} />,
+          ),
+        );
+      });
+
+      await waitFor(() => {
+        const frame = lastFrame();
+        expect(frame).toContain('Item 5');
+        expect(frame).toContain('Item 10');
+        expect(frame).not.toContain('Item 4');
+      });
     });
   });
 
