@@ -1660,8 +1660,13 @@ export const AppContainer = (props: AppContainerProps) => {
   // provenance is gone.
   const returnPrompt = useCallback(
     (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
-      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
       const current = bufferRef.current.text;
+      const draft = restorePasteDraft(
+        text,
+        pastes,
+        pendingPastesRef.current,
+        current,
+      );
       invalidateSubmittedPromptProvenance();
       setPendingPastes(draft.pasteExpansions);
       bufferRef.current.setText(
@@ -2879,6 +2884,7 @@ export const AppContainer = (props: AppContainerProps) => {
       submission.displayText ?? submission.modelText,
       submission.pasteExpansions ?? new Map(),
       pendingPastes,
+      buffer.text,
     );
     const text = draft.text;
     setPendingPastes(draft.pasteExpansions);
@@ -3801,10 +3807,12 @@ export const AppContainer = (props: AppContainerProps) => {
         // Same contract as the auto-restore path below: the buffer holds the
         // user's own text, and the model-bound copy rides along so an
         // unchanged resubmit keeps the one-shot notice (#11553).
+        const currentText = buffer.text;
         const draft = restorePasteDraft(
           popped.displayText ?? popped.submittedPrompt ?? popped.modelText,
           popped.pasteExpansions ?? new Map(),
           pendingPastes,
+          currentText,
         );
         const restoredText = draft.text;
         setPendingPastes(draft.pasteExpansions);
@@ -3822,7 +3830,6 @@ export const AppContainer = (props: AppContainerProps) => {
         submittedPromptProvenanceUnavailableRef.current = false;
         humanInputProvenanceUnavailableRef.current =
           hasUnknownInput === true || popped.humanInput === undefined;
-        const currentText = buffer.text;
         buffer.setText(
           currentText ? `${restoredText}\n${currentText}` : restoredText,
         );

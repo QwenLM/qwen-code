@@ -144,6 +144,32 @@ describe('useMessageQueue', () => {
     });
   });
 
+  it('keeps an earlier map-less queued placeholder inert when a later paste reuses its base', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'N'.repeat(1200);
+    act(() => {
+      result.current.addMessage(placeholder, false, undefined, false, {
+        displayText: placeholder,
+      });
+      result.current.addMessage(body, false, undefined, false, {
+        displayText: placeholder,
+        pasteExpansions: new Map([[placeholder, body]]),
+      });
+    });
+    const popped = result.current.popAllMessages();
+    expect(popped).toMatchObject({
+      displayText: `${placeholder}\n\n${placeholder} #2`,
+      pasteExpansions: new Map([[`${placeholder} #2`, body]]),
+    });
+    expect(
+      expandPendingPastePlaceholders(
+        popped?.displayText ?? '',
+        popped?.pasteExpansions ?? new Map(),
+      ),
+    ).toBe(`${placeholder}\n\n${body}`);
+  });
+
   it('should initialize with empty queue', () => {
     const { result } = renderHook(() => useMessageQueue());
 

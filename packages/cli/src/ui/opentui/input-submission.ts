@@ -52,17 +52,18 @@ export function restoreInputSubmissions(
           pasteExpansions: entry.pasteExpansions,
         },
   );
-  const displayText = drafts
-    .map((draft) => {
-      const restored = restorePasteDraft(
-        draft.displayText,
-        draft.pasteExpansions ?? new Map(),
-        pasteExpansions,
-      );
-      pasteExpansions = restored.pasteExpansions;
-      return restored.text;
-    })
-    .join(separator);
+  const displayTexts: string[] = [];
+  for (const draft of drafts) {
+    const restored = restorePasteDraft(
+      draft.displayText,
+      draft.pasteExpansions ?? new Map(),
+      pasteExpansions,
+      displayTexts.join(separator),
+    );
+    pasteExpansions = restored.pasteExpansions;
+    displayTexts.push(restored.text);
+  }
+  const displayText = displayTexts.join(separator);
   const humanTexts = drafts.flatMap((draft) =>
     draft.humanInput ? [draft.humanInput.text] : [],
   );

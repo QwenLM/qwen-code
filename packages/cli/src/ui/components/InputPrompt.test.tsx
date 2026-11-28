@@ -461,10 +461,6 @@ describe('InputPrompt', () => {
     // <clipboard-paste> framing must only ever exist at submit time — never
     // persisted into something the editor later shows as user-typed text.
     const largeContent = 'x'.repeat(1001);
-    mockBuffer.text = '[Pasted Content 1001 chars]';
-    mockBuffer.lines = [mockBuffer.text];
-    mockBuffer.cursor = [0, mockBuffer.text.length];
-
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
@@ -472,6 +468,9 @@ describe('InputPrompt', () => {
       stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
     });
     await wait();
+    mockBuffer.text = '[Pasted Content 1001 chars]';
+    mockBuffer.lines = [mockBuffer.text];
+    mockBuffer.cursor = [0, mockBuffer.text.length];
 
     act(() => {
       stdin.write('\x13');
@@ -559,6 +558,530 @@ describe('InputPrompt', () => {
     expect(
       invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
     ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
+    unmount();
+  });
+
+  it('restores the paste map when history recalls a collapsed paste', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const pasteExpansions = new Map([[placeholder, body]]);
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: body,
+          pasteExpansions,
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(body));
+
+    expect(onPendingPastesChange).toHaveBeenCalledWith(pasteExpansions);
+    expect(props.buffer.setText).toHaveBeenCalledWith(placeholder);
+    unmount();
+  });
+
+  it('history recall tolerates a JSON-persisted paste map', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const persisted = JSON.parse(
+      JSON.stringify(new Map([[placeholder, body]])),
+    );
+    props.pendingPastes = new Map();
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: body,
+          pasteExpansions: persisted,
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    expect(() => historyArgs.onChange(body)).not.toThrow();
+    expect(props.buffer.setText).toHaveBeenCalledWith(body);
+    unmount();
+  });
+
+  it.each([
+    { label: 'base', recalledSuffix: '', nextSuffix: ' #2' },
+    { label: 'suffixed', recalledSuffix: ' #2', nextSuffix: '' },
+  ])(
+    'a recalled map-less $label placeholder stays inert across a later same-size paste',
+    async ({ recalledSuffix, nextSuffix }) => {
+      const placeholder = `[Pasted Content 1200 chars]${recalledSuffix}`;
+      const body = 'B'.repeat(1200);
+      const onPendingPastesChange = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        history: [
+          {
+            id: 1,
+            type: 'user',
+            text: placeholder,
+            recallText: body,
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+          {
+            id: 2,
+            type: 'user',
+            text: placeholder,
+            recallText: placeholder,
+            pasteExpansions: JSON.parse(
+              JSON.stringify(new Map([[placeholder, body]])),
+            ),
+          },
+        ],
+      } as unknown as ReturnType<typeof useUIState>);
+
+      function StatefulPrompt() {
+        const [pastes, setPastes] = useState<Map<string, string>>(new Map());
+        return (
+          <InputPrompt
+            {...props}
+            pendingPastes={pastes}
+            onPendingPastesChange={(next) => {
+              onPendingPastesChange(next);
+              setPastes(next);
+            }}
+          />
+        );
+      }
+
+      const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+      const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!historyArgs) throw new Error('useInputHistory was not called');
+      act(() => historyArgs.onChange(body));
+      await flush();
+      const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+      act(() => secondHistoryArgs.onChange(placeholder));
+      await flush();
+      expect(mockBuffer.text).toBe(placeholder);
+
+      const newBody = 'N'.repeat(1200);
+      act(() => stdin.write(`\x1b[200~${newBody}\x1b[201~`));
+      await flush();
+      const newPlaceholder = `[Pasted Content 1200 chars]${nextSuffix}`;
+      expect(props.buffer.insert).toHaveBeenCalledWith(newPlaceholder, {
+        paste: false,
+      });
+      props.buffer.setText(`${placeholder}${newPlaceholder}`);
+
+      act(() => stdin.write('\r'));
+      await flush();
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        `${placeholder}\n${wrapClipboardPaste(newBody)}\n${CLIPBOARD_PASTE_FRAMING}`,
+        expect.objectContaining({
+          humanInput: { text: `${placeholder}${newBody}` },
+          pasteExpansions: new Map([[newPlaceholder, newBody]]),
+        }),
+      );
+      unmount();
+    },
+  );
+
+  it('a map-less recall keeps the draft map restorable on return', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const draftBody = 'D'.repeat(1200);
+    const originalPastes = new Map([[placeholder, draftBody]]);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = 'draft text';
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: 'old prompt',
+          recallText: 'old prompt',
+          pasteExpansions: {},
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(originalPastes);
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+    act(() => historyArgs.onChange('old prompt'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(new Map());
+    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => secondHistoryArgs.onChange('draft text'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(originalPastes);
+    unmount();
+  });
+
+  it('restores a paste-bearing draft that matches map-less history text', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'D'.repeat(1200);
+    const draftText = `fix ${placeholder}`;
+    const originalPastes = new Map([[placeholder, body]]);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = draftText;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [{ id: 1, type: 'user', text: draftText }],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(originalPastes);
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+    act(() => historyArgs.onChange(draftText, 'recall'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(new Map());
+
+    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => secondHistoryArgs.onChange(draftText, 'draft'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(originalPastes);
+
+    act(() => stdin.write('\r'));
+    await flush();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      `fix\n${wrapClipboardPaste(body)}\n${CLIPBOARD_PASTE_FRAMING}`,
+      expect.objectContaining({
+        humanInput: { text: `fix ${body}` },
+        pasteExpansions: originalPastes,
+      }),
+    );
+    unmount();
+  });
+
+  it('history recall does not suffix identical placeholders across items', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'first'.padEnd(1200, 'x');
+    const secondBody = 'second'.padEnd(1200, 'y');
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: firstBody,
+          pasteExpansions: new Map([[placeholder, firstBody]]),
+        },
+        {
+          id: 2,
+          type: 'user',
+          text: placeholder,
+          recallText: secondBody,
+          pasteExpansions: new Map([[placeholder, secondBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(new Map());
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(firstBody));
+    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => secondHistoryArgs.onChange(secondBody));
+
+    expect(props.buffer.setText).toHaveBeenLastCalledWith(placeholder);
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(
+      new Map([[placeholder, secondBody]]),
+    );
+    unmount();
+  });
+
+  it('history recall drops pastes absent from the recalled text', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'pasted body'.padEnd(1200, 'x');
+    const onPendingPastesChange = vi.fn();
+    props.pendingPastes = new Map();
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: 'hello',
+          recallText: 'hello',
+          pasteExpansions: new Map([[placeholder, body]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange('hello'));
+
+    expect(onPendingPastesChange).toHaveBeenCalledWith(new Map());
+    expect(props.buffer.setText).toHaveBeenCalledWith('hello');
+    unmount();
+  });
+
+  it('history return restores the original paste map', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const originalBody = 'original'.padEnd(1200, 'x');
+    const recalledBody = 'recalled'.padEnd(1200, 'y');
+    const originalPastes = new Map([[placeholder, originalBody]]);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = 'original draft';
+    props.pendingPastes = originalPastes;
+    props.onPendingPastesChange = onPendingPastesChange;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: recalledBody,
+          pasteExpansions: new Map([[placeholder, recalledBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(recalledBody));
+    act(() => historyArgs.onChange('original draft'));
+
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(originalPastes);
+    expect(props.buffer.setText).toHaveBeenLastCalledWith('original draft');
+    unmount();
+  });
+
+  it('keeps the recalled paste map when arena resets history navigation', async () => {
+    const placeholder = '[Pasted Content 1500 chars]';
+    const recalledPlaceholder = `${placeholder} #2`;
+    const originalBody = 'A'.repeat(1500);
+    const recalledBody = 'R'.repeat(1500);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.setText(placeholder);
+    props.userMessages = [recalledBody];
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: recalledBody,
+          pasteExpansions: new Map([[placeholder, recalledBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(
+        new Map([[placeholder, originalBody]]),
+      );
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { stdin, rerender, unmount } = renderWithProviders(
+      <StatefulPrompt />,
+    );
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+    act(() => historyArgs.onChange(recalledBody));
+    await flush();
+    expect(mockBuffer.text).toBe(recalledPlaceholder);
+
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map([['agent-1', {}]]),
+      agentShellFocused: false,
+      agentInputBufferText: '',
+      agentTabBarFocused: false,
+      agentApprovalModes: new Map(),
+    } as unknown as ReturnType<typeof useAgentViewState>);
+    rerender(withProviders(<StatefulPrompt />));
+    await flush();
+    expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
+    const arenaHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!arenaHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => arenaHistoryArgs.onChange(recalledBody));
+    await flush();
+    act(() => arenaHistoryArgs.onChange(recalledPlaceholder));
+    await flush();
+
+    expect(mockBuffer.text).toBe(recalledPlaceholder);
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(
+      new Map([
+        [placeholder, originalBody],
+        [recalledPlaceholder, recalledBody],
+      ]),
+    );
+
+    act(() => stdin.write('\r'));
+    await flush();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      markedPaste(recalledBody),
+      expect.objectContaining({
+        humanInput: { text: recalledBody },
+      }),
+    );
+    unmount();
+  });
+
+  it('history discard does not restore a paste replaced after double ESC', async () => {
+    const placeholder = '[Pasted Content 1500 chars]';
+    const originalBody = 'A'.repeat(1500);
+    const recalledBody = 'R'.repeat(1500);
+    const replacementBody = 'B'.repeat(1500);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = placeholder;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [
+        {
+          id: 1,
+          type: 'user',
+          text: placeholder,
+          recallText: recalledBody,
+          pasteExpansions: new Map([[placeholder, recalledBody]]),
+        },
+      ],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(
+        new Map([[placeholder, originalBody]]),
+      );
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+
+    act(() => historyArgs.onChange(recalledBody));
+    stdin.write('\x1B');
+    await wait(50);
+    stdin.write('\x1B');
+    await wait(50);
+    act(() => {
+      stdin.write(`\x1b[200~${replacementBody}\x1b[201~`);
+    });
+    await flush();
+    props.buffer.text = placeholder;
+
+    const returnedHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!returnedHistoryArgs) {
+      throw new Error('useInputHistory was not called');
+    }
+    act(() => returnedHistoryArgs.onChange(recalledBody));
+    act(() => returnedHistoryArgs.onChange(placeholder));
+
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(
+      new Map([[placeholder, replacementBody]]),
+    );
     unmount();
   });
 
@@ -6083,10 +6606,6 @@ describe('InputPrompt', () => {
 
     it('should expand placeholder to full content on submit', async () => {
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6099,6 +6618,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -6243,10 +6765,6 @@ describe('InputPrompt', () => {
     it('should write expanded placeholder content to shell history', async () => {
       props.shellModeActive = true;
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6258,6 +6776,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -6288,10 +6809,6 @@ describe('InputPrompt', () => {
     it('frames a shell-mode paste when shell mode is exited before submit', async () => {
       props.shellModeActive = true;
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount, rerender } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6303,6 +6820,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -6681,10 +7201,6 @@ describe('InputPrompt', () => {
 
     it('keeps a normal-mode paste raw when shell mode is active at submit time', async () => {
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount, rerender } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6696,6 +7212,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);

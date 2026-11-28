@@ -32,6 +32,51 @@ describe('restorePasteDraft', () => {
     ).toBe(`${literal}\n${body}\nappend instruction`);
   });
 
+  it('reserves map-less placeholders already visible in the draft', () => {
+    const base = '[Pasted Content 1200 chars]';
+    const mapLess = `${base} #2`;
+    const restored = restorePasteDraft(
+      `${mapLess}\n${base}`,
+      new Map([[base, 'restored body']]),
+      new Map([[base, 'current body']]),
+    );
+    expect(restored.text).toBe(`${mapLess}\n${base} #3`);
+    expect(
+      expandPendingPastePlaceholders(restored.text, restored.pasteExpansions),
+    ).toBe(`${mapLess}\nrestored body`);
+  });
+
+  it('reserves map-less placeholders in text appended by the caller', () => {
+    const base = '[Pasted Content 1200 chars]';
+    const restored = restorePasteDraft(
+      base,
+      new Map([[base, 'restored body']]),
+      new Map([[base, 'current body']]),
+      `${base} #2`,
+    );
+    expect(restored.text).toBe(`${base} #3`);
+    expect(restored.pasteExpansions).toEqual(
+      new Map([
+        [base, 'current body'],
+        [`${base} #3`, 'restored body'],
+      ]),
+    );
+  });
+
+  it('renames a restored base that collides with appended map-less text', () => {
+    const base = '[Pasted Content 1200 chars]';
+    const restored = restorePasteDraft(
+      base,
+      new Map([[base, 'restored body']]),
+      new Map(),
+      base,
+    );
+    expect(restored.text).toBe(`${base} #2`);
+    expect(restored.pasteExpansions).toEqual(
+      new Map([[`${base} #2`, 'restored body']]),
+    );
+  });
+
   it('renames colliding same-size snapshots without altering their siblings', () => {
     const first = '[Pasted Content 1200 chars]';
     const second = `${first} #2`;
@@ -64,6 +109,15 @@ describe('shared model paste encoding', () => {
         new Map([['[Pasted Content 5 chars]', 'paste']]),
       ),
     ).toBe('typed only');
+  });
+
+  it('does not expand a base placeholder inside a suffixed placeholder', () => {
+    const base = '[Pasted Content 1200 chars]';
+    const pastes = new Map([[base, 'new body']]);
+    expect(expandPendingPastePlaceholders(`${base} #2 ${base}`, pastes)).toBe(
+      `${base} #2 new body`,
+    );
+    expect(framePasteExpansion(`${base} #2`, pastes)).toBe(`${base} #2`);
   });
 
   it('escapes payload markers and backslashes, with one attribution for two pastes', () => {

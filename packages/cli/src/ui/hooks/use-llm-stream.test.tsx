@@ -2057,6 +2057,7 @@ describe('useLlmStream', () => {
         type: 'user',
         text: literal,
         recallText: literal.replace(placeholder, body),
+        pasteExpansions,
       }),
       expect.any(Number),
     );

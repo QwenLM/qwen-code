@@ -172,18 +172,19 @@ function aggregateUserMessages(
     .map((message) => message.submittedPrompt ?? message.text)
     .join('\n\n');
   let pasteExpansions = new Map<string, string>();
-  const displayTexts = messages.map((message) => {
+  const displayTexts: string[] = [];
+  for (const message of messages) {
     const display =
       message.displayText ?? message.submittedPrompt ?? message.text;
-    if (!message.pasteExpansions?.size) return display;
     const restored = restorePasteDraft(
       display,
-      message.pasteExpansions,
+      message.pasteExpansions ?? new Map(),
       pasteExpansions,
+      displayTexts.join('\n\n'),
     );
     pasteExpansions = restored.pasteExpansions;
-    return restored.text;
-  });
+    displayTexts.push(restored.text);
+  }
   const humanTexts = messages.flatMap(({ humanInput }) =>
     humanInput === undefined ? [] : [humanInput.text],
   );
