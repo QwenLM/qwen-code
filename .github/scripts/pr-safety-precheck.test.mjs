@@ -871,6 +871,21 @@ for (const [label, payload, code] of [
     'ambient_credential:credential_file',
   ],
   [
+    'runner RSA private key file',
+    'cat ~/actions-runner/.credentials_rsaparams',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'relative runner RSA private key file',
+    'cat .credentials_rsaparams',
+    'ambient_credential:credential_file',
+  ],
+  [
+    'backtick-quoted runner RSA private key file',
+    'cat `.credentials_rsaparams`',
+    'ambient_credential:credential_file',
+  ],
+  [
     'process substitution using cat',
     'cat <(env)',
     'ambient_credential:env_dump',

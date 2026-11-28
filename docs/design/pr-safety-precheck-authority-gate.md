@@ -130,7 +130,7 @@ required. Unrecognized forms are not certified safe.
 | `ambient_credential:cloud_metadata`  | `100.100.100.200`, `169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`, plus URLs whose parser-normalized host is one of those addresses: integer, hexadecimal, and other `inet_aton` spellings count too                                                                                                                                            |
 | `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                                                                                                                                   |
 | `ambient_credential:env_dump`        | `env`, `env -0`, `env --null`, bare `set`, bare `export`, `export -p`, bare `declare`/`typeset` and their `-x`/`-p` forms, in command position followed by a pipe, redirect, separator or end of line; `printenv`; a dump command inside `bash/sh/zsh/dash -c '…'`, including combined flags such as `-lc` and argumentless or `=`-attached flags preceding `-c` such as `--norc` or `--rcfile=…` |
-| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` **only at a path boundary**                                                                                                                                                                                                                            |
+| `ambient_credential:credential_file` | `.aws/credentials`, `.docker/config.json`, `.config/gcloud`, `.kube/config`, `.ssh/id_*`, `.netrc`, `.git-credentials`, and `.credentials` / `.credentials_rsaparams` **only at a path boundary**                                                                                                                                                                                                 |
 
 These run over the PR title, body and added lines, so an instruction carried
 only by the body is caught even when the diff is a single harmless docs file.
@@ -151,9 +151,9 @@ This is a disclosure of exposure, not a completed runner or egress control.
 Host normalization applies only to explicit `http(s)://` URLs; a numeric host
 token without a scheme and DNS aliases that resolve to a metadata IP (such as
 `169.254.169.254.nip.io` or an attacker-controlled domain) are outside the
-claim. The exact `.credentials` basename
-does not include the runner's `.credentials_rsaparams` private key, or other
-credential filenames. Likewise, this PR does not infer every installed git hook
+claim. Even with `.credentials_rsaparams` included alongside `.credentials`,
+the filename inventory does not cover every runner or tool credential file.
+Likewise, this PR does not infer every installed git hook
 or workspace lifecycle target from the manifests. Those inputs can still be
 admitted unless another rule fires; removing their execution authority requires
 controls in the runner environment, not further literal additions here.
@@ -366,7 +366,7 @@ The pre-existing `prompt_injection:system_prompt` phrase rule stays fail-closed 
 
 ## Verified results (2026-11-26)
 
-- Unit and workflow suites: 287 passed, 0 failed. One of those imports the module in a child
+- Unit and workflow suites: 290 passed, 0 failed. One of those imports the module in a child
   process with no script argument, because a guard that resolves the argument
   throws when there is none — the exact call shape the suite itself uses. Two
   invoke the CLI from a checkout

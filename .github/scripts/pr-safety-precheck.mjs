@@ -132,7 +132,7 @@ const AMBIENT_CREDENTIAL_PATTERNS = [
   // ungated. This is not a complete inventory of runner credential files.
   [
     'ambient_credential:credential_file',
-    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials\b/,
+    /\.aws\/credentials|\.docker\/config\.json|\.config\/gcloud|\.kube\/config|\.ssh\/id_[a-z0-9]+|\.netrc\b|\.git-credentials|(?:^|[/\\\s"'`])\.credentials(?:_rsaparams)?\b/,
   ],
 ];
 

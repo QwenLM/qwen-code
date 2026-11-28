@@ -70,11 +70,11 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 | `ambient_credential:cloud_metadata`  | `100.100.100.200`、`169.254.169.254`、`169.254.170.2`、`fd00:ec2::254`、`metadata.google.internal`、`metadata.goog`，加上经 URL 解析器归一化后等于这些地址的 URL：整数、十六进制及其他 `inet_aton` 拼写也计入                                                                                                                   |
 | `ambient_credential:proc_environ`    | `/proc/<self\|thread-self\|pid\|$$\|$VAR>[/task/<tid>]/environ`                                                                                                                                                                                                                                                                 |
 | `ambient_credential:env_dump`        | 处于命令位置、后接管道／重定向／分隔符／行尾的 `env`、`env -0`、`env --null`、裸 `set`、裸 `export`、`export -p`、裸 `declare`/`typeset` 及其 `-x`/`-p` 形态；`printenv`；以及包在 `bash/sh/zsh/dash -c '…'` 里的导出命令（含 `-lc` 这类组合旗标，以及 `--norc`、`--rcfile=…` 这类位于 `-c` 之前的无独立参数或 `=` 附着值旗标） |
-| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`                                                                                                                                                             |
+| `ambient_credential:credential_file` | `.aws/credentials`、`.docker/config.json`、`.config/gcloud`、`.kube/config`、`.ssh/id_*`、`.netrc`、`.git-credentials`，以及**仅出现在路径边界处**的 `.credentials`／`.credentials_rsaparams`                                                                                                                                   |
 
 这些规则作用于 PR 标题、正文与新增行，因此即使 diff 只是一个无害的 docs 文件，仅由正文承载的指令也会被抓到。`printenv` 无论裸写还是包在 shell `-c` 中都无需终止符；其参数不属于选项文法。列表项命令（`1. env`、`- env`）和未加引号的 `-c` 参数同样纳入识别；重定向前带文件描述符也被视为一个有效的命令终止位置。这仍只是被支持形态的列表，不声称解析任意 shell 结构。**文字面有意保持有限，而不是“补齐一次即可确保安全”。** 后续的命令别名、带引号或绝对路径的命令、反斜杠续行、`/proc` 的 glob 与方括号展开、以及 `.npmrc`、`.config/gh/hosts.yml` 等额外凭据文件，都仍是披露的已知缺口，而不是已验证的覆盖。逐个补拼写并不能建立安全性，还会反复改变什么才算普通散文；本 PR 不把声称的清单当成 runner/出网控制的替代物。维护者需按 `ambient_credential:env_dump` 的阅读结果理解这些暴露面，此处是披露，不是完成的 runner 或 egress 控制。
 
-主机归一化只处理显式带 `http(s)://` 的 URL；不带协议的纯数字主机 token 以及解析到元数据 IP 的 DNS 别名（如 `169.254.169.254.nip.io` 或攻击者可控域名）均不在承诺内。精确的 `.credentials` 文件名不包括 runner 的 `.credentials_rsaparams` 私钥和其他凭据文件。本 PR 也不从 manifest 推导所有已安装的 Git hook 或 workspace 生命周期目标。这些输入仍可能被放行，除非另一条规则命中；消除其执行权限要靠 runner 环境中的控制，而不是在这里继续加字面量。
+主机归一化只处理显式带 `http(s)://` 的 URL；不带协议的纯数字主机 token 以及解析到元数据 IP 的 DNS 别名（如 `169.254.169.254.nip.io` 或攻击者可控域名）均不在承诺内。即便已将 runner 的 `.credentials_rsaparams` 与 `.credentials` 一并纳入，该文件名清单也不覆盖全部 runner 或工具凭据文件。本 PR 也不从 manifest 推导所有已安装的 Git hook 或 workspace 生命周期目标。这些输入仍可能被放行，除非另一条规则命中；消除其执行权限要靠 runner 环境中的控制，而不是在这里继续加字面量。
 
 `then`、`do` 等保留字引入的命令位置、命令前的赋值前缀（如 `FOO=1 env`）以及 dump 后的 `#` 注释，同样不在已识别的锚点或终止符内；shell `-c` 包装分支也不识别位于 `-c` 之前的带独立参数旗标（如 `bash -o pipefail -c 'env'`、`bash -o posix -c printenv`），以及引号内以子壳作为首个 token 的写法（如 `sh -c '(env)'`）。本次没有修复这些形态，除非另一条规则命中，它们仍会被放行。
 
@@ -152,7 +152,7 @@ git 会对含 tab、换行、或（在 `core.quotePath` 下）非 ASCII 字节�
 
 ## 已验证结果（2026-11-26）
 
-- 单元与 workflow 套件：287 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
+- 单元与 workflow 套件：290 通过、0 失败。其中一条在子进程里以 `node --input-type=module -e import(...)` 动态导入——没有脚本实参时，解析实参会抛错，而这正是套件本身加载模块的方式。另两条从**含空格的检出路径**与**软链**调用 CLI——入口判断曾把模块 URL 与手工拼出的路径串比较，这两种情形都不匹配，子进程以 0 退出且无输出，而调用方只读 stdout 时这与「判定干净」无从区分。另四条驱动**真实 CLI**，使旗标拼写进入被测契约；还有一条从 CLI 源码推导旗标名，要求 workflow 逐个从 collect 步骤的对应 output 传入，并包含 untrusted 分支自身那行 echo——此前只断言 `echo "<name>=` 会被 trusted 分支的 `=false` 顶掉，删掉 untrusted 那行就此看不见。现在任一侧改名、或删掉那行 echo，套件都会转红。
 - #18362：`protected_path:authority_surface`、`ambient_credential:cloud_metadata`、`ambient_credential:env_dump`。
 - #18364：`ambient_credential:cloud_metadata`、`ambient_credential:proc_environ`。
 - 变异见证：56 个臂，全部击杀，无跳过，另加一条**未变异对照**要求保持全绿。装置的临时目录**镜像仓库真实布局**——workflow 契约用例经相对 URL 读取 workflow；若不镜像，该用例在每个臂都会因文件缺失而红，而「文件缺失」会被误当成「变异击杀」。正是这条对照让整轮结果值得读。
