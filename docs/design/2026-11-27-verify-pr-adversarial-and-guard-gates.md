@@ -126,11 +126,14 @@ exact same commits (`7210889200`, `7214891441`, `7215477398`, `7215982054`,
     in `fetchSnapshot()` (keeping `isSnapshot()` backwards-compatible when
     `capturedAt` is absent), enforce strict `owner/repo` slug validation, and
     reject empty flag values or stray positional arguments.
-  - Re-read PR head, PR state, `reviews`, and `reviewComments` after all
-    paginated comment lists finish (using explicit `{ ok, value }` call results
-    so a JSON `null` response can never skip confirmation) and fail closed if
-    any of them changed while pages were in flight, requiring a fresh snapshot
-    before comparing.
+  - Re-check `reviews` and `reviewComments` after the initial paginated pass,
+    then run a single lightweight non-paginated GraphQL closing probe
+    (`GUARD_CONFIRM_QUERY`) **after** all paginated fetches finish (using
+    explicit `{ ok, value }` call results so a JSON `null` response can never
+    skip confirmation) to verify `headRefOid`, `state`, formal review count and
+    latest review (`databaseId`, `state`, `submittedAt`), and top-level comment
+    count and latest comment (`databaseId`, `updatedAt`) atomically before
+    writing the snapshot.
   - Add `--no-clobber` (`O_EXCL` atomic create) for round-start snapshots in
     per-round host directories so concurrent rounds cannot overwrite or delete
     each other's `guard-start.json`.

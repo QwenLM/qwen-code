@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  GUARD_CONFIRM_QUERY,
   GUARD_VERDICT_SCHEMA,
   buildGuardVerdict,
   compareSnapshots,
@@ -31,6 +32,9 @@ import {
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-guard.mjs', import.meta.url),
+);
+const CHECK_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
 );
 const HEAD = 'a'.repeat(40);
 
@@ -52,7 +56,12 @@ function snapshot(overrides = {}) {
 /** A gh stand-in: `responses` maps a label to a spawnSync-shaped result. */
 function fakeRun(responses) {
   return (args) => {
-    const key = args[0] === 'api' ? args[2] : 'pr view';
+    const key =
+      args[0] === 'api'
+        ? args[1] === 'graphql'
+          ? 'graphql'
+          : args[2]
+        : 'pr view';
     const response = responses[key];
     if (response === undefined) {
       return { status: 1, stdout: '', stderr: `no stub for ${key}` };
@@ -63,6 +72,34 @@ function fakeRun(responses) {
 
 function ok(body) {
   return { status: 0, stdout: JSON.stringify(body), stderr: '' };
+}
+
+function confirmPayload(overrides = {}) {
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          headRefOid: HEAD,
+          state: 'OPEN',
+          reviews: {
+            totalCount: 1,
+            nodes: [
+              {
+                databaseId: 1,
+                state: 'COMMENTED',
+                submittedAt: '2026-10-28T00:00:00Z',
+              },
+            ],
+          },
+          comments: {
+            totalCount: 0,
+            nodes: [],
+          },
+          ...overrides,
+        },
+      },
+    },
+  };
 }
 
 function allLists() {
@@ -80,6 +117,7 @@ function allLists() {
       { id: 2, updated_at: '2026-10-28T00:01:00Z', body: '' },
     ]),
     'repos/owner/repo/issues/7/comments': ok([]),
+    graphql: ok(confirmPayload()),
   };
 }
 
@@ -110,17 +148,31 @@ describe('fetchSnapshot', () => {
     );
   });
 
-  it('asks for every page, not the first 30', () => {
+  it('asks for every page, not the first 30, and runs the single closing GraphQL probe last', () => {
     const calls = [];
     const run = (args) => {
       calls.push(args);
       return fakeRun(allLists())(args);
     };
-    fetchSnapshot({ pr: 7, repo: 'owner/repo', run });
-    const apiCalls = calls.filter((args) => args[0] === 'api');
+    const res = fetchSnapshot({ pr: 7, repo: 'owner/repo', run });
+    expect(res.ok).toBe(true);
+    const paginatedCalls = calls.filter(
+      (args) => args[0] === 'api' && args[1] !== 'graphql',
+    );
     // 3 initial paginated list fetches + 2 closing confirmations (reviews, reviewComments).
-    expect(apiCalls).toHaveLength(5);
-    for (const args of apiCalls) expect(args).toContain('--paginate');
+    expect(paginatedCalls).toHaveLength(5);
+    for (const args of paginatedCalls) expect(args).toContain('--paginate');
+
+    // The single non-paginated closing GraphQL probe must run strictly AFTER
+    // all paginated list fetches finish.
+    const lastCall = calls.at(-1);
+    expect(lastCall[0]).toBe('api');
+    expect(lastCall[1]).toBe('graphql');
+    expect(lastCall).not.toContain('--paginate');
+    expect(lastCall).toContain(`query=${GUARD_CONFIRM_QUERY}`);
+    expect(GUARD_CONFIRM_QUERY).toBe(
+      'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 1) { totalCount nodes { databaseId state submittedAt } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } } } }',
+    );
   });
 
   // The hole this script exists to close: a failed call must not become an
@@ -240,24 +292,15 @@ describe('fetchSnapshot', () => {
       /an id, body or review state in one of the lists/,
     );
   });
-  it('rejects a snapshot when PR head or state changes during paginated comment fetches, or when the closing pr view fails', () => {
+  it('rejects a snapshot when PR head, state, reviews, or top-level comments change before the closing GraphQL probe, or when the probe fails or returns null', () => {
     const HEAD_B = 'b'.repeat(40);
-    const makeSequencedRun = (closingMeta) => {
-      let prViews = 0;
-      const base = allLists();
-      return (args) => {
-        if (args[0] !== 'api') {
-          prViews += 1;
-          return prViews === 1 ? base['pr view'] : closingMeta;
-        }
-        return base[args[2]];
-      };
-    };
+    const runWithClosing = (closingResponse) =>
+      fakeRun({ ...allLists(), graphql: closingResponse });
 
     const moved = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
-      run: makeSequencedRun(ok({ headRefOid: HEAD_B, state: 'OPEN' })),
+      run: runWithClosing(ok(confirmPayload({ headRefOid: HEAD_B }))),
     });
     expect(moved.ok).toBe(false);
     expect(moved.snapshot).toBeNull();
@@ -268,7 +311,7 @@ describe('fetchSnapshot', () => {
     const merged = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
-      run: makeSequencedRun(ok({ headRefOid: HEAD, state: 'MERGED' })),
+      run: runWithClosing(ok(confirmPayload({ state: 'MERGED' }))),
     });
     expect(merged.ok).toBe(false);
     expect(merged.snapshot).toBeNull();
@@ -276,10 +319,57 @@ describe('fetchSnapshot', () => {
       /PR state changed during snapshot fetch/,
     );
 
+    // Top-level P1 comment #77 lands during the second pagination pass.
+    const newTopComment = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithClosing(
+        ok(
+          confirmPayload({
+            comments: {
+              totalCount: 1,
+              nodes: [{ databaseId: 77, updatedAt: '2026-10-28T00:05:00Z' }],
+            },
+          }),
+        ),
+      ),
+    });
+    expect(newTopComment.ok).toBe(false);
+    expect(newTopComment.snapshot).toBeNull();
+    expect(newTopComment.errors.join('\n')).toMatch(
+      /issueComments changed during snapshot fetch \(0 -> 1\)/,
+    );
+
+    // Review added during the final window after list re-checks.
+    const lateReview = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithClosing(
+        ok(
+          confirmPayload({
+            reviews: {
+              totalCount: 2,
+              nodes: [
+                {
+                  databaseId: 88,
+                  state: 'CHANGES_REQUESTED',
+                  submittedAt: '2026-10-28T00:05:00Z',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    });
+    expect(lateReview.ok).toBe(false);
+    expect(lateReview.errors.join('\n')).toMatch(
+      /reviews changed during snapshot fetch \(1 -> 2\)/,
+    );
+
     const confirmFailed = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
-      run: makeSequencedRun({
+      run: runWithClosing({
         status: 1,
         stdout: '',
         stderr: 'connection reset',
@@ -288,11 +378,11 @@ describe('fetchSnapshot', () => {
     expect(confirmFailed.ok).toBe(false);
     expect(confirmFailed.snapshot).toBeNull();
     expect(confirmFailed.errors.join('\n')).toMatch(
-      /pr view \(confirm\): gh exited 1/,
+      /guard confirm: gh exited 1/,
     );
 
-    // Non-object JSON literals (`null`, `[]`) from either opening or closing
-    // `pr view` fail closed without skipping confirmation or throwing.
+    // Non-object JSON literals (`null`, `[]`) from opening `pr view` or closing
+    // `guard confirm` fail closed without skipping confirmation or throwing.
     const nullMeta = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
@@ -307,22 +397,44 @@ describe('fetchSnapshot', () => {
     const nullConfirm = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
-      run: makeSequencedRun(ok(null)),
+      run: runWithClosing(ok(null)),
     });
     expect(nullConfirm.ok).toBe(false);
     expect(nullConfirm.snapshot).toBeNull();
     expect(nullConfirm.errors.join('\n')).toMatch(
-      /pr view \(confirm\): expected an object, got null/,
+      /guard confirm: expected pullRequest object, got null/,
     );
 
     const arrayConfirm = fetchSnapshot({
       pr: 7,
       repo: 'owner/repo',
-      run: makeSequencedRun(ok([])),
+      run: runWithClosing(ok([])),
     });
     expect(arrayConfirm.ok).toBe(false);
     expect(arrayConfirm.errors.join('\n')).toMatch(
-      /pr view \(confirm\): expected an object, got array/,
+      /guard confirm: expected pullRequest object, got array/,
+    );
+
+    const malformedComments = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithClosing(ok(confirmPayload({ comments: null }))),
+    });
+    expect(malformedComments.ok).toBe(false);
+    expect(malformedComments.errors.join('\n')).toMatch(
+      /malformed issueComments summary in closing probe/,
+    );
+
+    const graphqlErrors = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: runWithClosing(
+        ok({ ...confirmPayload(), errors: [{ message: 'partial error' }] }),
+      ),
+    });
+    expect(graphqlErrors.ok).toBe(false);
+    expect(graphqlErrors.errors.join('\n')).toMatch(
+      /guard confirm: GraphQL response returned errors/,
     );
   });
 
@@ -331,7 +443,12 @@ describe('fetchSnapshot', () => {
     const runWithMidListChange = (targetPath, secondResponse) => {
       const counts = new Map();
       return (args) => {
-        const key = args[0] === 'api' ? args[2] : 'pr view';
+        const key =
+          args[0] === 'api'
+            ? args[1] === 'graphql'
+              ? 'graphql'
+              : args[2]
+            : 'pr view';
         const seen = (counts.get(key) ?? 0) + 1;
         counts.set(key, seen);
         if (key === targetPath && seen === 2) return secondResponse;
@@ -788,7 +905,9 @@ describe.skipIf(process.platform === 'win32')('guard (CLI)', () => {
     return { PATH: `${bin}:${process.env.PATH}` };
   }
 
+  const GH_OK_GRAPHQL = JSON.stringify(confirmPayload());
   const GH_OK = `case "$*" in
+  *graphql*) echo '${GH_OK_GRAPHQL}' ;;
   *"pr view"*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
   *reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
   *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
@@ -1071,6 +1190,16 @@ esac`;
     const ghAfterP1 = GH_OK.replace(
       `  *issues/7/comments*) echo '[]' ;;`,
       `  *issues/7/comments*) echo '[{"id":99,"updated_at":"2026-10-28T00:05:00Z","body":"[P1] new finding"}]' ;;`,
+    ).replace(
+      GH_OK_GRAPHQL,
+      JSON.stringify(
+        confirmPayload({
+          comments: {
+            totalCount: 1,
+            nodes: [{ databaseId: 99, updatedAt: '2026-10-28T00:05:00Z' }],
+          },
+        }),
+      ),
     );
     const envAfterP1 = withGh(join(dir, 'gh-p1'), ghAfterP1);
     const clobberAttempt = run(
@@ -1166,15 +1295,16 @@ esac`;
 
     // Simulate a push landing right as the first comment list returns: the
     // opening `pr view` sees HEAD, reviews marks stateFile, and the closing
-    // `pr view` observes HEAD_B.
+    // GraphQL probe observes HEAD_B.
     const midPushGh = `#!/bin/sh
 case "$*" in
-  *'pr view'*)
+  *graphql*)
     if [ -f "${stateFile}" ]; then
-      echo '{"headRefOid":"${HEAD_B}","state":"OPEN"}'
+      echo '${JSON.stringify(confirmPayload({ headRefOid: HEAD_B }))}'
     else
-      echo '{"headRefOid":"${HEAD}","state":"OPEN"}'
+      echo '${GH_OK_GRAPHQL}'
     fi ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
   *pulls/7/reviews*)
     touch "${stateFile}"
     echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
@@ -1194,12 +1324,231 @@ esac
     expect(existsSync(nowPath)).toBe(false);
   });
 
-  it('rejects a mid-fetch CHANGES_REQUESTED review and a closing null pr view via CLI', () => {
+  it('blocks publication on the very first attempt when a push or top-level P1 comment lands during the second reviews pagination pass', () => {
+    const dir = tmpDir();
+    const HEAD_B = 'b'.repeat(40);
+    const NONCE = '0123456789abcdef0123456789abcdef';
+    const nonceSha = createHash('sha256').update(NONCE).digest('hex');
+
+    const prClone = join(dir, 'pr-clone');
+    const rd = join(prClone, 'tmp', 'pr7-verify-20261128-031500');
+    const verifyCtxDir = join(dir, 'qwen-verify', 'pr7');
+    mkdirSync(join(rd, 'evidence'), { recursive: true });
+    mkdirSync(join(rd, 'logs'), { recursive: true });
+    mkdirSync(verifyCtxDir, { recursive: true });
+
+    writeFileSync(
+      join(rd, 'report.md'),
+      `**Verdict: merge-ready** — head \`${HEAD}\`.\n\n## Methodology\n\n**Boundary.** Credential-free \`node:22\` container with \`--network none\`.\n`,
+    );
+    writeFileSync(join(rd, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(rd, 'assertions.json'),
+      JSON.stringify({ total: 2, pass: 2, fail: 0 }),
+    );
+    writeFileSync(
+      join(rd, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'node:22 --network none' }),
+    );
+    writeFileSync(
+      join(rd, 'boundary-gate.json'),
+      JSON.stringify({
+        gate: 'require-isolation',
+        passed: true,
+        at: '2026-11-28T03:00:00.000Z',
+        signals: ['/.dockerenv'],
+        observed: ['/.dockerenv'],
+        credentialFree: true,
+        nonceSha256: nonceSha,
+      }),
+    );
+    writeFileSync(join(rd, 'logs', 'run.log'), `container-nonce: ${NONCE}\n`);
+    writeFileSync(join(rd, 'evidence', '01-ab.png'), 'png');
+
+    const ctxPath = join(verifyCtxDir, 'pr.json');
+    const ctxRaw = JSON.stringify({
+      repo: 'owner/repo',
+      pr: 7,
+      headRefOid: HEAD,
+    });
+    writeFileSync(ctxPath, ctxRaw);
+    const ctxSha = createHash('sha256').update(ctxRaw, 'utf8').digest('hex');
+
+    const okEnv = withGh(dir, GH_OK);
+
+    // Helper running the full publish chain: refresh -> compare --out -> verify-pr-check --require-guard.
+    const runPublishChain = (roundDir, env) => {
+      const startPath = join(roundDir, 'guard-start.json');
+      const nowPath = join(roundDir, 'guard-now.json');
+      const verdictPath = join(roundDir, 'guard-verdict.json');
+      const snap = run(
+        ['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath],
+        env,
+      );
+      if (snap.status !== 0) return { stage: 'snapshot', res: snap };
+      const cmp = run([
+        '--compare',
+        '--start',
+        startPath,
+        '--now',
+        nowPath,
+        '--out',
+        verdictPath,
+      ]);
+      if (cmp.status !== 0) return { stage: 'compare', res: cmp };
+      const shaMatch = /^ {2}guard-sha256 {2}([0-9a-f]{64})$/m.exec(cmp.stdout);
+      const chk = spawnSync(
+        process.execPath,
+        [
+          CHECK_SCRIPT,
+          '--context',
+          ctxPath,
+          '--context-sha256',
+          ctxSha,
+          '--context-root',
+          prClone,
+          '--require-guard',
+          '--guard',
+          verdictPath,
+          '--guard-sha256',
+          shaMatch ? shaMatch[1] : '0'.repeat(64),
+          rd,
+        ],
+        { encoding: 'utf8' },
+      );
+      return { stage: 'check', res: chk };
+    };
+
+    // Case 1: Push HEAD -> HEAD_B takes effect on the SECOND `pulls/7/reviews` call.
+    const pushRoundDir = join(dir, 'guard-push');
+    mkdirSync(pushRoundDir, { recursive: true });
+    expect(
+      run(
+        [
+          '--pr',
+          '7',
+          '--repo',
+          'owner/repo',
+          '--snapshot',
+          join(pushRoundDir, 'guard-start.json'),
+          '--no-clobber',
+        ],
+        okEnv,
+      ).status,
+    ).toBe(0);
+    const pushCountFile = join(dir, 'reviews-count-push');
+    const pushActiveFile = join(dir, 'push-active');
+    const secondPassPushEnv = withGh(
+      join(dir, 'gh-second-push'),
+      `case "$*" in
+  *graphql*)
+    if [ -f "${pushActiveFile}" ]; then
+      echo '${JSON.stringify(confirmPayload({ headRefOid: HEAD_B }))}'
+    else
+      echo '${GH_OK_GRAPHQL}'
+    fi ;;
+  *'pr view'*)
+    if [ -f "${pushActiveFile}" ]; then
+      echo '{"headRefOid":"${HEAD_B}","state":"OPEN"}'
+    else
+      echo '{"headRefOid":"${HEAD}","state":"OPEN"}'
+    fi ;;
+  *pulls/7/reviews*)
+    n=$(cat "${pushCountFile}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${pushCountFile}"
+    if [ "$n" -ge 2 ]; then touch "${pushActiveFile}"; fi
+    echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*) echo '[]' ;;
+esac`,
+    );
+    const firstPushTry = runPublishChain(pushRoundDir, secondPassPushEnv);
+    expect(firstPushTry.stage).toBe('snapshot');
+    expect(firstPushTry.res.status).toBe(1);
+    expect(firstPushTry.res.stderr).toContain(
+      'PR head moved during snapshot fetch',
+    );
+    const secondPushTry = runPublishChain(pushRoundDir, secondPassPushEnv);
+    expect(secondPushTry.stage).toBe('compare');
+    expect(secondPushTry.res.status).toBe(1);
+    expect(secondPushTry.res.stdout).toContain('head moved');
+
+    // Case 2: Head stays unchanged, top-level P1 comment #77 takes effect on
+    // the SECOND `pulls/7/reviews` call.
+    const commentRoundDir = join(dir, 'guard-comment');
+    mkdirSync(commentRoundDir, { recursive: true });
+    expect(
+      run(
+        [
+          '--pr',
+          '7',
+          '--repo',
+          'owner/repo',
+          '--snapshot',
+          join(commentRoundDir, 'guard-start.json'),
+          '--no-clobber',
+        ],
+        okEnv,
+      ).status,
+    ).toBe(0);
+    const commentCountFile = join(dir, 'reviews-count-comment');
+    const commentActiveFile = join(dir, 'comment-active');
+    const secondPassCommentEnv = withGh(
+      join(dir, 'gh-second-comment'),
+      `case "$*" in
+  *graphql*)
+    if [ -f "${commentActiveFile}" ]; then
+      echo '${JSON.stringify(
+        confirmPayload({
+          comments: {
+            totalCount: 1,
+            nodes: [{ databaseId: 77, updatedAt: '2026-10-28T00:06:00Z' }],
+          },
+        }),
+      )}'
+    else
+      echo '${GH_OK_GRAPHQL}'
+    fi ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
+  *pulls/7/reviews*)
+    n=$(cat "${commentCountFile}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "${commentCountFile}"
+    if [ "$n" -ge 2 ]; then touch "${commentActiveFile}"; fi
+    echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
+  *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
+  *issues/7/comments*)
+    if [ -f "${commentActiveFile}" ]; then
+      echo '[{"id":77,"updated_at":"2026-10-28T00:06:00Z","body":"[P1] late top-level review"}]'
+    else
+      echo '[]'
+    fi ;;
+esac`,
+    );
+    const firstCommentTry = runPublishChain(
+      commentRoundDir,
+      secondPassCommentEnv,
+    );
+    expect(firstCommentTry.stage).toBe('snapshot');
+    expect(firstCommentTry.res.status).toBe(1);
+    expect(firstCommentTry.res.stderr).toContain(
+      'issueComments changed during snapshot fetch (0 -> 1)',
+    );
+    const secondCommentTry = runPublishChain(
+      commentRoundDir,
+      secondPassCommentEnv,
+    );
+    expect(secondCommentTry.stage).toBe('compare');
+    expect(secondCommentTry.res.status).toBe(1);
+    expect(secondCommentTry.res.stdout).toContain('issueComments: 77 is new');
+  });
+
+  it('rejects a mid-fetch CHANGES_REQUESTED review and a closing null confirmation via CLI', () => {
     const dir = tmpDir();
     const startPath = join(dir, 'guard-start.json');
     const nowPath = join(dir, 'guard-now.json');
     const reviewMarker = join(dir, 'review-arrived');
-    const nullMarker = join(dir, 'null-confirm');
 
     const okEnv = withGh(dir, GH_OK);
     expect(
@@ -1215,6 +1564,7 @@ esac
     // inline comments arrives while `pulls/7/comments` is being read.
     const midReviewGh = `#!/bin/sh
 case "$*" in
+  *graphql*) echo '${GH_OK_GRAPHQL}' ;;
   *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
   *pulls/7/reviews*)
     if [ -f "${reviewMarker}" ]; then
@@ -1240,20 +1590,15 @@ esac
     expect(midReviewRes.stderr).toContain(`removed stale ${nowPath}`);
     expect(existsSync(nowPath)).toBe(false);
 
-    // Opening pr view succeeds, closing pr view returns exit 0 with JSON `null`.
+    // Opening pr view succeeds, closing GraphQL confirmation returns exit 0 with JSON `null`.
     expect(
       run(['--pr', '7', '--repo', 'owner/repo', '--snapshot', nowPath], okEnv)
         .status,
     ).toBe(0);
     const nullConfirmGh = `#!/bin/sh
 case "$*" in
-  *'pr view'*)
-    if [ -f "${nullMarker}" ]; then
-      echo 'null'
-    else
-      touch "${nullMarker}"
-      echo '{"headRefOid":"${HEAD}","state":"OPEN"}'
-    fi ;;
+  *graphql*) echo 'null' ;;
+  *'pr view'*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
   *pulls/7/reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
   *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
   *issues/7/comments*) echo '[]' ;;
@@ -1266,7 +1611,7 @@ esac
     );
     expect(nullConfirmRes.status).toBe(1);
     expect(nullConfirmRes.stderr).toContain(
-      'pr view (confirm): expected an object, got null',
+      'guard confirm: expected pullRequest object, got null',
     );
     expect(nullConfirmRes.stderr).toContain(`removed stale ${nowPath}`);
     expect(existsSync(nowPath)).toBe(false);

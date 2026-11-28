@@ -1495,7 +1495,9 @@ a **per-round host directory** outside the container-mounted verify cache
 (`qwen-verify-guard/pr<n>/<round-id>/`, never under the `qwen-verify/pr<n>/`
 tree that Docker mounts read-only as the container's `verify-context` mount,
 because raw guard snapshots store unfiltered comment bodies for edit detection
-and must stay unreadable from inside the verification sandbox). Allocate
+and must stay unreadable from inside the verification sandbox; if reusing a
+workstation cache that held older guard files under `qwen-verify/pr<n>/`,
+remove those stale guard files before starting the container). Allocate
 `<round-id>` (a unique per-round identifier independent of `prepare`'s
 artifact directory name) and create `guard-start.json` exclusively with
 `--no-clobber` **before** `verify-pr-prepare.mjs` fetches `review-threads.json`
@@ -1563,12 +1565,15 @@ node <trusted-clone>/scripts/verify-pr-check.mjs \
   <artifact-dir>
 ```
 
-A `--snapshot` refresh re-reads PR head, PR state, `reviews`, and
-`reviewComments` after all paginated comment fetches complete (requiring valid
-JSON objects/arrays and rejecting mid-fetch pushes, state changes,
-`CHANGES_REQUESTED` reviews, or inline review comments), and removes any stale
-regular snapshot already at that path on either fetch failure or write failure
-(while refusing to touch symlinks, hardlinks, or non-regular files).
+A `--snapshot` refresh re-checks `reviews` and `reviewComments` and then runs
+one non-paginated closing GraphQL probe **after** all paginated fetches finish
+to confirm PR head, PR state, formal review count and latest review, and
+top-level comment count and latest comment all stayed unchanged (requiring
+valid JSON objects/arrays and rejecting mid-fetch pushes, state changes,
+`CHANGES_REQUESTED` reviews, inline review comments, or new top-level
+comments), and removes any stale regular snapshot already at that path on
+either fetch failure or write failure (while refusing to touch symlinks,
+hardlinks, or non-regular files).
 `--compare --out` overwrites the verdict on dirty runs and invalidates any
 stale regular verdict on write failure (so an older `clean: true` file cannot
 survive), and `verify-pr-check.mjs` with `--require-guard` refuses a missing

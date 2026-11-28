@@ -43,6 +43,13 @@ import { GUARD_VERDICT_SCHEMA } from './verify-pr-check.mjs';
 
 export { GUARD_VERDICT_SCHEMA };
 
+// Checked against live GitHub PRs (#18549, #18494): single non-paginated
+// closing probe run after all paginated list fetches finish so any push, state
+// transition, formal review, or top-level comment arriving during pagination
+// is caught atomically before the snapshot is written.
+export const GUARD_CONFIRM_QUERY =
+  'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid state reviews(last: 1) { totalCount nodes { databaseId state submittedAt } } comments(last: 1) { totalCount nodes { databaseId updatedAt } } } } }';
+
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
 
@@ -71,13 +78,15 @@ const HELP = `Usage:
   node scripts/verify-pr-guard.mjs --compare --start <file> --now <file> [--out <verdict-file>]
 
 --snapshot fetches the head and PR state, paginates all three comment lists,
-then re-reads the head, PR state, reviews, and review comments to confirm none
-changed while pages were in flight. It writes the file only when every call
-succeeded with valid JSON objects/arrays and the opening and closing reads
-match. A failed fetch or failed write exits 1 and leaves no stale regular
-snapshot behind (removing any stale regular snapshot already at that path while
-refusing to touch symlinks, hardlinks, or non-regular files), so a retry after
-a failed refresh cannot be mistaken for a fresh snapshot.
+re-checks the earlier review/review-comment lists, then runs a single
+non-paginated closing GraphQL probe after all paginated fetches complete to
+confirm head, PR state, formal review count/latest review, and top-level
+comment count/latest comment all remained unchanged. It writes the file only
+when every call succeeded with valid JSON objects/arrays and the opening and
+closing reads match. A failed fetch or failed write exits 1 and leaves no stale
+regular snapshot behind (removing any stale regular snapshot already at that
+path while refusing to touch symlinks, hardlinks, or non-regular files), so a
+retry after a failed refresh cannot be mistaken for a fresh snapshot.
 
 With --no-clobber (for round-start snapshots in a per-round host directory),
 --snapshot creates the file exclusively (O_EXCL) and exits 1 without touching
@@ -196,59 +205,6 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
     snapshot[key] = normalize(itemsRes.value, carriesState);
   }
 
-  // Re-read head, state, and the earlier paginated lists (`reviews` and
-  // `reviewComments`) after `issueComments` finishes so any push, state
-  // change, CHANGES_REQUESTED review, review edit/dismissal, or inline review
-  // comment landing while pages were in flight is caught and rejected.
-  if (errors.length === 0 && metaObj !== null) {
-    const confirmMetaRes = call(
-      ['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,state'],
-      'pr view (confirm)',
-    );
-    if (confirmMetaRes.ok) {
-      if (!isPlainObject(confirmMetaRes.value)) {
-        errors.push(
-          `pr view (confirm): expected an object, got ${describeType(confirmMetaRes.value)}`,
-        );
-      } else {
-        if (confirmMetaRes.value.headRefOid !== metaObj.headRefOid) {
-          errors.push(
-            `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${confirmMetaRes.value.headRefOid}); re-fetch before comparing`,
-          );
-        }
-        if (confirmMetaRes.value.state !== metaObj.state) {
-          errors.push(
-            `PR state changed during snapshot fetch (${metaObj.state} -> ${confirmMetaRes.value.state}); re-fetch before comparing`,
-          );
-        }
-      }
-    }
-
-    for (const [key, path, carriesState] of LISTS.slice(0, -1)) {
-      const confirmListRes = call(
-        ['api', '--paginate', path(pr).replace('{repo}', repo)],
-        `${key} (confirm)`,
-      );
-      if (!confirmListRes.ok) continue;
-      if (!Array.isArray(confirmListRes.value)) {
-        errors.push(
-          `${key} (confirm): expected an array, got ${describeType(confirmListRes.value)}`,
-        );
-        continue;
-      }
-      if (!confirmListRes.value.every(isPlainObject)) {
-        errors.push(`${key} (confirm): expected an array of objects`);
-        continue;
-      }
-      const confirmed = normalize(confirmListRes.value, carriesState);
-      if (canonicalListKey(confirmed) !== canonicalListKey(snapshot[key])) {
-        errors.push(
-          `${key} changed during snapshot fetch; re-fetch before comparing`,
-        );
-      }
-    }
-  }
-
   if (errors.length > 0) return { ok: false, errors, snapshot: null };
   if (!isSnapshot(snapshot)) {
     return {
@@ -259,6 +215,147 @@ export function fetchSnapshot({ pr, repo, run, now = () => new Date() }) {
       snapshot: null,
     };
   }
+
+  // First re-check the earlier paginated lists (`reviews` and `reviewComments`)
+  // so edits, dismissals, or additions during the first pass are caught, then
+  // run one lightweight non-paginated GraphQL closing probe AFTER all
+  // paginated fetches finish so any push, state change, formal review, or
+  // top-level comment arriving during the second pagination pass is rejected.
+  for (const [key, path, carriesState] of LISTS.slice(0, -1)) {
+    const confirmListRes = call(
+      ['api', '--paginate', path(pr).replace('{repo}', repo)],
+      `${key} (confirm)`,
+    );
+    if (!confirmListRes.ok) continue;
+    if (!Array.isArray(confirmListRes.value)) {
+      errors.push(
+        `${key} (confirm): expected an array, got ${describeType(confirmListRes.value)}`,
+      );
+      continue;
+    }
+    if (!confirmListRes.value.every(isPlainObject)) {
+      errors.push(`${key} (confirm): expected an array of objects`);
+      continue;
+    }
+    const confirmed = normalize(confirmListRes.value, carriesState);
+    if (canonicalListKey(confirmed) !== canonicalListKey(snapshot[key])) {
+      errors.push(
+        `${key} changed during snapshot fetch; re-fetch before comparing`,
+      );
+    }
+  }
+
+  if (errors.length === 0) {
+    const [owner, name] = repo.split('/');
+    const confirmRes = call(
+      [
+        'api',
+        'graphql',
+        '-f',
+        `owner=${owner}`,
+        '-f',
+        `name=${name}`,
+        '-F',
+        `number=${pr}`,
+        '-f',
+        `query=${GUARD_CONFIRM_QUERY}`,
+      ],
+      'guard confirm',
+    );
+    if (confirmRes.ok) {
+      if (
+        isPlainObject(confirmRes.value) &&
+        Array.isArray(confirmRes.value.errors) &&
+        confirmRes.value.errors.length > 0
+      ) {
+        errors.push('guard confirm: GraphQL response returned errors');
+      } else {
+        const pull = isPlainObject(confirmRes.value)
+          ? confirmRes.value?.data?.repository?.pullRequest
+          : undefined;
+        if (!isPlainObject(pull)) {
+          errors.push(
+            `guard confirm: expected pullRequest object, got ${describeType(pull ?? confirmRes.value)}`,
+          );
+        } else {
+          if (pull.headRefOid !== metaObj.headRefOid) {
+            errors.push(
+              `PR head moved during snapshot fetch (${metaObj.headRefOid} -> ${pull.headRefOid}); re-fetch before comparing`,
+            );
+          }
+          if (pull.state !== metaObj.state) {
+            errors.push(
+              `PR state changed during snapshot fetch (${metaObj.state} -> ${pull.state}); re-fetch before comparing`,
+            );
+          }
+
+          const latestById = (list) =>
+            list.length === 0
+              ? null
+              : list.reduce((max, item) => (item.id > max.id ? item : max));
+
+          const checkConnection = (conn, list, label, extraFields) => {
+            if (
+              !isPlainObject(conn) ||
+              !Number.isInteger(conn.totalCount) ||
+              conn.totalCount < 0 ||
+              !Array.isArray(conn.nodes) ||
+              !conn.nodes.every(isPlainObject)
+            ) {
+              errors.push(
+                `guard confirm: malformed ${label} summary in closing probe`,
+              );
+              return;
+            }
+            if (conn.totalCount !== list.length) {
+              errors.push(
+                `${label} changed during snapshot fetch (${list.length} -> ${conn.totalCount}); re-fetch before comparing`,
+              );
+              return;
+            }
+            if (conn.totalCount === 0) {
+              if (conn.nodes.length !== 0) {
+                errors.push(
+                  `guard confirm: malformed ${label} summary in closing probe`,
+                );
+              }
+              return;
+            }
+            if (conn.nodes.length !== 1) {
+              errors.push(
+                `guard confirm: missing latest ${label} node in closing probe`,
+              );
+              return;
+            }
+            const latest = latestById(list);
+            const node = conn.nodes[0];
+            if (node.databaseId !== latest.id || !extraFields(node, latest)) {
+              errors.push(
+                `${label} changed during snapshot fetch; re-fetch before comparing`,
+              );
+            }
+          };
+
+          checkConnection(
+            pull.reviews,
+            snapshot.reviews,
+            'reviews',
+            (node, latest) =>
+              node.state === latest.state &&
+              (node.submittedAt ?? null) === latest.stamp,
+          );
+          checkConnection(
+            pull.comments,
+            snapshot.issueComments,
+            'issueComments',
+            (node, latest) => (node.updatedAt ?? null) === latest.stamp,
+          );
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors, snapshot: null };
   return { ok: true, errors: [], snapshot };
 }
 

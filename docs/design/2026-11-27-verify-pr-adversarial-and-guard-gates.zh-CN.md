@@ -86,7 +86,7 @@ I/O 回归（`7210889200`、`7214891441`、`7215477398`、`7215982054`、`721809
   `verify-pr-check.mjs` 时不增加对 `verify-pr-guard.mjs` 的运行时依赖。
 - **`verify-pr-guard.mjs`**：
   - `fetchSnapshot()` 在首次读取元数据前记录 UTC ISO-8601 `capturedAt`（`isSnapshot()` 对缺少 `capturedAt` 的旧快照保持向后兼容），收紧 `owner/repo` slug 校验，并拒绝空值参数与多余位置参数。
-  - 在三类评论全部分页拉取完成后再次读取 PR head、状态、`reviews` 与 `reviewComments`（内部以显式 `{ ok, value }` 区分调用失败与 JSON `null` 响应，杜绝末次确认返回 `null` 被静默跳过），若分页在途期间发生推送、状态变更、无行内评论的 `CHANGES_REQUESTED` 评审或行内评论变动则直接拒绝写出快照并要求重抓。
+  - 在首轮分页完成后先复核 `reviews` 与 `reviewComments`，随后在**所有耗时分页完全结束之后**执行唯一一次非分页轻量 GraphQL 终检（`GUARD_CONFIRM_QUERY`，内部以显式 `{ ok, value }` 区分调用失败与 JSON `null` 响应，杜绝末次确认返回 `null` 被静默跳过），在同一响应内原子核对 `headRefOid`、`state`、正式评审总数与末条标识（`databaseId`/`state`/`submittedAt`）以及顶层评论总数与末条标识（`databaseId`/`updatedAt`），凡在途变化即拒绝写出快照并要求重抓。
   - 为本轮独占目录中的起始快照新增 `--no-clobber`（内核级 `O_EXCL` 排他创建），防止并发两轮互相覆盖或删除彼此的 `guard-start.json`。
   - 在非 `--no-clobber` 的 `--snapshot <file>` 刷新及 `--compare --out <verdict-file>` 中，预先校验目标安全性；无论抓取失败还是写入失败（例如可写目录中只读旧文件触发 `EACCES`），均自动移除单链接普通旧文件使之失效（绝不触动 symlink、hardlink 或非普通文件）。
   - `--compare` 通过 `realpathSync`、父目录规范化与 `(dev, ino)` 强化同文件判定，防止经由 symlink 或 hardlink 自我对比，并将倒序时间戳（`now.capturedAt < start.capturedAt`）直接判为 dirty。
