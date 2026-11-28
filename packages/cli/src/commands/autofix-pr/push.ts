@@ -32,7 +32,7 @@ import {
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
-import { assertNoFixInFlight } from './fix.js';
+import { assertNoFixInFlight, readSnapshotRoundId } from './fix.js';
 import {
   checkoutHoldsWork,
   hasUncommittedChanges,
@@ -350,11 +350,14 @@ function pushLocked(
     );
   }
 
+  const snapshotRoundId = readSnapshotRoundId(paths, prNumber);
+  const { lastPush: _prevPush, ...baseState } = current;
   writeState(paths.statePath, {
-    ...current,
+    ...baseState,
     lastKnownHeadSha: head,
     pushedShas: [...state.pushedShas, head],
     pushCount: pushes + 1,
+    ...(snapshotRoundId ? { lastPush: { sha: head, snapshotRoundId } } : {}),
   });
   return {
     pushed: true,

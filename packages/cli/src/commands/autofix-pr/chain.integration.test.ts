@@ -1429,12 +1429,75 @@ describe.skipIf(process.platform === 'win32')(
         ),
       ).toBe(false);
 
+      // Rollback scenario: another contributor pushes B on top of sha2, next
+      // round snapshots at B, then the contributor rolls the branch back to
+      // previously-pushed sha2 and `sync` adopts sha2 without this round
+      // pushing. `reply` must refuse to resolve a new thread on sha2.
+      const otherSha = pushFromElsewhere('extra.txt', 'Contributor push B');
+      expect(await cli('sync', '7')).toMatchObject([
+        { synced: true, headSha: otherSha },
+      ]);
+      updateWorld((world) => {
+        world.threads.push({
+          id: 'PRRT_ROLLBACK',
+          path: 'sum.js',
+          line: 1,
+          comments: [
+            {
+              id: 'PRRC_804',
+              databaseId: 804,
+              author: 'alice',
+              authorAssociation: 'MEMBER',
+              body: 'Drop extra.txt.',
+            },
+          ],
+        });
+      });
+      const [snapRollback] = await cli('snapshot', '7');
+      expect(snapRollback).toMatchObject({ action: 'fix', headSha: otherSha });
+      // External rollback back to previously-pushed sha2.
+      run(bare, 'update-ref', 'refs/heads/feat', sha2);
+      run(bare, 'update-ref', 'refs/pull/7/head', sha2);
+      expect(await cli('sync', '7')).toMatchObject([
+        { synced: true, headSha: sha2 },
+      ]);
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          replies: [
+            {
+              replyTo: 804,
+              body: `Fixed in ${sha2.slice(0, 7)}: rolled back.`,
+              handled: ['PRRC_804'],
+              resolve: true,
+            },
+          ],
+        }),
+      );
+      const [repliedRollback] = await cli('reply', '7', planPath);
+      expect(repliedRollback).toMatchObject({
+        resolvedThreads: [],
+        resolveSkipped: [{ replyTo: 804, reason: 'not_pushed' }],
+      });
+      const worldAfterRollback = JSON.parse(
+        readFileSync(worldPath, 'utf8'),
+      ) as {
+        threads: Array<{ id: string; isResolved?: boolean }>;
+      };
+      expect(
+        Boolean(
+          worldAfterRollback.threads.find((t) => t.id === 'PRRT_ROLLBACK')
+            ?.isResolved,
+        ),
+      ).toBe(false);
+
       expect(await cli('cleanup', '7')).toMatchObject({
         0: { removed: true },
       });
       expectPushes([
         [head, fixedSha],
         [fixedSha, sha2],
+        [sha2, otherSha],
       ]);
     });
   },

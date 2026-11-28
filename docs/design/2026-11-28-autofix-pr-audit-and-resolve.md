@@ -48,12 +48,22 @@ workflow before committing:
    - Distinguish aggregate/summary CI jobs from the underlying failing child
      job, and separate PR defects from external/runner/base-branch flakes.
    - Account for every actionable item across inline `review_thread` comments,
-     findings/deferred checklists in `review` bodies, and verification reports
-     or maintainer follow-ups in trusted `issue_comment` entries, while
-     recognizing purely procedural bot status notices (e.g., CI-pending
-     downgrades) that require no code change.
+     findings/deferred checklists in `review` bodies (including `APPROVED`
+     reviews carrying a deferred checklist such as
+     `<!-- qwen-review-deferred -->`, surfaced by `snapshot` with
+     `deferredOnly: true` while keeping plain approvals quiet and preserving
+     the items' deferred status), and verification reports or maintainer
+     follow-ups in trusted `issue_comment` entries, while recognizing purely
+     procedural bot status notices (e.g., CI-pending downgrades) that require
+     no code change.
 2. **Multi-round undirected & adversarial audit (`## Audit until clean`)**:
-   - **Undirected audit**: read the full PR diff against `<remote>/<baseRefName>`
+   - **Fresh base diff**: before choosing the audit diff, run
+     `git fetch --no-tags <remote> <baseRefName>`, pin
+     `BASE_SHA=$(git rev-parse FETCH_HEAD)`, and compute
+     `MERGE_BASE=$(git merge-base "$BASE_SHA" HEAD)` so stale local
+     `<remote>/<baseRefName>` refs never pull unrelated upstream commits into
+     the audit.
+   - **Undirected audit**: read the full PR diff from `"$MERGE_BASE"..HEAD`
      and nearby callers without a preset checklist to catch missed sibling call
      sites, unwired switches, contract/docs drift, and merge side effects.
    - **Adversarial audit**: assume implementation and tests are wrong; probe
@@ -117,24 +127,32 @@ call raw `gh api` or GraphQL mutations directly.
   before calling GitHub GraphQL `resolveReviewThread`:
   1. `post === true` (`--no-post` skips with `no_post`).
   2. `resolve !== false` (`--no-resolve` skips with `disabled`).
-  3. `state.pushedShas.includes(head)` **and** the round's prepared snapshot
+  3. `state.pushedShas.includes(head)`, the round's prepared snapshot
      (`autofix-pr-<n>-snapshot.json` or background-fix
-     `autofix-pr-<n>-fix-snapshot.json`) exists with `headSha !== head` —
-     proving this round actually pushed a new head after reading the thread,
-     and preventing a later non-pushing round from resolving a new thread
-     opened on an earlier pushed head (`not_pushed`).
-  4. `pr.headRefOid === head` — GitHub's live PR head matches the pushed head
-     (`head_mismatch`).
-  5. Thread exists with a valid GraphQL id (`thread_not_found`) and is currently
+     `autofix-pr-<n>-fix-snapshot.json`) exists with `headSha !== head` and a
+     non-empty `roundId`, **and** `state.lastPush` (recorded by `push` for that
+     `roundId` and cleared by `withKnownHead` whenever `sync` or `prepare`
+     adopts a different head) matches both `head` and `roundId` — proving this
+     round itself pushed `head`, even if another contributor rolls the branch
+     back to an earlier pushed SHA (`not_pushed`).
+  4. Immediately before resolving each candidate (after posting replies and
+     persisting state), re-read the live PR state via `fetchPrData` (read
+     failure skips with `recheck_failed`): verify `freshPr.state === 'OPEN'`
+     (`pr_not_open`) and `freshPr.headRefOid === head` (`head_mismatch`).
+  5. Thread exists with a valid GraphQL id (`thread_not_found`), is currently
      open (`isResolved === true` skips idempotently with `already_resolved`;
-     `unresolveReviewThread` is never called).
-  6. The thread carries our matching reply — either posted in this `reply` call
-     or already present on the thread with `isOwnReply` and matching `bodyHash`
-     — and every id in `reply.handled` is recorded in `done` (`not_replied`).
-     Matching `bodyHash` prevents a later pushed round from resolving an older
-     thread that had previously been answered `"Needs a human decision"`.
-  7. No unanswered trusted follow-up comment exists in the thread (`offer.threads`
-     has no id outside `done`; otherwise skips with `new_comment_in_thread`).
+     `unresolveReviewThread` is never called), and has complete comment history
+     (`!thread.comments.pageInfo.hasPreviousPage`; otherwise skips fail-closed
+     with `incomplete_history`).
+  6. The live re-read thread carries our matching reply (`isOwnReply` with
+     matching `bodyHash`) and every id in `reply.handled` is recorded in `done`
+     (`not_replied`). Matching `bodyHash` prevents a later pushed round from
+     resolving an older thread that had previously been answered
+     `"Needs a human decision"`.
+  7. No unanswered trusted follow-up comment exists in the live re-read thread
+     (`actionable(buildSnapshot(freshPr, state)).threads` has no id outside
+     `done`; otherwise skips with `new_comment_in_thread`, catching follow-ups
+     that arrived while reply POSTs were in flight).
   8. GraphQL `resolveReviewThread` runs via `ghWithInput` over stdin JSON
      (`gh api --method POST graphql --input -`, avoiding flag injection), checks
      `!errors?.length` and post-checks

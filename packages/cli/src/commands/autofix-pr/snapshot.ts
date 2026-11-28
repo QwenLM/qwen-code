@@ -19,6 +19,7 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
+import { randomUUID } from 'node:crypto';
 import {
   lstatSync,
   mkdirSync,
@@ -368,7 +369,14 @@ export type SnapshotEvent =
       outdated: boolean;
       comments: CommentRef[];
     }
-  | ({ type: 'review'; state: string } & CommentRef)
+  | ({
+      type: 'review';
+      state: string;
+      /** Set when an `APPROVED` review carries a deferred checklist (such as
+       * `<!-- qwen-review-deferred -->`): surfaced for accounting while
+       * preserving the items' non-blocking deferred status. */
+      deferredOnly?: true;
+    } & CommentRef)
   | ({ type: 'issue_comment' } & CommentRef)
   | {
       type: 'untrusted_comment';
@@ -1161,6 +1169,31 @@ function startupFailures(suites: CheckSuite[]): FailedCheck[] {
 }
 
 /**
+ * Whether an `APPROVED` review body carries a deferred checklist that should
+ * be surfaced for accounting, while plain approvals ("LGTM", prose-only
+ * acceptance, or quoted code examples) remain quiet.
+ */
+export function approvalHasDeferredChecklist(body: string): boolean {
+  if (!body.trim()) return false;
+  // Strip fenced code blocks and inline code spans so quoted snippets (e.g.,
+  // an approval mentioning `<!-- qwen-review-deferred -->` in prose) stay quiet.
+  const stripped = body
+    .replace(
+      /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g,
+      '$1',
+    )
+    .replace(/`+[^`\n]*`+/g, '');
+  if (!stripped.trim()) return false;
+  if (/<!--\s*qwen-review-deferred\s*-->/i.test(stripped)) return true;
+  // Unchecked Markdown task list item (`- [ ] ...` / `* [ ] ...`).
+  if (/^[ \t]*[-*+][ \t]+\[\s\][ \t]+\S/m.test(stripped)) return true;
+  // Explicit "Deferred ..." heading or lead-in line followed by list items.
+  return /(?:^|\n)[ \t]*(?:#{1,6}[ \t]+|[*_]{1,2})?deferred\b[^\n]*:?(?:[*_]{1,2})?[ \t]*\n+(?:[ \t]*\n)*[ \t]*(?:[-*+]|\d+\.)[ \t]+\S/i.test(
+    stripped,
+  );
+}
+
+/**
  * Review threads, reviews and conversation comments that `isNew` admits,
  * classified by trust. `ids` lists every admitted comment, trusted or not,
  * so a gate cursor can remember them.
@@ -1241,14 +1274,14 @@ function commentEvents(
 
   // A review's inline comments arrive through its threads; only a review
   // with a body of its own says something the threads do not. A dismissed
-  // review was withdrawn, and an approval's body ("LGTM") accepts the PR:
-  // neither asks for anything.
+  // review was withdrawn, and a plain approval ("LGTM") accepts the PR
+  // without asking for anything — except an approval carrying a deferred
+  // checklist, which is surfaced for accounting with `deferredOnly: true`.
   for (const node of pr.reviews.nodes) {
-    if (
-      node.state === 'PENDING' ||
-      node.state === 'DISMISSED' ||
-      node.state === 'APPROVED'
-    ) {
+    if (node.state === 'PENDING' || node.state === 'DISMISSED') {
+      continue;
+    }
+    if (node.state === 'APPROVED' && !approvalHasDeferredChecklist(node.body)) {
       continue;
     }
     if (!node.body.trim() || !isNew(node)) continue;
@@ -1257,7 +1290,12 @@ function commentEvents(
     ids.push(node.id);
     if (trust === 'untrusted') events.push(untrusted(node));
     else
-      events.push({ type: 'review', state: node.state!, ...ref(node, trust) });
+      events.push({
+        type: 'review',
+        state: node.state!,
+        ...(node.state === 'APPROVED' ? { deferredOnly: true as const } : {}),
+        ...ref(node, trust),
+      });
   }
 
   for (const node of pr.comments.nodes) {
@@ -2510,6 +2548,7 @@ export function runSnapshot(args: SnapshotArgs): void {
     `${JSON.stringify(
       {
         ...snapshot,
+        roundId: randomUUID(),
         readAt,
         ...(args.task === undefined ? {} : { task: args.task }),
       },

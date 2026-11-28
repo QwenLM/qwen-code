@@ -87,6 +87,11 @@ export interface AutofixPrState {
   handledConflictSha?: string | null;
   /** Pushes made by this watch. */
   pushCount?: number;
+  /** The current round's successful push (`push` sets it tied to the round's
+   * prepared snapshot `roundId`; `withKnownHead` clears it whenever a head
+   * is adopted from elsewhere). `reply` requires `lastPush` to match both
+   * `head` and the round's snapshot before resolving review threads. */
+  lastPush?: { sha: string; snapshotRoundId: string };
   /** Head SHA the last round summary was posted for. */
   summarizedSha?: string;
   /** Whether the PR author could push to the base repository (`prepare`). */
@@ -252,14 +257,22 @@ export function withKnownHead(
   state: AutofixPrState,
   head: string,
 ): AutofixPrState {
-  if (state.pushedShas.includes(head) || !state.failingChecks?.length) {
-    return { ...state, lastKnownHeadSha: head };
+  // Adopting a head from outside `push` invalidates any earlier round's push
+  // evidence so a branch rollback to a previously pushed SHA cannot pass for
+  // a push made by the current round.
+  let base = state;
+  if (head !== state.lastKnownHeadSha && state.lastPush !== undefined) {
+    const { lastPush: _dropped, ...rest } = state;
+    base = rest;
   }
-  const lastPush = state.pushedShas.at(-1);
+  if (base.pushedShas.includes(head) || !base.failingChecks?.length) {
+    return { ...base, lastKnownHeadSha: head };
+  }
+  const lastPush = base.pushedShas.at(-1);
   return {
-    ...state,
+    ...base,
     lastKnownHeadSha: head,
-    failingChecks: state.failingChecks.map((record) => ({
+    failingChecks: base.failingChecks.map((record) => ({
       identity: record.identity,
       check: record.check,
       head: record.head,
@@ -943,6 +956,19 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'pushCount';
   }
+  if (
+    state.lastPush !== undefined &&
+    !(
+      typeof state.lastPush === 'object' &&
+      state.lastPush !== null &&
+      typeof state.lastPush.sha === 'string' &&
+      SHA_RE.test(state.lastPush.sha) &&
+      typeof state.lastPush.snapshotRoundId === 'string' &&
+      state.lastPush.snapshotRoundId.length > 0
+    )
+  ) {
+    return 'lastPush';
+  }
   // `schedule` puts these into the scheduled task's prompt.
   if (state.watch !== undefined && !isWatchOptions(state.watch)) {
     return 'watch';
@@ -1088,10 +1114,24 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman, reportedNeedsHuman, failingChecks } =
-    parsed;
+  const {
+    watch,
+    ended,
+    needsHuman,
+    reportedNeedsHuman,
+    failingChecks,
+    lastPush,
+  } = parsed;
   return {
     ...parsed,
+    ...(lastPush
+      ? {
+          lastPush: {
+            sha: lastPush.sha,
+            snapshotRoundId: lastPush.snapshotRoundId,
+          },
+        }
+      : {}),
     ...(watch
       ? {
           watch: {

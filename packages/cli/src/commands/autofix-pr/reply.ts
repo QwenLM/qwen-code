@@ -46,7 +46,7 @@ import {
   type AutofixPrState,
   type PendingPost,
 } from './state.js';
-import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
+import { assertNoFixInFlight, roundSnapshotPath } from './fix.js';
 import { AutofixPrRefusal } from './refusal.js';
 
 /** GitHub refuses a comment body longer than this. */
@@ -83,9 +83,12 @@ export type ResolveSkipReason =
   | 'no_post'
   | 'disabled'
   | 'not_pushed'
+  | 'recheck_failed'
+  | 'pr_not_open'
   | 'head_mismatch'
   | 'thread_not_found'
   | 'already_resolved'
+  | 'incomplete_history'
   | 'not_replied'
   | 'new_comment_in_thread'
   | 'graphql_error'
@@ -262,22 +265,32 @@ function keyHead(key: string): string | null {
 function roundSnapshot(path: string): {
   checks: Set<string>;
   headSha: string | null;
+  roundId: string | null;
 } {
   // A FIFO in its place would block, the lock held.
-  if (!isRegularFile(path)) return { checks: new Set(), headSha: null };
+  if (!isRegularFile(path)) {
+    return { checks: new Set(), headSha: null, roundId: null };
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return { checks: new Set(), headSha: null };
+    return { checks: new Set(), headSha: null, roundId: null };
   }
-  const obj = parsed as { events?: unknown; headSha?: unknown } | null;
+  const obj = parsed as {
+    events?: unknown;
+    headSha?: unknown;
+    roundId?: unknown;
+  } | null;
   const headSha =
     typeof obj?.headSha === 'string' && obj.headSha !== '' ? obj.headSha : null;
+  const roundId =
+    typeof obj?.roundId === 'string' && obj.roundId !== '' ? obj.roundId : null;
   const events = obj?.events;
-  if (!Array.isArray(events)) return { checks: new Set(), headSha };
+  if (!Array.isArray(events)) return { checks: new Set(), headSha, roundId };
   return {
     headSha,
+    roundId,
     checks: new Set(
       events.flatMap((event: unknown) => {
         const { type, key } = (event ?? {}) as {
@@ -622,11 +635,7 @@ function replyLocked(
   const knownChecks = new Set(state.handledChecks ?? []);
   // The round of a background fix claimed its snapshot under another
   // name, and no round prepared one since.
-  const roundSnap = roundSnapshot(
-    isRegularFile(paths.snapshotPath)
-      ? paths.snapshotPath
-      : fixSnapshotPath(paths, args.pr),
-  );
+  const roundSnap = roundSnapshot(roundSnapshotPath(paths, args.pr));
   const roundChecks = roundSnap.checks;
   const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
@@ -710,7 +719,6 @@ function replyLocked(
     resolvedThreads: [],
     resolveSkipped: [],
   };
-  const postedReplyTos = new Set<number>();
   const addHandled = (ids: string[]) => {
     const fresh = [...new Set(ids)].filter((id) => !done.has(id));
     for (const id of fresh) done.add(id);
@@ -771,7 +779,6 @@ function replyLocked(
       pendingPosts: settled,
     });
     outcome.posted.push({ kind: 'thread', ...posted });
-    postedReplyTos.add(reply.replyTo);
   }
 
   // A summary is posted once: one that handles comments, while any of them
@@ -849,9 +856,11 @@ function replyLocked(
   });
 
   // Fail-closed thread resolution: only after replies and handled state are
-  // persisted, only when this watch pushed the current head and GitHub's live
-  // head matches it, and only for threads replied to by this plan with no
-  // unanswered trusted follow-up comments. Never calls unresolve.
+  // persisted, only when this round actually pushed the current head (tied to
+  // the round's snapshot `roundId` and invalidated on external `sync`), and
+  // only after re-reading the live PR head, matching reply, full thread
+  // history (`!hasPreviousPage`), and thread comments immediately before each
+  // candidate is resolved. Never calls unresolve.
   const resolveCandidates = plan.replies.filter(
     (reply) => reply.resolve === true,
   );
@@ -859,16 +868,17 @@ function replyLocked(
     const pushedThisRound =
       state.pushedShas.includes(head) &&
       roundSnap.headSha !== null &&
-      roundSnap.headSha !== head;
+      roundSnap.headSha !== head &&
+      roundSnap.roundId !== null &&
+      state.lastPush?.sha === head &&
+      state.lastPush?.snapshotRoundId === roundSnap.roundId;
     const globalSkip: ResolveSkipReason | null = !args.post
       ? 'no_post'
       : !allowResolve
         ? 'disabled'
         : !pushedThisRound
           ? 'not_pushed'
-          : pr.headRefOid !== head
-            ? 'head_mismatch'
-            : null;
+          : null;
     if (globalSkip) {
       for (const reply of resolveCandidates) {
         outcome.resolveSkipped.push({
@@ -878,7 +888,31 @@ function replyLocked(
       }
     } else {
       for (const reply of resolveCandidates) {
-        const thread = pr.reviewThreads.nodes.find(
+        let freshPr: PrData;
+        try {
+          freshPr = fetchPrData(state, roundReplyCheck(state, true)).pr;
+        } catch {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'recheck_failed',
+          });
+          continue;
+        }
+        if (freshPr.state !== 'OPEN') {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'pr_not_open',
+          });
+          continue;
+        }
+        if (freshPr.headRefOid !== head) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'head_mismatch',
+          });
+          continue;
+        }
+        const thread = freshPr.reviewThreads.nodes.find(
           (t) => t.root.nodes[0]?.databaseId === reply.replyTo,
         );
         if (!thread || !thread.id) {
@@ -895,14 +929,19 @@ function replyLocked(
           });
           continue;
         }
+        if (thread.comments.pageInfo.hasPreviousPage) {
+          outcome.resolveSkipped.push({
+            replyTo: reply.replyTo,
+            reason: 'incomplete_history',
+          });
+          continue;
+        }
         const replyBodyHash = bodyHash(reply.body);
-        const replied =
-          postedReplyTos.has(reply.replyTo) ||
-          thread.comments.nodes.some(
-            (node) =>
-              isOwnReply(node, state.viewer) &&
-              bodyHash(node.body) === replyBodyHash,
-          );
+        const replied = thread.comments.nodes.some(
+          (node) =>
+            isOwnReply(node, state.viewer) &&
+            bodyHash(node.body) === replyBodyHash,
+        );
         if (!replied || !reply.handled.every((id) => done.has(id))) {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,
@@ -910,7 +949,8 @@ function replyLocked(
           });
           continue;
         }
-        const threadOpen = offer.threads.get(reply.replyTo);
+        const freshOffer = actionable(buildSnapshot(freshPr, state));
+        const threadOpen = freshOffer.threads.get(reply.replyTo);
         if (threadOpen && [...threadOpen].some((id) => !done.has(id))) {
           outcome.resolveSkipped.push({
             replyTo: reply.replyTo,

@@ -1155,6 +1155,124 @@ describe('buildSnapshot', () => {
     ]);
   });
 
+  it('surfaces deferred checklists carried by APPROVED reviews while keeping plain approvals quiet', () => {
+    const deferredBody =
+      'Looks good overall.\n\n<!-- qwen-review-deferred -->\n\nDeferred under the convergence posture (round 2, not a blocker):\n\n- `src/foo.ts:12` [Suggestion] tidy helper';
+    const taskListBody =
+      'Approved.\n\n- [ ] Follow up on retry metric in a later PR';
+    const headingBody =
+      'Approved!\n\n### Deferred items\n- Consolidate error strings';
+    const proseOnly =
+      'Approved, we can defer refactoring to a later PR.\n\n- Great tests';
+    const quotedInline =
+      'Looks good, glad `<!-- qwen-review-deferred -->` is now handled!';
+    const quotedFence =
+      'Approved!\n\n```md\n<!-- qwen-review-deferred -->\n### Deferred\n- [ ] example\n```';
+
+    const snap = buildSnapshot(
+      pr({
+        reviews: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [
+            comment('R_LGTM', 'a', 'MEMBER', {
+              body: 'LGTM, thanks!',
+              state: 'APPROVED',
+            }),
+            comment('R_PROSE', 'a', 'MEMBER', {
+              body: proseOnly,
+              state: 'APPROVED',
+            }),
+            comment('R_INLINE_CODE', 'a', 'MEMBER', {
+              body: quotedInline,
+              state: 'APPROVED',
+            }),
+            comment('R_FENCED_CODE', 'a', 'MEMBER', {
+              body: quotedFence,
+              state: 'APPROVED',
+            }),
+            comment('R_MARKER', 'review-bot', 'NONE', {
+              bot: true,
+              body: deferredBody,
+              state: 'APPROVED',
+            }),
+            comment('R_TASK', 'alice', 'MEMBER', {
+              body: taskListBody,
+              state: 'APPROVED',
+            }),
+            comment('R_HEADING', 'bob', 'COLLABORATOR', {
+              body: headingBody,
+              state: 'APPROVED',
+            }),
+          ],
+        },
+      }),
+      state(),
+    );
+    expect(snap.action).toBe('fix');
+    expect(snap.events).toEqual([
+      {
+        type: 'review',
+        state: 'APPROVED',
+        deferredOnly: true,
+        id: 'R_MARKER',
+        author: 'review-bot',
+        trust: 'bot',
+        body: deferredBody,
+        url: 'https://github.com/o/r/pull/7#R_MARKER',
+      },
+      {
+        type: 'review',
+        state: 'APPROVED',
+        deferredOnly: true,
+        id: 'R_TASK',
+        author: 'alice',
+        trust: 'member',
+        body: taskListBody,
+        url: 'https://github.com/o/r/pull/7#R_TASK',
+      },
+      {
+        type: 'review',
+        state: 'APPROVED',
+        deferredOnly: true,
+        id: 'R_HEADING',
+        author: 'bob',
+        trust: 'collaborator',
+        body: headingBody,
+        url: 'https://github.com/o/r/pull/7#R_HEADING',
+      },
+    ]);
+
+    // Plain approvals alone stay quiet (`wait`).
+    const plainOnly = buildSnapshot(
+      pr({
+        reviews: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [
+            comment('R_LGTM', 'a', 'MEMBER', {
+              body: 'LGTM, thanks!',
+              state: 'APPROVED',
+            }),
+            comment('R_PROSE', 'a', 'MEMBER', {
+              body: proseOnly,
+              state: 'APPROVED',
+            }),
+            comment('R_INLINE_CODE', 'a', 'MEMBER', {
+              body: quotedInline,
+              state: 'APPROVED',
+            }),
+            comment('R_FENCED_CODE', 'a', 'MEMBER', {
+              body: quotedFence,
+              state: 'APPROVED',
+            }),
+          ],
+        },
+      }),
+      state(),
+    );
+    expect(plainOnly.action).toBe('wait');
+    expect(plainOnly.events).toEqual([]);
+  });
+
   it('flags connections cut at the page size', () => {
     const data = pr();
     data.commits.nodes[0].commit.statusCheckRollup!.contexts.pageInfo.hasNextPage = true;

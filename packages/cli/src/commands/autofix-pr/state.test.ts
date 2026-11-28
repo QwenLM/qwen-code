@@ -274,6 +274,8 @@ describe('stateDefect', () => {
       ['watch', { every: 2, reply: 'yes', instructions: '' }],
       ['watch', { every: 2, reply: true, resolve: 'no', instructions: '' }],
       ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
+      ['lastPush', { sha: 'not-a-sha', snapshotRoundId: 'r1' }],
+      ['lastPush', { sha: 'a'.repeat(40), snapshotRoundId: '' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
       ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],
       ['watch', { every: 2, reply: true, instructions: '', task: 'x; id' }],

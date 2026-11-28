@@ -158,7 +158,11 @@ describe('runPush (real git, bare remote)', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  it('pushes a fast-forward of the known head and records it', () => {
+  it('pushes a fast-forward of the known head and records it tied to the round snapshot', () => {
+    writeFileSync(
+      paths.snapshotPath,
+      JSON.stringify({ headSha: featSha, roundId: 'round-push-1', events: [] }),
+    );
     const fix = commitIn(paths.worktreePath, 'fix.txt');
     expect(runPush(7)).toEqual({
       pushed: true,
@@ -171,11 +175,14 @@ describe('runPush (real git, bare remote)', () => {
       lastKnownHeadSha: fix,
       pushedShas: [fix],
       pushCount: 1,
+      lastPush: { sha: fix, snapshotRoundId: 'round-push-1' },
     });
-    // The second push builds on the first.
+    // The second push builds on the first and clears lastPush when no snapshot roundId exists.
+    rmSync(paths.snapshotPath);
     const again = commitIn(paths.worktreePath, 'fix2.txt');
     expect(runPush(7)).toMatchObject({ pushed: true, sha: again, pushes: 2 });
     expect(state().pushedShas).toEqual([fix, again]);
+    expect(state().lastPush).toBeUndefined();
   });
 
   it('has nothing to push while HEAD is the PR head, and asks GitHub nothing', () => {

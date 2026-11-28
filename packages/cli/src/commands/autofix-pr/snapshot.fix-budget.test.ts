@@ -1584,4 +1584,18 @@ describe('withKnownHead', () => {
       ),
     ).toMatchObject({ lastKnownHeadSha: H2, failingChecks: [spent] });
   });
+
+  it('clears lastPush when adopting a different head, and preserves it when head is unchanged', () => {
+    const withPush = state({
+      lastKnownHeadSha: H2,
+      pushedShas: [H1, H2],
+      lastPush: { sha: H2, snapshotRoundId: 'round-1' },
+    });
+    expect(withKnownHead(withPush, H1).lastPush).toBeUndefined();
+    expect(withKnownHead(withPush, H3).lastPush).toBeUndefined();
+    expect(withKnownHead(withPush, H2).lastPush).toEqual({
+      sha: H2,
+      snapshotRoundId: 'round-1',
+    });
+  });
 });

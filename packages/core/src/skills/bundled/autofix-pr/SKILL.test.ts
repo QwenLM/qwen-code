@@ -607,6 +607,8 @@ describe('bundled autofix-pr skill', () => {
     expect(config.description).toContain('[--no-resolve]');
     const brief = body.split('```markdown')[1]?.split('```')[0] ?? '';
     expect(brief).toContain('## Audit until clean');
+    expect(brief).toContain('git fetch --no-tags <remote> <baseRefName>');
+    expect(brief).toContain('git merge-base "$BASE_SHA" HEAD');
     expect(brief).toContain('Undirected audit');
     expect(brief).toContain('Adversarial audit');
     expect(brief).toContain('2 consecutive clean passes');
@@ -614,11 +616,14 @@ describe('bundled autofix-pr skill', () => {
     expect(brief).toContain('Local real-environment verification');
     expect(brief).toMatch(/local `\/review` skill or\s+`qwen review run`/);
     expect(brief).toContain('Verdict: findings');
+    expect(brief).toContain('deferredOnly: true');
+    expect(brief).toContain('preserve their deferred status');
     expect(brief).toMatch(/`review` body/);
     expect(body).toContain('--audit');
     expect(body).toContain('--no-resolve');
     expect(body).toContain('"resolve": true');
     expect(body).toContain('resolveReviewThread');
+    expect(body).toContain('!hasPreviousPage');
     expect(body).toContain('after 20 pushes');
     expect(body).toContain('within 255 minutes');
     expect(body).not.toContain('after 10 pushes');

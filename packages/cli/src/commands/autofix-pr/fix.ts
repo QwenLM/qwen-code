@@ -185,6 +185,37 @@ export function fixSnapshotPath(
   );
 }
 
+/** The active round's prepared snapshot path: `snapshot.json`, or the
+ * background-fix claimed copy when `fix-end` moved it. */
+export function roundSnapshotPath(
+  paths: AutofixPrPaths,
+  prNumber: number,
+): string {
+  return isRegularFile(paths.snapshotPath)
+    ? paths.snapshotPath
+    : fixSnapshotPath(paths, prNumber);
+}
+
+/** The `roundId` recorded on the current round's prepared snapshot, or null
+ * when missing or unreadable. */
+export function readSnapshotRoundId(
+  paths: AutofixPrPaths,
+  prNumber: number,
+): string | null {
+  const path = roundSnapshotPath(paths, prNumber);
+  if (!isRegularFile(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      roundId?: unknown;
+    } | null;
+    return typeof parsed?.roundId === 'string' && parsed.roundId.length > 0
+      ? parsed.roundId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Refuses unless the round prepared a snapshot to fix, at the watch's head
  * and recently, that no attempt claimed yet: an attempt is that round's,
