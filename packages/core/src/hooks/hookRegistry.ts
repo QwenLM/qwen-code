@@ -350,7 +350,10 @@ export class HookRegistry {
     }: { agentScope?: string; sourceLabel?: string } = {},
   ): void {
     for (const [eventName, definitions] of Object.entries(hooksConfig)) {
-      if (HOOKS_CONFIG_FIELDS.includes(eventName)) {
+      if (
+        HOOKS_CONFIG_FIELDS.includes(eventName) ||
+        (source === HooksConfigSource.Extensions && eventName === 'modules')
+      ) {
         continue;
       }
 
