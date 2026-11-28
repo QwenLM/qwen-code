@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -17,12 +17,16 @@ const sanitizeTerminalText = vi.hoisted(() =>
 
 vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
 
-vi.mock('node:child_process', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:child_process')>()),
-  spawn: vi.fn(() => {
-    throw new Error('unexpected daemon spawn');
-  }),
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(() => {
+      throw new Error('unexpected daemon spawn');
+    }),
+    spawnSync: vi.fn(actual.spawnSync),
+  };
+});
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -32,7 +36,7 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
   return {
     ...actual,
     currentPidNamespace: () => 'pid:[1]',
-    isProcessAlive: () => false,
+    isProcessAlive: vi.fn(() => false),
   };
 });
 
@@ -68,6 +72,7 @@ import {
   type DaemonRestartPlan,
 } from './daemon.js';
 import {
+  isProcessAlive,
   readDaemonToken,
   writeDaemonDiscovery,
   writeDaemonToken,
@@ -78,6 +83,7 @@ import {
   readDaemonOccupancy,
   startDaemonOccupancyPublisher,
 } from '../serve/daemon-occupancy.js';
+import { getSseOccupancy } from '../serve/sse-occupancy.js';
 
 function entry(port: number): DaemonDiscoveryEntry {
   return {
@@ -998,6 +1004,80 @@ describe('qwen daemon command', () => {
       await fsp.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'removes the occupancy file after force-stopping a daemon',
+    async () => {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-force-stop-'));
+      vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('ok')),
+      );
+      const exitCode = process.exitCode;
+      const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+      const record = {
+        ...entry(4170).record,
+        pid: process.pid + 1,
+        pidNamespace: 'pid:[1]',
+      };
+      const discovery = { record, path: writeDaemonDiscovery(record) };
+      const stopPublisher = startDaemonOccupancyPublisher(
+        discovery,
+        getSseOccupancy,
+        vi.fn(),
+      );
+      let alive = true;
+      const kill = vi.spyOn(process, 'kill').mockImplementation((_, signal) => {
+        if (signal === 'SIGKILL') alive = false;
+        return true;
+      });
+      vi.mocked(isProcessAlive).mockImplementation(() => alive);
+      const psResult = (stdout: string) => ({
+        pid: 1,
+        status: 0,
+        signal: null,
+        output: [null, stdout, ''],
+        stdout,
+        stderr: '',
+      });
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce(psResult(record.startedAt))
+        .mockReturnValueOnce(psResult('qwen serve'));
+
+      try {
+        await vi.waitFor(() => {
+          expect(readDaemonOccupancy(discovery)).toBeDefined();
+        });
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+        const stopped = yargs([])
+          .exitProcess(false)
+          .fail(false)
+          .command(daemonCommand)
+          .parseAsync(['daemon', 'stop', '--port', '4170', '--force']);
+        await vi.runAllTimersAsync();
+        await stopped;
+
+        expect(kill.mock.calls).toEqual([
+          [record.pid, 'SIGTERM'],
+          [record.pid, 'SIGKILL'],
+        ]);
+        expect(process.exitCode).toBe(exitCode);
+        expect(await fsp.readdir(path.dirname(discovery.path))).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+        kill.mockRestore();
+        stdout.mockRestore();
+        vi.mocked(spawnSync).mockReset();
+        vi.mocked(isProcessAlive).mockReset();
+        process.exitCode = exitCode;
+        vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+        await stopPublisher();
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('preserves memory figures, nulls and missing fields in JSON detail', () => {
     const process = {

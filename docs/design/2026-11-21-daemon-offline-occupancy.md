@@ -10,7 +10,7 @@
 
 `qwen daemon status --offline` reads discovery records and their local occupancy snapshots. It skips health probes and reports health as `unchecked`, or `stale` when the recorded process is gone in the reader's addressable PID namespace. It rejects `--detail` and `--prune` because those options have live or mutating behavior.
 
-The text view shows the total, per-surface and per-listener counts, and the sample's `asOf` time. `--offline --json` includes the same values in `streamOccupancy` with a `stale` flag. A sample is stale if it is at least 15 seconds old, appears to be from the future, or its local process is known to be gone. An unavailable, unreadable or invalid sample is displayed as unavailable (`null` in JSON). Health and sample freshness are checked independently.
+The text view shows the total, per-surface and per-listener counts, and the sample's `asOf` time. `--offline --json` includes the same values in `streamOccupancy` with a `stale` flag. A sample is stale if it is at least 15 seconds old, appears to be from the future, or its local process is known to be gone. An unavailable, unreadable or invalid sample is displayed as unavailable (`null` in JSON). Across PID namespaces, health remains `unchecked`. The `stale` flag reflects only the timestamp of the sample associated with the matching discovery record, and daemon liveness remains unknown.
 
 ## Publication and lifetime
 
