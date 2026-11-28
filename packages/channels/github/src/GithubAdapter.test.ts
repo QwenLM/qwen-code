@@ -5817,8 +5817,8 @@ describe('GithubChannel', () => {
       writeFileSync(pendingPath(), JSON.stringify(records));
     }
 
-    async function retryPendingForTest(): Promise<void> {
-      const privateChannel = channel as unknown as {
+    async function retryPendingForTest(target = channel): Promise<void> {
+      const privateChannel = target as unknown as {
         octokit: typeof mockOctokit;
         abortableSleep: (ms: number) => Promise<void>;
         retryPendingFinalDeliveries: () => Promise<void>;
@@ -6122,6 +6122,39 @@ describe('GithubChannel', () => {
       if (process.platform !== 'win32') {
         expect(statSync(pendingPath()).mode & 0o777).toBe(0o600);
       }
+    });
+
+    it('keeps retrying the records after one already recorded as consumed', async () => {
+      // The consumed branch removes the record and moves on. Ending the loop
+      // there instead drops every sibling that still needs its delivery, and
+      // no other case in this file covers a record that follows a consumed one.
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 1, html_url: 'https://github.com/o/r/issues/42#c1' },
+      });
+      mkdirSync(join(pendingPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        JSON.stringify({
+          outcome: 'posted',
+          pendingId: 'pending',
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+        }) + '\n',
+      );
+      writePending([
+        pendingRecord(),
+        pendingRecord({ id: 'fresh', fullText: 'Second reply' }),
+      ]);
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('Second reply'),
+        }),
+      );
     });
 
     it('does not collapse same-body pending finals without a source message id', async () => {
@@ -6851,11 +6884,60 @@ describe('GithubChannel', () => {
       expect(audit).toEqual([
         expect.objectContaining({
           outcome: 'failed_ambiguous',
+          pendingId: 'first',
           failureError: 'ambiguous',
         }),
         expect.objectContaining({
           outcome: 'posted',
           commentId: 2004,
+        }),
+      ]);
+    });
+
+    it('does not resend a pending final after an ambiguous answer survives a failed rewrite', async () => {
+      const record = pendingRecord({ id: 'ambiguous' });
+      writePending([record]);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      // The rewrite fails, but the file keeps the record for the next start.
+      mockOctokit.rest.issues.createComment.mockImplementationOnce(async () => {
+        writeFileSync(pendingPath(), '{');
+        throw new Error('ambiguous');
+      });
+
+      try {
+        await retryPendingForTest();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('failed to update pending GitHub deliveries'),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      // A fresh channel shares the on-disk audit and pending record, but
+      // starts with no in-memory delivery history.
+      writePending([record]);
+      const restarted = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await retryPendingForTest(restarted);
+
+      // The second start sends nothing, and the record it skipped is
+      // dropped once the rewrite succeeds.
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(() => readFileSync(pendingPath(), 'utf-8')).toThrow();
+      const audit = readFileSync(auditPath(), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(audit).toEqual([
+        expect.objectContaining({
+          outcome: 'failed_ambiguous',
+          pendingId: 'ambiguous',
         }),
       ]);
     });

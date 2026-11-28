@@ -218,10 +218,11 @@ replies away too and keeps those for the next retry: a refusal proven by
 GitHub's headers or a credential GitHub does not accept (401) keeps that reply
 as well, while another rate limit or a server or network failure drops that
 reply as ambiguous. Replies the audit already records as posted are dropped,
-and so are replies the running channel already posted or sent with an
-ambiguous answer, even if it could not record that. The corresponding inbound
-task remains in `reply_pending` state until that delivery succeeds or the reply
-is dropped. Ambiguous delivery failures are not retried
+and so is a reply whose audit records an ambiguous failure carrying that
+reply's pending id, as are replies the running channel already posted or sent
+with an ambiguous answer, even if it could not record that. The corresponding
+inbound task remains in `reply_pending` state until that delivery succeeds or
+the reply is dropped. Ambiguous delivery failures are not retried
 automatically because GitHub may have created the comment: the audit records
 `failed_ambiguous` and the reply is not kept. A rate-limit answer without a
 numeric `x-ratelimit-remaining` header, such as a 429 with only `retry-after`
