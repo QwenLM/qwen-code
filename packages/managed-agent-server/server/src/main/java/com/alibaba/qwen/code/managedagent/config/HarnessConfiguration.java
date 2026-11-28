@@ -52,6 +52,10 @@ public class HarnessConfiguration {
             @Value("${qwen.managed-agent.harness-pull.enabled:false}") boolean workPull) {
         BrokerSecurity.checkHarnessTransport(properties, new ArrayList<>());
         var pool = properties.getHarness().getPool();
+        if (workPull && !pool.isEnabled()) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.harness-pull.enabled requires qwen.managed-agent.harness.pool.enabled");
+        }
         if (pool.isEnabled()) {
             HarnessDiscovery discovery;
             if ("static".equals(pool.getDiscovery())) {
