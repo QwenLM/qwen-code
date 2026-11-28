@@ -7,7 +7,11 @@
 import {
   CODE_FENCE_RE,
   isClosingCodeFence,
+  parseCodeFenceInfo,
+  START_LINE_DIRECTIVE_RE,
 } from './pending-rendered-height.js';
+
+export { parseCodeFenceInfo } from './pending-rendered-height.js';
 
 /*
 **Background & Purpose:**
@@ -248,32 +252,6 @@ export const findLastSafeSplitPoint = (
   // block boundary. With a cap, fall back to the cap so a single long line
   // cannot remain one ever-growing pending render item forever.
   return hasLengthCap ? searchEnd : content.length;
-};
-
-/**
- * Internal fence info-string directive carrying the gutter start line for a
- * code block that streaming split across commits. It rides on the re-opened
- * fence's info line — which is a delimiter line, never rendered as content — so
- * it never shows on screen; it only lets `parseCodeFenceInfo` restore
- * continuous line numbering. Namespaced to avoid colliding with real info
- * strings.
- */
-const START_LINE_DIRECTIVE_RE = /\s*\bqwen-code:start-line=(\d+)\b/;
-
-/**
- * Parses a fenced code block's info string into its language (first token, with
- * the internal start-line directive removed) and the gutter start line (1 when
- * no directive is present). Shared by MarkdownDisplay so the directive never
- * leaks into language detection.
- */
-export const parseCodeFenceInfo = (
-  info: string | undefined | null,
-): { lang: string | null; startLine: number } => {
-  const raw = info ?? '';
-  const directive = raw.match(START_LINE_DIRECTIVE_RE);
-  const startLine = directive ? Math.max(1, Number(directive[1])) : 1;
-  const lang = raw.replace(START_LINE_DIRECTIVE_RE, '').trim().split(/\s+/)[0];
-  return { lang: lang || null, startLine };
 };
 
 /** Counts code lines shown in the committed head of a fenced block, i.e. the

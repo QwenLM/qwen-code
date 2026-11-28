@@ -264,6 +264,31 @@ describe('fitPendingSlice', () => {
     expect(unguttered.clipped).toBe(false);
   });
 
+  it('charges the literal marker of raw-mode checklist items', () => {
+    const line = '- [ ] ' + 'x'.repeat(73);
+    expect(estimateLineRows(line, 78)).toBe(1);
+    expect(estimateLineRows(line, 78, false)).toBe(2);
+  });
+
+  it('counts a tab indent as one column, matching the list renderer', () => {
+    expect(estimateLineRows('\t- ' + 'x'.repeat(17), 20)).toBe(2);
+  });
+
+  it('charges the actual gutter width of a resumed numbered fence', () => {
+    const body = Array.from({ length: 5 }, () => 'x'.repeat(37));
+    expect(
+      fitPendingSlice(['```ts', ...body, '```'], 40, 8, CLAMP).clipped,
+    ).toBe(false);
+    expect(
+      fitPendingSlice(
+        ['```ts qwen-code:start-line=995', ...body, '```'],
+        40,
+        8,
+        CLAMP,
+      ).clipped,
+    ).toBe(true);
+  });
+
   it('charges a fence body opened by a line that carries an info string', () => {
     // The lookahead must close on the same block the walk closes: '```ts'
     // inside the open '```js' block is content, so the body is 12 lines and

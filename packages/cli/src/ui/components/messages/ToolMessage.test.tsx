@@ -682,6 +682,27 @@ describe('<ToolMessage />', () => {
       expect(lastFrame()).not.toContain('MockMarkdown:');
     });
 
+    it('measures completed table rows when a late cell changes the layout', () => {
+      const table = [
+        '| one | two | three | four | five | six |',
+        '| --- | --- | --- | --- | --- | --- |',
+        ...Array.from({ length: 3 }, () => '| a | b | c | d | e | f |'),
+        `| ${Array.from({ length: 6 }, () => 'x'.repeat(90)).join(' | ')} |`,
+      ].join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={table}
+          renderOutputAsMarkdown
+          contentWidth={104}
+          availableTerminalHeight={31}
+        />,
+        StreamingState.Idle,
+      );
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
     it('falls back for a single table taller than the budget', () => {
       // `fitPendingSlice` keeps an over-budget LEADING table whole (the cut is
       // gated on `i > 0`), so `clipped` stays false for a table-only result.

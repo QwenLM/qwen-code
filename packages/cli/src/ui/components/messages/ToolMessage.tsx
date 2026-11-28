@@ -10,6 +10,8 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { measureCompletedTableRows } from '../../utils/TableRenderer.js';
+import { useRenderMode } from '../../contexts/RenderModeContext.js';
 import {
   fitPendingSlice,
   hasMermaidFence,
@@ -123,17 +125,18 @@ function exceedsRenderedHeight(
   maxWidth: number,
   maxHeight: number,
   showLineNumbers: boolean,
+  renderVisualBlocks: boolean,
 ): boolean {
   if (maxHeight <= 0) return false;
   const lines = text.split(/\r?\n/);
-  if (hasMermaidFence(lines)) return true;
+  if (renderVisualBlocks && hasMermaidFence(lines)) return true;
   const budget = pendingRenderedBudget(maxHeight);
   const { clipped, renderedRows } = fitPendingSlice(
     lines,
     Math.max(1, maxWidth),
     budget,
     pendingTableClampRows(maxHeight),
-    { showLineNumbers },
+    { showLineNumbers, renderVisualBlocks, measureCompletedTableRows },
   );
   return clipped || renderedRows > budget;
 }
@@ -692,11 +695,8 @@ const StringResultRenderer: React.FC<{
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
           // The height gate above uses the same estimator MarkdownDisplay
-          // pre-slices with, so the two agree on what fits. The estimator is
-          // an approximation (proportional column widths, word-aware wrapping)
-          // and can under-charge a table; without this flag a markdown result
-          // that slips through renders past `availableHeight`, which the
-          // MainContent `overflow="hidden"` wrapper then clips silently
+          // pre-slices with. Keep the renderer's height limit as a backstop so
+          // MainContent does not silently clip an overflowing result
           // (#10640/#5798).
           enforceHeightBudget
         />
@@ -838,6 +838,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   executionStartTime,
 }) => {
   const settings = useSettings();
+  const { renderMode } = useRenderMode();
   const isThisShellFocused =
     (name === SHELL_COMMAND_NAME || name === SHELL_NAME) &&
     status === ToolCallStatus.Executing &&
@@ -1031,6 +1032,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         innerWidth,
         availableHeight,
         settings.merged.ui?.showLineNumbers ?? true,
+        renderMode === 'render',
       ),
     [
       isShellTool,
@@ -1039,6 +1041,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       effectiveDisplayRenderer,
       innerWidth,
       settings,
+      renderMode,
     ],
   );
   if (isShellTool || outputExceedsBudget) {

@@ -104,26 +104,39 @@ export function hasMermaidFence(lines: string[]): boolean {
       // `mermaid qwen-code:start-line=12` — still draws a diagram. Matching
       // the whole string here would let that fence be charged by its source
       // lines and then render a diagram past the budget the gate certified.
-      if (fenceLanguage(match[2]) === 'mermaid') return true;
+      if (parseCodeFenceInfo(match[2]).lang?.toLowerCase() === 'mermaid')
+        return true;
       fence = match[1]!;
     }
   }
   return false;
 }
 
-const START_LINE_DIRECTIVE_RE = /\s*\bqwen-code:start-line=\d+\b/;
+/**
+ * Internal fence info-string directive carrying the gutter start line for a
+ * code block that streaming split across commits. It rides on the re-opened
+ * fence's info line — which is a delimiter line, never rendered as content — so
+ * it never shows on screen; it only lets `parseCodeFenceInfo` restore
+ * continuous line numbering. Namespaced to avoid colliding with real info
+ * strings.
+ */
+export const START_LINE_DIRECTIVE_RE = /\s*\bqwen-code:start-line=(\d+)\b/;
 
 /**
- * The language a fence's info string names, resolved the way the renderer
- * resolves it: the start-line directive stripped, then the first token.
+ * Parses a fenced code block's info string into its language (first token, with
+ * the internal start-line directive removed) and the gutter start line (1 when
+ * no directive is present). Shared by MarkdownDisplay so the directive never
+ * leaks into language detection.
  */
-function fenceLanguage(info: string): string | null {
-  const token = info
-    .replace(START_LINE_DIRECTIVE_RE, '')
-    .trim()
-    .split(/\s+/)[0];
-  return token ? token.toLowerCase() : null;
-}
+export const parseCodeFenceInfo = (
+  info: string | undefined | null,
+): { lang: string | null; startLine: number } => {
+  const raw = info ?? '';
+  const directive = raw.match(START_LINE_DIRECTIVE_RE);
+  const startLine = directive ? Math.max(1, Number(directive[1])) : 1;
+  const lang = raw.replace(START_LINE_DIRECTIVE_RE, '').trim().split(/\s+/)[0];
+  return { lang: lang || null, startLine };
+};
 
 export function isClosingCodeFence(
   match: RegExpMatchArray | null,
@@ -222,27 +235,30 @@ export function estimateWrappedRows(line: string, width: number): number {
  * Charges the narrowest width the line can render at, so the estimate stays an
  * upper bound.
  */
-export function estimateLineRows(line: string, contentWidth: number): number {
+export function estimateLineRows(
+  line: string,
+  contentWidth: number,
+  renderVisualBlocks = true,
+): number {
   if (contentWidth <= 0) return 1;
   const listItem = LIST_ITEM_RE.exec(line);
   if (listItem) {
     // RenderListItemInternal insets the text box by the item's indent, the
     // shared prefix padding and a fixed-width marker cell, at every nesting
-    // level. A task item's literal `[ ] ` is never drawn — it becomes a
-    // 2-column glyph — so charging it would over-charge a fitting checklist
-    // by those columns.
-    const task = /^\[[ xX]\]\s+/.exec(listItem[3]!);
+    // level. Render mode replaces a task marker with a two-column glyph.
+    // Raw mode keeps the literal marker in the text box.
+    const task = renderVisualBlocks ? /^\[[ xX]\]\s+/.exec(listItem[3]!) : null;
     const itemText = task ? listItem[3]!.slice(task[0].length) : listItem[3]!;
     const markerWidth = task
       ? TASK_ITEM_GLYPH_WIDTH
       : getCachedStringWidth(listItem[2]!) + 1;
-    const indentWidth = getCachedStringWidth(listItem[1]!);
+    const indentWidth = listItem[1]!.length;
     return estimateWrappedRows(
       itemText,
       contentWidth - indentWidth - LIST_ITEM_PREFIX_PADDING - markerWidth,
     );
   }
-  const blockquote = BLOCKQUOTE_LINE_RE.exec(line);
+  const blockquote = renderVisualBlocks ? BLOCKQUOTE_LINE_RE.exec(line) : null;
   if (blockquote) {
     return estimateWrappedRows(
       blockquote[1]!,
@@ -315,7 +331,15 @@ export function fitPendingSlice(
   contentWidth: number,
   budget: number,
   tableClampRows: number,
-  options: { showLineNumbers?: boolean } = {},
+  options: {
+    showLineNumbers?: boolean;
+    renderVisualBlocks?: boolean;
+    measureCompletedTableRows?: (
+      headers: string[],
+      rows: string[][],
+      contentWidth: number,
+    ) => number;
+  } = {},
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
@@ -328,6 +352,7 @@ export function fitPendingSlice(
   // hard-coded.
   let activeCodeLineWidth = contentWidth;
   const showLineNumbers = options.showLineNumbers ?? true;
+  const renderVisualBlocks = options.renderVisualBlocks ?? true;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
@@ -350,10 +375,8 @@ export function fitPendingSlice(
     if (fenceMatch) {
       codeFence = fenceMatch[1]!;
       // Lookahead to the closing fence: colorizeCode pads its line numbers to
-      // the widest one the block will draw, so the gutter — and the body's
-      // text box — depend on the block's line count, not on a constant. A
-      // block whose numbering starts past 1 pads one column wider at most;
-      // the gutter is then under-modeled by a single column, the safe side.
+      // the widest one the block will draw, including the start-line directive
+      // on the reopened tail of a split block.
       let close = -1;
       for (let k = i + 1; k < allLines.length; k++) {
         const closing = CODE_FENCE_RE.exec(allLines[k]!);
@@ -363,11 +386,12 @@ export function fitPendingSlice(
         }
       }
       const bodyCount = (close === -1 ? allLines.length : close) - (i + 1);
+      const { startLine } = parseCodeFenceInfo(fenceMatch[2]);
       activeCodeLineWidth =
         contentWidth -
         CODE_BLOCK_PREFIX_PADDING -
-        (showLineNumbers ? String(bodyCount).length + 1 : 0);
-      rendered += estimateLineRows(line, contentWidth);
+        (showLineNumbers ? String(bodyCount + startLine - 1).length + 1 : 0);
+      rendered += estimateLineRows(line, contentWidth, renderVisualBlocks);
       if (rendered > budget) {
         kept = i;
         break;
@@ -375,9 +399,35 @@ export function fitPendingSlice(
       i++;
       continue;
     }
-    if (isTableStart(allLines, i)) {
+    if (renderVisualBlocks && isTableStart(allLines, i)) {
       let j = i + 2;
       while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
+      if (options.measureCompletedTableRows) {
+        const headers = splitMarkdownTableRow(TABLE_ROW_RE.exec(line)![1]!);
+        const rows = allLines
+          .slice(i + 2, j)
+          .filter((row) => !TABLE_SEPARATOR_RE.test(row))
+          .map((row) => splitMarkdownTableRow(TABLE_ROW_RE.exec(row)![1]!));
+        if (rows.length > 0) {
+          // A completed layout renders at least one line for each data row.
+          // If those alone exhaust the budget, skip formatting the whole table.
+          const cost =
+            rows.length > budget - rendered
+              ? rows.length
+              : options.measureCompletedTableRows(headers, rows, contentWidth);
+          if (rendered + cost > budget && i > 0) {
+            kept = i;
+            break;
+          }
+          rendered += cost;
+        }
+        i = j;
+        if (rendered >= budget) {
+          kept = j;
+          break;
+        }
+        continue;
+      }
       const dataRows = j - (i + 2);
       // TableRenderer renders EITHER the horizontal format (each row as tall as
       // its tallest wrapped cell, + chrome) OR the vertical key-value format
@@ -492,7 +542,7 @@ export function fitPendingSlice(
         break;
       }
     } else {
-      rendered += estimateLineRows(line, contentWidth);
+      rendered += estimateLineRows(line, contentWidth, renderVisualBlocks);
       if (rendered > budget) {
         kept = i;
         break;

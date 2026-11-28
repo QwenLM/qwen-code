@@ -10,7 +10,11 @@ import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
-import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import {
+  TableRenderer,
+  measureCompletedTableRows,
+  type ColumnAlign,
+} from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { SettingsContext, useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
@@ -260,7 +264,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       contentWidth,
       renderedBudget,
       tableClampRows,
-      { showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true },
+      {
+        showLineNumbers: settings?.merged.ui?.showLineNumbers ?? true,
+        ...(isPending ? {} : { renderVisualBlocks, measureCompletedTableRows }),
+      },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);

@@ -1079,6 +1079,37 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('keeps the display default for a tool in a standalone session preview', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              { functionCall: { id: 'question', name: 'ask_user_question' } },
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'question',
+            resultDisplay: '**Color**: Blue',
+            status: 'success',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      null,
+    );
+    const group = items.find((item) => item.type === 'tool_group');
+    expect(group?.tools[0]?.resultDisplay).toBe('**Color**: Blue');
+    expect(group?.tools[0]).not.toHaveProperty('renderOutputAsMarkdown');
+  });
+
   it('flushes pending tool groups before subsequent user messages', () => {
     const conversation = {
       messages: [
