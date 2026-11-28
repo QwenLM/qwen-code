@@ -5816,8 +5816,8 @@ describe('GithubChannel', () => {
       writeFileSync(pendingPath(), JSON.stringify(records));
     }
 
-    async function retryPendingForTest(): Promise<void> {
-      const privateChannel = channel as unknown as {
+    async function retryPendingForTest(target = channel): Promise<void> {
+      const privateChannel = target as unknown as {
         octokit: typeof mockOctokit;
         abortableSleep: (ms: number) => Promise<void>;
         retryPendingFinalDeliveries: () => Promise<void>;
@@ -6915,10 +6915,15 @@ describe('GithubChannel', () => {
       }
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      // Next start: the record is still on disk, so the audit has to be
-      // what stops the second public reply.
+      // A fresh channel shares the on-disk audit and pending record, but
+      // starts with no in-memory delivery history.
       writePending([record]);
-      await retryPendingForTest();
+      const restarted = new TestableGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      await retryPendingForTest(restarted);
 
       // The second start sends nothing, and the record it skipped is
       // dropped once the rewrite succeeds.
