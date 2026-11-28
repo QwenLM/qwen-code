@@ -31,6 +31,10 @@ permissions:
   actions: 'read'
   contents: 'read'
   issues: 'write'
+  # The PR-gate arm reads commits/{sha}/pulls to confirm a green gate run
+  # belongs to the same PR and commit; without pull-requests read that lookup
+  # 403s and the arm never retires an issue.
+  pull-requests: 'read'
 
 jobs:
   resolve:

@@ -144,9 +144,11 @@ per-model share, daily tokens, heatmap cells — derives from that table. Sessio
 ended-run duration, tool calls, changed lines and skills still come from
 `aggregateUsage`, because the ledger deliberately carries none of them. Both
 surfaces filter those records by the same inclusive local-day keys as the token
-slice, not by the rolling millisecond cut-off. Per-day `sessions` specifically
-means **runs ended on that date**; a cross-midnight run's requests and its end
-record can therefore appear on different days.
+slice, not by the rolling millisecond cut-off. Per-day `sessions` originally
+counted runs ended on that date; this was superseded by
+[Ledger-Backed Session Census and Daemon Session-End Usage Persistence](./2026-11-25-usage-ledger-session-census.md),
+under which summary and per-day `sessions` count distinct active `sessionId`s
+across ended non-supplement records and per-request ledger rows on that day.
 
 - `loadTokenUsageDailyByModel(sinceLocalDate)` streams each month file at/after the
   start month, validates every record with the existing `isTokenUsageRecord`, and
@@ -1091,10 +1093,13 @@ than a fabricated attribution.
 - **Calendar-day windows now apply to every record-derived tile too.** Tokens,
   sessions, duration, tools, files and skills all include the whole boundary day;
   the TUI's previous comparison window is disjoint and has the same number of
-  completed days. The daemon's per-day `sessions` field remains an ended-run
-  series, not an assertion that all shown tokens belong to runs ending that
-  same day. The displayed Today counts still include an unfinished day, while a
-  comparison has no scope unless at least one prior local day is complete.
+  completed days. The daemon's per-day `sessions` field originally counted ended
+  runs only and was subsequently updated by
+  [Ledger-Backed Session Census and Daemon Session-End Usage Persistence](./2026-11-25-usage-ledger-session-census.md)
+  to count distinct active `sessionId`s across ended non-supplement records and
+  ledger rows on each day. The displayed Today counts still include an unfinished
+  day, while a comparison has no scope unless at least one prior local day is
+  complete.
 - Records written before this change stay inflated, so other consumers of
   `loadUsageHistory` that this PR does not convert (for example the per-project
   token column and the pre-repair fallback window) still show the old numbers for

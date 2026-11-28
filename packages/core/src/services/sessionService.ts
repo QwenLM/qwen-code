@@ -124,6 +124,11 @@ import {
   writeSessionArtifactSummarySidecar,
 } from './session-artifact-summary-sidecar.js';
 import {
+  moveSessionPromptTimeSidecar,
+  removeSessionPromptTimeSidecar,
+  sessionPromptTimeSidecarPath,
+} from './session-prompt-time-sidecar.js';
+import {
   deleteArtifactSnapshot,
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
@@ -1104,6 +1109,16 @@ export class SessionService {
     );
   }
 
+  private getPromptTimeSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionPromptTimeSidecarPath(
+      this.getChatsDirForState(state),
+      sessionId,
+    );
+  }
+
   /**
    * Returns the absolute path to the sidecar JSON file that caches the
    * session's restorable artifact count for the session list. The file may
@@ -1982,8 +1997,23 @@ export class SessionService {
   private removeWorktreeSidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
-      if (fs.existsSync(sidecar)) {
-        this.removeFileIfExists(sidecar);
+      let present = false;
+      try {
+        present =
+          fs.lstatSync(sidecar, { throwIfNoEntry: false }) !== undefined;
+      } catch {
+        present = false;
+      }
+      if (present) {
+        try {
+          this.removeFileIfExists(sidecar);
+        } catch (error) {
+          this.warn(
+            `worktree sidecar not removed: ${sidecar}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
     }
   }
@@ -2026,6 +2056,14 @@ export class SessionService {
     for (const state of ['active', 'archived'] as const) {
       removeSessionArtifactSummarySidecar(
         this.getArtifactSummaryPathForState(sessionId, state),
+      );
+    }
+  }
+
+  private removePromptTimeSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionPromptTimeSidecar(
+        this.getPromptTimeSidecarPathForState(sessionId, state),
       );
     }
   }
@@ -2178,6 +2216,9 @@ export class SessionService {
     removeSessionArtifactSummarySidecar(
       this.getArtifactSummaryPathForState(sessionId, droppedState),
     );
+    removeSessionPromptTimeSidecar(
+      this.getPromptTimeSidecarPathForState(sessionId, droppedState),
+    );
   }
 
   // The kept transcript's Goal is authoritative. Unlike a title label, an
@@ -2327,6 +2368,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move artifact summary sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionPromptTimeSidecar(
+        this.getPromptTimeSidecarPathForState(sessionId, sourceState),
+        this.getPromptTimeSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move prompt-time sidecar for ${sessionId}: ${error}`,
       );
     }
   }
@@ -3455,7 +3508,11 @@ export class SessionService {
   async getLastUserPromptAt(
     sessionId: string,
     archiveState: SessionArchiveState = 'active',
-    options: { preferCache?: boolean } = {},
+    options: {
+      preferCache?: boolean;
+      signal?: AbortSignal;
+      allowSidecarWrite?: boolean;
+    } = {},
   ): Promise<string | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
     try {
@@ -3472,6 +3529,7 @@ export class SessionService {
         },
       );
     } catch (error) {
+      if (options.signal?.aborted) throw error;
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
@@ -4981,6 +5039,8 @@ export class SessionService {
     this.removeSessionBranchSidecars(sessionId);
     assertCleanupOwned?.();
     this.removeArtifactSummarySidecars(sessionId);
+    assertCleanupOwned?.();
+    this.removePromptTimeSidecars(sessionId);
     assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();

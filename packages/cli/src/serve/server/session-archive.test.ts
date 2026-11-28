@@ -54,6 +54,7 @@ import {
   unarchiveDaemonSessions,
   DaemonDrainingError,
 } from './session-archive.js';
+import { Session } from '../../acp-integration/session/Session.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 import {
@@ -716,6 +717,89 @@ describe('archiveDaemonSessions', () => {
     );
     expect(byId['bound']!.enabled).toBe(false); // paused with its session
     expect(byId['other']!.enabled).toBeUndefined(); // unrelated — untouched
+  });
+
+  it('archives an idle live session whose scheduler lists an enabled bound durable task', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440059';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound-live',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+
+    const liveSessionLike = Object.create(Session.prototype) as Session;
+    Object.assign(liveSessionLike, {
+      sessionId,
+      disposed: false,
+      disposedActiveWorkHolds: [],
+      mcpAppCalls: new Map(),
+      cwdRestorePending: false,
+      historyMutationActive: false,
+      goalProcessing: false,
+      cronProcessing: false,
+      pendingCronChildren: 0,
+      cronAbortController: null,
+      cronCompletion: null,
+      cronQueue: [],
+      notificationQueue: [],
+      activeNotificationAcceptances: new Set(),
+      notificationCompletion: null,
+      currentAgentNotificationTaskId: null,
+      currentWorkflowNotificationTaskId: null,
+      currentShellNotificationActive: false,
+      config: {
+        getBackgroundTaskRegistry: () => ({
+          listUnfinalizedBackgroundAgentIds: () => [],
+        }),
+        getBackgroundShellRegistry: () => ({
+          hasRunningEntries: () => false,
+        }),
+        getWorkflowRunRegistry: () => ({
+          listStartingRunIds: () => [],
+          list: () => [],
+        }),
+        isCronEnabled: () => true,
+        getCronScheduler: () => ({
+          disabled: false,
+          list: () => [{ durable: true, boundSessionId: sessionId }],
+          hasGatesInFlight: () => false,
+        }),
+      },
+    });
+
+    const closeSession = vi.fn(
+      async (id: string, _ctx?: unknown, opts?: { requireIdle?: boolean }) => {
+        if (opts?.requireIdle) {
+          const holds = liveSessionLike.collectActiveWorkHolds({
+            includeScheduledTasks: true,
+          });
+          if (holds.length > 0) {
+            throw new SessionBusyError(id);
+          }
+        }
+      },
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.archived).toEqual([sessionId]);
+    const tasks = await readCronTasks(workspaceDir);
+    expect(tasks[0]?.enabled).toBe(false);
   });
 
   it('reports task maintenance failure after archiving the transcript', async () => {
@@ -2614,6 +2698,122 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(fs.existsSync(worktreePath)).toBe(true);
     expect(warnings()).toContain('worktree cleanup preserved checkout');
   });
+
+  it.each(['active', 'archived'] as const)(
+    'keeps the checkout, warns, and unlinks a dangling %s sidecar symlink without poisoning sibling cleanup',
+    async (archiveState) => {
+      const sessionId = '550e8400-e29b-41d4-a716-4466554400b1';
+      const healthyId = '550e8400-e29b-41d4-a716-4466554400b2';
+      const { service, worktreePath } = setupWorktreeSession(sessionId, {
+        record: false,
+      });
+      fs.rmSync(service.getWorktreeSessionPath(sessionId));
+      writeSessionFile(workspaceDir, sessionId, archiveState);
+      const danglingSidecar = service.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      fs.mkdirSync(path.dirname(danglingSidecar), { recursive: true });
+      fs.symlinkSync(
+        path.join(runtimeDir, 'missing-sidecar-target'),
+        danglingSidecar,
+      );
+
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(result.errors).toEqual([]);
+      expect(fs.existsSync(worktreePath)).toBe(true);
+      expect(warnings()).toContain('worktree cleanup preserved checkout');
+      expect(warnings()).toContain('unsafe sidecar file type');
+      expect(
+        fs.lstatSync(danglingSidecar, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+
+      // The unlinked dangling sidecar must not poison subsequent healthy
+      // worktree deletions in the same workspace.
+      const healthy = setupWorktreeSession(healthyId);
+      const healthyResult = await deleteDaemonSessions({
+        sessionIds: [healthyId],
+        service: healthy.service,
+        bridge: cleanupBridge(),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(healthyResult.removed).toEqual([healthyId]);
+      expect(healthyResult.errors).toEqual([]);
+      expect(fs.existsSync(healthy.worktreePath)).toBe(false);
+      expect(warnings()).not.toContain('unreadable sibling sidecar');
+    },
+  );
+
+  it('keeps the checkout, warns, and unlinks a self-referencing sidecar symlink loop', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400b3';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const sidecarPath = service.getWorktreeSessionPath(sessionId);
+    fs.rmSync(sidecarPath);
+    fs.symlinkSync(sidecarPath, sidecarPath);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(result.errors).toEqual([]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('worktree cleanup preserved checkout');
+    expect(warnings()).toContain('unsafe sidecar file type');
+    expect(
+      fs.lstatSync(sidecarPath, { throwIfNoEntry: false }),
+    ).toBeUndefined();
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'does not take the delete fast path when the archived sidecar parent is unreadable',
+    async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-4466554400b4';
+      writeSessionFile(workspaceDir, sessionId, 'active');
+      const service = new SessionService(workspaceDir);
+      const archivedDir = path.dirname(
+        service.getWorktreeSessionPathForArchiveState(sessionId, 'archived'),
+      );
+      fs.mkdirSync(archivedDir, { recursive: true });
+      fs.chmodSync(archivedDir, 0o000);
+
+      let result: Awaited<ReturnType<typeof deleteDaemonSessions>>;
+      try {
+        result = await deleteDaemonSessions({
+          sessionIds: [sessionId],
+          service,
+          bridge: cleanupBridge(),
+          coordinator: new SessionArchiveCoordinator(),
+        });
+      } finally {
+        fs.chmodSync(archivedDir, 0o700);
+      }
+
+      expect(result.removed).toEqual([]);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          sessionId,
+          error: expect.stringContaining('EACCES'),
+        }),
+      ]);
+      expect(
+        fs.existsSync(sessionPath(workspaceDir, sessionId, 'active')),
+      ).toBe(true);
+      expect(warnings()).toContain('worktree cleanup preserved checkout');
+      expect(warnings()).toContain('EACCES');
+    },
+  );
 
   it('keeps the checkout and warns when the marker names another session', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440095';

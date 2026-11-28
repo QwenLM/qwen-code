@@ -38,8 +38,6 @@ import static org.mockito.Mockito.mock;
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "qwen.managed-agent.runtime-broker.enabled=true",
-        "qwen.managed-agent.runtime-broker.host=127.0.0.1",
-        "qwen.managed-agent.runtime-broker.port=0",
         "qwen.managed-agent.runtime-broker.token=broker-token",
         "qwen.managed-agent.runtime-broker.credential-key-id=test-key",
         "qwen.managed-agent.runtime-broker.credential-key="
