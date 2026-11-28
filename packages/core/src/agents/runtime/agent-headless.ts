@@ -17,6 +17,7 @@
 import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { LlmChat } from '../../core/llm-chat.js';
+import { boundToolHookContext } from '../../core/tool-hook-context.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -44,6 +45,7 @@ import { logSubagentExecution } from '../../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../../telemetry/types.js';
 import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
+import { MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH } from '../../hooks/types.js';
 
 const debugLogger = createDebugLogger('SUBAGENT');
 
@@ -188,6 +190,34 @@ export class ContextState {
   get_keys(): string[] {
     return Object.keys(this.state);
   }
+}
+
+/**
+ * Appends a SubagentStart hook's `additionalContext` to the subagent's
+ * `task_prompt`. `hook_context` feeds the `${hook_context}` system-prompt
+ * placeholder; the initial user turn carries the context too, because a
+ * continuation turn no longer re-renders the system instruction.
+ *
+ * The context arrives pre-escaped from `getAdditionalContext()` and is bounded
+ * by the shared hook-context rule: the cut never splits a surrogate pair and a
+ * truncated context ends in the truncation notice. Nothing is written when
+ * there is no context. A missing `task_prompt` keeps no prefix: the context is
+ * stored on its own, not after the string `undefined`.
+ */
+export function appendSubagentStartContext(
+  contextState: ContextState,
+  additionalContext: string | undefined,
+): void {
+  const bounded = boundToolHookContext(
+    [additionalContext],
+    MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  );
+  if (!bounded) return;
+  const taskPrompt = contextState.get('task_prompt');
+  contextState.set(
+    'task_prompt',
+    taskPrompt ? `${String(taskPrompt)}\n\n${bounded}` : bounded,
+  );
 }
 
 /**

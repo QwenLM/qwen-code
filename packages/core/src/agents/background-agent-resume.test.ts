@@ -17,6 +17,8 @@ import {
   type AgentTaskRegistration,
 } from './background-tasks.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
+import { TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE } from '../core/tool-hook-context.js';
+import { MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH } from '../hooks/types.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
@@ -1199,7 +1201,7 @@ describe('BackgroundAgentResumeService', () => {
     await waitForStatus(agentId, 'completed');
   });
 
-  it('fires SubagentStart hooks when resuming and injects hook context', async () => {
+  it('fires SubagentStart hooks when resuming and appends hook context to the task prompt', async () => {
     const sessionId = 'session-resume';
     const agentId = 'agent-resume';
     seedPaused(sessionId, agentId, 'Resume with hooks', {
@@ -1250,8 +1252,41 @@ describe('BackgroundAgentResumeService', () => {
       throw new Error('Expected resume execute context');
     }
     expect(contextArg.get('hook_context')).toBe('resume-context');
-    expect(contextArg.get('task_prompt')).toBe('continue');
+    expect(contextArg.get('task_prompt')).toBe('continue\n\nresume-context');
     expect(resumedInvocation).toBeUndefined();
+    await waitForStatus(agentId, 'completed');
+  });
+
+  it('bounds an oversized SubagentStart context when resuming', async () => {
+    const agentId = 'agent-resume-bound';
+    seedPaused('session-resume-bound', agentId, 'Resume with a long context', {
+      resolvedApprovalMode: 'auto-edit',
+    });
+    const subagent = stubSubagent();
+    const { service, hookSystem } = createService({ subagent });
+    const cut =
+      MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH -
+      TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+    // The cut would land between the halves of the emoji.
+    const longContext = 'x'.repeat(cut - 1) + '😀' + 'y'.repeat(200);
+    hookSystem.fireSubagentStartEvent.mockResolvedValue({
+      getAdditionalContext: () => longContext,
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    const contextArg = subagent.execute.mock.calls[0]![0];
+    const taskPrompt = String(contextArg.get('task_prompt'));
+    const appended = taskPrompt.slice('continue\n\n'.length);
+    expect(taskPrompt.startsWith('continue\n\n')).toBe(true);
+    expect(appended).toBe(
+      `${'x'.repeat(cut - 1)}${TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE}`,
+    );
+    // One code unit is given up so the emoji is not split.
+    expect(appended).toHaveLength(
+      MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 1,
+    );
     await waitForStatus(agentId, 'completed');
   });
 

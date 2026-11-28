@@ -16,7 +16,11 @@ import {
   type AgentToolCallEvent,
 } from './runtime/agent-events.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
-import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
+import {
+  AgentHeadless,
+  appendSubagentStartContext,
+  ContextState,
+} from './runtime/agent-headless.js';
 import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
   buildAgentTranscriptAttach,
@@ -1335,13 +1339,6 @@ export class BackgroundAgentResumeService {
                 resolvedMode,
                 signal: turnAbortController.signal,
               });
-              const additionalContext = turnContextState.get('hook_context');
-              if (additionalContext) {
-                turnContextState.set(
-                  'task_prompt',
-                  `${String(turnContextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
-                );
-              }
             }
             shouldFireStartHook = false;
 
@@ -1959,6 +1956,7 @@ export class BackgroundAgentResumeService {
       const additionalContext = startHookOutput?.getAdditionalContext();
       if (additionalContext) {
         contextState.set('hook_context', additionalContext);
+        appendSubagentStartContext(contextState, additionalContext);
       }
     } catch (hookError) {
       debugLogger.warn(

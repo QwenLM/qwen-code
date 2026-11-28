@@ -53,6 +53,7 @@ import {
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
+  appendSubagentStartContext,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import {
@@ -65,8 +66,12 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
+import { TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE } from '../../core/tool-hook-context.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
-import { PermissionMode } from '../../hooks/types.js';
+import {
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  PermissionMode,
+} from '../../hooks/types.js';
 import {
   runWithAgentConfiguredToolAllowlist,
   runWithAgentContext,
@@ -306,6 +311,16 @@ vi.mock('../../telemetry/index.js', async (importOriginal) => {
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
+// The module is automocked, so the prompt append under test would be a stub:
+// it keeps the real implementation.
+const actualAppendSubagentStartContext = await vi
+  .importActual<
+    typeof import('../../agents/runtime/agent-headless.js')
+  >('../../agents/runtime/agent-headless.js')
+  .then((actual) => actual.appendSubagentStartContext);
+vi.mocked(appendSubagentStartContext).mockImplementation(
+  actualAppendSubagentStartContext,
+);
 
 describe('AgentTool', () => {
   let config: Config;
@@ -475,7 +490,10 @@ describe('AgentTool', () => {
       .mockResolvedValue(mockSubagents[0]);
   /** A fresh ContextState that every `new ContextState()` returns. */
   const newContextState = () => {
-    const state = { set: vi.fn() } as unknown as ContextState;
+    const state = {
+      set: vi.fn(),
+      get: vi.fn(() => undefined),
+    } as unknown as ContextState;
     MockedContextState.mockImplementation(() => state);
     return state;
   };
@@ -3781,6 +3799,23 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
     });
 
+    it('appends SubagentStart additionalContext to the fork task prompt', async () => {
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+        getAdditionalContext: vi.fn().mockReturnValue('Fork context'),
+      } as never);
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Fork directive' : undefined,
+      );
+
+      await runFork(forkParams('some task'));
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Fork directive\n\nFork context',
+      );
+    });
+
     it('resolves a project fork profile into the existing execution gate and task prompt', () =>
       withProfiles(
         'qwen-agent-fork-profile-',
@@ -4428,6 +4463,52 @@ describe('AgentTool', () => {
         'hook_context',
         'Extra context from hook',
       );
+      // No task_prompt exists in this fixture: the context is stored on its
+      // own, not after the string `undefined`.
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Extra context from hook',
+      );
+    });
+
+    it('appends additionalContext to the initial task prompt', async () => {
+      startOutput('Extra context from hook');
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Original task' : undefined,
+      );
+
+      await runFg();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Original task\n\nExtra context from hook',
+      );
+    });
+
+    it('bounds additionalContext like other hook context before appending it', async () => {
+      const cut =
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH -
+        TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+      // The cut would land between the halves of the emoji.
+      const longContext = 'x'.repeat(cut - 1) + '😀' + 'y'.repeat(200);
+      startOutput(longContext);
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Original task' : undefined,
+      );
+
+      await runFg();
+
+      const appended = String(
+        vi
+          .mocked(mockContextState.set)
+          .mock.calls.filter(([key]) => key === 'task_prompt')
+          .pop()?.[1],
+      );
+      // The emoji straddles the cut, so one code unit is backed off: the
+      // context ends in the notice and never in a lone surrogate.
+      expect(appended).toBe(
+        `Original task\n\n${'x'.repeat(cut - 1)}${TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE}`,
+      );
     });
 
     it('should inject hook_context as empty string when additionalContext is undefined', async () => {
@@ -4439,6 +4520,17 @@ describe('AgentTool', () => {
         'hook_context',
         expect.stringMatching(/.+/),
       );
+      // No context means the hook writes neither `undefined` nor a second
+      // task prompt: the dispatch's own prompt is the only write.
+      expect(mockContextState.set).not.toHaveBeenCalledWith(
+        'hook_context',
+        undefined,
+      );
+      expect(
+        vi
+          .mocked(mockContextState.set)
+          .mock.calls.filter(([key]) => key === 'task_prompt'),
+      ).toEqual([['task_prompt', 'Find all TypeScript files']]);
     });
 
     it('should continue execution when SubagentStart hook fails', async () => {
@@ -5854,6 +5946,24 @@ describe('AgentTool', () => {
       } finally {
         attachSpy.mockRestore();
       }
+    });
+
+    it('appends additionalContext to the initial background task prompt', async () => {
+      const hookSystem = installHookSystem();
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
+        getAdditionalContext: vi.fn().mockReturnValue('Background context'),
+      } as never);
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Watch for changes' : undefined,
+      );
+
+      await launch();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Watch for changes\n\nBackground context',
+      );
+      await untilCompleted();
     });
 
     it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {

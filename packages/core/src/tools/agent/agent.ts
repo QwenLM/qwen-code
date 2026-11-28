@@ -38,6 +38,7 @@ import type {
 } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
+  appendSubagentStartContext,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js';
@@ -2538,6 +2539,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const additionalContext = startHookOutput?.getAdditionalContext();
           if (additionalContext) {
             contextState.set('hook_context', additionalContext);
+            appendSubagentStartContext(contextState, additionalContext);
           }
         } catch (hookError) {
           debugLogger.warn(
@@ -3899,6 +3901,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const additionalContext = startHookOutput?.getAdditionalContext();
             if (additionalContext) {
               contextState.set('hook_context', additionalContext);
+              appendSubagentStartContext(contextState, additionalContext);
             }
             subagentStartHookCompleted = true;
           } catch (hookError) {
@@ -4334,12 +4337,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     startHookOutput?.getAdditionalContext();
                   if (additionalContext) {
                     turnContextState.set('hook_context', additionalContext);
-                    // The resident chat's system instruction was rendered on
-                    // its first turn, so make new hook context visible in the
-                    // continuation user turn as well.
-                    turnContextState.set(
-                      'task_prompt',
-                      `${String(turnContextState.get('task_prompt'))}\n\n${additionalContext}`,
+                    appendSubagentStartContext(
+                      turnContextState,
+                      additionalContext,
                     );
                   }
                 } catch (hookError) {
