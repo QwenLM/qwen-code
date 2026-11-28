@@ -384,6 +384,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // Kimi
   [/^kimi-k3/, LIMITS['128k']], // Kimi K3: 128K default max output (up to 1M configurable)
+  [KIMI_K3_GENERATION, LIMITS['128k']], // Kimi Code's bare `k3.1-pro` aliases
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
