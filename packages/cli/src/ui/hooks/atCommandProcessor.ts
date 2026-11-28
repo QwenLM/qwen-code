@@ -46,6 +46,10 @@ import {
   matchMcpServerByRef,
   parseMcpServerRef,
 } from '../../utils/mcp-server-mention.js';
+import {
+  getAtPathCandidates,
+  selectAtPathCandidate,
+} from '../utils/at-path-candidates.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -331,7 +335,7 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const pathName = originalAtPath.substring(1);
+    let pathName = originalAtPath.substring(1);
 
     // URL media reference (`@https://…`): detected BEFORE every other
     // parser — a URL can't be an extension/session/MCP ref, and without
@@ -436,6 +440,12 @@ export async function resolveAtCommandQuery({
 
     // Check if path should be ignored based on filtering options
     const workspaceContext = config.getWorkspaceContext();
+    const workspaceDirs = workspaceContext.getDirectories();
+    pathName = await selectAtPathCandidate(
+      getAtPathCandidates(pathName),
+      workspaceDirs,
+      [...workspaceDirs, configuredProjectTempDir, projectTempDir],
+    );
 
     // Check if path is in project temp directory
     const absolutePathName = path.isAbsolute(pathName)

@@ -19,6 +19,7 @@ import {
   getCachedStringWidth,
 } from '../../utils/textUtils.js';
 import { editTextInExternalEditor } from '../../utils/external-editor.js';
+import { getAtPathCandidates } from '../../utils/at-path-candidates.js';
 import {
   releaseProgramStatus,
   restoreProgramStatus,
@@ -2057,9 +2058,9 @@ function tryExtractFilePaths(
         );
         validPaths.push(...gapPaths);
       }
-      const unescaped = unescapePath(match[1]);
-      if (isValidPath(unescaped)) {
-        validPaths.push(`@${escapePath(unescaped)}`);
+      const resolvedPath = resolveValidPastedPath(match[1], isValidPath);
+      if (resolvedPath !== null) {
+        validPaths.push(`@${escapePath(resolvedPath)}`);
       } else {
         // Quoted path found but not a valid path — mark as non-path
         hadNonPathToken.value = true;
@@ -2096,6 +2097,18 @@ function tryExtractFilePaths(
   }
 
   return null;
+}
+
+function resolveValidPastedPath(
+  rawPath: string,
+  isValidPath: (p: string) => boolean,
+): string | null {
+  const unescaped = unescapePath(rawPath);
+  return (
+    getAtPathCandidates(unescaped).find((candidate) =>
+      isValidPath(candidate),
+    ) ?? null
+  );
 }
 
 /**
@@ -2135,9 +2148,9 @@ function extractPathsFromSegment(
       if (quoteMatch) {
         unquoted = quoteMatch[1];
       }
-      const unescaped = unescapePath(unquoted);
-      if (isValidPath(unescaped)) {
-        paths.push(`@${escapePath(unescaped)}`);
+      const resolvedPath = resolveValidPastedPath(unquoted, isValidPath);
+      if (resolvedPath !== null) {
+        paths.push(`@${escapePath(resolvedPath)}`);
         i = j;
         found = true;
         break;

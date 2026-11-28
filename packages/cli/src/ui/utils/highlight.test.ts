@@ -206,6 +206,31 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  it('should highlight file paths with escaped shell metacharacters from @ completion', () => {
+    const text = 'see @report\\ \\(1\\)\\[v2\\]\\&final.md now';
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: 'see ', type: 'default' },
+      { text: '@report\\ \\(1\\)\\[v2\\]\\&final.md', type: 'file' },
+      { text: ' now', type: 'default' },
+    ]);
+  });
+
+  it('should highlight Windows absolute and UNC file paths in full', () => {
+    const driveText = 'see @C:\\Users\\demo\\my\\ file.txt now';
+    expect(parseInputForHighlighting(driveText, 0)).toEqual([
+      { text: 'see ', type: 'default' },
+      { text: '@C:\\Users\\demo\\my\\ file.txt', type: 'file' },
+      { text: ' now', type: 'default' },
+    ]);
+
+    const uncText = 'see @\\\\server\\share\\my\\ file.txt now';
+    expect(parseInputForHighlighting(uncText, 0)).toEqual([
+      { text: 'see ', type: 'default' },
+      { text: '@\\\\server\\share\\my\\ file.txt', type: 'file' },
+      { text: ' now', type: 'default' },
+    ]);
+  });
+
   it('should paint a URL ref with a backslash-escaped span in full', () => {
     // The parser's escape branch runs for URL refs too, so the highlighter
     // must not split the token at the backslash.

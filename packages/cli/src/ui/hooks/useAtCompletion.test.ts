@@ -23,10 +23,26 @@ import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 
 const mockGetSessionSuggestions = vi.hoisted(() => vi.fn());
+const atPathCandidatesControl = vi.hoisted(() => ({
+  override: undefined as
+    | ((pathSpec: string) => string[] | undefined)
+    | undefined,
+}));
 
 vi.mock('./session-completion.js', () => ({
   getSessionSuggestions: mockGetSessionSuggestions,
 }));
+
+vi.mock('../utils/at-path-candidates.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/at-path-candidates.js')>();
+  return {
+    ...actual,
+    getAtPathCandidates: (pathSpec: string, platform?: NodeJS.Platform) =>
+      atPathCandidatesControl.override?.(pathSpec) ??
+      actual.getAtPathCandidates(pathSpec, platform),
+  };
+});
 
 // Test harness to capture the state from the hook's callbacks.
 function useTestHarnessForAtCompletion(
@@ -68,6 +84,7 @@ describe('useAtCompletion', () => {
   });
 
   afterEach(async () => {
+    atPathCandidatesControl.override = undefined;
     if (testRootDir) {
       await cleanupTmpDir(testRootDir);
     }
@@ -132,6 +149,146 @@ describe('useAtCompletion', () => {
           'src/components/Button.tsx',
           'src/index.js',
         ]),
+      );
+    });
+
+    it('should find nested files when pattern contains an escaped spaced directory prefix', async () => {
+      const structure: FileSystemStructure = {
+        'my folder': {
+          'readme.md': '',
+          'sub note.md': '',
+        },
+      };
+      testRootDir = await createTmpDir(structure);
+      atPathCandidatesControl.override = (pattern) =>
+        pattern === 'my\\ folder/read'
+          ? ['my\\ folder/read', 'my folder/read']
+          : undefined;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my\\ folder/read',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toContain(
+          'my\\ folder/readme.md',
+        );
+      });
+    });
+
+    it('should find nested files when typing an unescaped metacharacter after an escaped spaced directory prefix', async () => {
+      const structure: FileSystemStructure = {
+        'my folder': {
+          '(draft).md': '',
+        },
+      };
+      testRootDir = await createTmpDir(structure);
+      if (process.platform !== 'win32') {
+        atPathCandidatesControl.override = (pattern) =>
+          pattern === 'my\\ folder/('
+            ? ['my\\ folder/(', 'my folder/(']
+            : undefined;
+      }
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my\\ folder/(',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toContain(
+          'my\\ folder/\\(draft\\).md',
+        );
+      });
+    });
+
+    it('stops after the first candidate when literal search already returns matches', async () => {
+      const mockSearch = vi
+        .fn()
+        .mockImplementation(async (pattern: string) =>
+          pattern === 'dir\\#v2/file'
+            ? ['dir/#v2/file.txt']
+            : ['dir#v2/file.txt'],
+        );
+      vi.spyOn(FileSearchFactory, 'create').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        search: mockSearch,
+      } as unknown as FileSearch);
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      atPathCandidatesControl.override = (pattern) =>
+        pattern === 'dir\\#v2/file'
+          ? ['dir\\#v2/file', 'dir#v2/file']
+          : undefined;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'dir\\#v2/file',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.label)).toEqual([
+          'dir/#v2/file.txt',
+        ]);
+      });
+      expect(mockSearch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not search the unescaped fallback candidate after the search is aborted', async () => {
+      let resolveFirstSearch!: (value: string[]) => void;
+      const mockSearch = vi.fn((pattern: string) => {
+        if (pattern === 'my\\ folder/read') {
+          return new Promise<string[]>((resolve) => {
+            resolveFirstSearch = resolve;
+          });
+        }
+        return Promise.resolve(['next.txt']);
+      });
+      vi.spyOn(FileSearchFactory, 'create').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        search: mockSearch,
+      } as unknown as FileSearch);
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      atPathCandidatesControl.override = (pattern) =>
+        pattern === 'my\\ folder/read'
+          ? ['my\\ folder/read', 'my folder/read']
+          : undefined;
+
+      const { rerender } = renderHook(
+        ({ pattern }: { pattern: string }) =>
+          useTestHarnessForAtCompletion(true, pattern, mockConfig, testRootDir),
+        { initialProps: { pattern: 'my\\ folder/read' } },
+      );
+
+      await waitFor(() => {
+        expect(mockSearch).toHaveBeenCalledWith(
+          'my\\ folder/read',
+          expect.any(Object),
+        );
+      });
+      rerender({ pattern: 'next' });
+      await waitFor(() => {
+        expect(mockSearch).toHaveBeenCalledWith('next', expect.any(Object));
+      });
+      await act(async () => {
+        resolveFirstSearch([]);
+        await Promise.resolve();
+      });
+      expect(mockSearch).not.toHaveBeenCalledWith(
+        'my folder/read',
+        expect.any(Object),
       );
     });
 

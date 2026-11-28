@@ -485,6 +485,10 @@ import {
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
+  getAtPathCandidates,
+  selectAtPathCandidateSync,
+} from '../../ui/utils/at-path-candidates.js';
+import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
@@ -20865,7 +20869,15 @@ export class Session implements SessionContext {
           if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
-          for (const pathSpec of extractAtPathCommands(part.text)) {
+          for (const rawPathSpec of extractAtPathCommands(part.text)) {
+            const pathSpec = selectAtPathCandidateSync(
+              getAtPathCandidates(rawPathSpec),
+              [this.config.getProjectRoot()],
+              [
+                this.config.getProjectRoot(),
+                ...(this.config.getWorkspaceContext().getDirectories?.() ?? []),
+              ],
+            );
             if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),

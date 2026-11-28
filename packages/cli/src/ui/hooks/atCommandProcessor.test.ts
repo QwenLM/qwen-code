@@ -16,13 +16,32 @@ import {
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
   Storage,
+  WorkspaceContext,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
 import * as os from 'node:os';
 import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import * as fsPromises from 'node:fs/promises';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+
+const atPathCandidatesControl = vi.hoisted(() => ({
+  override: undefined as
+    | ((pathSpec: string) => string[] | undefined)
+    | undefined,
+}));
+
+vi.mock('../utils/at-path-candidates.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/at-path-candidates.js')>();
+  return {
+    ...actual,
+    getAtPathCandidates: (pathSpec: string, platform?: NodeJS.Platform) =>
+      atPathCandidatesControl.override?.(pathSpec) ??
+      actual.getAtPathCandidates(pathSpec, platform),
+  };
+});
 
 describe('extractAtPathCommands', () => {
   it('extracts only non-empty @path commands', () => {
@@ -143,6 +162,8 @@ describe('handleAtCommand', () => {
   });
 
   afterEach(async () => {
+    atPathCandidatesControl.override = undefined;
+    vi.restoreAllMocks();
     abortController.abort();
     await fsPromises.rm(testRootDir, { recursive: true, force: true });
   });
@@ -703,39 +724,345 @@ describe('handleAtCommand', () => {
     });
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'should correctly unescape paths with escaped spaces',
-    async () => {
-      const fileContent = 'This is the file content.';
-      const filePath = await createTestFile(
-        path.join(testRootDir, 'path', 'to', 'my file.txt'),
-        fileContent,
-      );
-      const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
-      const query = `@${escapedpath}`;
+  it('should correctly unescape paths with escaped spaces', async () => {
+    const fileContent = 'This is the file content.';
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'path', 'to', 'my file.txt'),
+      fileContent,
+    );
+    const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
+    const query = `@${escapedpath}`;
 
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 125,
+      signal: abortController.signal,
+    });
+
+    expect(result.processedQuery).toEqual([
+      { text: `@${filePath}` },
+      { text: '\n--- Content from referenced files ---' },
+      { text: `\nContent from ${filePath}:\n` },
+      { text: fileContent },
+      { text: '\n--- End of content ---' },
+    ]);
+    expect(result.shouldProceed).toBe(true);
+    // toolDisplays should be returned for caller to add to UI history
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('resolves escaped spaces and parentheses from @ completion', async () => {
+    const spaceContent = 'Spaced Chinese doc content';
+    const parensContent = 'Parens doc content';
+    await createTestFile(path.join(testRootDir, '测试 文档.md'), spaceContent);
+    await createTestFile(
+      path.join(testRootDir, '设计稿 (终版).md'),
+      parensContent,
+    );
+
+    const result = await handleAtCommand({
+      query: '@测试\\ 文档.md @设计稿\\ \\(终版\\).md 总结',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1251,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual(
+      expect.arrayContaining(['测试 文档.md', '设计稿 (终版).md']),
+    );
+    expect(JSON.stringify(result.processedQuery)).toContain(spaceContent);
+    expect(JSON.stringify(result.processedQuery)).toContain(parensContent);
+  });
+
+  it('resolves escaped relative paths whose first segment starts with a shell metacharacter', async () => {
+    const hashContent = 'Leading hash file content';
+    const parensDirContent = 'Leading parens dir content';
+    await createTestFile(path.join(testRootDir, '#notes.md'), hashContent);
+    await createTestFile(
+      path.join(testRootDir, '(v2)', 'a.md'),
+      parensDirContent,
+    );
+
+    const result = await handleAtCommand({
+      query: '@\\#notes.md @\\(v2\\)/a.md 总结',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1256,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual(
+      expect.arrayContaining(['#notes.md', '(v2)/a.md']),
+    );
+    expect(JSON.stringify(result.processedQuery)).toContain(hashContent);
+    expect(JSON.stringify(result.processedQuery)).toContain(parensDirContent);
+  });
+
+  it('prefers the nested metacharacter folder over a folded sibling when both exist after a spaced segment', async () => {
+    const nestedContent = 'REAL_NESTED_DRAFT_CONTENT';
+    const siblingContent = 'WRONG_FOLDED_SIBLING_CONTENT';
+    const nestedTarget = await createTestFile(
+      path.join(testRootDir, 'John Doe', 'Docs', '(draft)', 'a.txt'),
+      nestedContent,
+    );
+    const foldedSibling = await createTestFile(
+      path.join(testRootDir, 'John Doe', 'Docs(draft)', 'a.txt'),
+      siblingContent,
+    );
+    const queryPath =
+      process.platform === 'win32'
+        ? `${testRootDir}\\John\\ Doe\\Docs\\(draft\\)\\a.txt`
+        : path.join(testRootDir, 'John', 'escaped-draft.txt');
+    if (process.platform !== 'win32') {
+      atPathCandidatesControl.override = (pathSpec) =>
+        pathSpec === queryPath
+          ? [queryPath, nestedTarget, foldedSibling]
+          : undefined;
+    }
+
+    const result = await handleAtCommand({
+      query: `@${queryPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1259,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual([nestedTarget]);
+    expect(JSON.stringify(result.processedQuery)).toContain(nestedContent);
+    expect(JSON.stringify(result.processedQuery)).not.toContain(siblingContent);
+  });
+
+  it('does not let an existing path outside the workspace shadow a workspace-relative leading-metacharacter file', async () => {
+    const insideContent = 'WORKSPACE_DOLLAR_FILE_CONTENT';
+    await createTestFile(path.join(testRootDir, '$notes.md'), insideContent);
+    const outsideDir = await fsPromises.realpath(
+      await fsPromises.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-shadow-')),
+    );
+    const outsideShadow = path.join(outsideDir, '$notes.md');
+    await fsPromises.writeFile(outsideShadow, 'OUTSIDE_SHADOW_CONTENT');
+
+    mockConfig = {
+      ...mockConfig,
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: (p: string) => {
+          const resolved = path.resolve(testRootDir, p);
+          return (
+            resolved === testRootDir ||
+            resolved.startsWith(`${testRootDir}${path.sep}`)
+          );
+        },
+        getDirectories: () => [testRootDir],
+      }),
+    } as unknown as Config;
+
+    atPathCandidatesControl.override = (pathSpec) =>
+      pathSpec === outsideShadow ? [outsideShadow, '$notes.md'] : undefined;
+
+    try {
       const result = await handleAtCommand({
-        query,
+        query: `@${outsideShadow}`,
         config: mockConfig,
         onDebugMessage: mockOnDebugMessage,
-        messageId: 125,
+        messageId: 1260,
         signal: abortController.signal,
       });
 
-      expect(result.processedQuery).toEqual([
-        { text: `@${filePath}` },
-        { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from ${filePath}:\n` },
-        { text: fileContent },
-        { text: '\n--- End of content ---' },
-      ]);
       expect(result.shouldProceed).toBe(true);
-      // toolDisplays should be returned for caller to add to UI history
-      expect(result.toolDisplays).toBeDefined();
-      expect(result.toolDisplays).toHaveLength(1);
-      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
-    },
-  );
+      expect(result.filesRead).toEqual(['$notes.md']);
+      expect(JSON.stringify(result.processedQuery)).toContain(insideContent);
+      expect(JSON.stringify(result.processedQuery)).not.toContain(
+        'OUTSIDE_SHADOW_CONTENT',
+      );
+    } finally {
+      await fsPromises.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to the second candidate when the first candidate does not exist', async () => {
+    const fallbackContent = 'Fallback candidate content';
+    const missingAlias = path.join(testRootDir, 'missing-alias.txt');
+    const realFile = await createTestFile(
+      path.join(testRootDir, 'real file.txt'),
+      fallbackContent,
+    );
+    atPathCandidatesControl.override = (pathSpec) =>
+      pathSpec === missingAlias ? [missingAlias, realFile] : undefined;
+
+    const result = await handleAtCommand({
+      query: `@${missingAlias}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1257,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual([realFile]);
+    expect(JSON.stringify(result.processedQuery)).toContain(fallbackContent);
+  });
+
+  it('prefers an existing literal folder name starting with a shell metacharacter over unescaping', async () => {
+    const literalContent = 'Literal folder content';
+    const fallbackContent = 'Unescaped sibling content';
+    const literalPath = await createTestFile(
+      path.join(testRootDir, 'dir', '#v2', 'file.txt'),
+      literalContent,
+    );
+    const siblingPath = await createTestFile(
+      path.join(testRootDir, 'dir#v2', 'file.txt'),
+      fallbackContent,
+    );
+
+    const queryPath = path.join(testRootDir, 'dir', '#v2', 'file.txt');
+    atPathCandidatesControl.override = (pathSpec) =>
+      pathSpec === queryPath ? [literalPath, siblingPath] : undefined;
+
+    const result = await handleAtCommand({
+      query: `@${queryPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1252,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual([literalPath]);
+    expect(JSON.stringify(result.processedQuery)).toContain(literalContent);
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      fallbackContent,
+    );
+  });
+
+  it('does not bypass ignore rules by falling back when an ignored literal file exists', async () => {
+    await fsPromises.mkdir(path.join(testRootDir, '.git'), {
+      recursive: true,
+    });
+    await createTestFile(
+      path.join(testRootDir, '.gitignore'),
+      'dir/#v2/secret.txt\n',
+    );
+    await createTestFile(
+      path.join(testRootDir, 'dir', '#v2', 'secret.txt'),
+      'IGNORED_LITERAL_SECRET',
+    );
+    await createTestFile(
+      path.join(testRootDir, 'dir#v2', 'secret.txt'),
+      'SIBLING_FALLBACK_CONTENT',
+    );
+    mockConfig = {
+      ...mockConfig,
+      getFileService: () => new FileDiscoveryService(testRootDir),
+    } as unknown as Config;
+
+    const queryPath = path.join('dir', '#v2', 'secret.txt');
+    const siblingQuery = path.join('dir#v2', 'secret.txt');
+    atPathCandidatesControl.override = (pathSpec) =>
+      pathSpec === queryPath ? [queryPath, siblingQuery] : undefined;
+
+    const result = await handleAtCommand({
+      query: `@${queryPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1255,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toBeUndefined();
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      'IGNORED_LITERAL_SECRET',
+    );
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      'SIBLING_FALLBACK_CONTENT',
+    );
+  });
+
+  it('does not fall back to an unescaped sibling when probing the literal path fails with EACCES', async () => {
+    const literalPath = path.join(testRootDir, 'dir', '#v2', 'notes.md');
+    const siblingPath = await createTestFile(
+      path.join(testRootDir, 'dir#v2', 'notes.md'),
+      'SIBLING_SHOULD_NOT_BE_READ',
+    );
+    const workspaceContext = new WorkspaceContext(testRootDir);
+    mockConfig = {
+      ...mockConfig,
+      getWorkspaceContext: () => workspaceContext,
+    } as unknown as Config;
+    atPathCandidatesControl.override = (pathSpec) =>
+      pathSpec === literalPath ? [literalPath, siblingPath] : undefined;
+
+    const eacces = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    const origRealpathSync = fs.realpathSync.bind(fs);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((target, options) => {
+      if (String(target) === literalPath) {
+        throw eacces;
+      }
+      return origRealpathSync(target, options as BufferEncoding);
+    });
+    const origLstat = fsPromises.lstat.bind(fsPromises);
+    vi.spyOn(fsPromises, 'lstat').mockImplementation(async (target) => {
+      if (String(target) === literalPath) {
+        throw eacces;
+      }
+      return origLstat(target);
+    });
+    const origRealpath = fsPromises.realpath.bind(fsPromises);
+    vi.spyOn(fsPromises, 'realpath').mockImplementation(async (target) => {
+      if (String(target) === literalPath) {
+        throw eacces;
+      }
+      return origRealpath(target);
+    });
+
+    const result = await handleAtCommand({
+      query: `@${literalPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1258,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toBeUndefined();
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      'SIBLING_SHOULD_NOT_BE_READ',
+    );
+    expect(mockOnDebugMessage).toHaveBeenCalledWith(
+      expect.stringContaining(`Path ${literalPath} will be skipped.`),
+    );
+  });
+
+  it('leaves the original path unchanged when neither candidate exists', async () => {
+    const result = await handleAtCommand({
+      query: 'Check @missing\\ file.md please',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1253,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toBeUndefined();
+    expect(result.processedQuery).toEqual([
+      {
+        text:
+          process.platform === 'win32'
+            ? 'Check @missing\\ file.md please'
+            : 'Check @missing file.md please',
+      },
+    ]);
+  });
 
   it('should handle multiple @file references', async () => {
     const content1 = 'Content file1';
@@ -1326,37 +1653,34 @@ describe('handleAtCommand', () => {
       });
     });
 
-    it.skipIf(process.platform === 'win32')(
-      'should still handle escaped spaces in paths before punctuation',
-      async () => {
-        const fileContent = 'Spaced file content';
-        const filePath = await createTestFile(
-          path.join(testRootDir, 'spaced file.txt'),
-          fileContent,
-        );
-        const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
-        const query = `Check @${escapedPath}, it has spaces.`;
+    it('should still handle escaped spaces in paths before punctuation', async () => {
+      const fileContent = 'Spaced file content';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'spaced file.txt'),
+        fileContent,
+      );
+      const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
+      const query = `Check @${escapedPath}, it has spaces.`;
 
-        const result = await handleAtCommand({
-          query,
-          config: mockConfig,
-          onDebugMessage: mockOnDebugMessage,
-          messageId: 412,
-          signal: abortController.signal,
-        });
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 412,
+        signal: abortController.signal,
+      });
 
-        expect(result).toMatchObject({
-          processedQuery: [
-            { text: `Check @${filePath}, it has spaces.` },
-            { text: '\n--- Content from referenced files ---' },
-            { text: `\nContent from ${filePath}:\n` },
-            { text: fileContent },
-            { text: '\n--- End of content ---' },
-          ],
-          shouldProceed: true,
-        });
-      },
-    );
+      expect(result).toMatchObject({
+        processedQuery: [
+          { text: `Check @${filePath}, it has spaces.` },
+          { text: '\n--- Content from referenced files ---' },
+          { text: `\nContent from ${filePath}:\n` },
+          { text: fileContent },
+          { text: '\n--- End of content ---' },
+        ],
+        shouldProceed: true,
+      });
+    });
 
     it('should not break file paths with periods in extensions', async () => {
       const fileContent = 'TypeScript content';

@@ -15,6 +15,7 @@ import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 import { getExtensionSuggestions } from './extension-mention-ref.js';
 import { getSessionSuggestions } from './session-completion.js';
 import { buildMcpServerRef } from '../../utils/mcp-server-mention.js';
+import { getAtPathCandidates } from '../utils/at-path-candidates.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -487,10 +488,17 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       }, 200);
 
       try {
-        const results = await fileSearch.current.search(state.pattern, {
-          signal: controller.signal,
-          maxResults: MAX_SUGGESTIONS_TO_SHOW * 3,
-        });
+        const searchCandidates = getAtPathCandidates(state.pattern);
+        let results: string[] = [];
+        for (const searchPattern of searchCandidates) {
+          results = await fileSearch.current.search(searchPattern, {
+            signal: controller.signal,
+            maxResults: MAX_SUGGESTIONS_TO_SHOW * 3,
+          });
+          if (results.length > 0 || controller.signal.aborted) {
+            break;
+          }
+        }
 
         if (slowSearchTimer.current) {
           clearTimeout(slowSearchTimer.current);
