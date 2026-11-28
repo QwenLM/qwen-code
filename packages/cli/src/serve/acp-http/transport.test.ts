@@ -7590,6 +7590,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge.subscribeThrows = true;
     const connId = await initialize();
     await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    const sendSession = vi.spyOn(conn, 'sendSession');
     const sessStream = await openStream(connId, 'sess-1');
     // The guarantee is that the server CLOSES the stream (not a zombie that
     // heartbeats forever). A safety abort at 3s distinguishes "server closed"
@@ -7604,12 +7606,24 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }, 3000);
     const start = Date.now();
     try {
-      for await (const _f of readSse(sessStream, ac.signal)) {
+      for await (const _frame of readSse(sessStream, ac.signal)) {
         // drain
       }
+      // Check the actual pump's transport handoff: the terminal close can
+      // discard queued SSE bytes before they become readable on the client.
+      expect(sendSession).toHaveBeenCalledWith('sess-1', {
+        jsonrpc: '2.0',
+        method: '_qwen/notify',
+        params: {
+          sessionId: 'sess-1',
+          kind: 'stream_error',
+          error: 'subscribe failed',
+        },
+      });
     } finally {
       clearTimeout(timer);
       ac.abort();
+      sendSession.mockRestore();
     }
     // A zombie stream ends only via the safety abort; the close must not.
     expect(safetyAbortFired).toBe(false);
@@ -9466,23 +9480,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('translateEvent: stream_error + client_evicted → _qwen/notify with kind', async () => {
+  it('translateEvent: session notifications retain kind and owning session', async () => {
     const connId = await initialize();
     await newSession(connId);
     const sess = await openStream(connId, 'sess-1');
-    const got = takeFrames(sess, 2);
+    const got = takeFrames(sess, 3);
     await new Promise((r) => setTimeout(r, 50));
     const q = bridge.queues.get('sess-1');
     q?.push({ type: 'stream_error', data: { error: 'boom' } });
     q?.push({ type: 'client_evicted', data: { reason: 'slow' } });
+    q?.push({
+      type: 'permission_resolved',
+      data: { requestId: 'settled', outcome: 'allow' },
+    });
     const frames = (await got) as Array<{
       method: string;
-      params: { kind: string };
+      params: { kind: string; sessionId: string };
     }>;
     expect(frames.every((f) => f.method === '_qwen/notify')).toBe(true);
+    expect(frames.every((f) => f.params.sessionId === 'sess-1')).toBe(true);
     const kinds = frames.map((f) => f.params.kind);
     expect(kinds).toEqual(
-      expect.arrayContaining(['stream_error', 'client_evicted']),
+      expect.arrayContaining([
+        'stream_error',
+        'client_evicted',
+        'permission_resolved',
+      ]),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
   });

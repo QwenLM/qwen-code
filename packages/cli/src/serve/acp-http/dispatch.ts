@@ -6221,6 +6221,7 @@ export class AcpDispatcher {
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            sessionId,
             kind: 'stream_error',
             error: errMsg(err),
           }),
@@ -6406,6 +6407,7 @@ export class AcpDispatcher {
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            sessionId,
             kind: event.type,
             data: event.data,
           }),
@@ -6420,6 +6422,7 @@ export class AcpDispatcher {
             // Spread first so a stray `kind` in event.data can't shadow the
             // discriminator the client's error handler keys on.
             ...(event.data as object),
+            sessionId,
             kind: 'stream_error',
           }),
           // Pass the bus cursor through if present; a synthetic terminal frame
@@ -6429,16 +6432,37 @@ export class AcpDispatcher {
         return;
       }
       default: {
-        // client_evicted / slow_client_warning / state_resync_required /
-        // model_switched / approval_mode_changed / … → opaque qwen notify.
+        // Session buses also carry workspace broadcasts. Approval-mode fanout
+        // is addressed to each recipient bus; retain its origin separately
+        // because SDK normalization uses the envelope as the delivery scope.
+        const sessionScoped = [
+          'client_evicted',
+          'slow_client_warning',
+          'state_resync_required',
+          'replay_complete',
+          'model_switched',
+          'model_switch_failed',
+          'mcp_budget_warning',
+          'mcp_child_refused_batch',
+          'history_truncated',
+          'terminal_sequence',
+          'approval_mode_changed',
+        ].includes(event.type);
+        const data =
+          event.type === 'approval_mode_changed' &&
+          isObject(event.data) &&
+          typeof event.data['sessionId'] === 'string'
+            ? { ...event.data, originSessionId: event.data['sessionId'] }
+            : event.data;
         // `event.id` is undefined for the synthetic control frames (no SSE
         // `id:` line, so they don't burn a slot in the resume sequence) and
         // set for ring-backed daemon events.
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            ...(sessionScoped ? { sessionId } : {}),
             kind: event.type,
-            data: event.data,
+            data,
           }),
           event.id,
         );
