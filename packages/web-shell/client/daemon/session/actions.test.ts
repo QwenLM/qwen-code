@@ -5584,6 +5584,24 @@ describe('createDaemonSessionActions', () => {
       expect(getConnection().context?.recovery?.canContinue).toBe(true);
     });
 
+    it('suppresses the refusal notice for an unattended continuation', async () => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          ...connection(),
+          context: { ...contextStatus('session-a') },
+        },
+        addNotice,
+      });
+
+      await expect(actions.continueSession({ silent: true })).rejects.toThrow(
+        'no resumable interrupted turn',
+      );
+      expect(addNotice).not.toHaveBeenCalled();
+    });
+
     it('keeps unknown admission disabled until server events or reload', async () => {
       const session = createMockSession('session-a');
       session.continueSession.mockRejectedValueOnce(
