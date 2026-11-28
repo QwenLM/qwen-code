@@ -13,6 +13,10 @@ import type { LoadedSettings } from '../../config/settings.js';
 // Mock i18n module
 vi.mock('../../i18n/index.js', () => ({
   setLanguageAsync: vi.fn().mockResolvedValue(undefined),
+  resolveLanguageSetting: vi.fn(
+    (settingsLanguage?: string) =>
+      process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto',
+  ),
   getCurrentLanguage: vi.fn().mockReturnValue('en'),
   detectSystemLanguage: vi.fn().mockReturnValue('en'),
   getLanguageNameFromLocale: vi.fn((locale: string) => {
@@ -86,6 +90,7 @@ describe('languageCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv('QWEN_CODE_LANG', '');
     mockContext = createMockCommandContext({
       services: {
         config: {
@@ -121,6 +126,7 @@ describe('languageCommand', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('command metadata', () => {
@@ -496,6 +502,20 @@ describe('languageCommand', () => {
       await languageCommand.action(mockContext, 'ui zh --project');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('zh');
+    });
+
+    it('uses QWEN_CODE_LANG over the saved setting when applying the language', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+      vi.stubEnv('QWEN_CODE_LANG', 'ru');
+      (mockContext.services.settings as { merged?: unknown }).merged = {
+        general: { language: 'de' },
+      };
+
+      await languageCommand.action(mockContext, 'ui de --global');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ru');
     });
 
     it('rejects --project in an untrusted workspace without persisting', async () => {

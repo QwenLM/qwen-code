@@ -14,6 +14,7 @@ import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import {
   setLanguageAsync,
+  resolveLanguageSetting,
   getCurrentLanguage,
   type SupportedLanguage,
   t,
@@ -179,8 +180,10 @@ async function setUiLanguage(
     }
   }
 
-  const effectiveLanguage = (services.settings?.merged?.general?.language ||
-    lang) as SupportedLanguage | 'auto';
+  const mergedLanguage = services.settings?.merged?.general?.language;
+  const effectiveLanguage = resolveLanguageSetting(
+    typeof mergedLanguage === 'string' ? mergedLanguage : lang,
+  );
   await setLanguageAsync(effectiveLanguage);
 
   // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
