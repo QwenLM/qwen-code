@@ -207,6 +207,7 @@ function convertToHistoryItems(
     args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
+    renderOutputAsMarkdown?: boolean;
     detailedDisplay?: string;
     images?: InlineImageData[];
     omittedImageCount?: number;
@@ -596,6 +597,11 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
+            // An available registry can establish that a tool is gone. The
+            // session picker has no registry and retains its historical default.
+            ...(config
+              ? { renderOutputAsMarkdown: tool ? tool.isOutputMarkdown : false }
+              : {}),
             // Without a recorded result, completion cannot be established.
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,

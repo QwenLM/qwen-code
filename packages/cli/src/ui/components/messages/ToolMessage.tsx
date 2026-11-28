@@ -10,6 +10,14 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { measureCompletedTableRows } from '../../utils/TableRenderer.js';
+import { useRenderMode } from '../../contexts/RenderModeContext.js';
+import {
+  fitPendingSlice,
+  hasMermaidFence,
+  pendingRenderedBudget,
+  pendingTableClampRows,
+} from '../../utils/pending-rendered-height.js';
 import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -92,6 +100,46 @@ type DiffResultDisplay = Pick<
   | 'fileDiffLength'
   | 'fileDiffTruncated'
 >;
+
+/**
+ * Whether the markdown branch would NOT fit. The renderer this branch feeds
+ * pre-slices at `pendingRenderedBudget` — two rows tighter than the viewport —
+ * and drops everything past a block boundary it cuts, so the gate has to be at
+ * least as strict as the slice it hands the result to.
+ *
+ * Three ways a result can fail here:
+ * - `clipped` is true: `fitPendingSlice` breaks before charging a non-leading
+ *   block that overflows, so `renderedRows` alone stays at the prefix and the
+ *   tail would vanish behind the renderer's own slice.
+ * - `renderedRows` exceeds `pendingRenderedBudget(maxHeight)` — the budget the
+ *   renderer actually slices at, not the raw viewport, or content in the
+ *   two-row band is certified here and then truncated with a false
+ *   "viewport too small" cue.
+ * - the text opens a ```mermaid fence: the renderer draws a diagram bounded
+ *   only by the message viewport, never by the fence's source lines, so no
+ *   source-line charge models it — fail closed to the plain-text path this
+ *   gate falls back to (the shape every budgeted result had before).
+ */
+function exceedsRenderedHeight(
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  showLineNumbers: boolean,
+  renderVisualBlocks: boolean,
+): boolean {
+  if (maxHeight <= 0) return false;
+  const lines = text.split(/\r?\n/);
+  if (renderVisualBlocks && hasMermaidFence(lines)) return true;
+  const budget = pendingRenderedBudget(maxHeight);
+  const { clipped, renderedRows } = fitPendingSlice(
+    lines,
+    Math.max(1, maxWidth),
+    budget,
+    pendingTableClampRows(maxHeight),
+    { showLineNumbers, renderVisualBlocks, measureCompletedTableRows },
+  );
+  return clipped || renderedRows > budget;
+}
 
 function sliceTextForMaxHeight(
   text: string,
@@ -646,6 +694,11 @@ const StringResultRenderer: React.FC<{
           isPending={false}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
+          // The height gate above uses the same estimator MarkdownDisplay
+          // pre-slices with. Keep the renderer's height limit as a backstop so
+          // MainContent does not silently clip an overflowing result
+          // (#10640/#5798).
+          enforceHeightBudget
         />
       </Box>
     );
@@ -785,6 +838,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   executionStartTime,
 }) => {
   const settings = useSettings();
+  const { renderMode } = useRenderMode();
   const isThisShellFocused =
     (name === SHELL_COMMAND_NAME || name === SHELL_NAME) &&
     status === ToolCallStatus.Executing &&
@@ -887,19 +941,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isCappingShell && shellCapHeight === shellOutputMaxLines;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
-  // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
-  // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox.
-  // `isCappingShell` keeps the cap honest when ctrl+s has been pressed
-  // (#10640): constrainHeight=false drops the height budget (availableHeight
-  // above is undefined) but the ui.shellOutputMaxLines cap still binds.
-  // Resumed sessions rebuild tool displays without renderOutputAsMarkdown
-  // (default true), so without this the capped shell output would escape
-  // through the markdown branch, which MaxSizedBox does not contain.
-  if (availableHeight || isCappingShell) {
-    renderOutputAsMarkdown = false;
-  }
-
   // §4.9: in full-detail mode, collapsible tools (read/search/list)
   // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
   // from the persisted functionResponse. Only a non-empty string detail
@@ -942,18 +983,70 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           ? formatSubscriptionQuotaDisplay(resultDisplay, t)
           : undefined) ?? resultDisplay);
 
+  const effectiveDisplayRenderer = useResultDisplayRenderer(
+    effectiveResultDisplay,
+  );
+
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
-  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
-  // markdown-suppression guard above doesn't catch this because fullDetail
-  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. Separate
+  // from the height gate below: fullDetail lifts the height cap, so that gate
+  // never sees this content at all.
   if (usingDetailedDisplay) {
     renderOutputAsMarkdown = false;
   }
 
-  const effectiveDisplayRenderer = useResultDisplayRenderer(
-    effectiveResultDisplay,
+  // A result too tall for its budget falls back to plain text, which
+  // MaxSizedBox then bounds by `availableHeight`. That fallback is about
+  // HEIGHT, not about depth: a result whose rendered height fits the budget
+  // keeps the markdown its tool declared (`isOutputMarkdown`), so
+  // `ask_user_question`'s `**Color**: Blue` no longer loses its formatting just
+  // because the message carries a terminal-height budget (#13956).
+  //
+  // Measured on `effectiveDisplayRenderer.data` — the string the markdown
+  // branch actually draws — rather than the raw `resultDisplay`, because
+  // `useResultDisplayRenderer` maps every object-shaped display
+  // (`ask_user_question_answers`, `shell_result`, `mcp_app.fallbackText`, the
+  // `JSON.stringify` default) onto a string, and
+  // `formatSubscriptionQuotaDisplay` substitutes its own text on the error
+  // path. A raw-prop string check skips all of those. Memoized: a large result
+  // (up to MAXIMUM_RESULT_DISPLAY_CHARACTERS) split on every render makes the
+  // TUI stutter while a tool group streams.
+  //
+  // Shell output always takes the plain-text path: `ui.shellOutputMaxLines`
+  // binds through MaxSizedBox (`isCappingShell`), and forcing it here also
+  // covers ctrl+s (budget dropped, cap still binding). Live ShellTool results
+  // already arrive with `renderOutputAsMarkdown: false` — the tool declares
+  // `isOutputMarkdown: false` — so this branch is really for the displays that
+  // carry no flag at all: the `!`-command `Shell Command` display built in
+  // shellCommandProcessor.ts, and resumed results rebuilt without the flag
+  // (#10640).
+  const outputExceedsBudget = React.useMemo(
+    () =>
+      !isShellTool &&
+      renderOutputAsMarkdown &&
+      availableHeight !== undefined &&
+      effectiveDisplayRenderer.type === 'string' &&
+      exceedsRenderedHeight(
+        effectiveDisplayRenderer.data,
+        innerWidth,
+        availableHeight,
+        settings.merged.ui?.showLineNumbers ?? true,
+        renderMode === 'render',
+      ),
+    [
+      isShellTool,
+      renderOutputAsMarkdown,
+      availableHeight,
+      effectiveDisplayRenderer,
+      innerWidth,
+      settings,
+      renderMode,
+    ],
   );
+  if (isShellTool || outputExceedsBudget) {
+    renderOutputAsMarkdown = false;
+  }
 
   // Collapse text/ANSI output for completed collapsible tools (read/search/list)
   // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)

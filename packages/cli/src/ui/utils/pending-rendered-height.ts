@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import wrapAnsi from 'wrap-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { readInlineMathSpanAt } from './inline-math.js';
 
@@ -38,6 +39,104 @@ export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
 /** A code fence: group 1 is the marker run, group 2 is info/trailing text. */
 export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+/** A list item: indent (1), marker (2), then the item text (3). */
+export const LIST_ITEM_RE = /^([ \t]*)([-*+]|\d+\.) +(.*)$/;
+/** A blockquote line: `> text`. Group 1 is the quoted text. */
+export const BLOCKQUOTE_LINE_RE = /^ *> ?(.*)$/;
+
+// Mirrors MarkdownDisplay's own prefixes. They are re-declared rather than
+// imported because MarkdownDisplay imports this module.
+const LIST_ITEM_PREFIX_PADDING = 1;
+const BLOCKQUOTE_PREFIX_PADDING = 1;
+const BLOCKQUOTE_MARKER_WIDTH = 2; // "│ "
+export const CODE_BLOCK_PREFIX_PADDING = 1;
+const TASK_ITEM_GLYPH_WIDTH = 2; // `✓ ` / `○ `
+
+/** Rows the renderer reserves below the viewport when it pre-slices pending
+ *  or height-budgeted content (`availableTerminalHeight - 2`). Exported so the
+ *  height gate measures against the same budget the renderer slices at, not
+ *  the raw viewport. */
+export const PENDING_RENDERED_BUDGET_RESERVE = 2;
+
+/** Extra rows reserved when clamping a streaming table (`- 3`): marginY 2 +
+ *  one row of wrapped-cell safety headroom. */
+export const TABLE_PENDING_RESERVED_ROWS = 3;
+
+/** Floor of the renderer's pending budget (streaming safety net). */
+export const MIN_PENDING_CONTENT_LINES = 1;
+
+/** The budget MarkdownDisplay actually slices at for a viewport of
+ *  `availableTerminalHeight` rows. */
+export function pendingRenderedBudget(availableTerminalHeight: number): number {
+  return Math.max(
+    MIN_PENDING_CONTENT_LINES,
+    availableTerminalHeight - PENDING_RENDERED_BUDGET_RESERVE,
+  );
+}
+
+/** The clamp MarkdownDisplay applies to a streaming/budgeted table for a
+ *  viewport of `availableTerminalHeight` rows. */
+export function pendingTableClampRows(availableTerminalHeight: number): number {
+  return Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS);
+}
+
+/**
+ * True when `lines` opens a ```mermaid (or ~~~mermaid) fence. The renderer
+ * draws such a fence as a diagram whose height is bounded only by the
+ * message-level viewport — never by the fence's source lines — so no
+ * source-line charge models it. A completed-result gate fails closed on it
+ * (plain-text fallback, the behavior every budgeted result had before
+ * markdown was kept) rather than certify a fit the diagram can overflow.
+ */
+export function hasMermaidFence(lines: string[]): boolean {
+  let fence: string | null = null;
+  for (const line of lines) {
+    const match = CODE_FENCE_RE.exec(line);
+    if (fence) {
+      // Delegate to the predicate the renderer's own walk uses: a fence line
+      // carrying an info string is content inside the block, not its closer.
+      if (isClosingCodeFence(match, fence)) fence = null;
+      continue;
+    }
+    if (match) {
+      // The renderer takes the language from the first token of the info
+      // string, so a fence carrying anything after it — `mermaid title="x"`,
+      // `mermaid qwen-code:start-line=12` — still draws a diagram. Matching
+      // the whole string here would let that fence be charged by its source
+      // lines and then render a diagram past the budget the gate certified.
+      if (parseCodeFenceInfo(match[2]).lang?.toLowerCase() === 'mermaid')
+        return true;
+      fence = match[1]!;
+    }
+  }
+  return false;
+}
+
+/**
+ * Internal fence info-string directive carrying the gutter start line for a
+ * code block that streaming split across commits. It rides on the re-opened
+ * fence's info line — which is a delimiter line, never rendered as content — so
+ * it never shows on screen; it only lets `parseCodeFenceInfo` restore
+ * continuous line numbering. Namespaced to avoid colliding with real info
+ * strings.
+ */
+export const START_LINE_DIRECTIVE_RE = /\s*\bqwen-code:start-line=(\d+)\b/;
+
+/**
+ * Parses a fenced code block's info string into its language (first token, with
+ * the internal start-line directive removed) and the gutter start line (1 when
+ * no directive is present). Shared by MarkdownDisplay so the directive never
+ * leaks into language detection.
+ */
+export const parseCodeFenceInfo = (
+  info: string | undefined | null,
+): { lang: string | null; startLine: number } => {
+  const raw = info ?? '';
+  const directive = raw.match(START_LINE_DIRECTIVE_RE);
+  const startLine = directive ? Math.max(1, Number(directive[1])) : 1;
+  const lang = raw.replace(START_LINE_DIRECTIVE_RE, '').trim().split(/\s+/)[0];
+  return { lang: lang || null, startLine };
+};
 
 export function isClosingCodeFence(
   match: RegExpMatchArray | null,
@@ -116,10 +215,57 @@ export function splitMarkdownTableRow(row: string): string[] {
   return cells;
 }
 
-/** Estimated terminal rows a non-table line occupies once wrapped to `width`. */
+/** Estimated terminal rows a non-table line occupies once wrapped to `width`.
+ *  Charged with the renderer's own wrapper: Ink breaks at word boundaries, so a
+ *  character-ceil under-counts a line whose words do not pack the last row
+ *  (`aa aa aa` at width 4 renders 3 rows, ceils to 2). */
 export function estimateWrappedRows(line: string, width: number): number {
   if (width <= 0) return 1;
-  return Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
+  const wrapped = wrapAnsi(line, width, { trim: false, hard: true }).split(
+    '\n',
+  ).length;
+  return Math.max(wrapped, Math.ceil(getCachedStringWidth(line) / width));
+}
+
+/**
+ * How many rows a plain (non-table, non-code-fence) source line renders at
+ * `contentWidth`. List items and blockquotes share only part of that width:
+ * MarkdownDisplay insets the item text by its marker + padding, so charging the
+ * whole line at `contentWidth` under-counts a wide bullet by a row (#13956).
+ * Charges the narrowest width the line can render at, so the estimate stays an
+ * upper bound.
+ */
+export function estimateLineRows(
+  line: string,
+  contentWidth: number,
+  renderVisualBlocks = true,
+): number {
+  if (contentWidth <= 0) return 1;
+  const listItem = LIST_ITEM_RE.exec(line);
+  if (listItem) {
+    // RenderListItemInternal insets the text box by the item's indent, the
+    // shared prefix padding and a fixed-width marker cell, at every nesting
+    // level. Render mode replaces a task marker with a two-column glyph.
+    // Raw mode keeps the literal marker in the text box.
+    const task = renderVisualBlocks ? /^\[[ xX]\]\s+/.exec(listItem[3]!) : null;
+    const itemText = task ? listItem[3]!.slice(task[0].length) : listItem[3]!;
+    const markerWidth = task
+      ? TASK_ITEM_GLYPH_WIDTH
+      : getCachedStringWidth(listItem[2]!) + 1;
+    const indentWidth = listItem[1]!.length;
+    return estimateWrappedRows(
+      itemText,
+      contentWidth - indentWidth - LIST_ITEM_PREFIX_PADDING - markerWidth,
+    );
+  }
+  const blockquote = renderVisualBlocks ? BLOCKQUOTE_LINE_RE.exec(line) : null;
+  if (blockquote) {
+    return estimateWrappedRows(
+      blockquote[1]!,
+      contentWidth - BLOCKQUOTE_PREFIX_PADDING - BLOCKQUOTE_MARKER_WIDTH,
+    );
+  }
+  return estimateWrappedRows(line, contentWidth);
 }
 
 /**
@@ -151,6 +297,15 @@ export interface PendingSliceResult {
   keptLines: number;
   /** True when some trailing source lines were dropped to fit the budget. */
   clipped: boolean;
+  /**
+   * RENDERED rows (not source lines) walked through `keptLines`. Unlike
+   * `clipped`, this is true when the result does not fit `budget`, including
+   * the case where an over-budget leading table is kept whole (the `i > 0`
+   * cut rule) and `clipped` therefore stays false. Callers using this as a
+   * height gate must read it alongside `clipped` — a cut at a later block
+   * leaves `renderedRows` at the prefix while `clipped` is true.
+   */
+  renderedRows: number;
 }
 
 /**
@@ -176,20 +331,40 @@ export function fitPendingSlice(
   contentWidth: number,
   budget: number,
   tableClampRows: number,
+  options: {
+    showLineNumbers?: boolean;
+    renderVisualBlocks?: boolean;
+    measureCompletedTableRows?: (
+      headers: string[],
+      rows: string[][],
+      contentWidth: number,
+    ) => number;
+  } = {},
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
   let codeFence = ''; // non-empty while inside a fenced code block
+  // Width the active fence's body is charged at: RenderCodeBlock draws code
+  // inside `paddingLeft={CODE_BLOCK_PREFIX_PADDING}` and colorizeCode prefixes
+  // each line with a right-padded line number plus a space (`ui.showLineNumbers`
+  // defaults on), so the code text box is narrower than `contentWidth`. The
+  // gutter grows with the block's line count, so it is derived per block, not
+  // hard-coded.
+  let activeCodeLineWidth = contentWidth;
+  const showLineNumbers = options.showLineNumbers ?? true;
+  const renderVisualBlocks = options.renderVisualBlocks ?? true;
   for (let i = 0; i < allLines.length; ) {
     const line = allLines[i]!;
     const fenceMatch = CODE_FENCE_RE.exec(line);
     if (codeFence) {
-      // Inside a code block: charge the line as code (one row, wrapped), and
-      // close on a matching fence. Never treat contents as a table.
+      // Inside a code block: charge the line as code at the code box's width
+      // (a code line renders verbatim — no markdown constructs), and close on
+      // a matching fence. Never treat contents as a table.
       if (isClosingCodeFence(fenceMatch, codeFence)) {
         codeFence = '';
+        activeCodeLineWidth = contentWidth;
       }
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateWrappedRows(line, activeCodeLineWidth);
       if (rendered > budget) {
         kept = i;
         break;
@@ -199,7 +374,24 @@ export function fitPendingSlice(
     }
     if (fenceMatch) {
       codeFence = fenceMatch[1]!;
-      rendered += estimateWrappedRows(line, contentWidth);
+      // Lookahead to the closing fence: colorizeCode pads its line numbers to
+      // the widest one the block will draw, including the start-line directive
+      // on the reopened tail of a split block.
+      let close = -1;
+      for (let k = i + 1; k < allLines.length; k++) {
+        const closing = CODE_FENCE_RE.exec(allLines[k]!);
+        if (isClosingCodeFence(closing, codeFence)) {
+          close = k;
+          break;
+        }
+      }
+      const bodyCount = (close === -1 ? allLines.length : close) - (i + 1);
+      const { startLine } = parseCodeFenceInfo(fenceMatch[2]);
+      activeCodeLineWidth =
+        contentWidth -
+        CODE_BLOCK_PREFIX_PADDING -
+        (showLineNumbers ? String(bodyCount + startLine - 1).length + 1 : 0);
+      rendered += estimateLineRows(line, contentWidth, renderVisualBlocks);
       if (rendered > budget) {
         kept = i;
         break;
@@ -207,9 +399,35 @@ export function fitPendingSlice(
       i++;
       continue;
     }
-    if (isTableStart(allLines, i)) {
+    if (renderVisualBlocks && isTableStart(allLines, i)) {
       let j = i + 2;
       while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
+      if (options.measureCompletedTableRows) {
+        const headers = splitMarkdownTableRow(TABLE_ROW_RE.exec(line)![1]!);
+        const rows = allLines
+          .slice(i + 2, j)
+          .filter((row) => !TABLE_SEPARATOR_RE.test(row))
+          .map((row) => splitMarkdownTableRow(TABLE_ROW_RE.exec(row)![1]!));
+        if (rows.length > 0) {
+          // A completed layout renders at least one line for each data row.
+          // If those alone exhaust the budget, skip formatting the whole table.
+          const cost =
+            rows.length > budget - rendered
+              ? rows.length
+              : options.measureCompletedTableRows(headers, rows, contentWidth);
+          if (rendered + cost > budget && i > 0) {
+            kept = i;
+            break;
+          }
+          rendered += cost;
+        }
+        i = j;
+        if (rendered >= budget) {
+          kept = j;
+          break;
+        }
+        continue;
+      }
       const dataRows = j - (i + 2);
       // TableRenderer renders EITHER the horizontal format (each row as tall as
       // its tallest wrapped cell, + chrome) OR the vertical key-value format
@@ -324,7 +542,7 @@ export function fitPendingSlice(
         break;
       }
     } else {
-      rendered += estimateWrappedRows(line, contentWidth);
+      rendered += estimateLineRows(line, contentWidth, renderVisualBlocks);
       if (rendered > budget) {
         kept = i;
         break;
@@ -332,5 +550,9 @@ export function fitPendingSlice(
       i++;
     }
   }
-  return { keptLines: kept, clipped: kept < allLines.length };
+  return {
+    keptLines: kept,
+    clipped: kept < allLines.length,
+    renderedRows: rendered,
+  };
 }

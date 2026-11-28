@@ -1027,6 +1027,9 @@ describe('resumeHistoryUtils', () => {
             name: 'unknown_tool',
             description: '',
             args: { foo: 'bar' },
+            // A registry miss resolves the flag to the live builder's
+            // false default rather than leaving it unset.
+            renderOutputAsMarkdown: false,
             resultDisplay: { summary: 'failure' },
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
@@ -1074,6 +1077,37 @@ describe('resumeHistoryUtils', () => {
         timestamp: new Date('2026-01-15T16:00:00.000Z').getTime(),
       },
     ]);
+  });
+
+  it('keeps the display default for a tool in a standalone session preview', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              { functionCall: { id: 'question', name: 'ask_user_question' } },
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'question',
+            resultDisplay: '**Color**: Blue',
+            status: 'success',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      null,
+    );
+    const group = items.find((item) => item.type === 'tool_group');
+    expect(group?.tools[0]?.resultDisplay).toBe('**Color**: Blue');
+    expect(group?.tools[0]).not.toHaveProperty('renderOutputAsMarkdown');
   });
 
   it('flushes pending tool groups before subsequent user messages', () => {
@@ -1570,6 +1604,84 @@ describe('resumeHistoryUtils', () => {
       // A resumed session must show the same args row as a live one.
       expect(tool?.description).toBe('a.ts');
       expect(tool?.args).toEqual({ file_path: 'a.ts', old_string: 'x' });
+    });
+
+    it('carries the tool markdown opt-out onto the display object', () => {
+      const plainTextTool = {
+        name: 'lsp',
+        displayName: 'LSP',
+        description: 'Run an LSP query',
+        isOutputMarkdown: false,
+        build: vi.fn().mockReturnValue({ getDescription: () => 'symbols' }),
+      } as unknown as AnyDeclarativeTool;
+
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'lsp',
+                    args: { query: 'symbols' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ lsp: plainTextTool }),
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      // ToolMessage defaults the flag to true, so a resumed result must say
+      // otherwise or raw LSP text gets markdown-parsed.
+      expect(tool?.renderOutputAsMarkdown).toBe(false);
+    });
+
+    it('falls back to false when the registry no longer holds the tool', () => {
+      // A resumed lsp/skill/autofix-pr session whose MCP server or plugin is
+      // gone leaves getTool empty-handed; leaving the flag unset would let
+      // ToolMessage's `= true` default markdown-parse raw tool text, the
+      // opposite of the live builder's `= false` default.
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'lsp',
+                    args: { query: 'symbols' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      expect(tool?.renderOutputAsMarkdown).toBe(false);
     });
   });
 
