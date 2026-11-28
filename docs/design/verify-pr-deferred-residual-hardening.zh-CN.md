@@ -35,9 +35,13 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   `deriveView({ ...existing, ... })` 构态、不补 `seqCounter`，是唯一可能产出
   带列表却无 `seqCounter` 正文的写者（遗留前列态无可继承）。读守卫的文档不变量
   「`*Heads` 列表蕴含 `seqCounter`」因此并非对每个写者成立。`releaseRound` 现
-  设 `seqCounter: existing?.seqCounter ?? 0`，与 `startRound`/`completeRound`
-  一致。对每个可达形状行为中性（释放正文本就经 `releasedHeads` 接纳）；使不变量
-  稳健。CLI 见证释放一个遗留无 `seqCounter` 态，断言写出的正文带整数 `seqCounter`。
+  设 `seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0)`，与
+  `startRound`/`completeRound` 一致。对每个可达形状行为中性（释放正文本就经
+  `releasedHeads` 接纳，且写者产出的形状本就 `entry.seq ≤ seqCounter`）；使
+  不变量稳健，并使计数器不会回落到它搬进 `releasedHeads` 的 seq 之下
+  （`nextSeq` 从不读该列表）。见证释放一个遗留无 `seqCounter` 态，断言写出
+  的正文带整数 `seqCounter`；第二条见证种一个低于标记 `seq` 的计数器并钉住
+  折叠，仅 `?? 0` 回退即红。
 - **A2 —— 移除死字段 `sandboxRuntime`（D17-8）。** `verify-pr-prepare.mjs` 的
   `detectIsolation` 返回 `sandboxRuntime`，但无生产消费者读它（调用方用
   `isolated`/`signals`/`seatbelt`）。移除该字段及钉它的 prepare 测试断言。
@@ -46,23 +50,32 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
 
 - **B1 —— 上限拒绝文案（第 7 轮 #6）。** 资源上限拒绝建议「把 nonce echo 进
   早日志」，但遍历无序，「早」不控制读取顺序；上限按总字节计。改写去掉顺序
-  暗示（降低非 evidence 日志量/保持 nonce 日志小），保留 `mode:"waived"` 退路。
-- **B2 —— 钉上限常量（第 7 轮 #8）。** 三个上限测试只断言拒绝文案；补断言钉
-  `TOTAL_BUDGET`（64 MiB）与 `MAX_ENTRIES`（20000），常量被悄悄改动即红。
+  暗示并点名两种补救——降低非 evidence 日志量，且把日志并成更少的文件或目录
+  （目录与空文件计条目上限、不计字节预算，R1-7）——保留 `mode:"waived"` 退路。
+- **B2 —— 钉上限常量（第 7 轮 #8）。** 拒绝文案的数字曾独立于函数内
+  `TOTAL_BUDGET`/`MAX_ENTRIES` 硬编码，常量被悄悄改动不会红（R1-5）。把两个界
+  提到模块作用域、用它们拼拒绝文案，并钉渲染出的 `64 MiB total / 20000 entries`
+  ——常量改动即红消息钉。skill 侧钉覆盖完整界句（含 `20000 entries in total`）。
 - **B3 —— 按文件/按目录预算见证（第 7 轮 #9）。** 两个界只在扁平单目录夹具上
-  断言；补多文件/嵌套目录夹具，证明预算与条目上限是聚合的（按文件/按目录重置即红）。
+  断言；补嵌套目录森林证明条目上限聚合、补双文件（2 × 33 MiB）夹具证明字节
+  预算聚合——按目录/按文件重置各使其夹具红（R1-6）。
 
 ### C. skill 契约（`.qwen/skills/verify-pr/SKILL.md`）
 
 - **C1 —— nonce 扫描界文案（第 7 轮 #2）。** nonce 契约漏写扫描的 64 MiB/
-  20000 条目界，合规轮也可能被拒而操作者不知其因。补一句点名该界与补救
-  （降低非 evidence 日志量/经批准 `mode:"waived"`）。
+  20000 条目界，合规轮也可能被拒而操作者不知其因。补一句点名该界与两种补救
+  （降低非 evidence 日志量/并成更少的文件或目录/经批准 `mode:"waived"`）。
 - **C2 —— nonce 声称限定为「无法产出」（第 7 轮 #3）。** step-5 echo 把 nonce
   明文放进 PR 可写日志，故「宿主电池读不到 nonce」强于所证。绑定在于宿主电池
-  没有容器本地明文就**无法产出**匹配的 `container-nonce:` 行。据此改写。
+  没有容器本地明文就**无法产出**匹配的 `container-nonce:` 行。据此改写，并把
+  声称限定为 echo 实际所证——harness 在 echo 时读到了容器本地值，而非电池在
+  容器内运行：echo 副本随共享挂载可见，任何后续拿到 round dir 的写者都能复用
+  该行（R1-1）。step-7 注释同批对齐。
 - **C3 —— R12-D4 moved-head 终态组。** moved-head 指引说启动 release 的
   deferred 列表点名的 head，但该列表还带「多次 inconclusive 后终态 not-covered」
-  组，无新 head move 不得启动。在 moved-head 措辞中再排除终态组（exit-3 节已描述）。
+  组，无新 head move 不得启动。在 moved-head 措辞与读同一份 release 输出的
+  exit-3 死标记条目中都再排除终态组——后者的「启动最后一个 deferred head」
+  限定到 awaiting 组，因为终态组打印在最后（R1-2）。
 - **C4 —— 第 14 轮 prose 结构项，评估而不反复改。** :786 项（moved-head
   release `--round <r>`「在重启改编号后」）是已核实的 bot 误读：moved-head 分支
   释放**本轮**标记且**不**重启，故 `--round <r>` 正确（`<r+1>` 改编号属于另一条
@@ -110,17 +123,20 @@ R16-1/R16-2/R16-4 与 D17-1/2/3 由 #17440；R17-2（提前注册活性）由 #1
   （A1）因其廉价且使文档声称成立。
 - **已接受风险保持接受。** RS-1/RS-2（fail-closed 预算）与三条静默丢弃窗口是
   维护者接受的活性/可用性取舍；超出范围，仍由 #17371 跟踪。
-- **尽量 prose/测试-only。** 唯一生产代码改动是 A1（一个字段）与 A2（移除死
-  字段）；其余皆 prose、文档或测试加固，影响面小且每项有见证。
+- **尽量 prose/测试-only。** 生产改动都很小——三个文件：A1（一个字段）、
+  A2（移除死字段）、B1/B2（拒绝文案，现由提升后的界常量拼出）、D1
+  （`requireBoundary` 上的测试接缝）；其余皆 prose、文档或测试加固，影响面小
+  且每项有见证。
 
 ## 涉及文件
 
-- `scripts/verify-pr-watch-state.mjs`（A1）、`scripts/verify-pr-prepare.mjs`（A2）。
-- `scripts/verify-pr-check.mjs`（B1）。
+- `scripts/verify-pr-watch-state.mjs`（A1）、`scripts/verify-pr-prepare.mjs`
+  （A2、D1）。
+- `scripts/verify-pr-check.mjs`（B1、B2）。
 - `.qwen/skills/verify-pr/SKILL.md`（C1–C4）。
 - `scripts/tests/verify-pr-watch-state.test.js`（A1 见证）、
   `scripts/tests/verify-pr-prepare.test.js`（A2、D1）、
-  `scripts/tests/verify-pr-check.test.js`（B2、B3、D10 见证）、
+  `scripts/tests/verify-pr-check.test.js`（B2、B3、D17-10 见证）、
   `scripts/tests/qwen-triage-workflow.test.js`（C/E 钉）。
 - `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md`（F1）、
   `docs/design/verify-pr-watch.md` + `.zh-CN.md`（F2）、

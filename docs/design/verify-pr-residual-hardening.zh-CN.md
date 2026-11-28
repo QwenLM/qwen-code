@@ -151,11 +151,11 @@ bullet above」，与 VM 条目一致。attestation 注解点名操作者已确�
 - `scripts/tests/qwen-triage-workflow.test.js` —— step-5 flat 钉、VM 限定钉、checker
   唯一匹配器钉、step-5↔checker nonce 拼写钉（R6 延后）；shim-node replay 保留
   声明/teardown 见证（nonce 见证移至 checker 测试）。
-- `docs/design/verify-pr-watch.md` + `.zh-CN.md` —— 规范 watch 设计的 nonce 佐证
-  与形状守卫文案对齐到 checker 唯一匹配器与梯推导守卫（F3：此前清单漏列）。
+- `docs/design/verify-pr-watch.md` + `.zh-CN.md` —— 规范 watch 设计的形状守卫
+  文案对齐到梯推导守卫（F3：此前清单漏列）。
 - `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md` ——
-  配方 nonce/边界文案对齐到仅哈希记录；完整 waived 模型协调 sweep 延后为 R5-2
-  （F3：此前清单漏列）。
+  配方 nonce/边界文案对齐到仅哈希记录；完整 waived 模型协调 sweep 当时延后为
+  R5-2，已由 verify-pr-deferred-residual-hardening.md（F1）完成（F3：此前清单漏列）。
 
 ## 范围边界
 

@@ -7014,8 +7014,12 @@ describe('qwen-triage verify hardening round 2', () => {
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
     // the manual twin cannot satisfy it). Removing --repo reds it.
+    // R1-2 (#17371): "start the last deferred head" is scoped to the awaiting
+    // group — printDeferred prints the terminal not-covered group last, so the
+    // unqualified instruction would start a head --start refuses (exit 3) and
+    // burn the awaiting head's only delivery. Restoring it reds this pin.
     expect(flat).toContain(
-      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
+      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head the release lists as **awaiting a round** (never one it lists under "not covered"), or the deferral is never delivered',
     );
     // R2-1 (round 4): the bullet tells the operator to read the marker's round
     // from the state file and pass it — an omitted --round skips the match and
@@ -7221,9 +7225,25 @@ describe('qwen-triage verify hardening round 2', () => {
       'cannot produce the matching `container-nonce:` line without the container-local plaintext',
     );
     expect(flat).not.toContain('cannot read the container-local nonce');
+    // R1-1 (#17371): the retracted parenthetical denying the shared mount carries
+    // the plaintext must stay gone — the mandated echo writes it into the round
+    // dir — and the claim is scoped to what the echo proves (the harness read a
+    // container-local value at echo time, not where the battery ran). The
+    // step-7 comment's old "cannot read that file" claim is aligned with it.
+    expect(flat).not.toContain('the shared mount does not carry it');
+    expect(flat).not.toContain('a host battery cannot read that file');
+    expect(flat).toContain(
+      'any later writer with the round dir can reuse the echoed line',
+    );
     // C1 (#17371 round-7): the nonce contract names the scan's resource bound so
-    // a compliant round refused beyond it is not a surprise.
-    expect(flat).toContain('The scan is bounded (64 MiB of');
+    // a compliant round refused beyond it is not a surprise. R1-5 (#17371): pin
+    // the full bound phrase — the half-sentence pin left "20000 entries in
+    // total" unguarded. R1-7 (#17371): the sentence names the entry-side remedy
+    // too (directories and empty files charge the entry cap, not the budget).
+    expect(flat).toContain(
+      'The scan is bounded (64 MiB of non-`evidence/` logs / 20000 entries in total)',
+    );
+    expect(flat).toContain('consolidate logs into fewer files or directories');
     expect(flat).toContain('the SINGLE authoritative implementation');
     // R6 (deferred): step 5's container-nonce spelling and the checker's
     // matcher literal are pinned together, so rewording either side cannot

@@ -2705,6 +2705,23 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       mkdirSync(sub);
       for (let j = 0; j < 101; j++) mkdirSync(join(sub, `d${j}`));
     }
+    const refusal = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(refusal).toMatch(/hit its resource bound/);
+    // R1-7 (#17371): an entry-cap refusal must name the entry-side remedy too —
+    // directories and empty files charge no bytes, so trimming volume alone
+    // cannot clear it.
+    expect(refusal).toMatch(/consolidate it into fewer files or directories/);
+  });
+
+  // B3 (#17371 round-7): the byte budget is aggregate across files too — two
+  // 33 MiB logs carrying no nonce line exhaust it together. A per-file reset
+  // would read each under the budget and answer "no marker" instead of the
+  // bound refusal. Both files sit outside the byte-exempt top-level evidence/
+  // subtree, so this witnesses the budget, not the exemption.
+  it('spends the byte budget across files, not per file', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(join(dir, 'a.log'), 'x'.repeat(33 * 1024 * 1024));
+    writeFileSync(join(dir, 'b.log'), 'y'.repeat(33 * 1024 * 1024));
     expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
       /hit its resource bound/,
     );

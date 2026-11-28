@@ -43,11 +43,16 @@ before being acted on; several are already covered or not reproducible:
   the one writer that can emit a list-bearing body without one (a legacy
   pre-list state has none to inherit). The read guard's documented invariant
   "a `*Heads` list implies `seqCounter`" therefore does not hold for every
-  writer. `releaseRound` now sets `seqCounter: existing?.seqCounter ?? 0`,
-  matching `startRound`/`completeRound`. Behavior-neutral for every reachable
-  shape (the released body was already admitted via `releasedHeads`); it makes
-  the invariant robust. A CLI witness releases a legacy no-`seqCounter` state
-  and asserts the written body carries an integer `seqCounter`.
+  writer. `releaseRound` now sets
+  `seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0)`, matching
+  `startRound`/`completeRound`. Behavior-neutral for every reachable shape (the
+  released body was already admitted via `releasedHeads`, and every
+  writer-produced shape already has `entry.seq ≤ seqCounter`); it makes the
+  invariant robust and keeps the counter from regressing below a seq it carries
+  into `releasedHeads` (`nextSeq` never reads that list). A witness releases
+  a legacy no-`seqCounter` state and asserts the written body carries an integer
+  `seqCounter`; a second witness seeds a counter below the marker's `seq` and
+  pins the fold, so the `?? 0` fallback alone reds it.
 - **A2 — drop the dead `sandboxRuntime` field (D17-8).** `detectIsolation` in
   `verify-pr-prepare.mjs` returns `sandboxRuntime`, but no production consumer
   reads it (callers use `isolated` / `signals` / `seatbelt`). Remove the field
@@ -58,32 +63,46 @@ before being acted on; several are already covered or not reproducible:
 - **B1 — bound-refusal wording (round-7 #6).** The resource-bound refusal
   advises "echo the nonce into an early log", but the walk is unsorted, so
   "early" does not control read order; the bound is on total bytes. Reword to
-  drop the ordering implication (reduce non-evidence log volume / keep the
-  nonce log small), keeping the `mode:"waived"` escape.
-- **B2 — pin the bound constants (round-7 #8).** The three bound tests assert
-  only the refusal phrase; add assertions pinning `TOTAL_BUDGET` (64 MiB) and
-  `MAX_ENTRIES` (20000) so a silent constant change reds them.
+  drop the ordering implication and name both remedies — reduce the
+  non-evidence log volume AND consolidate it into fewer files or directories,
+  since directories and empty files charge the entry cap, not the byte budget
+  (R1-7) — keeping the `mode:"waived"` escape.
+- **B2 — pin the bound constants (round-7 #8).** The refusal hardcoded its
+  numbers independently of the function-local `TOTAL_BUDGET` / `MAX_ENTRIES`,
+  so a silent constant change red nothing (R1-5). Hoist both bounds to module
+  scope and build the refusal from them; the message pin now asserts the
+  rendered `64 MiB total / 20000 entries`, so a constant change reds it. The
+  skill-side pin covers the full bound phrase, `20000 entries in total`
+  included.
 - **B3 — per-file / per-directory budget witness (round-7 #9).** The two bounds
-  are asserted only on flat single-directory fixtures; add a multi-file /
-  nested-directory fixture proving the budget and entry cap are aggregate
-  (a per-file or per-directory reset reds it).
+  are asserted only on flat single-directory fixtures; add a nested-directory
+  forest proving the entry cap is aggregate and a two-file (2 × 33 MiB)
+  fixture proving the byte budget is aggregate — a per-directory or per-file
+  reset reds its fixture (R1-6).
 
 ### C. skill contract (`.qwen/skills/verify-pr/SKILL.md`)
 
 - **C1 — nonce scan bound prose (round-7 #2).** The nonce contract omits the
   scan's 64 MiB / 20000-entry bound, so a compliant round can still be refused
-  without the operator knowing why. Add a sentence naming the bound and the
-  remedy (reduce non-evidence log volume / `mode:"waived"` with approval).
+  without the operator knowing why. Add a sentence naming the bound and both
+  remedies (reduce non-evidence log volume / consolidate into fewer files or
+  directories / `mode:"waived"` with approval).
 - **C2 — scope the nonce claim to "cannot produce" (round-7 #3).** The step-5
   echo puts the nonce plaintext in the PR-writable log, so "a host battery
   cannot read the nonce" is stronger than established. The binding is that a
   host battery cannot _produce_ the matching `container-nonce:` line without
-  the container-local plaintext. Reword accordingly.
+  the container-local plaintext. Reword accordingly, and scope the claim to
+  what the echo proves — the harness read a container-local value at echo
+  time, not that the battery ran in the container, since the echoed copy rides
+  the shared mount and any later writer with the round dir can reuse it
+  (R1-1). The step-7 comment is aligned in the same edit.
 - **C3 — R12-D4 moved-head terminal group.** The moved-head recipe says to
   start the head the release's deferred list names, but that list also carries
   a terminal "not covered after repeated inconclusive rounds" group that must
   not be started without a new head move. Re-exclude the terminal group in the
-  moved-head wording (the exit-3 section already describes it).
+  moved-head wording AND in the exit-3 dead-marker bullet that reads the same
+  release output — its "start the last deferred head" is scoped to the
+  awaiting group, since the terminal group prints last (R1-2).
 - **C4 — round-14 prose-structure items, assessed not churned.** The `:786`
   item (moved-head release `--round <r>` "after a restart renumbers") is a
   confirmed bot misreading: the moved-head branch releases _this_ round's
@@ -145,18 +164,21 @@ before being acted on; several are already covered or not reproducible:
 - **Accepted risks stay accepted.** RS-1/RS-2 (fail-closed budgets) and the
   three silent-drop windows are liveness/availability trade-offs the maintainer
   accepted; they are out of scope and remain tracked in #17371.
-- **Prose/test-only where possible.** The only production-code changes are A1
-  (one field) and A2 (remove a dead field); everything else is prose, docs, or
-  test hardening, so the blast radius is small and each change is witnessed.
+- **Prose/test-only where possible.** The production changes are small — three
+  files: A1 (one field), A2 (a dead field removed), B1/B2 (the refusal-message
+  wording, now built from the hoisted bound constants), and D1 (a test seam on
+  `requireBoundary`); everything else is prose, docs, or test hardening, so the
+  blast radius is small and each change is witnessed.
 
 ## Files affected
 
-- `scripts/verify-pr-watch-state.mjs` (A1), `scripts/verify-pr-prepare.mjs` (A2).
-- `scripts/verify-pr-check.mjs` (B1).
+- `scripts/verify-pr-watch-state.mjs` (A1), `scripts/verify-pr-prepare.mjs`
+  (A2, D1).
+- `scripts/verify-pr-check.mjs` (B1, B2).
 - `.qwen/skills/verify-pr/SKILL.md` (C1–C4).
-- `scripts/tests/verify-pr-watch-state.test.js` (A1 witness),
+- `scripts/tests/verify-pr-watch-state.test.js` (A1 witnesses),
   `scripts/tests/verify-pr-prepare.test.js` (A2, D1),
-  `scripts/tests/verify-pr-check.test.js` (B2, B3, D10 witness),
+  `scripts/tests/verify-pr-check.test.js` (B2, B3, D17-10 witness),
   `scripts/tests/qwen-triage-workflow.test.js` (C/E pins).
 - `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md` (F1),
   `docs/design/verify-pr-watch.md` + `.zh-CN.md` (F2),

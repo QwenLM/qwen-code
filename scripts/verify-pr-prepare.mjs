@@ -917,7 +917,7 @@ export function requireBoundary(artifactDir = null, options = {}) {
   if (home === undefined) {
     try {
       // The homedir seam lets a witness exercise the throw path itself, not
-      // only the post-catch home:null value (D17-4 / #17371 round-7).
+      // only the post-catch home:null value (round-7 #4 / #17371).
       home = (options.homedir ?? homedir)();
     } catch {
       home = null;

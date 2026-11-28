@@ -561,14 +561,18 @@ authority to certify the round.
    `verify nonce=<value>`, a separate nonce file) is refused. This ties the
    `mode:"container"` declaration to execution inside this container — a
    battery run on the host cannot produce the matching `container-nonce:` line
-   without the container-local plaintext (the shared mount does not carry it),
-   and the record's hash does not reveal it. The scan is bounded (64 MiB of
-   non-`evidence/` logs / 20000 entries in total): a round whose marker lies
-   beyond the bound is refused, so keep the non-evidence log volume under it.
-   If the battery cannot run in this
-   container (e.g. a Java-heavy
-   round whose image carries no JDK), do NOT declare `mode:"container"`:
-   declare `mode:"waived"` with the maintainer's approval instead.
+   without the container-local plaintext, and the record's hash does not
+   reveal it. The echo itself writes that plaintext into the PR-writable round
+   dir, so the binding proves the round's harness read a container-local value
+   at echo time — not that the battery ran in the container: any later writer
+   with the round dir can reuse the echoed line. The scan is bounded (64 MiB
+   of non-`evidence/` logs / 20000 entries in total): a round whose marker lies
+   beyond the bound is refused, so keep the non-evidence log volume under it
+   and consolidate logs into fewer files or directories (empty files and
+   directories count against the entry cap, not the byte budget). If the
+   battery cannot run in this container (e.g. a Java-heavy round whose image
+   carries no JDK), do NOT declare `mode:"container"`: declare `mode:"waived"`
+   with the maintainer's approval instead.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -664,8 +668,10 @@ authority to certify the round.
      # checker refuses mode:"container" unless a round log carries a
      # container-nonce: line whose sha256 matches it. The battery echoes the
      # container-local plaintext ($HOME/.qwen-verify-nonce) into its logs in
-     # step 5; a host battery cannot read that file, and the hash does not
-     # reveal it.
+     # step 5; the file itself is container-local, but the echoed copy rides
+     # the PR-writable round dir — the binding proves the harness read the
+     # container-local value at echo time, not that the battery ran in the
+     # container. The hash does not reveal the nonce.
      # Fill in the detail with the image and network policy you used — the
      # checker refuses the skill's <placeholder> template strings.
      printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > "$rd/boundary.json" || rc=1
@@ -812,7 +818,9 @@ Exit 3 has several shapes, each with its own reaction:
   round that owns the blocking head may have finished without `--complete`;
   if it is no longer running, recover with
   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
-  and then start the last deferred head, or the deferral is never delivered.
+  and then start the last deferred head the release lists as **awaiting a
+  round** (never one it lists under "not covered"), or the deferral is never
+  delivered.
   Here `<r>` is the dead round's number (the blocking marker's), not this
   round's. Read it from the state file's in-flight entry and pass it (reading
   the state is allowed; only hand-writing the JSON is forbidden): an omitted

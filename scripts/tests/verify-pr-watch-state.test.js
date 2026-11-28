@@ -1003,6 +1003,40 @@ describe('releaseRound', () => {
     expect(state.releasedHeads.length).toBe(1);
   });
 
+  // R1-9 (#17371): the release folds the released entry's seq into the counter
+  // like its three siblings — nextSeq never reads releasedHeads, so a release
+  // that only inherits would let a later push mint a seq at or below the
+  // released entry's. Seed a counter below the marker's seq (a hand-edited
+  // shape no writer produces) so the fold is pinned independently of the ?? 0
+  // fallback the legacy case above covers.
+  it('release folds the released entry seq into seqCounter', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        seqCounter: 1,
+        inFlightHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'r10',
+            startedAt: '2026-11-18T00:00:00Z',
+            seq: 7,
+            retries: 0,
+          },
+        ],
+        verifiedHeads: [],
+        deferredHeads: [],
+      }) + '\n',
+    );
+    expect(releaseRound(root, { pr: 1, head: HEAD }).released).toBe(true);
+    const state = readState(root, 1);
+    expect(state.seqCounter).toBe(7);
+    expect(state.releasedHeads[0].seq).toBe(7);
+  });
+
   it('refuses a marker belonging to another head', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
